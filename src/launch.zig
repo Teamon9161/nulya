@@ -83,11 +83,13 @@ pub const tasks_subdir = "tasks";
 ///                     `wrap_up`) rather than reporting an empty round.
 ///   wrapdefy:         the same run with a model that does NOT take the hint:
 ///                     it calls a tool on every step, including the one it was
-///                     asked to spend on its report. Each call writes a file
-///                     named for which side of the ask it is on, so a test can
-///                     say whether a tool RAN rather than whether one was
-///                     asked for — the difference between a constraint and a
-///                     sentence.
+///                     asked to spend on its report — and then, seeing that the
+///                     call did not run, answers in text after all. Each call
+///                     writes a file named for which side of the ask it is on,
+///                     so a test can say whether a tool RAN rather than whether
+///                     one was asked for — the difference between a constraint
+///                     and a sentence — while the answer at the end says the
+///                     refusal was something the model could still act on.
 ///   background:       start ONE background command, then end the turn — saying
 ///                     `background done` once a `task_finished` turn is in the
 ///                     transcript and `waiting` while it is not, so a test can
@@ -110,6 +112,11 @@ pub const ScriptedProvider = struct {
     /// and the absence of the second is the whole point.
     pub const defiant_before_file = "wrapup-before.txt";
     pub const defiant_after_file = "wrapup-after.txt";
+    /// What it says once the refusal is in front of it. A round that only
+    /// refused would leave everything the sub-agent found in a session nobody
+    /// reads, so this is the half of the wrap-up round that has to be paid for:
+    /// the deny is a `tool_results` entry, and reading one takes a turn.
+    pub const defiant_report = "denied, so here is what I found";
     const defiant_before_args = "{\"command\":\"echo ran > " ++ defiant_before_file ++ "\"}";
     const defiant_after_args = "{\"command\":\"echo ran > " ++ defiant_after_file ++ "\"}";
 
@@ -205,6 +212,16 @@ pub const ScriptedProvider = struct {
             return;
         }
         if (self.mode == .wrapdefy) {
+            // A call that did not run: the gate refused it, and the note saying
+            // so is this result's text. `ok == false` rather than that wording —
+            // every other tool result in this mode is an `echo` that worked, so
+            // the failed one is the refusal, and the stand-in does not need to
+            // agree with the kernel about a sentence to notice it.
+            if (hasFailedToolResult(request.prompt_ir.turns)) {
+                try sink.emit(.{ .text_delta = defiant_report });
+                try sink.emit(.{ .done = .end_turn });
+                return;
+            }
             const asked = hasUserTextContaining(request.prompt_ir.turns, wrap_up_opening);
             try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = if (asked) "d2" else "d1", .name = "shell" } });
             try sink.emit(.{ .tool_use_input_delta = .{
@@ -275,6 +292,18 @@ fn hasToolResult(turns: []const prompt.Turn) bool {
     for (turns) |turn| {
         if (turn == .tool_results) return true;
     }
+    return false;
+}
+
+/// Did any tool call in this transcript come back not-ok? A gate refusal is one
+/// (`loop.deniedOutput`), and in the modes that use this it is the only one.
+fn hasFailedToolResult(turns: []const prompt.Turn) bool {
+    for (turns) |turn| switch (turn) {
+        .tool_results => |results| for (results) |result| {
+            if (!result.ok) return true;
+        },
+        else => {},
+    };
     return false;
 }
 

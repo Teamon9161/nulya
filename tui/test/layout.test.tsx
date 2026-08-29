@@ -8,6 +8,7 @@
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { testRender } from "@opentui/solid"
+import { ScrollBoxRenderable, type Renderable } from "@opentui/core"
 import { App } from "../src/ui/App.tsx"
 import { rowsBelow } from "../src/ui/Transcript.tsx"
 import { createStyle } from "../src/render/theme.ts"
@@ -165,6 +166,52 @@ test("the status line ends in a settings control, and clicking it opens the pane
 
     await setup.mockMouse.click(rows[at]!.lastIndexOf(style.glyphs.settings), at)
     await untilFrame(setup, (frame) => frame.includes("settings · tui.toml"))
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
+/** Every ScrollBox on screen, in tree order. */
+function scrollBoxes(from: Renderable): ScrollBoxRenderable[] {
+  const found: ScrollBoxRenderable[] = from instanceof ScrollBoxRenderable ? [from] : []
+  for (const child of from.getChildren()) found.push(...scrollBoxes(child as Renderable))
+  return found
+}
+
+/**
+ * The transcript's content box is never wider than the viewport showing it —
+ * the invariant a horizontal scrollbar under the transcript is the symptom of
+ * (T96), asserted as the relation and never as a column count.
+ *
+ * **What this test is worth, exactly.** It does NOT reproduce the T96 bug, and
+ * that was checked rather than assumed: with `contentOptions.maxWidth` put back
+ * it still passes, at terminal widths 90/100/120/177/178, with
+ * `transcript.max_width` at 100 and at 200, with the vertical scrollbar already
+ * up and with it appearing only when `/` shortens the viewport — every one of
+ * those measured content and viewport equal. Whatever made a real terminal
+ * report 178 against 177 is not in reach of this renderer.
+ *
+ * So it is a guard, not a regression test, and the difference is written down
+ * because the commit it comes from claimed a guard it did not have: the frame
+ * snapshots were green while the bar was on screen, since a scrollbar the
+ * layout grows is not a character any card wrote. If the bar ever comes back,
+ * this is the place the real case goes — with the width that shows it.
+ */
+test("the transcript's content never outgrows the viewport, scrollbar and all", async () => {
+  const { setup } = await crowded(20)
+  try {
+    await settle(setup, 6)
+    await setup.mockInput.typeText("/")
+    await settle(setup, 4)
+
+    const boxes = scrollBoxes(setup.renderer.root)
+    // One box, so this cannot quietly start measuring somebody else's.
+    expect(boxes).toHaveLength(1)
+    const transcript = boxes[0]!
+    // It is actually scrolling vertically — otherwise there is no taken column
+    // and nothing here would be under test.
+    expect(transcript.scrollHeight).toBeGreaterThan(transcript.viewport.height)
+    expect(transcript.scrollWidth).toBeLessThanOrEqual(transcript.viewport.width)
   } finally {
     setup.renderer.destroy()
   }

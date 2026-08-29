@@ -2747,6 +2747,9 @@ S1c 把 checkout 的两个问题（store 的 trust、`.nulya/agents`）从 `main
 
 **测试**：不加。这一条要守的是"content 不比 viewport 宽"，而它已经被每一张现有的帧快照守着了（这次改动 26 个快照零变化——如果 content 宽度真的变了，卡片的裁剪点会跟着变）；再写一条断言某个 `scrollWidth` 数值的测试，只是把一个实现细节钉在两个地方。
 
+> **这段理由后来被推翻了（T98）**：带着这个 bug 的时候那些快照本来就是绿的，所以它们证明的恰恰是**没有**覆盖到这个状态。
+> 补的语义断言在 `test/layout.test.tsx`；它守住了不变量，但也没能在这个 renderer 里复现 178 对 177 —— 详见 T98 末尾那段。
+
 
 ### T97 · 剪贴板里的图片，和一条通向它的路（2026-08-29）
 
@@ -2763,3 +2766,48 @@ S1c 把 checkout 的两个问题（store 的 trust、`.nulya/agents`）从 `main
 **代价，如实记**：`Ctrl+V` 被终端拿走这件事**仍然没解**，`Alt+V` 还是应用内唯一的按键出路（tcode 亦然）；这次买到的是第二条**不靠按键**的路。另外路径粘贴要先认下这次粘贴的所有权（`preventDefault` 早于读盘），所以放在慢盘上的路径会晚一点显示——换来的是不先闪一段文本再变成卡片。
 
 **测试**：`test/image.test.ts`（字节判型 · 路径只在"整个粘贴就是它"时算数：引号、`file://`、散文里提到一个文件名不算、多行不算 · 读盘四态：真图 / 名字像图而字节不是 / 不存在 / 超限 · 相对路径相对**这个 tab 的工作区**而不是进程 cwd）· `test/composer.test.tsx` 两条（真粘一条路径 → `[Image #1]` → 提交带出 bytes，名字像图片的文本文件仍是文本 · 模型没标 vision 时图片不进草稿、notice 点名模型与 `vision = true`）。内核侧照旧 `zig build test` / `zig build e2e-core` 全绿，并用真二进制走了一遍门：同一张图在 `gpt-5.6-luna` 上从 exit 1 变成 exit 0。
+
+
+### T98 · 一个动作落在哪个目录，是那个 tab 说了算（外部 review 的两条 P1，2026-08-29）
+
+**内核零改动。** 两条都是同一个根：S1c 之后 `props.ws` 只剩一个意思——**这个进程是在哪儿启动的**，
+而不是"现在这件事发生在哪儿"；凡是作用于某一场 session 的动作还读着它，就是在一个 checkout 里动手、
+在另一个 checkout 里解释。第二条更细一层：**异步开始之后继续读"当前前台状态"**——目标定住了，判据没定住。
+
+**① 后台任务的 Stop 打在了启动目录**（`stopBackgroundTask` 与 `/tasks` 的 `ws`）。
+`stopTask(ws, send, task)` 的 `ws` 不是展示信息，它决定 `nulya task kill` **真的在哪儿跑**；
+而 `send` 一直是前台 tab 那一场的。于是从 repo A 启动、切到 repo B 的 tab、按 Stop：kill 在 A（通常什么都杀不到，
+两个目录恰好持有同名 handle 时杀错任务），而 `<task-stopped>` 那句说明写进 B。
+改动是把两半都从同一个 tab 上取（`here.ws` / `here.attach.send`），顺手把 `/ext` `/model` `/provider` 三个
+overlay 的 `ws` 也从 `props.ws` 换成 `ws()`——`/ext` 的每一次 build / activate / deactivate / prune 都落在某个
+store 里而它的 capability note 落在前台那一场，`/model` `/provider` 读的 config 有 project 层。
+`/tasks` `/usage` `/settings` `/cwd` 本来就读 `ws()`，剩下那几处 `props.ws`（tab store 的初值、开屏 sync、
+crash log、plugin host）说的确实是进程。
+
+**② `/agent <name> <task>` 的跨 workspace trust race。** `delegate()` 先把目标 tab 建出来、workspace 定在
+`waiting.ws`，**但 discovery 没有定住**：`refreshAgents()` 在 `await agentPackage()` 之后又读了一次 `ws()`，
+而首次 build 那个包是一整趟 toolchain run——足够一个人从 A 切到 B。于是 `entry.layer` 可能来自 B，
+`agentStart(entry.layer, agentsTrustIn(draft.ws))` 拿 B 的 layer 配 A 的 trust，最后 `renderAgent(draft.ws, …)`
+按名字加载的是 A 的定义：A 有一个 workspace 层的 `foo`、B 的同名 `foo` 由 user/builtin 层胜出，
+就能让"user 层一律 allow"这条规则替 A 的 workspace 定义放行——**绕过刚修好的那道门**。
+
+改法是让"哪个目录"成为参数而不是可读的当前状态：`agentPackage(where)` / `agentsIn(where)` 都要求点名，
+`delegate` 在建出 draft 的下一行就 `const target = waiting.ws`，`startAgent` 开头 `const where = draft.ws`
+并且**整个函数不再出现 `ws()`**。同时把 `agentDefs` / `agentWarnings` 降级成**只给 picker 看的显示状态**：
+执行路径一律用 `agentsIn` 的返回值，那份全 App 共享的 catalog 正是"另一个 workspace 的答案可以替换掉这一份"的
+载体（列不出来时也不再退回上一次的列表——那可能是别的 checkout 的）。
+
+**测试**：① 有一条真的双 workspace 回归（`test/workspace.test.tsx`）——进程在 A 启动、`/cwd` 到 B、
+在 B 起一个后台任务、`/tasks` 按 `k`，断言看到的是 kernel 找到了那一行（`kill requested` / `already done`）
+而不是 `no such task`。**验证过它在旧代码上会红**（`task kill failed: no such task 's-…/t1'`）。
+② 没有写计时测试：这条 race 要靠"在某个 await 中间切 tab"才显形，钉一个时间窗的测试守不住任何东西。
+它的机制改成了**类型**——`agentPackage` / `agentsIn` 的 workspace 是必填参数，
+以后没有哪个调用点能悄悄回到"读前台"，编译器会问它要一个目录。
+
+**顺带（review 的 P3）**：T96 那条"不加测试，因为帧快照已经守着它"的理由不成立——**带着那个 bug 的时候
+那些快照本来就是绿的**。补了一条语义断言（`test/layout.test.tsx`：content 宽度 ≤ viewport 宽度，
+不钉任何列数）。但它**没能复现 T96**：把 `contentOptions.maxWidth` 放回去它照样是绿的，
+终端宽 90/100/120/177/178 × `max_width` 100/200 × 竖条已经在 / 竖条因 `/` 才出现，扫了一遍，
+每一种下 content 与 viewport 都相等。所以这一条如实写成**守不变量而不是复现那个 bug**，
+注释里也这么写着；真正让 178 对上 177 的那个条件不在这个 renderer 的射程里，横条哪天回来，
+那条测试该加在同一个地方。

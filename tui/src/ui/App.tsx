@@ -618,7 +618,14 @@ export function App(props: AppProps) {
   let noteField: InputRenderable | null = null
 
   /**
-   * The agent definitions this workspace and this machine hold (tui.md §5.10).
+   * What the `/agent` PICKER is showing, and nothing else (tui.md §5.10).
+   *
+   * Read once when the picker opens and never consulted by a path that starts
+   * something: `agentsIn` returns its listing, and every caller acting on a
+   * definition uses that return value, in the directory it asked about. A
+   * catalog shared by the screen and the delegation is a catalog that can be
+   * replaced by another workspace's between the two — which is exactly how a
+   * definition from one checkout came to be started against another's answer.
    *
    * Re-read whenever `/agent` is used rather than watched: a definition is a
    * file somebody edits in another window, and the moment that matters is the
@@ -695,9 +702,17 @@ export function App(props: AppProps) {
     }
     return started
   }
-  /** The `agent` package, for the delegation paths that need its version. */
-  const agentPackage = async (): Promise<WithRef | null> => {
-    const member = await sessionMemberOnce(ws(), agent_id)
+  /**
+   * The `agent` package IN ONE DIRECTORY, for the delegation paths that need
+   * its version.
+   *
+   * `where` is a parameter and not `ws()` because building it is the slow step
+   * on a cold machine — a whole toolchain run — and everything after the await
+   * has to be about the directory the caller asked about, not about whichever
+   * tab happens to be in front by the time it answers.
+   */
+  const agentPackage = async (where: Workspace): Promise<WithRef | null> => {
+    const member = await sessionMemberOnce(where, agent_id)
     return member ? { id: member.id, version: member.version } : null
   }
   const [composedWithTools, setComposedWithTools] = createSignal<string[]>([])
@@ -879,12 +894,20 @@ export function App(props: AppProps) {
    * doc comment says why: the kill and the "stopped by the user" note have to
    * land together or not at all). Bound here to the front tab's `ws` and
    * `attach.send` so neither caller needs to know either exists.
+   *
+   * BOTH halves come off the same tab, and that is the whole of it: `ws` is
+   * where `nulya task kill` actually runs and `send` is where the note lands,
+   * so taking one from the tab and the other from the process's launch
+   * directory (`props.ws`, which since S1c means only "where this process
+   * started") is a stop executed in one checkout and explained in another —
+   * usually killing nothing, and where two workspaces hold the same handle,
+   * killing the wrong task.
    */
   const stopBackgroundTask = async (task: string) => {
     const here = live()
     if (!here) return
     try {
-      await stopTask(props.ws, here.attach.send, task)
+      await stopTask(here.ws, here.attach.send, task)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
     }
@@ -2789,23 +2812,33 @@ export function App(props: AppProps) {
   // ── `/agent` (tui.md §5.10) ───────────────────────────────────────────────
 
   /**
-   * Re-read the definitions — through the package, which is the one reader
-   * (`agents.ts`). Asked again at every `/agent` rather than watched: a
+   * The definitions ONE DIRECTORY holds — through the package, which is the one
+   * reader (`agents.ts`). Asked again at every `/agent` rather than watched: a
    * definition is a file somebody edits in another window, and the moment that
    * matters is the moment one is about to be used.
+   *
+   * `where` is asked for and never read off the screen, and the answer is
+   * returned rather than published. Building the package can take a whole
+   * toolchain run on a cold machine, and a person is free to switch tabs while
+   * it does: a version resolved for directory A, a listing taken from whichever
+   * tab is in front when it lands, and a trust answer looked up in a third are
+   * three different directories agreeing to start a system prompt. One
+   * parameter, threaded from the tab that asked to the render that ends it, is
+   * what makes them one directory.
    */
-  const refreshAgents = async (): Promise<readonly AgentEntry[]> => {
-    const pkg = await agentPackage()
-    if (!pkg) return []
+  const agentsIn = async (
+    where: Workspace,
+  ): Promise<{ defs: readonly AgentEntry[]; warnings: readonly string[] }> => {
+    const pkg = await agentPackage(where)
+    if (!pkg) return { defs: [], warnings: [] }
     try {
-      const found = await listAgents(ws(), pkg)
-      setAgentDefs(usableAgents(found))
-      setAgentWarnings(found.flatMap((entry) => entry.warnings))
-      return agentDefs()
+      const found = await listAgents(where, pkg)
+      return { defs: usableAgents(found), warnings: found.flatMap((entry) => entry.warnings) }
     } catch {
       // No listing is "none known"; the sentence a caller needs comes from
-      // whichever command it was about to run.
-      return agentDefs()
+      // whichever command it was about to run. Emphatically NOT the last
+      // listing taken: that one may be another checkout's.
+      return { defs: [], warnings: [] }
     }
   }
 
@@ -2827,8 +2860,17 @@ export function App(props: AppProps) {
    *
    * A visible tab rather than a hidden run, because a delegation that goes wrong
    * is a delegation somebody has to be able to watch, cancel and read afterwards.
+   *
+   * ONE DIRECTORY runs through all of it, `draft.ws`, and nothing here reads
+   * `ws()`. `entry` was listed in that directory, its trust answer is that
+   * directory's, the package is built there and the definition is rendered
+   * there. Mixing them is not a cosmetic slip: `entry.layer` is what the trust
+   * gate below judges, so a `user`-layer row listed in one checkout would let
+   * `renderAgent` load a `workspace`-layer definition of the same name out of
+   * another — the gate answering about a file it never saw.
    */
   const startAgent = async (entry: AgentEntry, task: string, draft: DraftTab): Promise<SessionTab | null> => {
+    const where = draft.ws
     // This path IS the nulya runner, hand-driven: a tab needs a local session
     // to step. A persona on another harness has no such session — opening one
     // anyway would run it on a harness its definition did not name (the very
@@ -2844,19 +2886,19 @@ export function App(props: AppProps) {
     // builds into that checkout's extension store (DESIGN §9). "Not answered
     // yet" is its own refusal rather than a yes — the question may be on screen
     // this very second, and starting the persona would be answering it.
-    const gate = agentStart(entry.layer, agentsTrustIn(draft.ws))
+    const gate = agentStart(entry.layer, agentsTrustIn(where))
     if (gate !== "allow") {
       tabs.close(draft.key)
       setNotice(
         gate === "denied"
           ? `'${entry.name}' came with this checkout and was not trusted · its prompt would enter a session here · answer the question again by clearing asked_agents in tui-state.json`
-          : `'${entry.name}' came with this checkout and ${workspaceLabel(draft.ws.dir)} has not been answered for yet · its prompt would enter a session here · answer that question first`,
+          : `'${entry.name}' came with this checkout and ${workspaceLabel(where.dir)} has not been answered for yet · its prompt would enter a session here · answer that question first`,
       )
       return null
     }
     const inherited = draft.pick()
     setNotice(`agent ${entry.name} · rendering its prompt…`)
-    const pkg = await agentPackage()
+    const pkg = await agentPackage(where)
     if (!pkg) {
       setNotice("the agent package could not be built here · /ext for what it said")
       return null
@@ -2866,7 +2908,7 @@ export function App(props: AppProps) {
       // The package renders the definition and checks that the packages its
       // pins name can be brought in — one implementation of both, and the same
       // one the model reaches through the `agent` tool.
-      m = await renderAgent(draft.ws, pkg, entry.name)
+      m = await renderAgent(where, pkg, entry.name)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
       return null
@@ -2910,15 +2952,17 @@ export function App(props: AppProps) {
 
   /** Bare `/agent`: the list, as a dialog above the composer. */
   const openAgentPicker = async () => {
-    const defs = await refreshAgents()
+    const { defs, warnings } = await agentsIn(ws())
+    setAgentDefs(defs)
+    setAgentWarnings(warnings)
     setAgentChoice(0)
     setAgentPicker(true)
-    const skipped = agentWarnings().length
+    const skipped = warnings.length
     setNotice(
       defs.length === 0
         ? "no agent definitions yet"
         : skipped > 0
-          ? `${defs.length} agent${defs.length === 1 ? "" : "s"} · ${skipped} file${skipped === 1 ? "" : "s"} skipped: ${agentWarnings()[0]}`
+          ? `${defs.length} agent${defs.length === 1 ? "" : "s"} · ${skipped} file${skipped === 1 ? "" : "s"} skipped: ${warnings[0]}`
           : null,
     )
   }
@@ -2945,7 +2989,7 @@ export function App(props: AppProps) {
       return
     }
     if (task.trim().length === 0) {
-      const defs = await refreshAgents()
+      const { defs } = await agentsIn(ws())
       const def = defs.find((entry) => entry.name === name)
       setNotice(
         def
@@ -2962,8 +3006,13 @@ export function App(props: AppProps) {
     // only this untouched draft and return to the tab the user came from.
     const inherited = currentPick()
     const waiting = tabs.draft({ ws: ws(), ...(inherited ? { pick: inherited } : {}) })
+    // …and from here on, THAT tab's directory is the only one anybody asks
+    // about. `waiting.ws` is fixed; `ws()` is not, and the awaits below are
+    // long enough (a first build of the `agent` package is a toolchain run) for
+    // somebody to switch tabs inside one.
+    const target = waiting.ws
     setNotice(`agent ${name} · loading its definition…`)
-    const defs = await refreshAgents()
+    const { defs } = await agentsIn(target)
     const def = defs.find((entry) => entry.name === name)
     if (!def) {
       tabs.close(waiting.key)
@@ -4251,7 +4300,12 @@ export function App(props: AppProps) {
     ),
     ext: () => (
       <ExtView
-        ws={props.ws}
+        // The tab's directory. Every write this view makes — build, activate,
+        // deactivate, prune, seed — lands in a store, and the store search
+        // order is the workspace's (DESIGN §5.5); the capability note it asks
+        // the kernel to deposit goes into the session below, which is this
+        // tab's. One directory for both, or the two disagree.
+        ws={ws()}
         header={snapshot().header}
         // A draft has no session for the kernel to deposit a capability note
         // into — and no frozen tool face to warn about either, which the null
@@ -4275,7 +4329,10 @@ export function App(props: AppProps) {
     ),
     tasks: () => (
       <TasksView
-        ws={props.ws}
+        // The tab's directory, not the process's: `k`/`K` run `nulya task kill`
+        // there, and every other prop on this view already comes off the tab in
+        // front (see `stopBackgroundTask`).
+        ws={ws()}
         sessionId={live()?.id ?? ""}
         tasks={tasks()}
         send={(text, framed) => live()?.attach.send(text, framed) ?? Promise.resolve()}
@@ -4313,7 +4370,10 @@ export function App(props: AppProps) {
     usage: () => <UsageView ws={ws()} snapshot={snapshot()} onClose={closeOverlay} />,
     model: () => (
       <ModelView
-        ws={props.ws}
+        // The tab's directory: config has a project layer, so which profiles
+        // and models exist is a question about a checkout, and the pick starts
+        // a draft in this tab.
+        ws={ws()}
         current={currentPick()}
         notice={guide() ?? undefined}
         focusProfile={focusProfile()}
@@ -4333,7 +4393,8 @@ export function App(props: AppProps) {
     ),
     provider: () => (
       <ProviderView
-        ws={props.ws}
+        // The tab's directory, for the same reason `/model` reads it there.
+        ws={ws()}
         current={currentPick()}
         notice={guide() ?? undefined}
         onShowModels={showModelsOf}

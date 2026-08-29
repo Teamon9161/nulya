@@ -564,7 +564,8 @@ const Round = struct {
 /// What this round is FOR.
 ///
 /// `wrap_up` is the round after a budget ran out silently, and the difference is
-/// mechanical rather than persuasive: one model turn, no tool ever executed.
+/// mechanical rather than persuasive: at most two model turns, no tool ever
+/// executed in either of them.
 /// The sentence that asks for the report says "text only — do not call any more
 /// tools", and a sentence is not a budget. Without this the wrap-up round is an
 /// ordinary round carrying an ordinary `--max-steps`, so a sub-agent that does
@@ -632,10 +633,22 @@ fn driveNulyaRound(
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(alloc, &.{ exe, "session", "step", args.remote, "--stream" });
     if (wrapping_up) {
-        // One turn. Not the delegation's budget, which is the budget that just
-        // ran out, and not the kernel's ceiling either: what is being asked for
-        // is a single answer, and a step is exactly one model turn.
-        try argv.appendSlice(alloc, &.{ "--max-steps", "1" });
+        // TWO turns, and the second one is the whole reason the gate below says
+        // anything rather than simply refusing. A step is one model turn: with a
+        // budget of one, a sub-agent that answers the request for its report by
+        // reaching for a tool spends that turn on the call, and the deny —
+        // which IS that call's `tool_results` (DESIGN §4) — lands in a session
+        // nobody will step again. It would read the refusal on a turn that never
+        // comes, and everything it found would be thrown away for the sake of a
+        // budget already spent.
+        //
+        // So: turn one, and if it answers in text `run` stops there
+        // (`lastAssistantDone`) and the second is never paid for. Turn two only
+        // happens for the sub-agent that reached for a tool, and it opens with
+        // the refusal in front of it. Nothing runs in either — the gate below
+        // denies every call in both — so the ceiling this round is really
+        // enforcing is "no tool executes", not "no second thought".
+        try argv.appendSlice(alloc, &.{ "--max-steps", "2" });
     } else if (args.max_steps != 0) {
         try argv.appendSlice(alloc, &.{ "--max-steps", try std.fmt.allocPrint(alloc, "{d}", .{args.max_steps}) });
     }
@@ -794,11 +807,12 @@ fn driveNulyaRound(
 /// The wrap-up round's verdict, for every call without looking at it.
 ///
 /// The round exists to collect an answer, not to do more work, and the gate is
-/// where that is a fact rather than a request: `--max-steps 1` already bounds it
-/// to one turn, and this makes that turn tool-free even when the sub-agent
-/// reaches for one anyway. The note is what it will read about the refusal, so
-/// it says what to do instead — the deny is that call's `tool_results` and the
-/// turn continues (DESIGN §4), which is exactly the room a text answer needs.
+/// where that is a fact rather than a request: `--max-steps 2` bounds the whole
+/// round to two model turns, and this makes every call in both of them run
+/// nothing. The note is what the sub-agent will read about the refusal, so it
+/// says what to do instead — the deny is that call's `tool_results` (DESIGN §4),
+/// and the second turn is the one on which that sentence can be acted on. A
+/// budget of one would have made this note something written for nobody.
 const wrap_up_verdict = "deny your step budget is spent: this round is for your report, and no tool will run in it. Answer in text with what you established.\n";
 
 /// `allow` / `deny <note>`, mechanically (tui.md §5.10's ceiling, with nobody at

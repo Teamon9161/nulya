@@ -27,7 +27,7 @@ import {
   type SessionGroup,
 } from "../src/ui/overlays/SessionsView.tsx"
 import { loadTuiState, rememberTabs } from "../src/state/tui_state.ts"
-import { sessionList } from "../src/nulya/cli.ts"
+import { sessionList, taskList } from "../src/nulya/cli.ts"
 import type { SessionListEntry } from "../src/nulya/cli.ts"
 import type { Workspace } from "../src/nulya/bin.ts"
 import type { JSX } from "solid-js"
@@ -43,6 +43,7 @@ import { displayWidth } from "../src/ui/columns.ts"
 import { sessionNew } from "../src/nulya/cli.ts"
 import {
   frameLines,
+  scripted_background_env,
   scripted_env,
   settle,
   tempWorkspace,
@@ -559,6 +560,64 @@ test("`/cwd` re-points the draft, and the session lands in THAT directory", asyn
     setup.renderer.destroy()
   }
 }, 90_000)
+
+/**
+ * The other half of S1c's claim, and the one a screen can get wrong long after
+ * the spawns are right: an action aimed at THIS tab's session has to run in
+ * this tab's directory. `props.ws` means only "where the process started", and
+ * a stop button that used it killed in one checkout while telling the model in
+ * another about it — usually killing nothing, and where two directories hold
+ * the same handle, killing somebody else's task.
+ *
+ * Nothing here reads a workspace out of the front end: the task exists in one
+ * directory only, so `nulya task kill` either finds it or does not, and which
+ * of those happened is the whole assertion.
+ */
+test("a stop press kills in the tab's directory, not the one the process was launched in", async () => {
+  const state = join(mkdtempSync(join(tmpdir(), "nulya-state-")), "tui-state.json")
+  const setup = await testRender(
+    () => (
+      <App
+        ws={here}
+        pick={{ profile: "scripted", model: "scripted-demo" }}
+        style={style}
+        statePath={state}
+        // The stand-in that starts a background task on its first turn.
+        driver={{ env: scripted_background_env }}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  try {
+    await settle(setup, 4)
+    await setup.mockInput.typeText(`/cwd ${there.dir}`)
+    setup.mockInput.pressEnter()
+    await settle(setup, 4)
+    await setup.mockInput.typeText("go")
+    setup.mockInput.pressEnter()
+    // The session and the task it started are both over there, and there is
+    // nothing of either one here.
+    await until(async () => {
+      const [only] = await sessionList(there)
+      return only !== undefined && (await taskList(there, only.id)).length > 0
+    }, 60_000)
+    expect(await sessionList(here)).toHaveLength(0)
+
+    await setup.mockInput.typeText("/tasks")
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("background tasks"), 20_000)
+    await setup.mockInput.typeText("k")
+    await until(() => /kill requested|already done|no such task/.test(setup.captureCharFrame()), 20_000)
+    const frame = setup.captureCharFrame()
+    // `nulya task kill` looked the task up where it is. Both of its successes
+    // are accepted — an `echo` may well have finished before the key was
+    // pressed — because what is being asserted is the DIRECTORY, not the race.
+    expect(frame).not.toContain("no such task")
+    expect(frame).toMatch(/kill requested|already done/)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
 
 test("`no project` lands in the home workspace, and asks no renderer for a project's opening text", async () => {
   // A renderer that does not exist: in an ordinary workspace the screen says

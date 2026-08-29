@@ -141,10 +141,13 @@
   - **交接给 review 的一点**：TUI 侧 `render/registry.ts` 与 `AgentPicker` 判断"非 nulya runner"用的是 `runner !== "nulya"` 的字符串比较，`ext:<id>` 天然落在正确的一侧（显示 runner 名、退化成 `/tasks` 提示、`startAgent` 当场拒绝），所以本轮 `tui/` 无需改动；但 `/ext` 那张表不会告诉任何人某个扩展是一个 runner（manifest 里也没有说"我是 runner"的字段——`agent_runner` 这个名字就是全部声明）。要不要让前端认出它，属于 ar-t 系列的下一轮判断。
 
 - 2026-08-29 · **「最后汇报一次」是一个机械约束，不是一句叮嘱**（外部 review 的 P1）。上一轮加的 wrap-up（预算跑光却什么都没说 → runner 送一条"停下来汇报"）方向对，实现只写在句子里：那句话说"text only — do not call any more tools"，而 runner 送完就 `continue`，下一轮仍是普通的 `session step`，带的仍是这条委派自己的 `--max-steps`——同一轮还把自带 persona 的小预算删掉了，于是缺省落到内核 500 的 runaway 天花板。**不听那句话的模型，可以把"最后一次汇报"跑成又一整份预算。**
-  - 修法：`RoundMode{ordinary, wrap_up}` 穿过 `driveOnce`，只有 nulya arm 认它——**`--max-steps 1`（一个 model turn）+ `--gate` 且每个请求一律 deny**。deny 是那个 call 的 `tool_results`（DESIGN §4），所以模型读得到为什么、这一轮照样能用文字作答；executor 一次都不跑。这一档与 readonly 的 gate 共用同一条 stdin 通道（`gated = readonly or wrapping_up`），没有第二套 plumbing。
+  - 修法：`RoundMode{ordinary, wrap_up}` 穿过 `driveOnce`，只有 nulya arm 认它——**`--max-steps 2`（至多两个 model turn）+ `--gate` 且每个请求一律 deny**。deny 是那个 call 的 `tool_results`（DESIGN §4），所以模型读得到为什么；executor 一次都不跑。这一档与 readonly 的 gate 共用同一条 stdin 通道（`gated = readonly or wrapping_up`），没有第二套 plumbing。
+  - **为什么是 2 而不是 1**（2026-08-29 第二轮 review 的 P2）：**一个 step 就是一整个 provider turn**（`AgentSession.run` 的 `while (taken < budget)`），所以预算 1 的时候，一个用 tool call 回应"停下来汇报"的子场把那一个 turn 花在了那次调用上——deny 确实落进了 ledger，但**没有下一个 turn 去读它**。当时的注释写着"模型读到原因后仍然可以用文字回答"，那句话对一个不存在的回合成立：语义实际是"你要么第一句就写字，要么放弃这次机会"。安全那一半没问题（工具一个都没跑），但**恢复能力比注释声称的弱**——而恢复正是这一轮存在的全部理由（不然子场找到的一切都留在调用者永远读不到的 session 里）。2 的代价只由那个伸手去拿工具的子场付：老实作答的第一个 turn 就 `end_turn`，`lastAssistantDone` 让 `run` 当场收工，第二个 turn 根本不发生。两个 turn 里的每一个 call 都照样被 deny，所以"这一轮零 tool 执行"这条约束一个字没松。
+  - **`wrap_up_verdict` 那句话因此才有读者**：它写的是"这一轮不跑工具，用文字说你确立了什么"，而能按它行事的正是第二个 turn。
   - **外部四个 arm 仍然只有那句话**：codex/claude/pi/ext 是别人的 harness，"一个 turn、零 tool"没有可强制的旋钮。不假装对称——mode 是**传进去的参数**而不是全局假设，正因为只有一个 arm 能被它约束。
   - 一个刻意留下的边角：wrap-up 发出与下一轮之间恰好到达的真实追问，会落在这一轮受约束的边界里（一个 turn、无 tool）。它仍会被答，下一轮就是普通轮——比让"停下来汇报"变成一张空白支票便宜得多。
-  - 测试：新 scripted 档 `wrapdefy`（每一步都调 tool，被要求汇报的那一步**也**调），两个 shell 命令各写一个以自己所在轮次命名的文件——于是断言的是**工具有没有跑**，而不是有没有被请求。e2e `tests/e2e/agent.zig` 断言 ordinary 轮那个文件在（约束没有变成永久 gate）、wrap-up 轮那个文件不在、且 ask 之后**恰好一条** assistant turn。**验证过它在旧代码上会红**（`expected error.FileNotFound, found void`）。
+  - 测试：新 scripted 档 `wrapdefy`（每一步都调 tool，被要求汇报的那一步**也**调），两个 shell 命令各写一个以自己所在轮次命名的文件——于是断言的是**工具有没有跑**，而不是有没有被请求。e2e `tests/e2e/agent.zig` 断言 ordinary 轮那个文件在（约束没有变成永久 gate）、wrap-up 轮那个文件不在。**验证过它在旧代码上会红**（`expected error.FileNotFound, found void`）。
+  - 第二轮补的那一半（同日）：`wrapdefy` 多一个分支——**看见有 tool result 是 `ok=false` 就用文字作答**（`hasFailedToolResult`；不去比对内核那句 deny 的措辞，这个模式下唯一失败的 tool result 就是被 gate 拒掉的那个）。于是测试从"没有文件被写"升级成**报告真的回到了父场**：wrap-up 之后**恰好两条** assistant turn（调用 + 读到拒绝之后的答复），且父场 step 一次拿到 `defiant_report` 而不是"ran out of its step budget"那句兜底。旧测试把"只有一个 turn"钉死成了预期，正是它让那半步缺口看起来像设计。**验证过它在 `--max-steps 1` 上会红**（`expected 2, found 1`）。
 
 ## 7. `agent_runner` 契约（ar-g 定稿）
 

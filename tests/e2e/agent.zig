@@ -1177,7 +1177,7 @@ test "bundled agent: a sub-agent that spends every step on tools is asked to sto
     }
 }
 
-test "bundled agent: the round a sub-agent is given for its report is one turn with no tool in it, whatever the sub-agent tries to call" {
+test "bundled agent: nothing runs in the round a sub-agent is given for its report, and the refusal still leaves it room to answer" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1213,11 +1213,14 @@ test "bundled agent: the round a sub-agent is given for its report is one turn w
     // round it was asked to spend on its report included. The request says
     // "text only — do not call any more tools"; this model does not care, which
     // is the only interesting case, because a sentence the model obeys proves
-    // nothing about what the harness allows.
-    const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"stubborn\",\"task\":\"find something\"}" }, &.{
+    // nothing about what the harness allows. Seeing the call refused, it
+    // answers in text — the other half, and the one a budget of one turn would
+    // have made unreachable.
+    const in_parent: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "wrapdefy" },
-    });
+    };
+    const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"stubborn\",\"task\":\"find something\"}" }, in_parent);
     defer alloc.free(opened.stdout);
     try std.testing.expectEqual(@as(u8, 0), opened.code);
     const child = try remoteOf(alloc, opened.stdout);
@@ -1240,12 +1243,23 @@ test "bundled agent: the round a sub-agent is given for its report is one turn w
     // up to 500 more steps.
     try std.testing.expectError(error.FileNotFound, ws.access(io, Scripted.defiant_after_file, .{}));
 
-    // One turn, not a second budget: exactly one assistant turn follows the ask.
+    // Two turns, and not one more: the call, and the answer that reading the
+    // refusal made possible. A budget of one would have stopped at the first —
+    // the note the gate writes would have been addressed to a turn that never
+    // came, and everything the sub-agent found would have gone with it.
     {
         const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
         defer alloc.free(events.stdout);
         const at = std.mem.indexOf(u8, events.stdout, Scripted.wrap_up_opening) orelse return error.TestExpectedEqual;
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, events.stdout[at..], "\"kind\":\"assistant\""));
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, events.stdout[at..], "\"kind\":\"assistant\""));
+    }
+
+    // …and the parent gets that answer, which is the point of the round.
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, in_parent);
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, Scripted.defiant_report) != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "ran out of its step budget") == null);
     }
 }
 
