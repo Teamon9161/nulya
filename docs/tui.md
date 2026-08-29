@@ -2733,3 +2733,16 @@ S1c 把 checkout 的两个问题（store 的 trust、`.nulya/agents`）从 `main
 **波及面**：三十处 `backgroundColor={… theme.hover …}`（状态栏的每个 chip、tab 条、卡片头行、欢迎屏的每一行、任务面板、queue lane…）加上十来个用 `rowBackground` 的列表（`/sessions` `/ext` `/model` `/provider` `/tasks` `/cwd` 与四个 picker），逐个改成对**这一行里的每一个 `<text>`** 抬色——半亮的一行看起来像 bug，所以是整行而不是主列。唯一的例外是 `/sessions` 那条 `+ new tab`：它本来就整行换色，一个已经在说话的控件不需要第二种说法。
 
 **测试**（`test/mouse.test.tsx` 两条，就在"指针"这个文件里）：断言的是**机制**——悬停不给背景（`rowBackground` 只答光标那一档）、抬色是混合而不是替换（`warn` 抬完既不等于 `warn` 也不等于 `lift`，将来有人把它改成"直接换成某个高亮色"就红）、不悬停时逐字节是原色、`NO_COLOR` 下抬色是 no-op。没有断言那个 0.34，也没有断言任何十六进制。
+
+
+### T96 · 输入 `/` 时冒出来的那条横向滚动条（2026-08-29）
+
+**内核零改动，改动是一行：删掉 transcript scrollbox `contentOptions` 里的 `maxWidth`。**
+
+**症状**：一打 `/`，命令菜单占掉几行 → transcript 的视口变矮 → 竖向滚动条出现 → 紧接着**下边缘多出一条横向滚动条**，看着像有东西被切在右边。
+
+**真因**（用 `App` 真渲染量出来的，不是猜的）：`scrollWidth 178 / viewport 177 / content 178`——**溢出恰好一列，就是竖向滚动条刚刚拿走的那一列**。而让 content 比视口宽的，正是我们自己传的 `contentOptions.maxWidth = style.maxWidth`：OpenTUI 的 ScrollBox 本来会给 content 一个 `minWidth: "100%"`（跟着视口），我们那一项把它顶掉之后 content 按整个 scrollbox 的宽度算了。删掉它，`177 / 177 / 177`，横条消失（竖条照常）。
+
+**而那一项本来就是死的**：它想表达"transcript 内容宽度封顶在 `transcript.max_width`"，但它从来没有做到过——**每张卡自己就已经按 `min(screen, max_width)` 裁**（`AssistantTurn` / `UserTurn` / `CardFrame` / `CompositionCard` 全都是这么算 `room()` 的），因为这个前端的规矩是**自己裁自己的文本**，从不指望某个盒子替它裁。一个写了不生效、还顺手制造了一列溢出的选项，正是该删的那种。同样的 `contentOptions` 其它七个 scrollbox 都没有传 `maxWidth`，所以 `/help` `/sessions` `/ext` 这些从来没有这条横条——实测确认过。
+
+**测试**：不加。这一条要守的是"content 不比 viewport 宽"，而它已经被每一张现有的帧快照守着了（这次改动 26 个快照零变化——如果 content 宽度真的变了，卡片的裁剪点会跟着变）；再写一条断言某个 `scrollWidth` 数值的测试，只是把一个实现细节钉在两个地方。

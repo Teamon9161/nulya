@@ -241,7 +241,15 @@ export function Transcript(props: {
       verticalScrollbarOptions={{
         trackOptions: { foregroundColor: style.theme.hairline, backgroundColor: "transparent" },
       }}
-      contentOptions={{ flexDirection: "column", width: "100%", maxWidth: style.maxWidth, paddingRight: 1 }}
+      // No `maxWidth` here, and that is load-bearing (T96). It used to carry
+      // `style.maxWidth`, meaning to cap the transcript at `transcript.max_width`
+      // — which it never did (every card already cuts itself to
+      // `min(screen, max_width)`, because this front end cuts its own text
+      // rather than letting a box do it) — while making the content box one
+      // column WIDER than the viewport. That column is the one the vertical
+      // scrollbar takes, so the moment a session was long enough to scroll, a
+      // horizontal scrollbar appeared under it for one column of nothing.
+      contentOptions={{ flexDirection: "column", width: "100%", paddingRight: 1 }}
     >
       {/* Only a session that has started has a frozen composition to report; a
           draft's is still a decision and belongs on the welcome screen (T24). */}
