@@ -104,3 +104,40 @@ export function placeholderBefore(
   const before = [...text].slice(0, cursor).join("")
   return attachments.find((attachment) => before.endsWith(placeholderFor(attachment.id))) ?? null
 }
+
+/**
+ * Every shape a paste in this composer can become, as the word between `#`
+ * and the number: `[Pasted text #N]` here, `[Image #N]` in `Composer.tsx`.
+ * Images are otherwise none of this file's business (D7 above), but the
+ * counter that numbers both shapes has to recognise both, or a fresh image
+ * could be handed the same number a still-recalled text placeholder means.
+ */
+const numbered_placeholder = /\[(?:Pasted text|Image) #(\d+)\]/g
+
+/**
+ * The number the composer's next placeholder should start from, given every
+ * message it can still recall (`Up` walks `history`, tui.md §11 T14/T79).
+ *
+ * Counting up forever from process start is correct but reads badly:
+ * `[Image #7]` looks like seven pictures are attached when there may be one,
+ * because deleting an attachment never gave its number back — a recalled
+ * draft might still be showing that number's brackets, and reusing it for a
+ * fresh paste would silently swap what the old text meant (`expandPastes`'s
+ * "placeholder whose attachment is gone" case is what a naive reuse would
+ * produce). So the count cannot simply restart at 1 either.
+ *
+ * The answer is conditional: one past the highest number that appears
+ * ANYWHERE in `history`, or 1 if there is none. That is safe to hand out
+ * only once nothing is currently attached — `Composer.tsx` is the one that
+ * knows when that is true; this function only answers what the floor is.
+ */
+export function nextAttachmentAfter(history: readonly string[]): number {
+  let max = 0
+  for (const entry of history) {
+    for (const match of entry.matchAll(numbered_placeholder)) {
+      const n = Number(match[1])
+      if (n > max) max = n
+    }
+  }
+  return max + 1
+}

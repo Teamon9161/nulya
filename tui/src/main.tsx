@@ -35,7 +35,7 @@ import {
   type ProjectStorePlan,
 } from "./extensions.ts"
 import { agentsDirOf, planProjectAgents, workspaceAgentFiles } from "./agents.ts"
-import { createStyle } from "./render/theme.ts"
+import { liveStyle } from "./render/theme.ts"
 import { createSessionState } from "./state/session.ts"
 import { App } from "./ui/App.tsx"
 import type { ModelPick } from "./state/tui_state.ts"
@@ -139,7 +139,11 @@ async function main() {
     guideOn = plan.guideOn
   }
 
-  const style = createStyle(settings)
+  // Live, because `/settings` writes `tui.toml` (T100): the object handed down
+  // never changes identity, its fields follow the file, and this is the one
+  // place that reads the file chain — the screen asks for a reload, it does not
+  // build a Settings of its own.
+  const live = liveStyle(settings)
   const state = id === undefined ? undefined : createSessionState(id)
 
   await render(
@@ -149,7 +153,8 @@ async function main() {
         id={id}
         state={state}
         pick={pick}
-        style={style}
+        style={live.style}
+        onSettingsEdited={async () => live.reload(await loadSettings(ws.dir))}
         driver={args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}}
         effort={effort}
         guide={guide}

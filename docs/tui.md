@@ -37,7 +37,19 @@
 | D9 | 内容宽度 | transcript 内容宽度上限 `max_width = 100` 列，左对齐 | 250 列的 markdown 不可读；设定可改 |
 | D11 | **session 懒创建：第一条消息才 `session new`** | 开屏是一个 **draft tab**（无 id、磁盘上什么都没有），它只捏着 `session new` 要的东西（pick / `--with`）；pin 在 materialize 那一刻现读 `tui-state.json`。`--session <id>` 仍是真 tab；`/compact` 仍产真 tab | composition 在 `session new` 冻结（physics #2）——开屏就建，等于替人把 tools / pin / model 决定了，随后在 `/ext` `/model` 里做的一切要么落到**下一场**、要么靠"偷偷替换空 session"糊过去。懒创建让"改完再开"变成默认，`discardIfUntouched` 从常规路径退回成边角（T22） |
 | D12 | **`/ext` 的 Enter 是一个开关：activate + pin 一起动** | ON = `ext activate` +（声明了 tool 的话）把它的 tool 全进本 TUI 的 pin 列；OFF = 先撤 pin（含 user config 的 `always`）再 `ext deactivate`。两根轴在内核里仍是两根：单个 tool 仍在 tools pane 用 `Space`，单个版本仍在版本线用 `a`/`r` | **推翻 T12 §5 的"永不合成一个总开关"**。那条原则对内核是对的、对屏幕是错的：两个键（`Space` 批量 pin / `d` deactivate）都藏在 `?` 后面，而它们移动的状态**一格都没画**——截图里 `evolution` `guide` 是 `built` 但 `current (none)`，人按 Enter 没反应、也看不出差别。一个画出来的开关 + 底下写清两根轴，胜过两个没人找得到的键（T22） |
-| D10 | **给人用的：一切在屏幕上完成** | 启动 `nulya` 之后，选模型 / 换 effort / 看哪个 profile 缺 key / **贴 key** 都是屏幕上的交互（`/model` 选择器、`/effort`、选择器里的 `s`），**不能要求人去找 config 文件改**。TUI 记住上次的选择（`tui-state.json`，见 §7）；隐式的选择跑不了（缺 key）时开屏就是选择器 + 原因 + 怎么修。config 文件是**定义**（一个 model id 是什么、profile 怎么连）不是**日常操作面** | 这是 TUI 的关键设计理念，与 D4 分工：`tui.toml` 只有人写、`tui-state.json` 只有程序写；内核 `config.toml` 人写，TUI **只做一种写**——在末尾追加/就地替换一个带标记的 `[[provider.profiles]] name/api_key` 小块（`nulya/credentials.ts`；不重写、不碰人的内容）。内核不学"上次选了谁"（那不是 substrate）；kernel 只提供 `nulya config show --json` 一个投影（含 `paths`），TUI 不复刻配置合并链、不猜 home 在哪 |
+| D10 | **给人用的：一切在屏幕上完成** | 启动 `nulya` 之后，选模型 / 换 effort / 看哪个 profile 缺 key / **贴 key** 都是屏幕上的交互（`/model` 选择器、`/effort`、选择器里的 `s`），**不能要求人去找 config 文件改**。TUI 记住上次的选择（`tui-state.json`，见 §7）；隐式的选择跑不了（缺 key）时开屏就是选择器 + 原因 + 怎么修。config 文件是**定义**（一个 model id 是什么、profile 怎么连）不是**日常操作面** | 这是 TUI 的关键设计理念，与 D4 分工：`tui-state.json` 只有程序写；`tui.toml` 与内核 `config.toml` 是**人写的文件**，TUI 只对它们做**最小编辑**——在末尾追加/就地替换一个带标记的 `[[provider.profiles]] name/api_key` 小块（`nulya/credentials.ts`），以及 `/settings` 里就地换掉一个键所在的那一行（`state/settingsfile.ts`，T100）；两处都不重写、不重排、不碰人的注释与顺序，所以文件仍是同一份文档、作者仍只有人一个。「不能要求人去找 config 文件改」正是这条规则要禁的事，一个只读的设定面板违反的就是它。内核不学"上次选了谁"（那不是 substrate）；kernel 只提供 `nulya config show --json` 一个投影（含 `paths`），TUI 不复刻配置合并链、不猜 home 在哪 |
+
+### 1.3 边界尺子：什么住 TUI 本体，什么住 extension 的 tui plugin
+
+「composer 能贴图、能 `@` 文件，这些是不是该做成扩展」这个问题反复出现，答案定成一把尺子而不是逐案讨论：
+
+**问：删掉这个功能，TUI 还能不能把任何一场 session 用起来？**
+
+- **不能 → 本体。** 输入侧（composer、剪贴板粘贴与折叠、`@` 路径补全、键盘、IME）、ledger 渲染、tab / observer、审批对话框、`/model` `/env` 这些选择器，都发生在**任何 session 存在之前或之外**，产物只是「一条 user turn 的文本 + 图片」或「一个 `session new` 参数」。它们没有可以宿主到包里的语义：plugin 契约（`plugin-api.d.ts`）**有意**没有 composer 钩子——把输入交给包，等于让装了某个包的人打字行为都变化，那是 physics #6 在前端的对应物。贴图尤其如此：图片是 model-visible 的 turn 内容，格式由内核定（DESIGN §3.1），composer 只是在替人**拼一条 turn**。
+- **能，而它只对装了某个包的人有意义 → 包的 plugin。** 与某个包的语义绑定的命令 / 卡片 / 面板（plan 的评审面板、ask 的选项、agent 的委派卡）已经全是包声明的（T39–T41）；没装 plan，连 `/plan` 这个词都不存在——这条已经兑现，继续兑现。
+- **管理面已经存在，不新发明**：包的前端面走 manifest 的 `contributes.ui{"tui"}` / `commands` / `tools[].ui`，随版本冻结、经 store trust 门、`plugins=false` 一键退回声明层。「TUI 拓展如何提供」的答案就是这条路，不再开第二条。
+
+推论：往本体加东西前先过这把尺子；过不了的，去问「哪个包该声明它」。尺子过了也还有 §1.2 的各条决策要对齐（一切在屏幕上完成、不发明第二份真相）。
 
 ## 2. 与内核的接触面
 
@@ -590,7 +602,7 @@ cancel = "escape"
 
 `[extensions]` 两个键都只作用于**这一趟 sync**：`auto_activate` 永远不会盖掉指着别处的 `current`（那是 DESIGN §7.2 的规则，前端无从违反），所以一次 rollback 活得过下一次启动。**对一个 `apply: "manual"` 的包，`activate` 只是移动一个指针**（`current`，ext-review-2 Lane K）——无论它贡献了什么，activate 本身都不改变任何 session 的 composition，所以这一趟对它没有什么需要挡的。**唯一的例外是 `apply: "auto"` 的包**（T52）：对它 activate 就是 compose，内核从那一刻起把它组进这台机器上每一场非 `--bare` 的 fresh session，所以这一趟**永不**激活一个还没有 `current` 的这种包（`extensions.autoActivatable`，与内核给自己的 `ext sync --activate` 同一条规矩），只把它点名到状态栏那一行上，让 `/ext` 的 Enter 去按。project store 的那道 trust 问句**不受这两个键管**——它是 DESIGN §9 的边界，只有按键能推动。
 
-`/settings` 只显示当前生效值与来源文件；不在 TUI 里写配置（编辑器改文件即可，第二个诉求出现再做）。但它**说得出这个文件收哪些字段**（T94）：上面这一整张表的每个键都在屏幕上，每行带着它接受的词表或形状，以及——当它不是缺省时——缺省是什么；能在界面里选、记在 `tui-state.json` 里的那些（模型 / 权限档 / 目录 / shell 跑在哪 / 包与 pin）排在最前面，每行就是一个入口（T92）。
+`/settings` 显示当前生效值与来源文件，**说得出这个文件收哪些字段**（T94）——上面这一整张表的每个键都在屏幕上，每行带着它接受的词表或形状，以及——当它不是缺省时——缺省是什么；能在界面里选、记在 `tui-state.json` 里的那些（模型 / 权限档 / 目录 / shell 跑在哪 / 包与 pin）排在最前面，每行就是一个入口（T92）——**并且改得动**（T100）：`j/k` 落光标、`Enter` 在两值的键上直接换成另一个、三值以上开一个列表、数字与列表在行内输入（列表用逗号分隔，与值那一列的写法同一种）。写的是 **user 层**那一个文件，手法是**最小编辑**：找到那个键所在的行就地替换（连行尾注释一起留着）、没有就在它那张表的末尾加一行、连表都没有才在文件末尾开一节并写一句 `# nulya:` 说明是谁加的；**绝不重排、绝不删注释、绝不 serialize 整个文件**（`state/settingsfile.ts`，`nulya/credentials.ts` 的同一条纪律）。**这不构成第二个作者**：作者只有人一个，屏幕是那支笔，文件仍是同一份文档。`keys.*` 与 `env.<kind>.*` 两类行不写（前者名字是开集，后者一行代表三张表），`Enter` 只说去哪儿改；**项目层已经设过的键在行首标出来并拒绝写**——近的那层胜，写在 user 层什么都不会发生。写完当场重读文件链、界面即刻生效（`render/theme.ts` 的 `liveStyle`），只在启动时读一次的那几个键（`extensions.*`、`driver.mode`）由行自己说出这一点。
 
 **`tui-recents.json`（T71）**：user 层下**第二个**由程序写的文件，JSON `{"recent": ["<绝对路径>", …]}`（新的在前，上限 12）。为什么不是 `tui-state.json` 的一个键：那个文件在其它每一处都是 **workspace 层**的事实（这个项目的 pin、它的侧边栏、它的档），而这一条是**关于好几个目录**的事实——一份别的目录的清单不能住在其中一个目录里面（`trusted-stores.jsonl` 因为同一个理由在 user 层，DESIGN §9）。**只在真的建起一场 session 时写**：浏览到一个地方不等于在那儿工作过。读不出来 = 没记住，永不阻止启动。
 
@@ -2719,6 +2731,10 @@ S1c 把 checkout 的两个问题（store 的 trust、`.nulya/agents`）从 `main
 
 **为什么仍然不写文件**（§7 那条一个字没松）：`tui.toml` 是人写的、带注释与排版，程序回写要 toml_edit 那一档的东西；而在界面里做的选择本来就有自己的家（`tui-state.json`，面板顶上那一段）。现在的分工因此是完整的一句话：**能在界面里选的，面板上面那段就是入口；只在文件里的，面板下面那张表说出它叫什么、收什么、现在是什么、缺省是什么。**
 
+> **这一段后来被推翻了（T100）**：面板现在写那个文件。「要 toml_edit 那一档的东西」高估了这件事——
+> 需要的不是一个能 round-trip 整份文档的编辑器，而是**换掉一行**；而「第二个作者」说的是
+> 会重排的写法，不是任何写法。这里列出的词表恰好成了 T100 那个 picker 的选项。
+
 
 ### T95 · 悬停是把这一行的颜色抬起来，不是在它背后刷一条带子（2026-08-29）
 
@@ -2811,3 +2827,64 @@ crash log、plugin host）说的确实是进程。
 每一种下 content 与 viewport 都相等。所以这一条如实写成**守不变量而不是复现那个 bug**，
 注释里也这么写着；真正让 178 对上 177 的那个条件不在这个 renderer 的射程里，横条哪天回来，
 那条测试该加在同一个地方。
+
+### T99 · composer 粘贴收尾：右键第三条路、编号回归、Alt 名字对上（2026-08-29）
+
+**内核零改动。** T97 把 `Ctrl+V`/`Alt+V` 接完整、T89 把两种表示合到一处；这一条收尾三处小的。
+
+**① composer 右键 = 从剪贴板粘贴。** `Ctrl+V`/`Alt+V` 仍然要终端把一个修饰键交出来才到得了这里，
+Windows Terminal 的缺省绑定不交 `Ctrl+V`；右键需要的更少——只要终端发出鼠标序列（`MouseButton.RIGHT`，
+`@opentui/core` 的 `button` 字段在 SGR 与传统两种鼠标协议下按下时都可靠是 `2`），不需要任何修饰键存活到这里。
+落点是 `Composer.tsx` 已有的那个 `onMouseDown`——本来就是"点在输入框里 = 在这里打字"的入口
+（`props.onActivate`），右键分支只是多问一句 `event.button === MouseButton.RIGHT`，命中就多做
+`pasteFromClipboard()`。左键路径不变；只作用在这一个 box（边框 + 文本区），不碰全局。
+`Welcome.tsx` 的粘贴提示同步补了一句；`/help` 里没有点名过粘贴键位，不用同步。
+
+**② attachment 编号在安全时归零。** `nextAttachment` 是进程内单调递增，删掉一张再贴一张也不回头，
+`[Image #7]` 读起来像挂了七张图。单调是有理由的：`Up` 召回的旧草稿可能还带着 `[Pasted text #3]`
+字样，编号复用会让旧 token 悄悄指向新内容。改法是**条件重置**而不是固定重置：`paste.ts` 新增
+`nextAttachmentAfter(history)`——扫全部历史消息里两种占位符形状（`[Pasted text #N]` 与
+`[Image #N]`，后者是 `Composer.tsx` 自己的形状，`paste.ts` 本不管图片但编号计数器躲不开）里出现过的
+最大编号，答一个"下一个安全的号"。`Composer.tsx` 只在 `attachments()` 与 `images()` **都为空**的那一刻
+（`nextId()`：真正分配编号之前才检查，不是另开一个 effect）才用它重置计数器——这正是"贴一张、删掉、
+再贴"回到 `#1` 的路径，而只要还有任何东西挂着，编号继续往上走，不会跟草稿里正在显示的号相撞。
+`ComposerApi.clear()`（Ctrl+C 清草稿）本身没有把计数器重置到 1，而是让下一次分配去看 `history`——
+被丢弃的草稿从未 `push` 进 `history`，所以它的旧编号在 `Up` 里也已经找不回来了，安全。
+
+**③ `onKeyDown` 的注释说的是 `Alt+V`，代码查的是 `event.ctrl || event.meta`，没有 `event.alt`——
+读 `@opentui/core` 的类型声明（`KeyEvent implements ParsedKey`）才发现这个包压根没有 `alt` 字段，
+Alt 走的是 `option`。翻编译产物确认了两条解析路径（原始 ESC 前缀、Kitty CSI-u）都只在同时置位 `meta`
+的分支里才置位 `option`——没有一条只设 `option` 不设 `meta` 的路。也就是说这个解析器里 `meta`
+本来就把"真正的 Meta/Cmd"和"Alt"揉在一起了，`event.ctrl || event.meta` 早就在捕获 Alt+V，
+`option` 不会多逮到任何东西。改动只是把注释写准，没碰判断条件。**
+
+**测试**：`test/composer.test.tsx` 新增一条（右键在同一格触发粘贴、左键在同一格不触发）；
+`test/paste.test.ts` 给 `nextAttachmentAfter` 补五条（空历史 / 无占位符 / 单形状取最大值+1 /
+两种形状混合、谁大听谁的 / 分布在多条历史消息里）。`bun test` 全绿（681 pass）；`bun run compile` 过。
+
+
+### T100 · 设定面板改得动了，状态行只剩一种亮度（2026-08-29）
+
+**内核零改动。**
+
+**问题一：一个只读的设定面板违反的正是 D10。** T94 把二十七个键、每个键收什么词、缺省是什么全写到了屏幕上——然后在最后一行说「去编辑文件」。那句话是 D10 明文要禁的那件事（*不能要求人去找 config 文件改*），而当年不写的理由（写回去要 toml_edit 那一档的东西 / TUI 也写就成了同一份真相的第二个作者）经不起再看一遍：**需要的不是能 round-trip 整份文档的编辑器，是换掉一行**；而「第二个作者」说的是**会重排的写法**，不是任何写法——`nulya/credentials.ts` 早就立了另一条路的先例（往人写的 `config.toml` 里追加/就地替换一个带标记的小块，两年没有人说过它制造了第二份真相）。作者只有人一个，屏幕是那支笔。
+
+**`state/settingsfile.ts`（新，纯函数 + 一个写口）**：`placeSetting(text, table, key, literal)` 按行扫一遍——认注释、认 basic / literal 字符串、认括号深度（所以一个写成多行的数组是**一个值**而不是一行）——然后三选一：键在就**就地替换那一行**（**连行尾注释和它前面的空白一起留着**，那是人对齐注释列的方式）· 键不在但表在就在**那张表最后一个值之后**插一行（不是文件末尾：那样会掉进下一张表）· 表也不在才在文件末尾开一节，并写一句 `# nulya: added from /settings` 说明是谁加的。**只有新开的一节才有标记**：credentials.ts 需要标记是因为那个块要被再找到并整体替换，而这里 **TOML 的键在它那张表里唯一，键本身就是锚**。换行约定跟着原文件（CRLF 进 CRLF 出）。
+
+**扫描器很小，所以写之前先读回来**：`writeSetting` 把要写的文本先 `Bun.TOML.parse` 一遍，并断言那个键真的回来了、值真的是刚才要的那个，不满足就抛错、**一个字节都不落盘**。它不认识 `"""` 多行字符串，而一个 `note = """` 里正好写着 `[transcript]` 的文件会把它带偏——这条检查是那种情形的代价上限：一条消息，而不是一份被改坏的设定。
+
+**词表只写一处**：`setting_fields` 每行多一个 `edit`（`choice{values}` / `number{min}` / `list`），`accepts` 那一列在能推出来的时候就由它推（`acceptsOf`）。于是**第三列印的词和 picker 提供的选项是同一个数组**，不可能对不上。没有 `edit` 的两类行就是这个屏幕不写的两类：`keys.*`（名字是开集，没有封闭列表可给，也无法验一个绑定是不是绑定）与 `env.<local|wsl|ssh>.*`（一行代表三张表，没有单一的值可放）——`Enter` 在它们身上只说去哪儿改。
+
+**交互**：`j/k` 落光标（下表每行多了共用的两列 gutter——光标的底色与指针的抬色都是颜色，`NO_COLOR` 的终端也得知道 `Enter` 说的是哪一行）· `Enter`/`Space` 在**恰好两个值**的键上直接换成另一个（为两个已经在屏幕上的词开一个对话框是仪式），**三个以上开一个 picker**（否则走到目的地要写四次文件）· 数字与列表在**输入框里**编辑（`ProviderView` 的同一套：输入框在时它拿键盘，只有 `Esc` 是面板的）；鼠标点一下落光标、点已选中的行执行它的 `Enter`（与 `/ext` `/provider` 同一条）。**列表用逗号分隔**，`approvals.allow` 那种条目本身带空格，空白当不了分隔符——顺带把值那一列的 `shown()` 也改成逗号，于是**看到的和输入的是同一个字符串**。
+
+**两条拒绝**：**项目层已经设过的键**在第三列**行首**标出来（`set by the project layer · `——那一列是会被裁掉的一列，必须活下来的话放在头上），`Enter` 拒绝并说清楚「近的那层胜，写在这里什么都不会发生」；写失败（文件不可写、读不回来）**原样显示错误**，不吞。
+
+**写完当场生效**：`render/theme.ts` 新增 `liveStyle`——**一个身份不变、字段是 getter 的 `Style`**。不是"reload 出一个新对象"，因为 style 是经 `StyleContext` 到达每一张卡的，而 context 的 value 在 provider 创建时就读定了，新对象永远到不了；身份钉住、每个**字段**才是那次响应式读取，于是碰了 `style.theme` 的组件重画、没碰的不动。`main.tsx` 持有它、`App` 多一个 `onSettingsEdited`。只在开屏读一次的东西（keymap、plugin 加载）仍需重启，而**那几个键自己在屏幕上说这件事**（`SettingField.note`：`extensions.*` 是「read when this front end opens」，`driver.mode` 是「这一趟的档是在屏幕上选的」）。
+
+**问题二：`model` 是这一行上唯一的白字。** 状态行的分段本来是有层级的（`fg` 主语 / `dim` 陪衬 / `faint` chrome / `warn`·err 语义），但实际效果是一排浅灰里插着一个白词——**一行中间的一个亮词读起来像警报，不像标题**。改成 `muted`：仍比 `dim` 亮一档（主语的位置还在，而且它本来就靠**顺序**站住），但和其它 chip 同族。这一行剩下的两种颜色因此都是**语义色而不是层级色**——`unsafe` 与非 local 的 `⇥`、context 环的告警带——`fg` 只剩 notice 那一档，而 notice 本来就是这行上唯一的新闻。理由写进了 `StatusBar` 里模型那一段的注释。
+
+**顺带一处结构**：`SettingsView` 的 body 从三段嵌套 JSX 收成**一个扁平的行数组**（caption / blank / choice / path / setting）。理由是光标需要一个「这是第几行」的答案，而这个答案不能和布局各说各的：行的下标**就是**它在 scrollbox 里的偏移，于是「把光标滚进视野」是一次算术，不是第二份关于表头有多高的模型。
+
+**测试**（`test/settingsedit.test.tsx` 新，13 条）：纯函数八条守的是那几条保证——就地替换后**除了那个值以外逐字节相同**（行尾注释与它的空白一起留着）· 新键落在它那张表里而不是文件末尾 · 新表带标记 · CRLF 进 CRLF 出 · 多行数组整体换掉、后面那张表不动 · **扫描器跟不上的文件抛错且文件一字未变** · `layerSets` 只回答一个问题 · 列表按显示的形状回填。面板五条驱动的是真的按键与真的鼠标，断言的是**盘上的文件**与**屏幕上的那一行**（面板挂在真的 `liveStyle` 上，所以「写完生效」这条回路本身就在被跑，而不是被 stub 掉）：两值键的 `Enter` 写反面并让那一行当场变过来、再按一次写回去且**文件里仍然只有一行 `diff =`** · 三值键开列表、选一个写一次 · 列表按逗号切开、坏数字被拒且不落盘 · 项目层设过的键被标出来且拒绝写 · `keys.*` 不写、只说去哪儿改。断言全落在机制上，没有钉任何列宽或十六进制。
+
+`bun test` **694 pass / 0 fail**（62 文件），`bun run typecheck` 干净，`bun run compile` 出单文件。

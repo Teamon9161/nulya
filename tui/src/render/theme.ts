@@ -18,7 +18,7 @@
  * painting behind them (`ui/rows.ts`), so the two are never confused and a row
  * the mouse merely crossed does not look chosen.
  */
-import { createContext, useContext, type Accessor } from "solid-js"
+import { createContext, createSignal, useContext, type Accessor } from "solid-js"
 import { SyntaxStyle } from "@opentui/core"
 import { syntaxStyleFor } from "./syntax.ts"
 import { useTerminalDimensions } from "@opentui/solid"
@@ -403,6 +403,69 @@ export function createStyle(settings: Settings, env: Record<string, string | und
       dark: settings.ui.theme !== "nulya-light",
       noColor: no_color,
     }),
+  }
+}
+
+export interface LiveStyle {
+  /** The one object every consumer holds; its fields follow `reload`. */
+  style: Style
+  reload(settings: Settings): void
+}
+
+/**
+ * A `Style` that can change while the program runs — what `/settings` needs
+ * once it writes a key (T100): an edit that only took effect at the next start
+ * would be a screen that says it did something and did not.
+ *
+ * IT IS ONE OBJECT WITH GETTERS, not a new object per reload, because the
+ * style reaches every card through `StyleContext` and a context value is read
+ * once, at the provider's creation — a fresh object would never arrive. The
+ * identity stays put and each FIELD is the reactive read: a component that
+ * touches `style.theme` inside its render subscribes to the version signal and
+ * redraws, and one that never looks does nothing.
+ *
+ * Anything read once at set-up (the keymap, whether plugins load) still needs a
+ * restart, and the fields that work that way say so on the screen itself
+ * (`SettingField.note`).
+ */
+export function liveStyle(initial: Settings, env: Record<string, string | undefined> = process.env): LiveStyle {
+  const [version, bump] = createSignal(0)
+  let current = createStyle(initial, env)
+  const read = <K extends keyof Style>(field: K): Style[K] => {
+    version()
+    return current[field]
+  }
+  return {
+    style: {
+      get theme() {
+        return read("theme")
+      },
+      get glyphs() {
+        return read("glyphs")
+      },
+      get settings() {
+        return read("settings")
+      },
+      get maxWidth() {
+        return read("maxWidth")
+      },
+      get historyWindow() {
+        return read("historyWindow")
+      },
+      get motion() {
+        return read("motion")
+      },
+      get spinner() {
+        return read("spinner")
+      },
+      get syntax() {
+        return read("syntax")
+      },
+    },
+    reload(settings: Settings) {
+      current = createStyle(settings, env)
+      bump((at) => at + 1)
+    },
   }
 }
 

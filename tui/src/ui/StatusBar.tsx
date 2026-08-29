@@ -442,7 +442,19 @@ export function StatusBar(props: {
             {/* The model is the subject of this line and the one thing on it that
                 answers to a click — it opens `/model`, the way tcode's model line
                 does. The same tint every clickable thing takes under the pointer
-                (`ui/rows.ts`). */}
+                (`ui/rows.ts`).
+
+                `muted` and not `fg`. Being the subject is a matter of ORDER and
+                of one step of brightness, not of a different family: at `fg` it
+                was the only white thing on a row of grey chips, and a single
+                bright word in the middle of a line reads as an alert rather
+                than as a heading. The row's hierarchy is now the theme's own
+                (`render/theme.ts`) — `muted` for the fact this line is about,
+                `dim` for the chips that qualify it (mode, cwd, tools, step),
+                `faint` for the host's own controls at either end — and the two
+                colours left on it, `warn` on `unsafe` and on a non-local exec
+                target and the context ring's band, are the ones that mean
+                something rather than rank something. */}
             <box
               flexShrink={0}
               height={1}
@@ -451,7 +463,7 @@ export function StatusBar(props: {
               onMouseOver={() => setOverModel(true)}
               onMouseOut={() => setOverModel(false)}
             >
-              <text fg={lifted(style, Boolean(props.onPickModel) && overModel(), style.theme.fg)}>
+              <text fg={lifted(style, Boolean(props.onPickModel) && overModel(), style.theme.muted)}>
                 {layout().model}
               </text>
             </box>

@@ -84,8 +84,9 @@ function tipsOf(glyphs: Glyphs): string[] {
     // Alt+V is named FIRST on purpose: Ctrl+V reaches this application only on
     // terminals that do not paste on it themselves, and the people who most
     // need to know a picture can be pasted are the ones whose terminal quietly
-    // took that key.
-    "Alt+V (or Ctrl+V) pastes what is on the desktop clipboard, a picture included",
+    // took that key. A right click needs no key at all, and is named beside
+    // the two that do for the same reason (`ui/Composer.tsx` onMouseDown).
+    "Alt+V (or Ctrl+V, or right-click the box) pastes what is on the desktop clipboard, a picture included",
     // The route that needs no key at all, and therefore the one that works on
     // the terminals where the tip above cannot help.
     "paste or drag the path of a .png or .jpg and the picture goes in, not the path",

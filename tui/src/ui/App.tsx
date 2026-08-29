@@ -278,6 +278,15 @@ export interface AppProps {
    * without the person putting it there.
    */
   agentsTrusted?: boolean
+  /**
+   * `/settings` wrote a key in `tui.toml`: read the file chain again and let
+   * the answer reach the screen (T100, `render/theme.ts`'s `liveStyle`).
+   *
+   * The reload lives above this component because `style` is what the whole
+   * tree draws from and it arrives as a prop; absent in tests, where a static
+   * style is exactly what is wanted.
+   */
+  onSettingsEdited?: () => void | Promise<void>
 }
 
 /**
@@ -4345,6 +4354,7 @@ export function App(props: AppProps) {
       <SettingsView
         ws={ws()}
         onClose={closeOverlay}
+        {...(props.onSettingsEdited ? { onEdited: props.onSettingsEdited } : {})}
         // The choices this front end makes and remembers for itself, each
         // opening the same thing its status-line chip opens (T92). They are
         // computed here rather than in the view because every one of them is

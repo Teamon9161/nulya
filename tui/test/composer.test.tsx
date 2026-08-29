@@ -8,6 +8,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { testRender } from "@opentui/solid"
 import { useKeyboard } from "@opentui/solid"
+import { MouseButtons } from "@opentui/core/testing"
 import { Composer, wrappedRows } from "../src/ui/Composer.tsx"
 import { completions } from "../src/commands.ts"
 import { displayWidth } from "../src/ui/columns.ts"
@@ -576,6 +577,48 @@ test("a pasted image PATH is the picture; a path to anything else is still text"
   }
 }, 60_000)
 
+
+test("right-click in the composer pastes from the clipboard, no key required", async () => {
+  // The third route to the clipboard (`ui/Composer.tsx` onMouseDown), for the
+  // same reason Alt+V exists: on a terminal that keeps a modifier for itself,
+  // a gesture that needs no modifier at all is the one that still works.
+  const holds = "from the clipboard"
+  const sent: string[] = []
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer
+          readClipboard={async () => ({
+            status: "read",
+            representation: { mimeType: "text/plain", bytes: new TextEncoder().encode(holds) },
+          })}
+          onSubmit={(text) => sent.push(text)}
+        />
+      </StyleContext.Provider>
+    ),
+    { width: 70, height: 10 },
+  )
+  try {
+    await settle(setup, 3)
+    const rowOf = (frame: string) => frame.split("\n").findIndex((row) => row.includes("message nulya"))
+    const box = rowOf(setup.captureCharFrame())
+    expect(box).toBeGreaterThanOrEqual(0)
+
+    // A plain (left) click only activates the box — the ordinary gesture must
+    // not also reach for the clipboard.
+    await setup.mockMouse.click(4, box)
+    expect(await settle(setup, 3)).not.toContain(holds)
+
+    await setup.mockMouse.click(4, box, MouseButtons.RIGHT)
+    expect(await settle(setup, 4)).toContain(holds)
+
+    setup.mockInput.pressEnter()
+    await settle(setup, 3)
+    expect(sent).toEqual([holds])
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
 
 test("an image the model is not catalogued for is refused on the gesture", async () => {
   const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])

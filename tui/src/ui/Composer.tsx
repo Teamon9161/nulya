@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onMount } from "solid-js"
-import type { KeyEvent, PasteEvent, TextareaRenderable } from "@opentui/core"
-import { SyntaxStyle } from "@opentui/core"
+import type { KeyEvent, MouseEvent, PasteEvent, TextareaRenderable } from "@opentui/core"
+import { MouseButton, SyntaxStyle } from "@opentui/core"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { columnWidth, displayWidth, fit, squeeze, wrapWords } from "./columns.ts"
 import { pointer } from "./pointer.ts"
@@ -16,6 +16,7 @@ import {
   describeAttachment,
   expandPastes,
   measure,
+  nextAttachmentAfter,
   pasteShouldFold,
   placeholderBefore,
   placeholderFor,
@@ -253,6 +254,20 @@ export function Composer(props: {
    */
   const [focused, setFocused] = createSignal(!props.disabled)
   let nextAttachment = 1
+  /**
+   * The id for a new attachment. Monotonic while anything is still attached
+   * — a paste made mid-draft must never collide with one already sitting in
+   * the box or in `attachments()`/`images()` behind it — but the moment
+   * BOTH signals are empty there is nothing left for a fresh number to
+   * collide with except what submitted history can still recall through Up,
+   * so this is where `nextAttachmentAfter` (`paste.ts`) gets to lower the
+   * counter back down (`[Image #7]` reading as "one picture" the common way:
+   * paste, delete, paste again, and the count does not remember the first).
+   */
+  const nextId = (): number => {
+    if (attachments().length === 0 && images().length === 0) nextAttachment = nextAttachmentAfter(history)
+    return nextAttachment++
+  }
   /** The ones the draft currently refers to — what the line under the box shows. */
   const drafted = () => referenced(line(), attachments())
   const draftedImages = () => images().filter((image) => line().includes(imagePlaceholder(image.id)))
@@ -411,7 +426,7 @@ export function Composer(props: {
   const foldPaste = (text: string): boolean => {
     const size = measure(text)
     if (!pasteShouldFold(size.chars, size.lines)) return false
-    const attachment: PasteAttachment = { id: nextAttachment++, text, ...size }
+    const attachment: PasteAttachment = { id: nextId(), text, ...size }
     setAttachments([...attachments(), attachment])
     area?.insertText(placeholderFor(attachment.id))
     sync()
@@ -443,7 +458,7 @@ export function Composer(props: {
       props.onNotice?.(tooLarge(image.bytes.length))
       return false
     }
-    const attachment: ImageAttachment = { id: nextAttachment++, ...image }
+    const attachment: ImageAttachment = { id: nextId(), ...image }
     setImages([...images(), attachment])
     area?.insertText(imagePlaceholder(attachment.id))
     sync()
@@ -542,8 +557,12 @@ export function Composer(props: {
       clear: () => {
         clear()
         // The draft is gone, so the attachments it referred to are nobody's:
-        // leaving them would keep a thousand folded lines alive behind an empty
-        // box, and the next `[Pasted text #1]` would stand for the old one.
+        // leaving them would keep a thousand folded lines alive behind an
+        // empty box. Emptying both signals also arms `nextId`'s reset — safely,
+        // because a discarded draft was never pushed to `history` and so
+        // cannot come back through Up; the next paste is free to become
+        // `[Pasted text #1]` precisely because nothing can still mean the old
+        // one.
         setAttachments([])
         setImages([])
         shown = null
@@ -624,8 +643,15 @@ export function Composer(props: {
     // situation this cannot do anything about: a terminal that pastes on
     // `Ctrl+V` itself never delivers that key, so on Windows Terminal's default
     // binding there would otherwise be no way to reach the clipboard's image at
-    // all. A second key costs nothing and is the only escape hatch available
-    // from inside the application.
+    // all from the keyboard (the right-click below is the keyless third route).
+    //
+    // OpenTUI's `KeyEvent` has no `alt` field — Alt shows up as `option` — but
+    // there is nothing to add to the condition below for it. Both places this
+    // front end's key parser sets `option` (the ESC-prefix decoding a raw
+    // terminal uses, and the Kitty CSI-u path) set it ONLY alongside `meta`,
+    // never on its own, so `event.meta` already means "Ctrl+V's own modifier,
+    // or Alt". Checking `event.option` too would not catch anything this
+    // does not already catch.
     if (event.name === "v" && (event.ctrl || event.meta)) {
       event.preventDefault()
       void pasteFromClipboard()
@@ -753,6 +779,14 @@ export function Composer(props: {
         onMouseOver/onMouseOut: the mouse pointer says which of the two things
         under it is true — text to type into here, an interface to click
         everywhere else (`ui/pointer.ts`).
+
+        onMouseDown's right-click branch: a THIRD route to the clipboard,
+        alongside `Ctrl+V` and `Alt+V` below (`clipboard.ts`). Both keys still
+        need a modifier the terminal is free to keep for itself — Windows
+        Terminal's default binding does exactly that to `Ctrl+V` — so a right
+        click costs nothing extra and needs no key at all, only whatever
+        mouse-reporting sequence the terminal already sends for any click.
+        Left button still activates the box exactly as before.
       */}
       <box
         flexDirection="row"
@@ -764,8 +798,10 @@ export function Composer(props: {
         borderColor={focused() ? style.theme.accent.user : style.theme.hairline}
         paddingLeft={1}
         paddingRight={1}
-        onMouseDown={() => {
-          if (!props.disabled) props.onActivate?.()
+        onMouseDown={(event: MouseEvent) => {
+          if (props.disabled) return
+          props.onActivate?.()
+          if (event.button === MouseButton.RIGHT) void pasteFromClipboard()
         }}
         onMouseOver={() => pointer("text")}
         onMouseOut={() => pointer("default")}

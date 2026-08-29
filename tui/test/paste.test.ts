@@ -12,6 +12,7 @@ import {
   describeAttachment,
   expandPastes,
   measure,
+  nextAttachmentAfter,
   paste_fold_chars,
   paste_fold_lines,
   pasteShouldFold,
@@ -69,6 +70,26 @@ test("deleting the token drops the attachment, and one Backspace takes the whole
   // normal Backspace applies.
   expect(placeholderBefore(draft, 19, [one])).toBeNull()
   expect(placeholderBefore(draft, 25, [one])).toBeNull()
+})
+
+test("the next attachment id resumes just past the highest one history can still recall", () => {
+  // No history at all: nothing to collide with, so start at 1.
+  expect(nextAttachmentAfter([])).toBe(1)
+  expect(nextAttachmentAfter(["plain message, no placeholders"])).toBe(1)
+
+  // Ordinary ascending use: the highest number seen, plus one — not the COUNT
+  // of placeholders, in case some were deleted along the way.
+  expect(nextAttachmentAfter(["look at [Pasted text #1] and [Pasted text #3]"])).toBe(4)
+
+  // Both shapes count, and the highest wins regardless of which shape it is —
+  // a fresh image must not reuse a number a recalled text placeholder means,
+  // and vice versa.
+  expect(nextAttachmentAfter(["see [Image #5]", "then [Pasted text #2]"])).toBe(6)
+  expect(nextAttachmentAfter(["[Pasted text #9]", "[Image #2]"])).toBe(10)
+
+  // Spread across several messages, not just the most recent one — Up walks
+  // the whole history, not only the last entry.
+  expect(nextAttachmentAfter(["one [Pasted text #1]", "two [Image #4]", "three [Pasted text #2]"])).toBe(5)
 })
 
 test("placeholders are accented by their shape, wherever they sit in the line", () => {

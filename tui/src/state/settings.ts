@@ -11,6 +11,7 @@ import { join } from "node:path"
 import { default_rules, modes, normalizeMode, type ApprovalRules, type PermissionMode } from "../approvals.ts"
 import type { EnvProfileOverride, EnvProfiles } from "./envprofile.ts"
 import { code_theme_names, type CodeThemeName } from "../render/syntax.ts"
+import type { TomlValue } from "./settingsfile.ts"
 
 export type FoldDefault = "expanded" | "collapsed"
 /**
@@ -360,18 +361,95 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
  * through `loadSettings` and checks it arrives (`test/extensions.test.ts`). A
  * row for a key nobody reads fails; a key read but not listed is the one thing
  * that test cannot catch, which is why the order here follows the parser's.
+ *
+ * WHAT IT GAINED WHEN THE SCREEN LEARNED TO WRITE (T100). A row now also says
+ * HOW its key changes — the same vocabulary, used a second way. That is the
+ * point: the words a key accepts are written once, so the list a picker offers
+ * and the list the third column advertises cannot come to disagree.
  */
+
+/**
+ * How `/settings` changes a key, for the keys it will change (T100).
+ *
+ * A closed list is chosen from, a number and a list are typed. A field with no
+ * `edit` is one this screen will not write — `keys.*`, whose names are an open
+ * set, and the `env.<kind>` rows, whose one line stands for three tables and
+ * so has no single value to put anywhere.
+ */
+export type SettingEdit =
+  | { kind: "choice"; values: readonly string[]; boolean?: true }
+  | { kind: "number"; min: number }
+  | { kind: "list" }
+
+/** A closed list of words, written to the file as a string. */
+const words = (...values: string[]): SettingEdit => ({ kind: "choice", values })
+/** The same, written as a TOML boolean rather than as the word `"true"`. */
+const flag: SettingEdit = { kind: "choice", values: ["true", "false"], boolean: true }
+const fold = words("expanded", "collapsed")
+
 export interface SettingField {
   key: string
-  /** The values it takes — a closed list, or the shape of an open one. */
-  accepts: string
+  /**
+   * The values it takes — a closed list, or the shape of an open one. Omitted
+   * where `edit` already carries the whole vocabulary, so a set of words is
+   * written once and cannot come to disagree with itself (`acceptsOf`).
+   */
+  accepts?: string
   /** What it is set to, as one line. */
   value(settings: Settings): string
+  edit?: SettingEdit
+  /**
+   * What a person needs to know that the new value does not say — only where
+   * writing it would otherwise look like it did nothing on this screen.
+   */
+  note?: string
+}
+
+/** The third column of `/settings`: what the file will take here. */
+export function acceptsOf(field: SettingField): string {
+  if (field.accepts !== undefined) return field.accepts
+  return field.edit?.kind === "choice" ? field.edit.values.join(" | ") : ""
+}
+
+/**
+ * The TOML value an answer becomes, or why it is not one. The words are the
+ * screen's, so the field that describes a key also decides what may be put in
+ * it — there is no second place where "what does this key take" is answered.
+ */
+export function editedValue(edit: SettingEdit, text: string): { value: TomlValue } | { problem: string } {
+  const trimmed = text.trim()
+  switch (edit.kind) {
+    case "choice":
+      if (!edit.values.includes(trimmed)) return { problem: `takes ${edit.values.join(" | ")}` }
+      return { value: edit.boolean ? trimmed === "true" : trimmed }
+    case "number": {
+      if (!/^\d+$/.test(trimmed)) return { problem: "takes a whole number" }
+      const number = Number.parseInt(trimmed, 10)
+      if (number < edit.min) return { problem: `takes a number of at least ${edit.min}` }
+      return { value: number }
+    }
+    case "list":
+      // Commas, and only commas — an entry may contain spaces (`approvals.allow`
+      // holds command patterns), so whitespace cannot be the separator. It is
+      // the same joint the value column is written with (`shown`), so a list is
+      // read and typed in one form.
+      return {
+        value: trimmed.length === 0 ? [] : trimmed.split(",").map((one) => one.trim()).filter((one) => one.length > 0),
+      }
+  }
 }
 
 const yesno = "true | false"
-/** A list-shaped value: replaced by a nearer layer, never merged into. */
-const shown = (xs: readonly string[]) => (xs.length === 0 ? "—" : xs.join(" "))
+/**
+ * A list-shaped value: replaced by a nearer layer, never merged into.
+ *
+ * Comma-jointed, and that is not decoration: `approvals.allow` holds command
+ * patterns, which contain spaces, so a space-jointed line cannot be read back
+ * — `git status git push` is one entry or two and the screen would not say
+ * which. It is also what `/settings` types into and splits on (T100), so what
+ * is shown and what is typed are the same string.
+ */
+const shown = (xs: readonly string[]) => (xs.length === 0 ? "—" : xs.join(", "))
 /** Which `[env.<kind>]` tables set this key, since which one applies is per session. */
 const envSet = (settings: Settings, has: (table: EnvProfileOverride) => boolean) => {
   const kinds = (["local", "wsl", "ssh"] as const).filter((kind) => {
@@ -382,33 +460,65 @@ const envSet = (settings: Settings, has: (table: EnvProfileOverride) => boolean)
 }
 
 export const setting_fields: readonly SettingField[] = [
-  { key: "transcript.diff", accepts: "expanded | collapsed", value: (s) => s.transcript.diff },
-  { key: "transcript.tool_output", accepts: "expanded | collapsed", value: (s) => s.transcript.tool_output },
-  { key: "transcript.thinking", accepts: "expanded | collapsed | hidden", value: (s) => s.transcript.thinking },
-  { key: "transcript.composition", accepts: "expanded | collapsed", value: (s) => s.transcript.composition },
-  { key: "transcript.run_summary", accepts: yesno, value: (s) => String(s.transcript.run_summary) },
-  { key: "transcript.max_width", accepts: "columns, above 0", value: (s) => String(s.transcript.max_width) },
-  { key: "transcript.history_window", accepts: "items, 0 draws all", value: (s) => String(s.transcript.history_window) },
+  { key: "transcript.diff", edit: fold, value: (s) => s.transcript.diff },
+  { key: "transcript.tool_output", edit: fold, value: (s) => s.transcript.tool_output },
+  { key: "transcript.thinking", edit: words("expanded", "collapsed", "hidden"), value: (s) => s.transcript.thinking },
+  { key: "transcript.composition", edit: fold, value: (s) => s.transcript.composition },
+  { key: "transcript.run_summary", edit: flag, value: (s) => String(s.transcript.run_summary) },
+  {
+    key: "transcript.max_width",
+    accepts: "columns, above 0",
+    edit: { kind: "number", min: 1 },
+    value: (s) => String(s.transcript.max_width),
+  },
+  {
+    key: "transcript.history_window",
+    accepts: "items, 0 draws all",
+    edit: { kind: "number", min: 0 },
+    value: (s) => String(s.transcript.history_window),
+  },
   {
     key: "transcript.stream_interval_ms",
     accepts: "ms, 0 renders every delta",
+    edit: { kind: "number", min: 0 },
     value: (s) => String(s.transcript.stream_interval_ms),
   },
-  { key: "transcript.ascii", accepts: yesno, value: (s) => String(s.transcript.ascii) },
-  { key: "ui.theme", accepts: "nulya-dark | nulya-light", value: (s) => s.ui.theme },
-  { key: "ui.code_theme", accepts: code_theme_names.join(" | "), value: (s) => s.ui.code_theme },
-  { key: "ui.motion", accepts: yesno, value: (s) => String(s.ui.motion) },
-  { key: "extensions.sync_on_start", accepts: yesno, value: (s) => String(s.extensions.sync_on_start) },
-  { key: "extensions.auto_activate", accepts: yesno, value: (s) => String(s.extensions.auto_activate) },
-  { key: "extensions.plugins", accepts: yesno, value: (s) => String(s.extensions.plugins) },
+  { key: "transcript.ascii", edit: flag, value: (s) => String(s.transcript.ascii) },
+  { key: "ui.theme", edit: words("nulya-dark", "nulya-light"), value: (s) => s.ui.theme },
+  { key: "ui.code_theme", edit: words(...code_theme_names), value: (s) => s.ui.code_theme },
+  { key: "ui.motion", edit: flag, value: (s) => String(s.ui.motion) },
+  {
+    key: "extensions.sync_on_start",
+    edit: flag,
+    note: "read when this front end opens",
+    value: (s) => String(s.extensions.sync_on_start),
+  },
+  {
+    key: "extensions.auto_activate",
+    edit: flag,
+    note: "read when this front end opens",
+    value: (s) => String(s.extensions.auto_activate),
+  },
+  {
+    key: "extensions.plugins",
+    edit: flag,
+    // A module that has run has run (tui-plugin U3), so turning this off is a
+    // fact about the next start rather than about this screen.
+    note: "read when this front end opens",
+    value: (s) => String(s.extensions.plugins),
+  },
   {
     key: "extensions.session_with",
     accepts: "package ids · --with, every session",
+    edit: { kind: "list" },
+    note: "composition freezes at `session new`, so this reaches the next session",
     value: (s) => shown(s.extensions.session_with),
   },
   {
     key: "extensions.session_prompts",
     accepts: "package ids · their render tool writes --prompt",
+    edit: { kind: "list" },
+    note: "read just before the next `session new`",
     value: (s) => shown(s.extensions.session_prompts),
   },
   { key: "env.<local|wsl|ssh>.bare", accepts: yesno, value: (s) => envSet(s, (t) => t.bare !== undefined) },
@@ -419,14 +529,28 @@ export const setting_fields: readonly SettingField[] = [
     accepts: "package ids",
     value: (s) => envSet(s, (t) => t.session_prompts !== undefined),
   },
-  { key: "driver.mode", accepts: modes.join(" | "), value: (s) => s.driver.mode },
-  { key: "approvals.allow", accepts: "command patterns", value: (s) => shown(s.approvals.allow) },
-  { key: "approvals.ask", accepts: "command patterns", value: (s) => shown(s.approvals.ask) },
-  { key: "approvals.deny", accepts: "command patterns · nothing overrules it", value: (s) => shown(s.approvals.deny) },
-  { key: "approvals.manifest_readonly", accepts: yesno, value: (s) => String(s.approvals.manifest_readonly) },
+  {
+    key: "driver.mode",
+    edit: words(...modes),
+    // This is where a run STARTS; what was last chosen on screen wins over it
+    // and is remembered in `tui-state.json` (§7), so writing it here changes
+    // nothing about the run in flight.
+    note: "the mode this run is in was chosen on screen · /mode changes that one",
+    value: (s) => s.driver.mode,
+  },
+  { key: "approvals.allow", accepts: "command patterns", edit: { kind: "list" }, value: (s) => shown(s.approvals.allow) },
+  { key: "approvals.ask", accepts: "command patterns", edit: { kind: "list" }, value: (s) => shown(s.approvals.ask) },
+  {
+    key: "approvals.deny",
+    accepts: "command patterns · nothing overrules it",
+    edit: { kind: "list" },
+    value: (s) => shown(s.approvals.deny),
+  },
+  { key: "approvals.manifest_readonly", edit: flag, value: (s) => String(s.approvals.manifest_readonly) },
   {
     key: "approvals.readonly_commands",
     accepts: "program names the ask mode may run unasked",
+    edit: { kind: "list" },
     value: (s) => shown(s.approvals.readonly_commands),
   },
 ]
