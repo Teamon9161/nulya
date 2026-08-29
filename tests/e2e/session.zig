@@ -1654,19 +1654,19 @@ test "session cli: outcome appends a verdict to the outcomes journal, rejects a 
     try std.testing.expect(latest.by == null);
 
     // The model reaches this command through `shell`, whose env names the live
-    // session (NULYA_SESSION) — so the journal can record that the session graded
-    // ITSELF instead of leaving the slow loop unable to tell.
+    // session (NULYA_SESSION_ID) — so the journal can record that the session
+    // graded ITSELF instead of leaving the slow loop unable to tell. The ID, not
+    // the session file's path: every reader of this fact wants an identity, and
+    // a session whose workspace lives elsewhere has one there and no file.
     {
-        const spath_rel = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
-        defer alloc.free(spath_rel);
-        const self_graded = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "outcome", id, "success", "--note", "went great, if I say so myself" }, "NULYA_SESSION", spath_rel);
+        const self_graded = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "outcome", id, "success", "--note", "went great, if I say so myself" }, "NULYA_SESSION_ID", id);
         defer alloc.free(self_graded.stdout);
         try std.testing.expectEqual(@as(u8, 0), self_graded.code);
 
         // `--seq` judges ONE assistant turn; it is evidence, never the session's
         // verdict. The number is validated but not bounds-checked: this command
         // stays a journal append and never opens the session file.
-        const turn = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "outcome", id, "failure", "--seq", "2", "--note", "wrong file" }, "NULYA_SESSION", spath_rel);
+        const turn = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "outcome", id, "failure", "--seq", "2", "--note", "wrong file" }, "NULYA_SESSION_ID", id);
         defer alloc.free(turn.stdout);
         try std.testing.expectEqual(@as(u8, 0), turn.code);
 

@@ -1,7 +1,7 @@
 # Remote environment — 工作区住在别的机器上
 
-> **状态：设计已审阅通过；§4 的 Phase 1 与 Phase 2 已落地，Phase 3 前半已落地**（2026-08-29，见 DESIGN §8 的第四个动词、§8.2 的 `remote:` 一族与 §14 的 `remote` 动词族；
-> Phase 3 的 `ext build --target` 与 `ext push` 见 §6.3 与 DESIGN §7.4，`ExtensionRequest` 搬迁与 header 的 `exec_version` 列在下一轮）。
+> **状态：设计已审阅通过；§4 的 Phase 1–3 已落地**（2026-08-29，见 DESIGN §8 的第四个动词、§8.2 的 `remote:` 一族与 §14 的 `remote` 动词族；
+> Phase 3 的 `ext build --target` / `ext push` 见 §6.3，`ExtensionRequest` 搬迁与 header 的 `exec_version` 见 §6.4。TUI 那半同日另一轮落地（tui.md T101/T102：`/env` remote 档 + 远端目录浏览、`/ext` 的 push 动作；per-target 常驻状态列经裁决不做，见 T102））。
 > Phase 4–5 未实施。原有的 [DESIGN §8/§8.1](../DESIGN.md) exec target（`session new --env wsl|ssh`，**只有 `shell` 的命令移动**）；
 > 方向笔记在 [PLAN §3.8](../PLAN.md)（「真·remote environment = 第二个 `Environment` 实现」）。本文件答那一节列出而没答的缺口。
 > 八条 physics 与「内核只长 substrate」是尺子（[CLAUDE.md](../../CLAUDE.md)）。
@@ -359,10 +359,10 @@ nulya ext push <id>@<v> --env <spec>          # 内容寻址的一次拷贝 + �
 - 内核：`Environment` 第四个动词 `putWorkspaceFile`；`emit` 的 spill 与 `StepOutputLimiter` 经它写。local 实现 = 今天那行。
 - 这之前 footer 用 §3.2 的诚实降级措辞。
 
-**Phase 3 · extension 搬走**（用户诉求真正被满足的那一步）· **进行中：`--target` / `push` 已落地（§6.3），`ExtensionRequest` 搬迁与 `exec_version` 在下一轮**
-- 内核：`ExtensionRequest` 从 `entry_path` 改成 `(id, version, tool)`，解析与 `.sealed` 复验移到执行侧
-  （§7.5 的"冻绝对路径"随之删除——**是收窄不是新增**）· ~~`ext build --target <triple>`~~ ✅（两词形，不是 triple——见 §6.3 偏差 1）· ~~`ext push`~~ ✅ · header 的 `exec_version` 列。
-- TUI：`/ext` 的 push 动作与 per-target 状态；`[env.*]` profile 由人放宽。
+**Phase 3 · extension 搬走**（用户诉求真正被满足的那一步）✅ **内核侧已落地**（§6.3 + §6.4）
+- 内核：~~`ExtensionRequest` 从 `entry_path` 改成 `(id, version, tool)`，解析与 `.sealed` 复验移到执行侧~~ ✅
+  （§7.5 的"冻绝对路径"随之删除——**是收窄不是新增**）· ~~`ext build --target <triple>`~~ ✅（两词形，不是 triple——见 §6.3 偏差 1）· ~~`ext push`~~ ✅ · ~~header 的 `exec_version` 列~~ ✅
+- **TUI 那半未做**：`/ext` 的 push 动作与 per-target 状态；`[env.*]` profile 由人放宽。
 - **`handoff` 显式不进远端 composition**（§3.2），并给它的"提议变成数据"记一条 follow-up。
 
 **Phase 4 · 后台任务**
@@ -509,3 +509,32 @@ e2e 里一条通道连跑三次并断言每次都答对（`one channel serves ma
    值不值得先做掉再远端化。
    > **Phase 1 不受影响**：远端场里 extension 根本不跑（明说拒绝），所以 `handoff` 在远端场里只是一个不该被 `--with` 进来的包，
    > 而不是一个会把文件写错地方的包。这条问题属于 Phase 3。
+
+### 6.4 Phase 3 后半（2026-08-29）：extension 真的跑在远端
+
+**落地了什么**（现状写进 DESIGN §3.4 / §5.3 / §7.3 / §7.5 / §8 / §8.2 / §14；本节只记过程与偏差）：
+
+| 新增 / 改动 | 是什么 |
+|---|---|
+| `src/extension/exec.zig` | **执行侧**的解析器：`(id, version)` → 要 spawn 的那个文件 + interpreter。按自己的 OS 选 entry 变体、按自己的 `.sealed` 复验、拼自己的 store root，**每个 (id, version) 每进程验一次**（memo）。local backend 与 `nulya remote serve` 共用它 |
+| `environment.ExtensionRequest` | `entry_path` / `interpreter` / `env_extra` → `(id, version, tool)` + `presentation_file`。`LocalOptions.extension_roots` 是配套的输入（壳层算好交下来，`SessionRef` 先例），**懒开**、相对 spec 对着**那次调用的 cwd** 解析 |
+| `protocol.callEnv` / `requireArgumentsObject` | `NULYA_TOOL` / `NULYA_ARG_<k>` 的派生搬到执行侧（一份实现两台机器）；"arguments 必须是 object" 仍在发起侧、spawn 与发帧**之前** |
+| 协议 `run-extension`（**不 bump `v`**） | 头带 `(id, version, tool, cwd, session, timeout_ms, max_output_bytes)`，负载是参数 JSON；回复与 `run-shell` 同形。找不到那个版本 → 一句点名 `ext push` 的拒绝，host 答成一次失败的调用 |
+| header `ExtensionRef.exec_version` | 可空列（老 header 读回空、`v` 仍 1）：远端场上服务调用的那个版本。`composition.ExecTargetProbe` 懒问 target，`Roots.resolveForTarget` → `Store.findSealed` 按 `(package_digest, target)` 反查 |
+| `NULYA_SESSION_ID` | 身份与位置掰开：`session step` 两个都发布，只有 id 过通道；`envSessionId` / `extensions/std` / `extensions/handoff` 改读它 |
+| `Store.findSealed` / `readPackageDigest` | seal 匹配收成**一处实现**：`build_ext.findMatchingVersion` 与远端场的反查问的是同一把键 |
+
+**与设计的偏差，逐条**：
+
+1. **`session new` 在有 compiled 成员时要连一次**——对 Phase 1 那句"new 不连接"的**有意偏离**，因为那台机器的 target 只有它自己说得出，而 `exec_version` 必须在冻结的那一刻定下来（resume 再问一次就可能得到另一个答案）。代价压到最小：`composition.ExecTargetProbe` 是一个**懒回调**而不是一个字符串参数，只在第一个 `compiled` 成员被组进来时问、问一次——一场只由 data / script 包组成的远端 session 仍然不连。内核因此仍然不知道通道是什么（physics #8）：它只知道有这么一个问题、以及该问谁。
+2. **`.sealed` 的摊销是「每进程每版本一次」，不是「每次调用一次」，也不是「零次」。** 原则是"持有字节的机器至少在跑它之前验过一次"，而 resolver 的寿命恰好是一个进程（一个 `session step`、一条被服务的通道），所以 memo 让保证成立而代价有界。**如实记下的代价**：host 上因此比从前多付一次整包摘要——composition 冻结时已经对每个成员验过 `.sealed`，resolver 会对**真被调用到的**那些再验一次。没有把它省掉，是因为省掉的唯一办法是让 local 与 remote 两侧对"谁验过"给出不同答案，而那正是这次搬迁要消除的东西。
+3. **"这个包在这台机器上没有可用的 entry 变体"从 `session new` 的硬失败变成一次失败的调用。** 这是搬迁的直接后果而不是遗漏：composition 不再替执行方回答"哪个文件"，而它对一场跑在别处的 session **答不了**这个问题；分成"本地时 host 判、远端时对面判"就是同一个决定做两遍。于是 `isUnrunnableHere`（store fault ∪ `EntryUnsupportedOnHost` ∪ `MissingRuntime`）在 `invoke.zig` 里折成一次失败的调用，点名包、版本与主机——**与远端拒绝的形状逐位相同**。e2e（`script_wire`）改成断言这条新行为。
+4. **`presentation_file` 不过通道，而且这是判据而不是欠账**：§3.2 那张表的问题是**谁读它**，而它的读者是前端、在 host 上。所以远端 session 里包看不到这个变量，渲染不出面板——与 driver 压根没给一个时的行为完全相同，而不是写到一台没人看的机器上。
+5. **`run-extension` 不 bump 协议版本**，与 `store-*` 同一条理由（规则 4：老 agent 答的是那句列出自己会什么的话），并且这次同样确认过那条路成立。
+6. **请求头多一个 `session` 列而不是一次握手协商**：它对一条通道是常量，但放在帧里让 agent 对 session 完全无状态（不需要第二种握手后状态，也没有"谁先谁后"的顺序要求），代价是每帧多一个短字符串。`run-shell` 也带它，所以远端的 `shell` 命令与远端的 extension 看到同一个 `NULYA_SESSION_ID`。
+7. **`envSessionId` 改读 `NULYA_SESSION_ID` 且不留 fallback。** 逐处判断的清单：`ext run` 的 usage journal `session` 列 / `session outcome` 的 `by:` / `task run|list|status|wait` 的缺省场次（都只要身份，且 task 自己从 id 拼路径）→ 改读 ID；`ext activate` 投 capability note（要那个文件）→ 保留 `NULYA_SESSION`；`extensions/agent` 的 parent（要 `session new --parent` 的那个文件）→ 保留；`extensions/std` 的 freshness 键、`extensions/handoff` 的 `<session>-<n>.md` 文件名 → 改读 ID（两者从来只要一个名字）。
+8. **`Binding` 不再持路径与 interpreter**，只持 `(ext_id, version)` + manifest 的声明。于是 `composition.zig` 里 `entryPathAbs` 的调用整个消失，`bindingForSpec` 连 `roots` 都不再需要。
+9. **exec_version 走一条与成员列表并行的数组**（`Resolved.exec_versions`，排序之后计算、按 id 与 header 对齐）而不是给 `Roots.Resolved` 加字段：那是 store 的类型，而"哪份字节服务这一场"是 session 的事实。
+10. **`--target` 的反查不点名 compiler**：哪个 zig 建出了对面那份不是这一场该要求的，`findSealed` 内部的有序搜索保证多份合格时答案仍然确定。
+
+**测试**：`zig build test` **564 pass / 4 skip**。e2e 逐组：`e2e-ext` 49 · `e2e-core` 48 · `e2e-agent` 23 · `e2e-std` 8 · **`e2e-remote` 20**（+4：extension 读到的是**远端**的 sentinel 且 freshness journal 落在远端 · 没 push 过的包是一次点名 `ext push` 的失败调用而 session 照常继续 · 反查不到 target 时 `session new` exit 1 并点名 `--target` 与 `ext push`，且什么都没创建 · 无 `exec_version` 列的老 header 照常 step）。

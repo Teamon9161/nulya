@@ -3,7 +3,7 @@
 //! Fixtures come from `std.zig`.
 //!
 //! Everything here goes through the real binary: `ext run std@<v> <tool> '<json>'`
-//! in a scratch workspace, with `NULYA_SESSION` set when the point is what a
+//! in a scratch workspace, with `NULYA_SESSION_ID` set when the point is what a
 //! session remembers between calls, unset when the point is that nothing is.
 //! One test additionally drives `read` through a real session step, because
 //! the claim "the host's output budget never truncates a read" can only be
@@ -530,11 +530,12 @@ test "bundled std read of a 200 KB file caps itself under the host budget: throu
         const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
         defer alloc.free(spath);
 
-        var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+        var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_roots = support.workspace_store_roots });
         defer lenv.deinit();
-        // What `session step` gives every child: the session's file, whose stem
-        // is the id the tool keys its record by.
-        try lenv.env.put("NULYA_SESSION", spath);
+        // What `session step` gives every child: the session's file (for the
+        // things that need a file) and its id (for the things that need a name
+        // — like the record this tool keys by).
+        try lenv.publishSession(spath, id);
         var model = OneCallModel{ .tool = "read", .args_json = "{\"path\":\"big.txt\"}" };
         var sess = try session.AgentSession.openDurable(alloc, .{
             .model = .{ .ptr = &model, .vtable = &OneCallModel.vtable },

@@ -1,12 +1,15 @@
 //! Extension tools as ordinary kernel tools (DESIGN §7.3, §5).
 //!
-//! `Binding` pairs a tool's model-facing `tool.ToolDefinition` with its exact
-//! frozen executable path, then adapts it into the kernel's single `tool.Tool`
-//! through the existing `ToolExecutor` seam — no second tool abstraction.
+//! `Binding` pairs a tool's model-facing `tool.ToolDefinition` with the FROZEN
+//! VERSION that serves its calls, then adapts it into the kernel's single
+//! `tool.Tool` through the existing `ToolExecutor` seam — no second tool
+//! abstraction.
 //!
 //! Two invariants hold:
 //!   - The binding never touches the extension store, `current`, manifests, or
-//!     discovery; `entry_path` is already resolved and frozen by the caller.
+//!     discovery; which version serves this tool was decided and frozen by the
+//!     caller, and which FILE that version means is answered later, by the
+//!     machine about to spawn it (`extension/exec.zig`).
 //!   - `ToolExecutor.ptr` borrows the binding, so the binding (and its borrowed
 //!     definition strings) must outlive every derived `Tool` and must not move.
 
@@ -20,11 +23,14 @@ pub const Binding = struct {
     /// id (never version-qualified); `definition.name` is the tool name the
     /// manifest declared, which is what reaches the child as `NULYA_TOOL`.
     definition: tool.ToolDefinition,
-    /// Exact frozen executable path, passed verbatim to `Environment.runExtension`.
-    entry_path: []const u8,
-    /// For a script extension, the interpreter to run `entry_path` with; null for
-    /// a compiled (or directly-executable) entry.
-    interpreter: ?[]const u8 = null,
+    /// The package this tool belongs to.
+    ext_id: []const u8,
+    /// The frozen version that SERVES a call to it. For a session whose tools
+    /// run on another machine that is the header's `exec_version` — the sibling
+    /// build for that machine's target (DESIGN §3.4) — and otherwise the
+    /// member's own frozen version. Either way the choice was made once, at
+    /// freeze time, and is merely carried here.
+    version: []const u8,
     /// The wall-clock cap this tool's frozen manifest declared for one call, or
     /// null to take the host default (`invoke.Options.timeout_ms`). Frozen with
     /// the version like everything else the manifest says.
@@ -38,8 +44,8 @@ pub const Binding = struct {
     pub fn initOwned(
         alloc: std.mem.Allocator,
         definition: tool.ToolDefinition,
-        entry_path: []const u8,
-        interpreter: ?[]const u8,
+        ext_id: []const u8,
+        version: []const u8,
         timeout_ms: ?u32,
     ) !Binding {
         const id = try alloc.dupe(u8, definition.id);
@@ -50,9 +56,9 @@ pub const Binding = struct {
         errdefer alloc.free(description);
         const input_schema = try alloc.dupe(u8, definition.input_schema);
         errdefer alloc.free(input_schema);
-        const owned_entry = try alloc.dupe(u8, entry_path);
-        errdefer alloc.free(owned_entry);
-        const owned_interp: ?[]const u8 = if (interpreter) |i| try alloc.dupe(u8, i) else null;
+        const owned_ext_id = try alloc.dupe(u8, ext_id);
+        errdefer alloc.free(owned_ext_id);
+        const owned_version = try alloc.dupe(u8, version);
 
         return .{
             .definition = .{
@@ -66,8 +72,8 @@ pub const Binding = struct {
                 // not "not read-only".
                 .readonly = definition.readonly,
             },
-            .entry_path = owned_entry,
-            .interpreter = owned_interp,
+            .ext_id = owned_ext_id,
+            .version = owned_version,
             .timeout_ms = timeout_ms,
         };
     }
@@ -79,8 +85,8 @@ pub const Binding = struct {
         alloc.free(self.definition.name);
         alloc.free(self.definition.description);
         alloc.free(self.definition.input_schema);
-        alloc.free(self.entry_path);
-        if (self.interpreter) |i| alloc.free(i);
+        alloc.free(self.ext_id);
+        alloc.free(self.version);
     }
 
     /// Adapt into a kernel `Tool`. `executor.ptr` is this binding's address.
@@ -100,12 +106,12 @@ fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyer
     const invocation = try invoke.invokeTool(
         alloc,
         req.ctx.environment,
-        self.entry_path,
-        req.ctx.cwd,
+        self.ext_id,
+        self.version,
         self.definition.name,
+        req.ctx.cwd,
         req.args_json,
         .{
-            .interpreter = self.interpreter,
             .timeout_ms = self.timeout_ms orelse invoke.Options.default_timeout_ms,
             .presentation_file = req.ctx.presentation_file,
         },
@@ -134,7 +140,7 @@ const FakeEnv = struct {
     exit_code: u8 = 0,
     timed_out: bool = false,
     err: ?anyerror = null,
-    saw_entry_path: []const u8 = "",
+    saw_ref: []const u8 = "",
     saw_request_json: []const u8 = "",
     saw_timeout_ms: ?u32 = null,
 
@@ -145,14 +151,14 @@ const FakeEnv = struct {
         // Allocate everything before publishing to `self`: a mid-way failure
         // frees the locals via errdefer and leaves the saw fields empty, so
         // `deinit` never double-frees.
-        const saw_entry_path = try alloc.dupe(u8, req.entry_path);
-        errdefer alloc.free(saw_entry_path);
+        const saw_ref = try std.fmt.allocPrint(alloc, "{s}@{s}/{s}", .{ req.id, req.version, req.tool });
+        errdefer alloc.free(saw_ref);
         const saw_request_json = try alloc.dupe(u8, req.request_json);
         errdefer alloc.free(saw_request_json);
         const stdout = try alloc.dupe(u8, self.response);
         errdefer alloc.free(stdout);
         const stderr = try alloc.dupe(u8, self.stderr_text);
-        self.saw_entry_path = saw_entry_path;
+        self.saw_ref = saw_ref;
         self.saw_request_json = saw_request_json;
         return .{ .stdout = stdout, .stderr = stderr, .exit_code = self.exit_code, .timed_out = self.timed_out };
     }
@@ -198,7 +204,7 @@ const FakeEnv = struct {
     }
 
     fn deinit(self: *FakeEnv, alloc: std.mem.Allocator) void {
-        if (self.saw_entry_path.len > 0) alloc.free(self.saw_entry_path);
+        if (self.saw_ref.len > 0) alloc.free(self.saw_ref);
         if (self.saw_request_json.len > 0) alloc.free(self.saw_request_json);
     }
 };
@@ -211,7 +217,8 @@ fn testBinding() Binding {
             .description = "Search web",
             .input_schema = "{\"type\":\"object\"}",
         },
-        .entry_path = "/frozen/v1/bin/web-search",
+        .ext_id = "web.search",
+        .version = "v-000000000000000000000001",
     };
 }
 
@@ -223,14 +230,15 @@ test "initOwned copies every exposed string and survives the source being freed"
     const name = try alloc.dupe(u8, "web_search");
     const description = try alloc.dupe(u8, "Search web");
     const input_schema = try alloc.dupe(u8, "{\"type\":\"object\"}");
-    const entry_path = try alloc.dupe(u8, "/frozen/v1/bin/web-search");
+    const ext_id = try alloc.dupe(u8, "web.search");
+    const version = try alloc.dupe(u8, "v-000000000000000000000001");
 
     const binding = try Binding.initOwned(alloc, .{
         .id = id,
         .name = name,
         .description = description,
         .input_schema = input_schema,
-    }, entry_path, null, null);
+    }, ext_id, version, null);
     defer binding.deinit(alloc);
 
     // Drop the sources; the binding must not alias them.
@@ -238,13 +246,15 @@ test "initOwned copies every exposed string and survives the source being freed"
     alloc.free(name);
     alloc.free(description);
     alloc.free(input_schema);
-    alloc.free(entry_path);
+    alloc.free(ext_id);
+    alloc.free(version);
 
     try testing.expectEqualStrings("ext:web.search/web_search", binding.definition.id);
     try testing.expectEqualStrings("web_search", binding.definition.name);
     try testing.expectEqualStrings("Search web", binding.definition.description);
     try testing.expectEqualStrings("{\"type\":\"object\"}", binding.definition.input_schema);
-    try testing.expectEqualStrings("/frozen/v1/bin/web-search", binding.entry_path);
+    try testing.expectEqualStrings("web.search", binding.ext_id);
+    try testing.expectEqualStrings("v-000000000000000000000001", binding.version);
     // Nothing was claimed, so nothing is claimed here either (DESIGN §7.2.1).
     try testing.expect(binding.definition.readonly == null);
 }
@@ -257,7 +267,7 @@ test "a manifest's readonly claim rides on the frozen definition" {
         .description = "Read a file",
         .input_schema = "{\"type\":\"object\"}",
         .readonly = true,
-    }, "/frozen/v1/bin/std", null, null);
+    }, "std", "v-000000000000000000000002", null);
     defer binding.deinit(alloc);
 
     // The claim is what the gate is shown (DESIGN §4): the alternative — asking
@@ -274,7 +284,7 @@ test "initOwned leaks nothing when an interior allocation fails" {
                 .name = "web_search",
                 .description = "Search web",
                 .input_schema = "{\"type\":\"object\"}",
-            }, "/frozen/v1/bin/web-search", null, null);
+            }, "web.search", "v-000000000000000000000001", null);
             binding.deinit(alloc);
         }
     }.run, .{});
@@ -295,7 +305,7 @@ test "asTool exposes the frozen definition and binding pointer" {
     try testing.expectEqual(binding_ptr, t.executor.ptr);
 }
 
-test "executor forwards the exact frozen entry path" {
+test "executor forwards the exact frozen identity" {
     const alloc = testing.allocator;
     var binding = testBinding();
     var fake = FakeEnv{ .io = testing.io, .response = success_output };
@@ -307,9 +317,10 @@ test "executor forwards the exact frozen entry path" {
     });
     defer alloc.free(result.output);
 
-    // The frozen executable path reaches the environment verbatim — no
-    // resolution, no joining.
-    try testing.expectEqualStrings("/frozen/v1/bin/web-search", fake.saw_entry_path);
+    // The frozen (package, version, tool) reaches the environment verbatim —
+    // no resolution here, and no path: the machine that spawns it decides which
+    // file that version means.
+    try testing.expectEqualStrings("web.search@v-000000000000000000000001/web_search", fake.saw_ref);
 }
 
 test "a binding's declared timeout reaches the environment; without one the host default does" {

@@ -44,7 +44,15 @@
 //! `nulya ext api protocol` prints is the contract AND its implementation.
 
 const std = @import("std");
-const environment = @import("../environment.zig");
+
+/// One name/value pair of a per-call environment. It lives here rather than in
+/// `environment.zig` because the RULE that produces these names is this file's
+/// contract, and the execution side that consumes them is now two machines: the
+/// local backend and the remote agent both build the list from `callEnv`.
+pub const EnvVar = struct {
+    name: []const u8,
+    value: []const u8,
+};
 
 /// The exact bytes that go to stdin: the model's arguments object, trimmed,
 /// with "nothing" spelled `{}`.
@@ -53,9 +61,46 @@ pub fn normalizedArguments(args_json: []const u8) []const u8 {
     return if (trimmed.len == 0) "{}" else trimmed;
 }
 
+/// The arguments are a JSON object — the one shape rule of this wire, checked
+/// before anything is spawned or sent anywhere. Separate from `PlainEnv` because
+/// the two now happen on different machines: the seam that ACCEPTS a call checks
+/// it (`invoke.zig`), and the machine that SPAWNS the child derives the
+/// environment from the same bytes (`callEnv`).
+pub fn requireArgumentsObject(alloc: std.mem.Allocator, arguments: []const u8) !void {
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidArgumentsJson,
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.ArgumentsNotObject;
+}
+
+/// The whole per-call environment for one invocation: `NULYA_TOOL`, every
+/// exported argument, and the presentation file when the caller has one.
+///
+/// Built where the child is SPAWNED — the local backend and the remote agent
+/// both call this — so the contract at the top of this file has ONE
+/// implementation whichever machine the process starts on, and the frame that
+/// crosses a channel carries only the arguments JSON it is derived from (no
+/// shell quoting, no argv length limit; goals/remote-env.md §3.3). Caller
+/// deinits.
+pub fn callEnv(
+    alloc: std.mem.Allocator,
+    tool_name: []const u8,
+    arguments: []const u8,
+    presentation_file: ?[]const u8,
+) !PlainEnv {
+    var vars: PlainEnv = .empty;
+    errdefer vars.deinit(alloc);
+    try vars.add(alloc, "NULYA_TOOL", tool_name);
+    if (presentation_file) |path| try vars.add(alloc, "NULYA_PRESENTATION_FILE", path);
+    try vars.addArguments(alloc, arguments);
+    return vars;
+}
+
 /// The per-call environment, owning every string it hands to `runExtension`.
 pub const PlainEnv = struct {
-    list: std.ArrayList(environment.EnvVar) = .empty,
+    list: std.ArrayList(EnvVar) = .empty,
 
     pub const empty: PlainEnv = .{};
 
@@ -185,12 +230,40 @@ test "a value carrying NUL is left on stdin only, never silently truncated" {
     try testing.expect(std.mem.indexOf(u8, flat, "NULYA_ARG_b=fine\n") != null);
 }
 
+test "one call's whole environment is the tool name, the scalars, and a presentation file when there is one" {
+    const alloc = testing.allocator;
+
+    var vars = try callEnv(alloc, "greet", "{\"name\":\"world\",\"list\":[1,2]}", null);
+    defer vars.deinit(alloc);
+    const flat = try flatten(alloc, &vars);
+    defer alloc.free(flat);
+    try testing.expect(std.mem.indexOf(u8, flat, "NULYA_TOOL=greet\n") != null);
+    try testing.expect(std.mem.indexOf(u8, flat, "NULYA_ARG_name=world\n") != null);
+    try testing.expect(std.mem.indexOf(u8, flat, "NULYA_ARG_list") == null);
+    try testing.expect(std.mem.indexOf(u8, flat, "NULYA_PRESENTATION_FILE") == null);
+
+    // The tool name alone when there is nothing else to say — and the
+    // presentation file only when a driver offered one, which a remote
+    // environment never does.
+    var bare = try callEnv(alloc, "t", "{}", ".nulya/scratch/s/p.json");
+    defer bare.deinit(alloc);
+    const bare_flat = try flatten(alloc, &bare);
+    defer alloc.free(bare_flat);
+    try testing.expectEqualStrings("NULYA_TOOL=t\nNULYA_PRESENTATION_FILE=.nulya/scratch/s/p.json\n", bare_flat);
+}
+
 test "arguments that are not a JSON object are refused, before anything is spawned" {
     const alloc = testing.allocator;
     var bad: PlainEnv = .empty;
     defer bad.deinit(alloc);
     try testing.expectError(error.InvalidArgumentsJson, bad.addArguments(alloc, "{bad"));
     try testing.expectError(error.ArgumentsNotObject, bad.addArguments(alloc, "[]"));
+
+    // The same rule as its own question, which is what the seam asks before it
+    // spawns anything or sends a frame anywhere.
+    try requireArgumentsObject(alloc, "{\"a\":1}");
+    try testing.expectError(error.InvalidArgumentsJson, requireArgumentsObject(alloc, "{bad"));
+    try testing.expectError(error.ArgumentsNotObject, requireArgumentsObject(alloc, "[]"));
 }
 
 test "an allocation failure surfaces as OutOfMemory, not as malformed arguments" {

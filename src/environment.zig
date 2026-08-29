@@ -16,7 +16,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const tool = @import("tool.zig");
 const emit = @import("emit.zig");
+const ext_exec = @import("extension/exec.zig");
+const protocol = @import("extension/protocol.zig");
 const process_tree = @import("environment/tree.zig");
+const testkit = @import("extension/testkit.zig");
 // Aliased so the two run paths keep naming the primitives they use, not the
 // module they now live in.
 const Tree = process_tree.Tree;
@@ -208,38 +211,42 @@ pub const ShellRequest = struct {
 /// call's arguments object, written to the child's stdin; `stdout` on return is
 /// exactly what the child printed before exiting, which IS the tool's result —
 /// this seam never interprets it.
+///
+/// It names an IDENTITY, not a path. Which file to spawn, which entry variant
+/// this OS uses, which interpreter, and whether the version still matches its
+/// seal are all answers only the machine holding the bytes can give — so they
+/// are given there, by `extension/exec.zig`, on both sides of the seam
+/// (goals/remote-env.md §3.1). A host that resolved a path here would be
+/// modelling another machine's file system, and would verify its own copy while
+/// a different one ran.
 pub const ExtensionRequest = struct {
-    /// Absolute path to the extension entry: a built binary for a compiled
-    /// extension, or a frozen script for a script extension (DESIGN §7.1).
-    entry_path: []const u8,
-    /// For a script extension, the interpreter to run `entry_path` with (becomes
-    /// argv[0], with the entry as argv[1]). `null` runs the entry directly.
-    interpreter: ?[]const u8 = null,
+    /// The extension, and the FROZEN VERSION that serves this call — for a
+    /// session whose tools run elsewhere that is the header's `exec_version`
+    /// (DESIGN §3.4), which is why the choice is made once at freeze time and
+    /// merely carried here.
+    id: []const u8,
+    version: []const u8,
+    /// The tool name the frozen manifest declared; it reaches the child as
+    /// `NULYA_TOOL`.
+    tool: []const u8,
     cwd: []const u8,
     /// The arguments for this call: one compact JSON object (`{}` when there
-    /// are none), written to stdin verbatim.
+    /// are none), written to stdin verbatim — and the sole source of the
+    /// `NULYA_ARG_<k>` variables the executing side derives (`protocol.callEnv`).
     request_json: []const u8,
     max_output_bytes: usize,
     /// Wall-clock cap for the oneshot call (`tool.Timeouts`, base-tools.md §3).
     /// `null` disables the guard; callers should only do that in controlled tests.
     timeout_ms: ?u32 = tool.Timeouts.extension_ms,
-    /// Environment variables for THIS call, layered on top of the sanitized
-    /// child environment — `NULYA_TOOL` / `NULYA_ARG_<k>` (DESIGN §7.3),
-    /// derived by `protocol.PlainEnv` from the same arguments JSON that goes to
-    /// stdin. Authority is unchanged: these are the model's own arguments, not
-    /// host state, and the secret denylist still governs what was inherited
-    /// (physics #6).
+    /// Workspace-relative file the child may write UI-only presentation JSON
+    /// into. It is not stdout and never reaches the model.
     ///
-    /// An empty list is the ONE path that spawns with the process-wide map
-    /// itself, so a caller with nothing to add costs no copy.
-    env_extra: []const EnvVar = &.{},
-};
-
-/// One name/value pair for `ExtensionRequest.env_extra`. Borrowed for the
-/// duration of the call; the child's environment map takes its own copies.
-pub const EnvVar = struct {
-    name: []const u8,
-    value: []const u8,
+    /// A remote environment deliberately does NOT forward it: who READS a file
+    /// decides which machine it lives on (goals/remote-env.md §3.2), and this
+    /// one's reader is the front end, on the host. A package asked to render
+    /// over there simply sees no presentation file and renders nothing, which is
+    /// the same thing it does when the driver offers none.
+    presentation_file: ?[]const u8 = null,
 };
 
 /// A completed extension run. `stdout`/`stderr` are owned by the caller's allocator.
@@ -461,6 +468,16 @@ pub const LocalOptions = struct {
     /// and the environment can keep the ONE copy that both the parsed payload
     /// and a supervisor's `--env` argument borrow from.
     exec: []const u8 = "",
+    /// Where THIS machine keeps extension versions, in search order (DESIGN
+    /// §7.2). Supplied by the shell layer for the same reason `session` is:
+    /// which directories may supply code is a configuration decision, and the
+    /// kernel does not read config.
+    ///
+    /// Copied, and opened only when an extension is actually run — relative
+    /// specs resolve against the workspace the CALL names, which is the far
+    /// machine's workspace on a remote agent. Empty means this environment runs
+    /// no extensions and refuses if asked.
+    extension_roots: []const []const u8 = &.{},
 };
 
 /// How many `t<N>` slots one session may hand out. High enough that no real
@@ -501,6 +518,9 @@ pub const LocalEnvironment = struct {
     exec_spec: ?[]u8 = null,
     /// Where `shell` commands go. Payload borrows `exec_spec`.
     target: ExecTarget = .local,
+    /// How `(id, version)` becomes something to spawn on this machine. Owned;
+    /// opens nothing until the first extension call (`extension/exec.zig`).
+    resolver: ext_exec.Resolver,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, opts: LocalOptions) !LocalEnvironment {
         var host = try hostEnvironMap(alloc);
@@ -545,6 +565,9 @@ pub const LocalEnvironment = struct {
             tasks_dir = try alloc.dupe(u8, s.tasks_dir);
         }
 
+        var resolver = try ext_exec.Resolver.init(alloc, io, opts.extension_roots);
+        errdefer resolver.deinit();
+
         return .{
             .io = io,
             .alloc = alloc,
@@ -555,15 +578,28 @@ pub const LocalEnvironment = struct {
             .tasks_dir = tasks_dir,
             .exec_spec = exec_spec,
             .target = target,
+            .resolver = resolver,
         };
     }
 
     pub fn deinit(self: *LocalEnvironment) void {
         self.env.deinit();
+        self.resolver.deinit();
         if (self.session_path) |p| self.alloc.free(p);
         if (self.tasks_dir) |p| self.alloc.free(p);
         if (self.exec_spec) |p| self.alloc.free(p);
         self.* = undefined;
+    }
+
+    /// Publish the live session to everything this environment spawns (DESIGN
+    /// §5.3): `NULYA_SESSION` is the session FILE's path — a fact about this
+    /// machine — and `NULYA_SESSION_ID` is the session's IDENTITY, which is true
+    /// on any machine. They were one variable until a workspace could live
+    /// elsewhere; splitting them is what lets a package that only ever wanted
+    /// the id (a scratch key, a journal column) work over there too.
+    pub fn publishSession(self: *LocalEnvironment, session_path: []const u8, session_id: []const u8) !void {
+        if (session_path.len != 0) try self.env.put("NULYA_SESSION", session_path);
+        if (session_id.len != 0) try self.env.put("NULYA_SESSION_ID", session_id);
     }
 
     pub fn environment(self: *LocalEnvironment) Environment {
@@ -827,35 +863,40 @@ pub const LocalEnvironment = struct {
     fn runExtensionImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: ExtensionRequest) anyerror!ExtensionOutcome {
         const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
 
+        // WHICH FILE runs is decided here, on the machine that holds it: the
+        // entry variant for THIS OS, the interpreter its frozen manifest names,
+        // and the version checked against its own seal (`extension/exec.zig`).
+        // The caller only ever named `(id, version, tool)`.
+        const entry = try self.resolver.resolve(req.cwd, req.id, req.version);
+
         // Oneshot (DESIGN §7.3): spawn, feed one request, read one response, exit.
         // Capture stderr too: when an AI-authored extension crashes before it can
         // write a protocol error on stdout, stderr is the only repair signal.
         // A script extension runs through its interpreter (argv = [interpreter,
         // entry]); a compiled one runs directly (argv = [entry]).
         var argv_buf: [2][]const u8 = undefined;
-        const argv: []const []const u8 = if (req.interpreter) |interp| blk: {
-            argv_buf = .{ interp, req.entry_path };
+        const argv: []const []const u8 = if (entry.interpreter) |interp| blk: {
+            argv_buf = .{ interp, entry.path };
             break :blk argv_buf[0..2];
         } else blk: {
-            argv_buf[0] = req.entry_path;
+            argv_buf[0] = entry.path;
             break :blk argv_buf[0..1];
         };
-        // Per-call variables (`NULYA_TOOL` / `NULYA_ARG_<k>`) are a COPY of the
-        // sanitized map with those names put on top: the process-wide map
-        // belongs to every other spawn and must not be mutated for one call.
-        // With none of them the map itself is passed, so a caller that adds
-        // nothing pays nothing.
-        var overlay: ?std.process.Environ.Map = null;
-        defer if (overlay) |*m| m.deinit();
-        const child_env: *const std.process.Environ.Map = if (req.env_extra.len == 0) &self.env else blk: {
-            var m: std.process.Environ.Map = .init(alloc);
-            errdefer m.deinit();
+        // Per-call variables (`NULYA_TOOL` / `NULYA_ARG_<k>`) are derived HERE,
+        // from the same arguments JSON that goes to stdin — one implementation
+        // of that rule, shared with the remote agent (`protocol.callEnv`). They
+        // go into a COPY of the sanitized map: the process-wide map belongs to
+        // every other spawn and must not be mutated for one call.
+        var vars = try protocol.callEnv(alloc, req.tool, req.request_json, req.presentation_file);
+        defer vars.deinit(alloc);
+        var overlay: std.process.Environ.Map = .init(alloc);
+        defer overlay.deinit();
+        {
             var it = self.env.iterator();
-            while (it.next()) |entry| try m.put(entry.key_ptr.*, entry.value_ptr.*);
-            for (req.env_extra) |v| try m.put(v.name, v.value);
-            overlay = m;
-            break :blk &overlay.?;
-        };
+            while (it.next()) |e| try overlay.put(e.key_ptr.*, e.value_ptr.*);
+        }
+        for (vars.list.items) |v| try overlay.put(v.name, v.value);
+        const child_env: *const std.process.Environ.Map = &overlay;
 
         // Same tree discipline as the shell (see `Tree`): an extension is free to
         // spawn helpers of its own, and the timeout below has to end all of them.
@@ -1395,42 +1436,52 @@ test "shell run captures stdout and exit code without cancellation" {
     try std.testing.expect(std.mem.indexOf(u8, outcome.stdout, "hello-nulya") != null);
 }
 
-test "runExtension captures stderr when response is invalid" {
+test "a named version is resolved and spawned here, and both its streams are captured" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    const store_rel = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
+    try tmp.dir.createDirPath(io, store_rel);
+    var root = try tmp.dir.openDir(io, store_rel, .{ .iterate = true });
+    defer root.close(io);
 
-    const script_name = if (builtin.os.tag == .windows) "bad-extension.cmd" else "bad-extension.sh";
+    // A real frozen SCRIPT version, because that is what the request now names:
+    // the environment picks the entry variant for this OS, finds the
+    // interpreter in the frozen manifest and checks the seal — none of which a
+    // loose file on disk could exercise.
     const script = if (builtin.os.tag == .windows)
-        "@echo off\r\necho stderr-marker 1>&2\r\necho not-json\r\n"
+        "Write-Error 'stderr-marker'; Write-Output 'not-json'\n"
     else
-        "#!/bin/sh\necho stderr-marker >&2\necho not-json\n";
-    try tmp.dir.writeFile(io, .{ .sub_path = script_name, .data = script });
-    if (builtin.os.tag != .windows) {
-        var f = try tmp.dir.openFile(io, script_name, .{});
-        defer f.close(io);
-        try f.setPermissions(io, .executable_file);
-    }
+        "echo stderr-marker >&2\necho not-json\n";
+    const manifest_bytes =
+        \\{"schema":"nulya.extension/v2","id":"noisy","runtime":{"entry":{"windows":"src/run.ps1","default":"src/run.sh"},"interpreter":{"windows":"powershell","default":"sh"}},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    ;
+    const version = try testkit.writeFrozenVersion(alloc, io, root, "noisy", manifest_bytes, &.{
+        .{ .rel = "src/run.sh", .bytes = script },
+        .{ .rel = "src/run.ps1", .bytes = script },
+    });
+    defer alloc.free(version);
 
     var root_real: [std.fs.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(io, &root_real);
-    const root_path = root_real[0..root_len];
-    const entry_path = try std.fs.path.join(alloc, &.{ root_path, script_name });
-    defer alloc.free(entry_path);
+    const root_path = root_real[0..try tmp.dir.realPath(io, &root_real)];
 
-    var lenv = try LocalEnvironment.init(alloc, io, .{});
+    var lenv = try LocalEnvironment.init(alloc, io, .{ .extension_roots = &.{store_rel} });
     defer lenv.deinit();
 
     const outcome = try lenv.environment().runExtension(alloc, .{
-        .entry_path = entry_path,
+        .id = "noisy",
+        .version = version,
+        .tool = "t",
+        // Also where the relative store root is resolved from: each side reads
+        // "the workspace store" as its own (goals/remote-env.md §3.3).
         .cwd = root_path,
         .request_json = "{}",
         .max_output_bytes = 1024,
-        // This test is about stderr capture, not about the timeout, so it uses
-        // the production default: a one-second budget would turn "the machine
-        // was busy while a script interpreter started" into a failure about
+        // This test is about capture, not about the timeout, so it uses the
+        // production default: a one-second budget would turn "the machine was
+        // busy while a script interpreter started" into a failure about
         // something else entirely.
         .timeout_ms = 30_000,
     });
@@ -1439,4 +1490,15 @@ test "runExtension captures stderr when response is invalid" {
     try std.testing.expect(!outcome.timed_out);
     try std.testing.expect(std.mem.indexOf(u8, outcome.stdout, "not-json") != null);
     try std.testing.expect(std.mem.indexOf(u8, outcome.stderr, "stderr-marker") != null);
+
+    // A version this machine does not hold is a refusal, not a spawn of
+    // something else.
+    try std.testing.expectError(error.VersionNotFound, lenv.environment().runExtension(alloc, .{
+        .id = "noisy",
+        .version = "v-000000000000000000000000",
+        .tool = "t",
+        .cwd = root_path,
+        .request_json = "{}",
+        .max_output_bytes = 1024,
+    }));
 }

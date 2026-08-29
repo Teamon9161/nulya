@@ -179,11 +179,16 @@ pub fn greetSource(alloc: std.mem.Allocator, greeting: []const u8) ![]u8 {
     return buf;
 }
 
+/// The workspace store, as an environment resolves it: relative, against the
+/// workspace the CALL names — which is what makes the same spec correct on a
+/// remote agent looking at its own workspace (goals/remote-env.md §3.3).
+pub const workspace_store_roots: []const []const u8 = &.{".nulya/extensions"};
+
 /// One native tool invocation through the real executor chain: a fresh
-/// `LocalEnvironment` spawns the frozen executable and returns its output.
-/// Caller owns `result.output`.
+/// `LocalEnvironment` resolves the frozen version against this workspace's
+/// store, spawns it, and returns its output. Caller owns `result.output`.
 pub fn callNative(alloc: std.mem.Allocator, io: std.Io, t: tool.Tool, ws_path: []const u8) !tool.RawToolResult {
-    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_roots = workspace_store_roots });
     defer lenv.deinit();
     return t.executor.call(alloc, .{
         .args_json = "{}",

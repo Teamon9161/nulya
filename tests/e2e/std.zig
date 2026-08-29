@@ -44,7 +44,9 @@ pub fn nulyaExe(alloc: std.mem.Allocator) ![]u8 {
 }
 
 /// `ext run <ref> <tool> '<json>'` in `ws`, optionally inside a session (the
-/// same `NULYA_SESSION` the kernel would set — that is what turns freshness on).
+/// same `NULYA_SESSION_ID` the kernel would publish — that is what turns
+/// freshness on). The ID, because that is all these six tools ever wanted: a
+/// name to key their record by, which is true on whichever machine they run.
 pub fn runStd(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -57,9 +59,7 @@ pub fn runStd(
 ) !support.CliRun {
     const argv = [_][]const u8{ exe_abs, "ext", "run", ref, tool, args_json };
     if (session) |s| {
-        const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{s});
-        defer alloc.free(spath);
-        return runCliEnvs(alloc, io, ws, &argv, &.{.{ .key = "NULYA_SESSION", .value = spath }});
+        return runCliEnvs(alloc, io, ws, &argv, &.{.{ .key = "NULYA_SESSION_ID", .value = s }});
     }
     return runCli(alloc, io, ws, &argv);
 }

@@ -28,7 +28,8 @@
 //! the model has already read, so `read` can say "unchanged" and `write` can
 //! refuse to overwrite the unseen — lives on disk in this session's scratch
 //! directory (`.nulya/scratch/<session>/std-freshness.jsonl`, `freshness.zig`),
-//! keyed by `NULYA_SESSION`. Outside a session there is no such file and no gate.
+//! keyed by `NULYA_SESSION_ID`. Outside a session there is no such file and no
+//! gate.
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
@@ -61,8 +62,8 @@ fn discardLog(
 }
 
 /// `std.process.Init` rather than a bare `main()`: the io it hands over carries
-/// the real process environment, which is where `NULYA_TOOL` and `NULYA_SESSION`
-/// live.
+/// the real process environment, which is where `NULYA_TOOL` and
+/// `NULYA_SESSION_ID` live.
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     // One arena for the whole call: individual frees would be noise.
@@ -109,13 +110,17 @@ fn dispatch(ctx: *const rpc.Ctx, name: []const u8, arguments: std.json.ObjectMap
     return rpc.refuse(ctx.alloc, "std has no tool named '{s}' (it has read, write, append, edit, grep, glob)", .{name});
 }
 
-/// The session this call runs in, from the file path `session step` puts in the
-/// environment of everything it runs; null outside a session or when the value
-/// names no file.
+/// The session this call runs in, from the id `session step` publishes to
+/// everything it runs (DESIGN §5.3); null outside a session.
+///
+/// The ID, not the stem of `NULYA_SESSION`: what the freshness journal needs is
+/// an identity to key itself by, and a session whose workspace lives on another
+/// machine has one there while the session FILE does not exist over there at
+/// all. Asking for the path would have made these six tools silently gateless in
+/// exactly the sessions they were moved to serve.
 fn sessionId(env: *const std.process.Environ.Map) ?[]const u8 {
-    const session_path = env.get("NULYA_SESSION") orelse return null;
-    const stem = std.fs.path.stem(session_path);
-    return if (stem.len == 0) null else stem;
+    const id = env.get("NULYA_SESSION_ID") orelse return null;
+    return if (id.len == 0) null else id;
 }
 
 test {

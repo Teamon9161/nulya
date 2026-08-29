@@ -91,6 +91,12 @@ pub const tasks_subdir = "tasks";
 ///                     one was asked for — the difference between a constraint
 ///                     and a sentence — while the answer at the end says the
 ///                     refusal was something the model could still act on.
+///   readfile:         call the `read` tool once on a fixed file name, then end
+///                     the turn once a result is in the transcript. The one mode
+///                     that exercises an EXTENSION tool rather than `shell`,
+///                     which is what a session whose workspace lives on another
+///                     machine has to be tested through: the question there is
+///                     whose files `read` reads.
 ///   background:       start ONE background command, then end the turn — saying
 ///                     `background done` once a `task_finished` turn is in the
 ///                     transcript and `waiting` while it is not, so a test can
@@ -99,7 +105,16 @@ pub const tasks_subdir = "tasks";
 pub const ScriptedProvider = struct {
     mode: Mode = .finish,
 
-    pub const Mode = enum { finish, loop, truncate, handoff, batch, background, wrapup, wrapdefy };
+    pub const Mode = enum { finish, loop, truncate, handoff, batch, background, wrapup, wrapdefy, readfile };
+
+    /// The file the `readfile` mode asks for, workspace-relative. A fixed name
+    /// rather than a configurable one: the stand-in is deterministic, and the
+    /// test puts a DIFFERENT body at this name on each machine — which is how
+    /// "whose file did it read" becomes an observable answer.
+    pub const read_target = "remote-sentinel.txt";
+    const read_args =
+        \\{"path":"remote-sentinel.txt"}
+    ;
 
     /// The opening words of what a runner sends a sub-agent whose steps ran out.
     /// Spelled out rather than imported for the same reason `summary_marker` is:
@@ -229,6 +244,17 @@ pub const ScriptedProvider = struct {
                 .index = 0,
                 .fragment = if (asked) defiant_after_args else defiant_before_args,
             } });
+            try sink.emit(.{ .done = .tool_use });
+            return;
+        }
+        if (self.mode == .readfile) {
+            if (hasToolResult(request.prompt_ir.turns)) {
+                try sink.emit(.{ .text_delta = "read done" });
+                try sink.emit(.{ .done = .end_turn });
+                return;
+            }
+            try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "r1", .name = "read" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = read_args } });
             try sink.emit(.{ .done = .tool_use });
             return;
         }
@@ -645,18 +671,25 @@ pub fn nonEmpty(value: []const u8, fallback: []const u8) []const u8 {
 /// not how confined that command is. It is a parameter rather than a config key
 /// because it is decided per session and frozen in that session's header, the
 /// way the model identity is.
+///
+/// `ext_roots` is where THIS machine keeps extension versions (`extensionRoots`).
+/// The environment needs them because resolving `(id, version)` into something
+/// to spawn belongs to the machine that holds the bytes (DESIGN §7.5), and a
+/// caller that runs no extension may pass none.
 pub fn localEnvironment(
     alloc: std.mem.Allocator,
     io: std.Io,
     cfg: *const config.Config,
     session: ?environment.SessionRef,
     exec: []const u8,
+    ext_roots: []const []const u8,
 ) !environment.LocalEnvironment {
     if (cfg.environment.backend != .local) return error.UnsupportedEnvironmentBackend;
     return environment.LocalEnvironment.init(alloc, io, .{
         .dialect = cfg.environment.shell.toLocalOption(),
         .session = session,
         .exec = exec,
+        .extension_roots = ext_roots,
     });
 }
 
@@ -716,16 +749,22 @@ pub const SessionEnvironment = union(enum) {
         }
     }
 
-    /// Let shell children find the live session file (DESIGN §5.3). Local only,
-    /// and not as an oversight: that path names a file on THIS machine, so
-    /// publishing it to a process on another one would be a lie a capability
-    /// note would then be deposited against. The identity half of what
-    /// `NULYA_SESSION` carries is a separate question, and Phase 1 does not
-    /// need it (nothing runs over there but `shell`).
-    pub fn publishSessionPath(self: *SessionEnvironment, session_path: []const u8) !void {
+    /// Let this session's children name the session they are in (DESIGN §5.3),
+    /// in the two halves that used to be one variable:
+    ///
+    ///   - `NULYA_SESSION` is the session FILE's path, and is published LOCALLY
+    ///     ONLY — not as an oversight: it names a file on this machine, so
+    ///     handing it to a process on another one would be a lie a package could
+    ///     act on (a capability note deposited into nothing, a handoff written
+    ///     where no driver looks).
+    ///   - `NULYA_SESSION_ID` is the session's identity, which is true wherever
+    ///     the process runs, so it travels. Splitting the two is what lets a
+    ///     package that only ever wanted the id — a scratch key, a journal
+    ///     column — keep working when the workspace moved.
+    pub fn publishSession(self: *SessionEnvironment, session_path: []const u8, session_id: []const u8) !void {
         switch (self.*) {
-            .local => |*l| try l.env.put("NULYA_SESSION", session_path),
-            .remote => {},
+            .local => |*l| try l.publishSession(session_path, session_id),
+            .remote => |*r| try r.publishSession(session_id),
         }
     }
 };
@@ -745,17 +784,21 @@ pub fn sessionEnvironment(
     session: ?environment.SessionRef,
     exec: []const u8,
     workspace: []const u8,
+    ext_roots: []const []const u8,
 ) !SessionEnvironment {
     const spec = environment.normalizeExecSpec(exec);
     if (remote.isSpec(spec)) {
         if (cfg.environment.backend != .local) return error.UnsupportedEnvironmentBackend;
+        // No store roots: a remote environment resolves nothing here. Which
+        // version means which file is the far agent's answer, given against ITS
+        // roots (goals/remote-env.md §3.1).
         return .{ .remote = try remote.RemoteEnvironment.connect(alloc, io, .{
             .spec = spec,
             .workspace = workspace,
             .version = version,
         }) };
     }
-    return .{ .local = try localEnvironment(alloc, io, cfg, session, exec) };
+    return .{ .local = try localEnvironment(alloc, io, cfg, session, exec, ext_roots) };
 }
 
 /// The extension store roots this process searches, in order (DESIGN §7.2):
@@ -1305,15 +1348,15 @@ test "only the local environment backend runs; sandbox / remote are refused, not
     defer cfg.deinit();
 
     // The default backend builds an environment as usual…
-    var local = try localEnvironment(alloc, std.testing.io, &cfg, null, "");
+    var local = try localEnvironment(alloc, std.testing.io, &cfg, null, "", &.{});
     local.deinit();
 
     // …and a backend this build cannot honour fails rather than running the
     // tools locally under a config that asked for isolation (DESIGN §8).
     cfg.environment.backend = .sandbox;
-    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, ""));
+    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, "", &.{}));
     cfg.environment.backend = .remote;
-    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, ""));
+    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, "", &.{}));
 }
 
 test "an exec target is refused before anything is built, and the two refusals differ" {

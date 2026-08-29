@@ -107,6 +107,19 @@ fn hashPart(h: *std.crypto.hash.Blake3, part: []const u8) void {
 pub const FrozenExtension = struct {
     id: []const u8,
     version: []const u8,
+    /// Which frozen version of this package will actually SERVE a tool call —
+    /// set only when this session's tools run on a machine whose build target is
+    /// its own, and only for a `compiled` package (a data or script version is
+    /// the same bytes everywhere, so its two identities are equal and there is
+    /// nothing to record).
+    ///
+    /// Two columns rather than one collapsed identity (goals/remote-env.md §3.1):
+    /// `version` is what the package IS here — its manifest, its prompts, its
+    /// skills, its `ext run` — and `exec_version` is which build of it runs over
+    /// there. Merging them would dissolve "one version id names exactly one set
+    /// of executable bytes", which is what `.sealed` and the usage journal's
+    /// version column both rest on.
+    exec_version: ?[]const u8 = null,
 };
 
 /// Narrow, config-agnostic selection input. The composition knows only which
@@ -161,6 +174,27 @@ pub const Options = struct {
     /// the header rather than resolved against a store: the composition never
     /// learns where the bytes came from, and it never interprets `source`.
     prompts: []const ledger.InlinePrompt = &.{},
+    /// Which machine's binaries will serve this session's extension calls, when
+    /// that is not this one. Null for an ordinary session (and for a `wsl` /
+    /// `ssh` exec target, which moves the command and keeps the workspace here).
+    exec_target: ?ExecTargetProbe = null,
+};
+
+/// How the shell layer answers "which build target do this session's extension
+/// calls run on" — the two words `extension/target.zig` speaks.
+///
+/// A probe rather than a string because answering it may mean CONNECTING to that
+/// machine, and a session composing nothing compiled must not make anyone
+/// connect: it is asked AT MOST ONCE, and only when the first `compiled` member
+/// is reached. The kernel therefore never learns what a channel is (physics #8);
+/// it only knows there is a question and who to ask.
+pub const ExecTargetProbe = struct {
+    ptr: *anyopaque,
+    askFn: *const fn (ptr: *anyopaque) anyerror![]const u8,
+
+    pub fn ask(self: ExecTargetProbe) ![]const u8 {
+        return self.askFn(self.ptr);
+    }
 };
 
 /// One `--with` request: an extension id, optionally at an exact version.
@@ -310,6 +344,11 @@ const Request = union(enum) {
 const Resolved = struct {
     /// `gpa`-owned (each carries a parsed manifest), released by `build`.
     extensions: []roots_mod.Roots.Resolved,
+    /// Index-aligned with `extensions` (arena-owned): which frozen version of
+    /// each member actually serves a call, when that is not the member's own —
+    /// see `FrozenExtension.exec_version`. Computed once, AFTER the members are
+    /// sorted, so nothing downstream has to keep two orders in step.
+    exec_versions: []const ?[]const u8,
     /// Already arena-owned: the composition keeps these verbatim.
     bindings: []ext_tools.Binding,
     /// Same — the per-session prompts, copied into the arena so they outlive the
@@ -332,19 +371,109 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod
     errdefer freeResolved(gpa, extensions);
     sortResolved(extensions);
 
+    // Computed here, between membership and bindings, because a binding has to
+    // carry the version that will SERVE it: a fresh session works it out (and
+    // may ask the far machine what it is), a resumed one reads it back from the
+    // header and re-derives nothing — freezing is freezing.
+    const exec_versions = switch (request) {
+        .fresh => |opts| try freshExecVersions(gpa, a, roots, extensions, opts.exec_target),
+        .frozen => |frozen| try frozenExecVersions(a, extensions, frozen.active),
+    };
+
     const prompts = switch (request) {
         .fresh => |opts| opts.prompts,
         .frozen => |frozen| frozen.prompts,
     };
     const bindings = switch (request) {
-        .fresh => |opts| try resolveFreshBindings(a, roots, extensions, opts),
-        .frozen => |frozen| try resolvePinnedBindings(a, roots, extensions, frozen.native_tools),
+        .fresh => |opts| try resolveFreshBindings(a, extensions, exec_versions, opts),
+        .frozen => |frozen| try resolvePinnedBindings(a, extensions, exec_versions, frozen.native_tools),
     };
     return .{
         .extensions = extensions,
+        .exec_versions = exec_versions,
         .bindings = bindings,
         .prompts = try copyInlinePrompts(a, prompts),
     };
+}
+
+/// Which build of each member will serve a call, for a FRESH session.
+///
+/// Null everywhere when the session's tools run on this machine — the ordinary
+/// case, and the one that costs nothing. Otherwise, for every `compiled` member,
+/// the sibling version built for that machine's target, found by the seal key a
+/// donor copy already matches on (`Roots.resolveForTarget`). `data` and `script`
+/// members stay null: their identity does not depend on a target, so the two
+/// answers are the same version and recording it twice would say otherwise.
+///
+/// The probe is asked lazily, so a remote session that composes nothing compiled
+/// never makes anyone connect (see `ExecTargetProbe`).
+fn freshExecVersions(
+    gpa: std.mem.Allocator,
+    a: std.mem.Allocator,
+    roots: *const roots_mod.Roots,
+    extensions: []const roots_mod.Roots.Resolved,
+    probe: ?ExecTargetProbe,
+) ![]const ?[]const u8 {
+    const out = try a.alloc(?[]const u8, extensions.len);
+    @memset(out, null);
+    const p = probe orelse return out;
+
+    var target: ?[]const u8 = null;
+    for (extensions, out) |r, *slot| {
+        if (manifest.implementationKind(r.manifest) != .compiled) continue;
+        if (target == null) target = try p.ask();
+        // `gpa` for the search's scratch (version listings, seal reads) and the
+        // arena only for the answer: the composition arena lives as long as the
+        // session, and a lookup's working set has no business in it.
+        const found = (try roots.resolveForTarget(gpa, r.id, r.version, target.?)) orelse {
+            try reportMissingExecVersion(roots.io, gpa, r.id, r.version, target.?);
+            return error.ExecVersionNotFound;
+        };
+        defer gpa.free(found);
+        slot.* = try a.dupe(u8, found);
+    }
+    return out;
+}
+
+/// The same answers, read back out of the header a resume was handed. Matched by
+/// id rather than by position: the members were just sorted, and the header's
+/// order is its own.
+fn frozenExecVersions(
+    a: std.mem.Allocator,
+    extensions: []const roots_mod.Roots.Resolved,
+    active: []const ledger.ExtensionRef,
+) ![]const ?[]const u8 {
+    const out = try a.alloc(?[]const u8, extensions.len);
+    for (extensions, out) |r, *slot| {
+        slot.* = null;
+        for (active) |ref| {
+            if (!std.mem.eql(u8, ref.id, r.id)) continue;
+            if (ref.exec_version.len != 0) slot.* = try a.dupe(u8, ref.exec_version);
+            break;
+        }
+    }
+    return out;
+}
+
+/// The one line that carries what `error.ExecVersionNotFound` cannot: which
+/// package, which target, and the two commands that produce and deliver the
+/// missing build. stderr, for `reportBrokenActive`'s reason.
+fn reportMissingExecVersion(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    id: []const u8,
+    version: []const u8,
+    target: []const u8,
+) !void {
+    if (builtin.is_test) return;
+    const line = try std.fmt.allocPrint(
+        alloc,
+        "extension {s}@{s} has no build for {s}, which is where this session's tools run; " ++
+            "run 'nulya ext build <path to {s}> --target {s}' and then 'nulya ext push {s}@<that version> --env <this session's --env>'\n",
+        .{ id, version, target, id, target, id },
+    );
+    defer alloc.free(line);
+    try std.Io.File.stderr().writeStreamingAll(io, line);
 }
 
 /// Membership for a FRESH session, in three layers: the store's own standing
@@ -584,7 +713,7 @@ fn assemble(
     const skills = skill.SkillSetSnapshot{ .skills = try descriptors.toOwnedSlice(a) };
 
     return .{
-        .extensions = try copyFrozenExtensions(a, resolved.extensions),
+        .extensions = try copyFrozenExtensions(a, resolved.extensions, resolved.exec_versions),
         .extension_tool_bindings = bindings,
         .prompts = resolved.prompts,
         .tools = try snapshotFromBindings(a, bindings),
@@ -632,24 +761,24 @@ fn snapshotFromBindings(a: std.mem.Allocator, bindings: []ext_tools.Binding) !re
 /// `extensions/agent`'s entry tool is `auto` and no longer pinned).
 fn resolveFreshBindings(
     a: std.mem.Allocator,
-    roots: *const roots_mod.Roots,
     resolved: []const roots_mod.Roots.Resolved,
+    exec_versions: []const ?[]const u8,
     opts: Options,
 ) ![]ext_tools.Binding {
     var out: std.ArrayList(ext_tools.Binding) = .empty;
     errdefer out.deinit(a);
 
     for (opts.pinned_native_tools) |pin| {
-        try out.append(a, try resolvePinnedBinding(a, roots, resolved, pin, .fresh_pin));
+        try out.append(a, try resolvePinnedBinding(a, resolved, exec_versions, pin, .fresh_pin));
     }
 
-    for (resolved) |r| {
+    for (resolved, exec_versions) |r, exec| {
         for (r.manifest.tools) |spec| {
             if (spec.surfaceOf() != .auto) continue;
             const id = try std.fmt.allocPrint(a, "ext:{s}/{s}", .{ r.id, spec.name });
             defer a.free(id);
             if (bindingIdSeen(out.items, id)) continue;
-            try out.append(a, try bindingForSpec(a, roots, r, spec, id));
+            try out.append(a, try bindingForSpec(a, r, exec, spec, id));
         }
     }
 
@@ -661,12 +790,12 @@ fn resolveFreshBindings(
 /// re-expands `surface:"auto"`: the header already is the whole native face.
 fn resolvePinnedBindings(
     a: std.mem.Allocator,
-    roots: *const roots_mod.Roots,
     resolved: []const roots_mod.Roots.Resolved,
+    exec_versions: []const ?[]const u8,
     pins: []const []const u8,
 ) ![]ext_tools.Binding {
     const bindings = try a.alloc(ext_tools.Binding, pins.len);
-    for (pins, bindings) |pin, *b| b.* = try resolvePinnedBinding(a, roots, resolved, pin, .frozen_header);
+    for (pins, bindings) |pin, *b| b.* = try resolvePinnedBinding(a, resolved, exec_versions, pin, .frozen_header);
     return bindings;
 }
 
@@ -697,36 +826,35 @@ fn parseStableToolId(pin: []const u8) CompositionError!StableToolId {
 
 fn resolvePinnedBinding(
     a: std.mem.Allocator,
-    roots: *const roots_mod.Roots,
     resolved: []const roots_mod.Roots.Resolved,
+    exec_versions: []const ?[]const u8,
     pin: []const u8,
     mode: PinBindingMode,
 ) !ext_tools.Binding {
     const parsed = try parseStableToolId(pin);
 
-    const r = findResolved(resolved, parsed.ext_id) orelse return error.PinNamesUnknownExtension;
+    const index = findResolvedIndex(resolved, parsed.ext_id) orelse return error.PinNamesUnknownExtension;
+    const r = resolved[index];
     const spec = findToolSpec(r.manifest, parsed.tool_name) orelse return error.PinToolNotDeclared;
     if (mode == .fresh_pin and spec.surfaceOf() != .manual) return error.PinToolNotPinnable;
     // `pin` already passed parseStableToolId, whose two segments reformat back
     // to exactly `pin` (ids never contain `/`), so initOwned dupes it directly.
-    return bindingForSpec(a, roots, r, spec, pin);
+    return bindingForSpec(a, r, exec_versions[index], spec, pin);
 }
 
+/// A binding is an IDENTITY, not a path: the package, the version that will
+/// serve the call, and what the manifest says about the tool. Which file that
+/// version means is answered by the machine about to spawn it
+/// (`extension/exec.zig`) — which is why nothing here reads a store root any
+/// more, and why a package with no entry variant for the executing OS is that
+/// machine's refusal rather than a guess made here.
 fn bindingForSpec(
     a: std.mem.Allocator,
-    roots: *const roots_mod.Roots,
     r: roots_mod.Roots.Resolved,
+    exec_version: ?[]const u8,
     spec: manifest.ToolSpec,
     id: []const u8,
 ) !ext_tools.Binding {
-    // A validated manifest requires `runtime` whenever it declares tools
-    // (manifest.validate -> MissingRuntime), so a found tool spec guarantees an
-    // executable; there is no runtime-less tool state to defend against.
-    const rt = r.manifest.runtime.?;
-
-    const entry_abs = try r.entryPathAbs(a, roots);
-    defer a.free(entry_abs);
-
     // The binding's strings are the arena's; `Binding.deinit` is for callers who
     // allocated it themselves, and the composition never needs it.
     return ext_tools.Binding.initOwned(a, .{
@@ -738,14 +866,19 @@ fn bindingForSpec(
         // the manifest says (DESIGN §7.2.1). The kernel enforces nothing with
         // it — it travels so the gate can be told (DESIGN §4).
         .readonly = spec.readonly,
-    }, entry_abs, if (rt.interpreter) |ip| ip.forHost() else null, spec.timeout_ms);
+    }, r.id, exec_version orelse r.version, spec.timeout_ms);
+}
+
+fn findResolvedIndex(resolved: []const roots_mod.Roots.Resolved, id: []const u8) ?usize {
+    for (resolved, 0..) |r, i| {
+        if (std.mem.eql(u8, r.id, id)) return i;
+    }
+    return null;
 }
 
 fn findResolved(resolved: []const roots_mod.Roots.Resolved, id: []const u8) ?roots_mod.Roots.Resolved {
-    for (resolved) |r| {
-        if (std.mem.eql(u8, r.id, id)) return r;
-    }
-    return null;
+    const index = findResolvedIndex(resolved, id) orelse return null;
+    return resolved[index];
 }
 
 fn findToolSpec(m: manifest.Manifest, name: []const u8) ?manifest.ToolSpec {
@@ -891,11 +1024,18 @@ fn resolveFrozenExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roo
     return resolved.toOwnedSlice(alloc);
 }
 
-fn copyFrozenExtensions(a: std.mem.Allocator, resolved: []const roots_mod.Roots.Resolved) ![]FrozenExtension {
+fn copyFrozenExtensions(
+    a: std.mem.Allocator,
+    resolved: []const roots_mod.Roots.Resolved,
+    exec_versions: []const ?[]const u8,
+) ![]FrozenExtension {
     const out = try a.alloc(FrozenExtension, resolved.len);
-    for (resolved, out) |r, *e| e.* = .{
+    for (resolved, exec_versions, out) |r, exec, *e| e.* = .{
         .id = try a.dupe(u8, r.id),
         .version = try a.dupe(u8, r.version),
+        // Already arena-owned (both paths allocate it there), so it is carried
+        // rather than copied a second time into the same arena.
+        .exec_version = exec,
     };
     return out;
 }
@@ -1556,29 +1696,29 @@ fn writeToolExtension(
     return writeToolExtensionWithTools(alloc, io, root, id, tools_json, marker);
 }
 
-/// Scripted environment for the executor-chain test: records the frozen entry
-/// path each `runExtension` call receives and returns a canned success, so the
-/// full Composition -> Binding -> ToolExecutor -> invoke -> Environment chain is
+/// Scripted environment for the executor-chain test: records the frozen VERSION
+/// each `runExtension` call names and returns a canned success, so the full
+/// Composition -> Binding -> ToolExecutor -> invoke -> Environment chain is
 /// exercised without spawning a real process.
 const FakeEnv = struct {
     io: std.Io,
     response: []const u8 = "{\"results\":[]}",
-    saw_entry_path: []const u8 = "",
+    saw_version: []const u8 = "",
 
     fn runExtension(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment.ExtensionRequest) anyerror!environment.ExtensionOutcome {
         const self: *FakeEnv = @ptrCast(@alignCast(ptr));
         // Free the previous observation before allocating the next: the test
         // calls the same env several times, and deinit frees only the latest.
-        if (self.saw_entry_path.len != 0) alloc.free(self.saw_entry_path);
-        self.saw_entry_path = "";
+        if (self.saw_version.len != 0) alloc.free(self.saw_version);
+        self.saw_version = "";
         // Allocate everything before publishing to `self` so a mid-way failure
-        // (errdefer) can never leave a dangling `saw_entry_path`.
-        const saw = try alloc.dupe(u8, req.entry_path);
+        // (errdefer) can never leave a dangling `saw_version`.
+        const saw = try alloc.dupe(u8, req.version);
         errdefer alloc.free(saw);
         const stdout = try alloc.dupe(u8, self.response);
         errdefer alloc.free(stdout);
         const stderr = try alloc.dupe(u8, "");
-        self.saw_entry_path = saw;
+        self.saw_version = saw;
         return .{ .stdout = stdout, .stderr = stderr, .exit_code = 0, .timed_out = false };
     }
 
@@ -1623,7 +1763,7 @@ const FakeEnv = struct {
     }
 
     fn deinit(self: *FakeEnv, alloc: std.mem.Allocator) void {
-        if (self.saw_entry_path.len != 0) alloc.free(self.saw_entry_path);
+        if (self.saw_version.len != 0) alloc.free(self.saw_version);
     }
 };
 
@@ -1653,21 +1793,20 @@ test "a selected extension tool is provider-visible and freezes to the compositi
     try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&comp.extension_tool_bindings[0])), t.executor.ptr);
 
-    // The frozen entry path is absolute and names v1.
-    const entry = comp.extension_tool_bindings[0].entry_path;
-    try std.testing.expect(std.fs.path.isAbsolute(entry));
-    try std.testing.expect(std.mem.indexOf(u8, entry, v1) != null);
+    // The binding names v1 — the version, which is what a session freezes; the
+    // file it means is the executing machine's answer (`extension/exec.zig`).
+    try std.testing.expectEqualStrings("web.search", comp.extension_tool_bindings[0].ext_id);
+    try std.testing.expectEqualStrings(v1, comp.extension_tool_bindings[0].version);
 
-    // Activate v2 mid-session: the pinned executable stays on v1 (no `current`
+    // Activate v2 mid-session: the pinned tool stays on v1 (no `current`
     // re-read, no second activeVersion lookup).
     try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
-    try std.testing.expect(std.mem.indexOf(u8, comp.extension_tool_bindings[0].entry_path, v1) != null);
-    try std.testing.expect(std.mem.indexOf(u8, comp.extension_tool_bindings[0].entry_path, v2) == null);
+    try std.testing.expectEqualStrings(v1, comp.extension_tool_bindings[0].version);
 
     // A fresh session opened after the switch sees v2.
     var comp2 = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &pins });
     defer comp2.deinit(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, comp2.extension_tool_bindings[0].entry_path, v2) != null);
+    try std.testing.expectEqualStrings(v2, comp2.extension_tool_bindings[0].version);
 }
 
 test "initFrozen rebuilds a composition from a header and ignores later activation" {
@@ -1695,15 +1834,14 @@ test "initFrozen rebuilds a composition from a header and ignores later activati
     const t = comp.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&comp.extension_tool_bindings[0])), t.executor.ptr);
-    try std.testing.expect(std.mem.indexOf(u8, comp.extension_tool_bindings[0].entry_path, v1) != null);
+    try std.testing.expectEqualStrings(v1, comp.extension_tool_bindings[0].version);
 
     // Activate v2 live; a fresh initFrozen on the SAME header still rebuilds v1 —
     // resume is bound to the header, not to `current`.
     try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
     var comp2 = try SessionComposition.initFrozen(alloc, io, cwd, one_root, frozen);
     defer comp2.deinit(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, comp2.extension_tool_bindings[0].entry_path, v1) != null);
-    try std.testing.expect(std.mem.indexOf(u8, comp2.extension_tool_bindings[0].entry_path, v2) == null);
+    try std.testing.expectEqualStrings(v1, comp2.extension_tool_bindings[0].version);
 }
 
 test "initFrozen with no active extensions yields the builtin only" {
@@ -1720,7 +1858,7 @@ test "initFrozen with no active extensions yields the builtin only" {
     try std.testing.expectEqual(registry.builtin_count, comp.tools.tools.len);
 }
 
-test "executor calls reach the composition-time frozen entry path" {
+test "executor calls reach the composition-time frozen version" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1742,12 +1880,11 @@ test "executor calls reach the composition-time frozen entry path" {
     defer env_a.deinit(alloc);
     const req_a: tool.ToolRequest = .{ .args_json = "{}", .ctx = .{ .environment = env_a.handle(), .cwd = "ws" } };
 
-    // Session A's executor hands the environment the v1 executable.
+    // Session A's executor hands the environment v1.
     {
         const result = try tool_a.executor.call(alloc, req_a);
         defer alloc.free(result.output);
-        try std.testing.expect(std.mem.indexOf(u8, env_a.saw_entry_path, v1) != null);
-        try std.testing.expect(std.mem.indexOf(u8, env_a.saw_entry_path, v2) == null);
+        try std.testing.expectEqualStrings(v1, env_a.saw_version);
     }
 
     // Activate v2 mid-session: A's executor still reaches v1...
@@ -1755,8 +1892,7 @@ test "executor calls reach the composition-time frozen entry path" {
     {
         const result = try tool_a.executor.call(alloc, req_a);
         defer alloc.free(result.output);
-        try std.testing.expect(std.mem.indexOf(u8, env_a.saw_entry_path, v1) != null);
-        try std.testing.expect(std.mem.indexOf(u8, env_a.saw_entry_path, v2) == null);
+        try std.testing.expectEqualStrings(v1, env_a.saw_version);
     }
 
     // ...while a fresh session's executor reaches v2.
@@ -1769,8 +1905,7 @@ test "executor calls reach the composition-time frozen entry path" {
     {
         const result = try tool_b.executor.call(alloc, req_b);
         defer alloc.free(result.output);
-        try std.testing.expect(std.mem.indexOf(u8, env_b.saw_entry_path, v2) != null);
-        try std.testing.expect(std.mem.indexOf(u8, env_b.saw_entry_path, v1) == null);
+        try std.testing.expectEqualStrings(v2, env_b.saw_version);
     }
 }
 

@@ -427,17 +427,16 @@ test "background task: `task run` outside a session refuses, and names the two w
     defer alloc.free(missing.stdout);
     try std.testing.expectEqual(@as(u8, 1), missing.code);
 
-    // Inside a session, `NULYA_SESSION` supplies the default.
+    // Inside a session, `NULYA_SESSION_ID` supplies the default — the identity,
+    // which is what every task verb here derives its paths from.
     const id = try newSession(alloc, io, tmp.dir, exe);
     defer alloc.free(id);
-    const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
-    defer alloc.free(spath);
-    const inherited = try runCliEnv(alloc, io, tmp.dir, &.{ exe, "task", "run", "--", "echo INHERITED" }, "NULYA_SESSION", spath);
+    const inherited = try runCliEnv(alloc, io, tmp.dir, &.{ exe, "task", "run", "--", "echo INHERITED" }, "NULYA_SESSION_ID", id);
     defer alloc.free(inherited.stdout);
     try std.testing.expectEqual(@as(u8, 0), inherited.code);
     try std.testing.expect(std.mem.indexOf(u8, inherited.stdout, id) != null);
     // And the short name works there too.
-    const waited = try runCliEnv(alloc, io, tmp.dir, &.{ exe, "task", "wait", "t1", "--timeout-ms", wait_budget_ms }, "NULYA_SESSION", spath);
+    const waited = try runCliEnv(alloc, io, tmp.dir, &.{ exe, "task", "wait", "t1", "--timeout-ms", wait_budget_ms }, "NULYA_SESSION_ID", id);
     defer alloc.free(waited.stdout);
     try std.testing.expectEqual(@as(u8, 0), waited.code);
 }

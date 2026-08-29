@@ -288,12 +288,14 @@ Store and scope:
   The far end is a `nulya remote serve` reached through one long-lived channel,
   so there is no per-command connection, cancelling a step really does kill the
   command's process tree over there, and **that machine never needs an API key
-  — the model connection stays here**. Today `remote:` moves `shell` and the
-  workspace files the harness itself writes: a spilled tool output lands over
-  there, at the workspace-relative path its footer names, so the next command
-  can open it. Extension tools and background tasks still refuse in such a
-  session rather than quietly touching this machine's files. Two verbs answer
-  the questions a
+  — the model connection stays here**. `remote:` moves `shell`, extension tools,
+  and the workspace files the harness itself writes: a spilled tool output lands
+  over there at the workspace-relative path its footer names, and a tool like
+  `read` or `grep` reads the files `shell` sees rather than this machine's, so
+  the two finally answer about the same repository. A tool whose package has not
+  been pushed to that machine comes back as a failed call naming
+  `nulya ext push` — the session goes on. Background tasks still refuse in such
+  a session rather than quietly running here. Two verbs answer the questions a
   driver has before offering a machine to someone: `nulya remote check --env
   <spec>` reports what answered, and `nulya remote ls --env <spec> [<dir>]`
   lists a directory over there exactly, names and kinds.
@@ -316,6 +318,14 @@ Store and scope:
   id is a content hash, which is the whole of the check. Push does not activate
   anything over there; which machine holds which capability stays a decision
   somebody makes, and the record of it is that store's own contents.
+
+  A remote session composes a compiled package as TWO frozen versions: the one
+  this machine reads its manifest, prompts and skills from, and the build for
+  that machine's target, which is what actually runs a call. `session new`
+  works the second one out by asking the machine what it is and looking for the
+  same package bytes built for it — so build for that target BEFORE creating
+  the session, or creation stops and tells you the two commands above. Data and
+  script packages need none of this: they are the same version everywhere.
 - `nulya session step <id> --stream` adds a line protocol: transient
   `{"stream":…}` lines while it runs, interleaved with the same event lines the
   log receives. Behaviour is otherwise identical to a plain step.
@@ -426,6 +436,11 @@ A tool is a fresh process every call — nothing survives between them except
 what you write to disk. If that state needs the same discipline the three
 kernel journals use (one complete JSON line per event, safe under concurrent
 writers, a crash-torn tail repaired rather than glued onto), reach for
+A tool that wants per-session state keys it by `NULYA_SESSION_ID` — the
+session's identity, set for everything a step runs, and true on whichever
+machine the tool runs on. `NULYA_SESSION` is a different thing: the path of the
+session's file, which exists only where the harness runs, so reach for it only
+when you genuinely need that file. Use
 `"$NULYA_EXE" journal append/read` instead of writing your own file lock:
 
 ```sh

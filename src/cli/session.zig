@@ -24,6 +24,7 @@ const loop = @import("../loop.zig");
 const provider = @import("../provider.zig");
 const composition = @import("../composition.zig");
 const launch = @import("../launch.zig");
+const remote = @import("../environment/remote/mod.zig");
 const common = @import("common.zig");
 const cli_ext = @import("ext.zig");
 const session_list = @import("session_list.zig");
@@ -38,6 +39,44 @@ const printOut = common.printOut;
 const printErrFmt = common.printErrFmt;
 const printRaw = common.printRaw;
 const printErr = common.printErr;
+
+/// Answers "which build target do this session's extension calls run on" by
+/// asking that machine — the one thing only it can say (`composition.ExecTargetProbe`).
+///
+/// It opens a channel, reads the handshake and closes it again: `session new`
+/// runs nothing over there, it only needs the machine's own name for itself. The
+/// connection therefore happens at most once per creation, and only when a
+/// `compiled` member is actually composed — a remote session made of data and
+/// script packages never touches the network here.
+///
+/// The agent reports `@tagName(builtin.cpu.arch)` and `@tagName(builtin.os.tag)`,
+/// which is exactly the spelling `extension/target.zig` puts into a version id,
+/// so this is a comparison and never a translation. If the two ever drift apart,
+/// the fix belongs on the reporting side.
+const RemoteTargetProbe = struct {
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    spec: []const u8,
+    answer: ?[]u8 = null,
+
+    fn ask(ptr: *anyopaque) anyerror![]const u8 {
+        const self: *RemoteTargetProbe = @ptrCast(@alignCast(ptr));
+        if (self.answer) |cached| return cached;
+        var ch = try remote.Channel.connect(self.alloc, self.io, try remote.parseSpec(self.spec), launch.version, .default);
+        defer ch.deinit();
+        const words = try std.fmt.allocPrint(self.alloc, "{s}-{s}", .{ ch.hello.arch, ch.hello.os });
+        self.answer = words;
+        return words;
+    }
+
+    fn handle(self: *RemoteTargetProbe) composition.ExecTargetProbe {
+        return .{ .ptr = self, .askFn = ask };
+    }
+
+    fn deinit(self: *RemoteTargetProbe) void {
+        if (self.answer) |cached| self.alloc.free(cached);
+    }
+};
 
 // ── `nulya session *` (DESIGN §14, PLAN §3.2) ───────────────────────────────
 //
@@ -493,8 +532,11 @@ pub fn createSession(
     // opening a connection, and `session new` runs nothing. Freezing the spec is
     // the whole of its job here; the first `step` is where that machine has to
     // answer, and where an unreachable one fails loudly (DESIGN §8.1).
+    const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
+    defer launch.freeExtensionRoots(alloc, ext_roots);
+
     const compose_exec = if (launch.isRemoteSpec(exec)) "" else exec;
-    var lenv = launch.localEnvironment(alloc, io, &cfg, null, compose_exec) catch |err| switch (err) {
+    var lenv = launch.localEnvironment(alloc, io, &cfg, null, compose_exec, ext_roots) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return null;
@@ -503,8 +545,12 @@ pub fn createSession(
     };
     defer lenv.deinit();
 
-    const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
-    defer launch.freeExtensionRoots(alloc, ext_roots);
+    // Which machine's binaries will serve this session's extension calls. Only a
+    // REMOTE session has the question, and even then it is asked lazily — a
+    // remote session that composes nothing compiled never connects here, which
+    // is why this is a probe rather than an answer (DESIGN §8.2).
+    var target_probe: RemoteTargetProbe = .{ .alloc = alloc, .io = io, .spec = exec };
+    defer target_probe.deinit();
 
     // `--bare` composes from argv alone: the two standing config lists below are
     // read as empty, the store's own standing layer (`apply: "auto"`) is turned
@@ -541,6 +587,7 @@ pub fn createSession(
             .with = with,
             .apply_auto = !bare,
             .prompts = prompts,
+            .exec_target = if (launch.isRemoteSpec(exec)) target_probe.handle() else null,
         },
     }, .{
         .workspace = std.Io.Dir.cwd(),
@@ -569,6 +616,20 @@ pub fn createSession(
         // line only says what it cost.
         error.ActiveExtensionBroken => {
             try printErrFmt(alloc, io, "session new failed: an extension this session names has a broken current version (see the line above)\n", .{});
+            return null;
+        },
+        // This session's tools run on another machine, and one of its packages
+        // has no build for that machine. The line above already named the
+        // package, the target and the two commands that fix it.
+        error.ExecVersionNotFound => {
+            try printErrFmt(alloc, io, "session new failed: an extension this session composes has no build for the machine its tools run on (see the line above)\n", .{});
+            return null;
+        },
+        // The machine itself has to answer before its target can be known, so
+        // an unreachable one stops creation rather than freezing a session onto
+        // a guess. Same volume as a missing credential, at the same moment.
+        error.RemoteChannelLost, error.RemoteChannelStalled, error.RemoteVersionMismatch, error.RemoteSpecUnsupportedOnHost => {
+            try printErrFmt(alloc, io, "session new failed: '{s}' did not answer, and this session composes an extension whose build for that machine has to be identified now\n", .{exec});
             return null;
         },
         // Same rule for pins: a session missing a tool the operator asked for is
@@ -1028,10 +1089,12 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // or today's config: it was decided once, at creation (DESIGN §8). A target
     // this host cannot reach fails loudly, the way a missing credential does —
     // running the commands here instead would be the same silent substitution.
+    const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
+    defer launch.freeExtensionRoots(alloc, ext_roots);
     var lenv = launch.sessionEnvironment(alloc, io, &cfg, .{
         .session_path = spath,
         .tasks_dir = tasks_dir,
-    }, hdr.value.environment, hdr.value.remote_workspace) catch |err| switch (err) {
+    }, hdr.value.environment, hdr.value.remote_workspace, ext_roots) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             return stepFail(alloc, io, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
         },
@@ -1053,10 +1116,11 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         else => return err,
     };
     defer lenv.deinit();
-    // Let shell children (e.g. `nulya ext activate`) find the live session so
-    // they can deposit capability notes into its inbox (DESIGN §5.3). A no-op on
-    // a remote environment — see `SessionEnvironment.publishSessionPath`.
-    try lenv.publishSessionPath(spath);
+    // Let this session's children name it (DESIGN §5.3): the FILE path, so
+    // `nulya ext activate` can deposit a capability note into its inbox, and the
+    // ID, which is true on whichever machine the child runs — see
+    // `SessionEnvironment.publishSession`.
+    try lenv.publishSession(spath, id);
 
     // Reconstruct the model frozen at creation, re-resolving only the credential.
     // No silent fallback: a real session whose key is gone fails loudly rather
@@ -1083,9 +1147,6 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // set it per step; otherwise the profile / catalog default applies.
     const effort = flagValue(args[1..], "--effort") orelse
         cfg.defaultEffort(hdr.value.model, hdr.value.model_identity.model);
-
-    const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
-    defer launch.freeExtensionRoots(alloc, ext_roots);
 
     // Workspace-relative, and deliberately so: a spill is written through the
     // environment's `putWorkspaceFile`, so this one string is the path on

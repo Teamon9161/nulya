@@ -1,12 +1,12 @@
 //! Extension tool invocation (DESIGN §7.3).
 //!
-//! The narrow seam between an already-resolved extension executable and the one
-//! wire: the arguments on stdin, `NULYA_TOOL` / `NULYA_ARG_<k>` in the
-//! environment, stdout verbatim, the exit code as ok/failed. It knows nothing
-//! about the extension store: the caller resolves the active version, validates
-//! integrity, reads the frozen manifest, verifies the tool is declared, and
-//! passes an exact executable path. `invokeTool` never asks what `current`
-//! means.
+//! The narrow seam between a NAMED frozen extension version and the one wire:
+//! the arguments on stdin, `NULYA_TOOL` / `NULYA_ARG_<k>` in the environment,
+//! stdout verbatim, the exit code as ok/failed. It knows nothing about the
+//! extension store: the caller decides WHICH version serves the call (session
+//! composition froze it; `ext run` resolved it) and the executing machine
+//! decides which file that version means (`extension/exec.zig`). `invokeTool`
+//! never asks what `current` means, and never holds a path.
 //!
 //! The contract itself, and the two pure rules inside it, live in
 //! `protocol.zig` — what this file adds is spawning, capture, and the text a
@@ -24,7 +24,9 @@
 //! diagnostic) is released on all paths.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const environment = @import("../environment.zig");
+const exec = @import("exec.zig");
 const protocol = @import("protocol.zig");
 const tool = @import("../tool.zig");
 
@@ -38,8 +40,6 @@ pub const Options = struct {
     timeout_ms: u32 = default_timeout_ms,
     /// Runner-level capture cap for the child's stdout/stderr.
     max_output_bytes: usize = 1 << 20,
-    /// For a script extension, the interpreter to run the entry with.
-    interpreter: ?[]const u8 = null,
     /// Workspace-relative file where the child may write UI-only presentation
     /// JSON. It is not stdout and never reaches the model.
     presentation_file: ?[]const u8 = null,
@@ -58,7 +58,7 @@ pub const ToolInvocation = struct {
     }
 };
 
-/// Run the already-resolved executable once. Errors from
+/// Run one tool of the named frozen version once. Errors from
 /// `Environment.runExtension` propagate unchanged: `error.Canceled` in
 /// particular is host execution control and is never folded into a failed
 /// invocation.
@@ -67,32 +67,48 @@ pub const ToolInvocation = struct {
 /// second rule about how text reaches the model. A non-zero exit is an ordinary
 /// failed invocation carrying `exit <n>`, the child's stderr, and whatever it
 /// managed to print.
+///
+/// The arguments' SHAPE is checked here, before anything is spawned or sent
+/// anywhere: nothing runs — and no frame crosses a channel — with something a
+/// tool's declared `input` schema could not describe.
 pub fn invokeTool(
     alloc: std.mem.Allocator,
     env: environment.Environment,
-    entry_path: []const u8,
-    cwd: []const u8,
+    id: []const u8,
+    version: []const u8,
     tool_name: []const u8,
+    cwd: []const u8,
     args_json: []const u8,
     options: Options,
 ) !ToolInvocation {
     const arguments = protocol.normalizedArguments(args_json);
+    try protocol.requireArgumentsObject(alloc, arguments);
 
-    var vars: protocol.PlainEnv = .empty;
-    defer vars.deinit(alloc);
-    try vars.add(alloc, "NULYA_TOOL", tool_name);
-    if (options.presentation_file) |path| try vars.add(alloc, "NULYA_PRESENTATION_FILE", path);
-    try vars.addArguments(alloc, arguments);
-
-    const outcome = try env.runExtension(alloc, .{
-        .entry_path = entry_path,
-        .interpreter = options.interpreter,
+    const outcome = env.runExtension(alloc, .{
+        .id = id,
+        .version = version,
+        .tool = tool_name,
         .cwd = cwd,
         .request_json = arguments,
         .max_output_bytes = options.max_output_bytes,
         .timeout_ms = options.timeout_ms,
-        .env_extra = vars.list.items,
-    });
+        .presentation_file = options.presentation_file,
+    }) catch |err| {
+        // "This machine cannot run that version" is a FAILED CALL, not a host
+        // fault: the caller is the one who can act on it, and killing the whole
+        // step over it would take a conversation down for something one tool
+        // could have reported. The far side of a channel answers the same class
+        // of failure with a refusal that arrives here as the same shape, so the
+        // model reads one story whichever machine it happened on.
+        if (!exec.isUnrunnableHere(err)) return err;
+        var diag: std.Io.Writer.Allocating = .init(alloc);
+        errdefer diag.deinit();
+        try diag.writer.print(
+            "extension {s}@{s} cannot run on this machine ({s}, {s}); see `nulya ext inspect {s}@{s}`",
+            .{ id, version, @errorName(err), @tagName(builtin.os.tag), id, version },
+        );
+        return .{ .ok = false, .output = try diag.toOwnedSlice() };
+    };
     defer outcome.deinit(alloc);
 
     if (outcome.timed_out) {
@@ -137,12 +153,11 @@ const FakeEnv = struct {
     timed_out: bool = false,
     err: ?anyerror = null,
     saw_request_json: []const u8 = "",
-    saw_entry_path: []const u8 = "",
+    /// `<id>@<version>/<tool>` — the whole of what this seam now hands the
+    /// executing side, as one string so an assertion reads like the identity it
+    /// is checking.
+    saw_ref: []const u8 = "",
     saw_live: bool = false,
-    /// The per-call environment flattened to `NAME=VALUE\n` lines and OWNED:
-    /// the caller's pairs are freed the moment its call returns, so a borrow
-    /// would be read after free by every assertion below.
-    saw_env: []const u8 = "",
 
     fn runExtension(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment.ExtensionRequest) anyerror!environment.ExtensionOutcome {
         const self: *FakeEnv = @ptrCast(@alignCast(ptr));
@@ -154,8 +169,7 @@ const FakeEnv = struct {
         self.saw_request_json = try alloc.dupe(u8, req.request_json);
         self.saw_live = true;
         errdefer self.dropSaw(alloc);
-        self.saw_env = try flattenEnv(alloc, req.env_extra);
-        self.saw_entry_path = try alloc.dupe(u8, req.entry_path);
+        self.saw_ref = try std.fmt.allocPrint(alloc, "{s}@{s}/{s}", .{ req.id, req.version, req.tool });
         const stdout = try alloc.dupe(u8, self.response);
         errdefer alloc.free(stdout);
         const stderr = try alloc.dupe(u8, self.stderr);
@@ -214,66 +228,45 @@ const FakeEnv = struct {
     fn dropSaw(self: *FakeEnv, alloc: std.mem.Allocator) void {
         if (!self.saw_live) return;
         if (self.saw_request_json.len > 0) alloc.free(self.saw_request_json);
-        if (self.saw_entry_path.len > 0) alloc.free(self.saw_entry_path);
-        if (self.saw_env.len > 0) alloc.free(self.saw_env);
+        if (self.saw_ref.len > 0) alloc.free(self.saw_ref);
         self.saw_request_json = "";
-        self.saw_entry_path = "";
-        self.saw_env = "";
+        self.saw_ref = "";
         self.saw_live = false;
     }
 };
 
-fn flattenEnv(alloc: std.mem.Allocator, vars: []const environment.EnvVar) ![]const u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-    for (vars) |v| try out.writer.print("{s}={s}\n", .{ v.name, v.value });
-    return out.toOwnedSlice();
-}
+/// The identity every test below invokes: one package, one frozen version.
+const ref_id = "greeter";
+const ref_version = "v-000000000000000000000001";
 
 test "the arguments object goes to stdin and stdout comes back verbatim" {
     const alloc = testing.allocator;
     var fake = FakeEnv{ .io = testing.io, .response = "hello from greeter, name=world\n" };
     defer fake.deinit(alloc);
 
-    const invocation = try invokeTool(alloc, fake.handle(), "ext/src/run.sh", "ws", "greet", "{\"name\":\"world\"}", .{});
+    const invocation = try invokeTool(alloc, fake.handle(), ref_id, ref_version, "greet", "ws", "{\"name\":\"world\"}", .{});
     defer invocation.deinit(alloc);
 
     try testing.expect(invocation.ok);
     // No envelope, no decode: the bytes the script printed, unchanged.
     try testing.expectEqualStrings("hello from greeter, name=world\n", invocation.output);
     try testing.expectEqualStrings("{\"name\":\"world\"}", fake.saw_request_json);
-    // The already-resolved executable path is passed through untouched.
-    try testing.expectEqualStrings("ext/src/run.sh", fake.saw_entry_path);
+    // What the executing side is handed is an IDENTITY, not a path: which file
+    // that version means is its answer to give (`extension/exec.zig`), and the
+    // arguments it derives `NULYA_TOOL` / `NULYA_ARG_<k>` from are the very
+    // bytes on stdin (`protocol.callEnv`, tested there).
+    try testing.expectEqualStrings(ref_id ++ "@" ++ ref_version ++ "/greet", fake.saw_ref);
 }
 
-test "the tool and every top-level scalar argument reach the child environment" {
-    const alloc = testing.allocator;
-    var fake = FakeEnv{ .io = testing.io, .response = "ok" };
-    defer fake.deinit(alloc);
-
-    const args = "{\"name\":\"world\",\"count\":3,\"list\":[1,2]}";
-    const invocation = try invokeTool(alloc, fake.handle(), "bin", "ws", "greet", args, .{});
-    defer invocation.deinit(alloc);
-
-    // Which keys become variables is `protocol.PlainEnv`'s rule and tested
-    // there; what this locks is that the seam applies it and sends the whole
-    // object on stdin regardless.
-    try testing.expect(std.mem.indexOf(u8, fake.saw_env, "NULYA_TOOL=greet\n") != null);
-    try testing.expect(std.mem.indexOf(u8, fake.saw_env, "NULYA_ARG_name=world\n") != null);
-    try testing.expect(std.mem.indexOf(u8, fake.saw_env, "NULYA_ARG_list") == null);
-    try testing.expectEqualStrings(args, fake.saw_request_json);
-}
-
-test "no arguments still sends an object, and the tool name is the whole environment" {
+test "no arguments still sends an object" {
     const alloc = testing.allocator;
     var fake = FakeEnv{ .io = testing.io, .response = "" };
     defer fake.deinit(alloc);
 
-    const invocation = try invokeTool(alloc, fake.handle(), "bin", "ws", "t", "", .{});
+    const invocation = try invokeTool(alloc, fake.handle(), ref_id, ref_version, "t", "ws", "", .{});
     defer invocation.deinit(alloc);
     try testing.expect(invocation.ok);
     try testing.expectEqualStrings("{}", fake.saw_request_json);
-    try testing.expectEqualStrings("NULYA_TOOL=t\n", fake.saw_env);
 }
 
 test "a non-zero exit is a failed call carrying the code, stderr and stdout" {
@@ -286,7 +279,7 @@ test "a non-zero exit is a failed call carrying the code, stderr and stdout" {
     };
     defer fake.deinit(alloc);
 
-    const invocation = try invokeTool(alloc, fake.handle(), "bin", "ws", "t", "{}", .{});
+    const invocation = try invokeTool(alloc, fake.handle(), ref_id, ref_version, "t", "ws", "{}", .{});
     defer invocation.deinit(alloc);
 
     try testing.expect(!invocation.ok);
@@ -303,9 +296,10 @@ test "arguments that are not a JSON object are refused before anything is spawne
     var fake = FakeEnv{ .io = testing.io, .response = "" };
     defer fake.deinit(alloc);
 
-    try testing.expectError(error.InvalidArgumentsJson, invokeTool(alloc, fake.handle(), "bin", "ws", "t", "{bad", .{}));
-    try testing.expectError(error.ArgumentsNotObject, invokeTool(alloc, fake.handle(), "bin", "ws", "t", "[]", .{}));
-    // Nothing was spawned: the shape is checked before the child exists.
+    try testing.expectError(error.InvalidArgumentsJson, invokeTool(alloc, fake.handle(), ref_id, ref_version, "t", "ws", "{bad", .{}));
+    try testing.expectError(error.ArgumentsNotObject, invokeTool(alloc, fake.handle(), ref_id, ref_version, "t", "ws", "[]", .{}));
+    // Nothing was spawned, and nothing crossed a channel: the shape is checked
+    // before the child exists.
     try testing.expect(!fake.saw_live);
 }
 
@@ -314,7 +308,7 @@ test "a timeout is a failed call, and cancellation still propagates" {
 
     var slow = FakeEnv{ .io = testing.io, .timed_out = true, .stderr = "stuck on network\n" };
     defer slow.deinit(alloc);
-    const invocation = try invokeTool(alloc, slow.handle(), "bin", "ws", "t", "{}", .{});
+    const invocation = try invokeTool(alloc, slow.handle(), ref_id, ref_version, "t", "ws", "{}", .{});
     defer invocation.deinit(alloc);
     try testing.expect(!invocation.ok);
     try testing.expect(std.mem.indexOf(u8, invocation.output, "timed out after") != null);
@@ -322,7 +316,7 @@ test "a timeout is a failed call, and cancellation still propagates" {
 
     var canceled = FakeEnv{ .io = testing.io, .err = error.Canceled };
     defer canceled.deinit(alloc);
-    try testing.expectError(error.Canceled, invokeTool(alloc, canceled.handle(), "bin", "ws", "t", "{}", .{}));
+    try testing.expectError(error.Canceled, invokeTool(alloc, canceled.handle(), ref_id, ref_version, "t", "ws", "{}", .{}));
 }
 
 test "no allocation failure is swallowed into a failed invocation" {
@@ -334,7 +328,7 @@ test "no allocation failure is swallowed into a failed invocation" {
         fn run(alloc: std.mem.Allocator) !void {
             var fake = FakeEnv{ .io = testing.io, .response = "text" };
             defer fake.deinit(alloc);
-            const invocation = invokeTool(alloc, fake.handle(), "bin", "ws", "t", "{\"a\":\"b\",\"c\":1}", .{}) catch |err| switch (err) {
+            const invocation = invokeTool(alloc, fake.handle(), ref_id, ref_version, "t", "ws", "{\"a\":\"b\",\"c\":1}", .{}) catch |err| switch (err) {
                 // The allocating writer reports a denied allocation as
                 // WriteFailed ("effectively out-of-memory" for an allocating
                 // sink), while the sweep only accepts OutOfMemory. Normalize the
@@ -354,7 +348,7 @@ test "the failed-call path leaks nothing under allocation failure either" {
         fn run(alloc: std.mem.Allocator) !void {
             var fake = FakeEnv{ .io = testing.io, .response = "partial", .stderr = "why", .exit_code = 2 };
             defer fake.deinit(alloc);
-            const invocation = invokeTool(alloc, fake.handle(), "bin", "ws", "t", "{}", .{}) catch |err| switch (err) {
+            const invocation = invokeTool(alloc, fake.handle(), ref_id, ref_version, "t", "ws", "{}", .{}) catch |err| switch (err) {
                 error.WriteFailed => return error.OutOfMemory,
                 else => return err,
             };

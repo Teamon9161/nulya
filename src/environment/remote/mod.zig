@@ -10,12 +10,17 @@
 //! axis, not two spellings of one thing, so they have different words
 //! (`ssh:me@box` vs `remote:ssh:me@box`) and the older one is untouched.
 //!
-//! **Two verbs move so far.** `runShell` and `putWorkspaceFile` go over the
-//! channel; `runExtension` and `startShellTask` refuse, in sentences that say
-//! where those still run and why. Refusing is the whole point of shipping a
-//! phase: an extension that silently read the HOST's files in a session whose
-//! workspace is elsewhere would be the split-brain this design exists to end,
-//! wearing a success.
+//! **Three verbs move so far.** `runShell`, `runExtension` and
+//! `putWorkspaceFile` go over the channel; only `startShellTask` refuses, in a
+//! sentence that says where background tasks still run and why (Phase 4).
+//!
+//! `runExtension` is what ends the split brain this design exists to end: until
+//! it moved, `ext:std/read` was a process on the HOST reading the host's files
+//! while `shell` read the far machine's, and the two answered about different
+//! repositories. What crosses the channel is an IDENTITY — `(id, version, tool)`
+//! plus the arguments — because which file a version means, and whether it still
+//! matches its seal, are answers only the machine holding the bytes can give
+//! (goals/remote-env.md §3.1).
 //!
 //! `putWorkspaceFile` is what makes a spill footer true here (Phase 2): the
 //! bytes cross the channel and land in the far workspace at the very path the
@@ -427,16 +432,37 @@ const ControlExchange = struct {
     }
 };
 
+/// What a run of SOMETHING on the far side came back as. Deliberately one shape
+/// for both run verbs: `ShellOutcome` and `ExtensionOutcome` are the same four
+/// fields, and the reply frame does not distinguish them either.
+const Captured = struct {
+    stdout: []u8,
+    stderr: []u8,
+    exit_code: u8,
+    timed_out: bool,
+    /// The agent refused the request, in its own words (owned). Kept rather than
+    /// folded into an error because the two callers answer it differently: a
+    /// refused SHELL is a host fault, and a refused EXTENSION is an ordinary
+    /// failed call the model gets to read (`invoke.zig`'s taxonomy, unchanged).
+    refusal: ?[]u8 = null,
+
+    fn deinit(self: Captured, alloc: std.mem.Allocator) void {
+        alloc.free(self.stdout);
+        alloc.free(self.stderr);
+        if (self.refusal) |m| alloc.free(m);
+    }
+};
+
 /// A command round: request out, reply and its payload back, split into the two
-/// owned slices `ShellOutcome` wants.
-const ShellExchange = struct {
+/// owned slices an outcome wants.
+const CommandExchange = struct {
     ch: *Channel,
     alloc: std.mem.Allocator,
-    req: environment.ShellRequest,
-    cwd: []const u8,
-    out: ?anyerror!environment.ShellOutcome = null,
+    req: protocol.Request,
+    payload: []const u8,
+    out: ?anyerror!Captured = null,
 
-    fn run(self: *ShellExchange) void {
+    fn run(self: *CommandExchange) void {
         const result = self.round();
         // A canceled exchange leaves `out` null: the caller then knows the task
         // did not settle, exactly as `Waiter` does for a canceled `child.wait`.
@@ -446,20 +472,22 @@ const ShellExchange = struct {
         self.out = result;
     }
 
-    fn round(self: *ShellExchange) anyerror!environment.ShellOutcome {
+    fn round(self: *CommandExchange) anyerror!Captured {
         const ch = self.ch;
         if (ch.dead) return error.RemoteChannelLost;
         _ = ch.arena.reset(.retain_capacity);
-        try ch.send(.{
-            .op = protocol.Op.run_shell.wire(),
-            .cwd = self.cwd,
-            .timeout_ms = self.req.timeout_ms,
-            .max_output_bytes = self.req.max_output_bytes,
-            .bytes = self.req.command.len,
-        }, self.req.command);
+        try ch.send(self.req, self.payload);
 
         const rep = try ch.readHeader();
-        if (!rep.ok) return error.RemoteRefused;
+        if (!rep.ok) {
+            return .{
+                .stdout = try self.alloc.alloc(u8, 0),
+                .stderr = try self.alloc.alloc(u8, 0),
+                .exit_code = 1,
+                .timed_out = false,
+                .refusal = try self.alloc.dupe(u8, rep.message),
+            };
+        }
         if (rep.out > rep.bytes) {
             ch.dead = true;
             return error.RemoteChannelLost;
@@ -497,6 +525,12 @@ pub const RemoteEnvironment = struct {
     /// The absolute directory on the far side this session works in, owned.
     /// Empty means "wherever the agent started", which `hello` reported.
     workspace: []u8,
+    /// This session's IDENTITY, owned, published to everything the agent runs as
+    /// `NULYA_SESSION_ID` (DESIGN §5.3). Not the session file's path: that names
+    /// a file on the host, so sending it would be a lie a package could act on.
+    /// Empty until a driver publishes one (`session step` does; `remote check`
+    /// does not).
+    session_id: []u8 = &.{},
     dialect_val: environment_mod.Dialect,
     bounds: Bounds = .default,
 
@@ -548,7 +582,17 @@ pub const RemoteEnvironment = struct {
         self.ch.deinit();
         self.alloc.free(self.spec);
         self.alloc.free(self.workspace);
+        if (self.session_id.len != 0) self.alloc.free(self.session_id);
         self.* = undefined;
+    }
+
+    /// Tell the far side which session its commands belong to. Only the id
+    /// travels — see `session_id`.
+    pub fn publishSession(self: *RemoteEnvironment, session_id: []const u8) !void {
+        if (session_id.len == 0) return;
+        const owned = try self.alloc.dupe(u8, session_id);
+        if (self.session_id.len != 0) self.alloc.free(self.session_id);
+        self.session_id = owned;
     }
 
     pub fn environment(self: *RemoteEnvironment) environment_mod.Environment {
@@ -572,9 +616,39 @@ pub const RemoteEnvironment = struct {
 
     fn runShellImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment_mod.ShellRequest) anyerror!environment_mod.ShellOutcome {
         const self: *RemoteEnvironment = @ptrCast(@alignCast(ptr));
-        var ex: ShellExchange = .{ .ch = &self.ch, .alloc = alloc, .req = req, .cwd = self.remoteCwd() };
+        const captured = try self.runBounded(alloc, .{
+            .op = protocol.Op.run_shell.wire(),
+            .cwd = self.remoteCwd(),
+            .session = self.session_id,
+            .timeout_ms = req.timeout_ms,
+            .max_output_bytes = req.max_output_bytes,
+            .bytes = req.command.len,
+        }, req.command, req.timeout_ms);
+        if (captured.refusal != null) {
+            captured.deinit(alloc);
+            return error.RemoteRefused;
+        }
+        return .{
+            .stdout = captured.stdout,
+            .stderr = captured.stderr,
+            .exit_code = captured.exit_code,
+            .timed_out = captured.timed_out,
+        };
+    }
 
-        const bound: u32 = if (req.timeout_ms) |ms| ms +| self.bounds.reply_grace_ms else self.bounds.control_ms;
+    /// One run round under the host's patience. The bound is the request's own
+    /// budget plus a margin (the agent enforces the budget next to the process),
+    /// or the fixed control bound when the request carries none.
+    fn runBounded(
+        self: *RemoteEnvironment,
+        alloc: std.mem.Allocator,
+        req: protocol.Request,
+        payload: []const u8,
+        timeout_ms: ?u32,
+    ) anyerror!Captured {
+        var ex: CommandExchange = .{ .ch = &self.ch, .alloc = alloc, .req = req, .payload = payload };
+
+        const bound: u32 = if (timeout_ms) |ms| ms +| self.bounds.reply_grace_ms else self.bounds.control_ms;
         const Race = union(enum) { done: void, expired: void };
         var buf: [2]Race = undefined;
         var sel: std.Io.Select(Race) = .init(self.io, &buf);
@@ -582,12 +656,12 @@ pub const RemoteEnvironment = struct {
         // exchange runs unguarded: no false failure, just no guard — the same
         // degradation `waitBounded` takes.
         sel.concurrent(.expired, sleepMs, .{ self.io, bound }) catch {
-            ShellExchange.run(&ex);
+            CommandExchange.run(&ex);
             return ex.out orelse error.Canceled;
         };
-        sel.concurrent(.done, ShellExchange.run, .{&ex}) catch {
+        sel.concurrent(.done, CommandExchange.run, .{&ex}) catch {
             sel.cancelDiscard();
-            ShellExchange.run(&ex);
+            CommandExchange.run(&ex);
             return ex.out orelse error.Canceled;
         };
         const first = sel.await() catch |err| {
@@ -613,23 +687,45 @@ pub const RemoteEnvironment = struct {
         self.ch.dead = true;
     }
 
-    /// Phase 1 does not move extension processes. Answered as a FAILED CALL
-    /// rather than a host error so the sentence reaches the model through the
-    /// path every failed extension call already uses (`invoke.zig`: exit code
-    /// plus stderr) — no new branch anywhere, and the usage journal records an
-    /// `ok=false` that is true.
+    /// The extension runs on the far machine, against the far workspace — which
+    /// is the whole point of a remote session: `ext:std/read` and `shell` now
+    /// answer about the same repository.
+    ///
+    /// Only the identity and the arguments cross. Not `presentation_file`: who
+    /// READS a file decides which machine it lives on (goals/remote-env.md §3.2),
+    /// and that one's reader is the front end, here. A package asked to render
+    /// over there simply sees no presentation file, exactly as it does when a
+    /// driver offers none.
+    ///
+    /// A version that machine does not hold comes back as the agent's own
+    /// sentence, and is answered as a FAILED CALL rather than a host error: the
+    /// sentence then reaches the model through the path every failed extension
+    /// call already uses (`invoke.zig`: exit code plus stderr), no new branch
+    /// anywhere, and the usage journal records an `ok=false` that is true.
     fn runExtensionImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment_mod.ExtensionRequest) anyerror!environment_mod.ExtensionOutcome {
         const self: *RemoteEnvironment = @ptrCast(@alignCast(ptr));
-        _ = req;
-        const msg = try std.fmt.allocPrint(
-            alloc,
-            "this session's commands run on {s}, and extension tools still run on the machine the harness runs on. " ++
-                "Running this one here would read and write THIS machine's files, not the workspace you are working in, " ++
-                "so it is refused instead. Use `shell` for work on {s}.",
-            .{ self.spec, self.spec },
-        );
-        errdefer alloc.free(msg);
-        return .{ .stdout = try alloc.alloc(u8, 0), .stderr = msg, .exit_code = 1 };
+        const captured = try self.runBounded(alloc, .{
+            .op = protocol.Op.run_extension.wire(),
+            .id = req.id,
+            .version = req.version,
+            .tool = req.tool,
+            .cwd = self.remoteCwd(),
+            .session = self.session_id,
+            .timeout_ms = req.timeout_ms,
+            .max_output_bytes = req.max_output_bytes,
+            .bytes = req.request_json.len,
+        }, req.request_json, req.timeout_ms);
+        if (captured.refusal) |message| {
+            alloc.free(captured.stdout);
+            alloc.free(captured.stderr);
+            return .{ .stdout = try alloc.alloc(u8, 0), .stderr = message, .exit_code = 1 };
+        }
+        return .{
+            .stdout = captured.stdout,
+            .stderr = captured.stderr,
+            .exit_code = captured.exit_code,
+            .timed_out = captured.timed_out,
+        };
     }
 
     fn startShellTaskImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment_mod.TaskRequest) anyerror!environment_mod.TaskStart {

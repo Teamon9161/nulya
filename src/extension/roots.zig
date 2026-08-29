@@ -249,6 +249,44 @@ pub const Roots = struct {
         alloc.free(list);
     }
 
+    /// The sibling of `<id>@<version>` built for ANOTHER machine: the version,
+    /// in root order, whose seal records the same package bytes for
+    /// `target_words`. Null when no root holds one; caller owns the result.
+    ///
+    /// This is how a session whose tools run elsewhere learns which frozen
+    /// implementation will actually serve its calls (`exec_version`, DESIGN §3.4,
+    /// goals/remote-env.md §3.1). The two versions are ONE package that differs
+    /// only in what it was compiled for, and `(package_digest, target)` is
+    /// already the key a donor copy matches on — so this asks `Store.findSealed`,
+    /// the same matcher a build asks about its own machine.
+    ///
+    /// No compiler is named: which zig produced the copy for that machine is not
+    /// something this session gets to require, and the sorted search inside
+    /// `findSealed` keeps the answer deterministic when several qualify.
+    pub fn resolveForTarget(
+        self: *const Roots,
+        alloc: std.mem.Allocator,
+        id: []const u8,
+        version: []const u8,
+        target_words: []const u8,
+    ) !?[]u8 {
+        var digest: ?[]u8 = null;
+        defer if (digest) |d| alloc.free(d);
+        for (self.entries, 0..) |_, i| {
+            digest = self.store(i).readPackageDigest(alloc, id, version) catch |err| switch (err) {
+                error.Canceled, error.OutOfMemory => return err,
+                else => continue,
+            };
+            break;
+        }
+        const package_digest = digest orelse return null;
+
+        for (self.entries, 0..) |_, i| {
+            if (try self.store(i).findSealed(alloc, id, package_digest, target_words, null)) |found| return found;
+        }
+        return null;
+    }
+
     /// Index of the first root holding a BUILT `version` of `id`, validated to
     /// `level`. Content addressing makes every root's copy the same bytes, so
     /// the first one found is as good as any.

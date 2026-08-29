@@ -75,7 +75,7 @@ const Brief = struct {
 };
 
 /// `std.process.Init` rather than a bare `main()`: the io it hands over carries
-/// the real process environment, which is where `NULYA_SESSION` lives.
+/// the real process environment, which is where `NULYA_SESSION_ID` lives.
 ///
 /// The wire is `plain` (DESIGN §7.3, contract at the top of
 /// `src/extension/protocol.zig`): stdin is this call's arguments as one JSON
@@ -112,16 +112,19 @@ fn record(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
         return .{ .failed = message };
     }
 
-    // Which session is this? `session step` puts the live session's file path in
-    // the environment of everything it runs (DESIGN §5.3), and the stem is the
-    // id. Without it there is nobody to hand off FROM: the driver would have no
-    // way to tell whose proposal this file is, and the model would have been
-    // told "recorded" for a phase boundary that does not exist.
-    const session_path = env.get("NULYA_SESSION") orelse
-        return Outcome{ .failed = "handoff must be called from inside a session (NULYA_SESSION is not set)" };
-    const session_id = std.fs.path.stem(session_path);
+    // Which session is this? `session step` publishes the live session's id to
+    // everything it runs (DESIGN §5.3). Without it there is nobody to hand off
+    // FROM: the driver would have no way to tell whose proposal this file is,
+    // and the model would have been told "recorded" for a phase boundary that
+    // does not exist.
+    //
+    // The id, not the session file's path: this tool only ever wanted a name to
+    // put in a file name, and the two were one variable until a workspace could
+    // live on another machine.
+    const session_id = env.get("NULYA_SESSION_ID") orelse
+        return Outcome{ .failed = "handoff must be called from inside a session (NULYA_SESSION_ID is not set)" };
     if (session_id.len == 0)
-        return Outcome{ .failed = "handoff must be called from inside a session (NULYA_SESSION names no session file)" };
+        return Outcome{ .failed = "handoff must be called from inside a session (NULYA_SESSION_ID is empty)" };
 
     const body = try render(alloc, session_id, brief);
     const cwd = std.Io.Dir.cwd();

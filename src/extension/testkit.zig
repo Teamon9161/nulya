@@ -78,7 +78,12 @@ pub fn writeFrozenVersion(
 
     var binary_digest: ?[]u8 = null;
     defer if (binary_digest) |d| alloc.free(d);
-    if (m.runtime) |rt| {
+    // A SCRIPT version has no separately-built binary: its entry is frozen
+    // inside `package/` and covered by the package digest, so its seal must
+    // record no binary digest at all (`integrity.openVersion`). Writing one
+    // would make every script fixture fail validation for a reason that has
+    // nothing to do with what the test is about.
+    if (if (m.runtime) |rt| (if (manifest.isScript(rt)) null else rt) else null) |rt| {
         const host_entry = rt.entry.forHost() orelse return error.EntryUnsupportedOnHost;
         const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ host_entry, integrity.exe_suffix });
         defer alloc.free(entry);

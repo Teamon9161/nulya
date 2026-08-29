@@ -21,6 +21,8 @@
 //!   halfframe  answers `hello`, then writes half a header line and exits
 //!   liar       answers `hello`, then claims a payload larger than any reader
 //!              will accept
+//!   foreign    answers `hello` correctly, calling itself an os and arch that do
+//!              not exist — the machine a host has no build for
 //!   silent     answers nothing at all, ever
 //!
 //! The frames are written by hand rather than through `protocol.zig`: a fake
@@ -65,6 +67,10 @@ pub fn main(init: std.process.Init) !void {
     );
     try out.writeStreamingAll(io, line);
     if (std.mem.eql(u8, mode, "version")) return;
+    // `foreign`: the handshake is all a caller wanted. What makes it useful is
+    // the `os` / `arch` above — a machine this store can hold no build for, so
+    // the exec-version lookup has to refuse rather than guess.
+    if (std.mem.eql(u8, mode, "foreign")) return;
 
     // One more request, answered badly (or not at all).
     const req = reader.interface.takeDelimiter('\n') catch return orelse return;

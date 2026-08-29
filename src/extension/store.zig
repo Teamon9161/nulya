@@ -280,6 +280,93 @@ pub const Store = struct {
         return active.version;
     }
 
+    /// The package digest a built version's seal records — "which package bytes
+    /// these are", the key `findSealed` matches on. Caller owns the result.
+    pub fn readPackageDigest(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) ![]u8 {
+        try validateIdentity(id, version);
+        const version_rel = try self.versionDir(alloc, id, version);
+        defer alloc.free(version_rel);
+        const seal_sub = try std.fs.path.join(alloc, &.{ version_rel, integrity.seal_file });
+        defer alloc.free(seal_sub);
+        const bytes = self.root.readFileAlloc(self.io, seal_sub, alloc, .limited(1 << 20)) catch |err| switch (err) {
+            error.Canceled, error.OutOfMemory => return err,
+            else => return error.VersionNotFound,
+        };
+        defer alloc.free(bytes);
+        var seal = integrity.parseSeal(alloc, bytes) catch return error.VersionSealInvalid;
+        defer seal.deinit();
+        return alloc.dupe(u8, seal.package_digest);
+    }
+
+    /// The built version of `id` in this root whose seal records THESE package
+    /// bytes built for `target` — and, when the caller can name one, by that
+    /// compiler.
+    ///
+    /// One matcher, two questions. A build asks it about its own machine ("have
+    /// I already produced this?", `build_ext`); a session whose tools run
+    /// elsewhere asks it about another one ("which of my versions is the one
+    /// that machine can run?", `Roots.resolveForTarget`). Both are the same key
+    /// — the seal's triple — and two implementations of it is how the two would
+    /// come to disagree about what "the same package" means.
+    ///
+    /// Without a compiler identity several builds of one source can match, one
+    /// per compiler that ever produced it, so the search runs over SORTED
+    /// version ids: which copy answers must not depend on the order a directory
+    /// listing happens to arrive in. A half-written or otherwise broken version
+    /// directory is skipped rather than reported; host faults propagate. Null
+    /// when this root holds no such version. Caller owns the result.
+    ///
+    /// The check is `.structural`, not `.sealed`: the caller that is about to
+    /// RUN or FREEZE these bytes validates them itself (composition, `ext run`,
+    /// `exec.Resolver`, `adoptVersionDir`), and re-digesting every built binary
+    /// here would make `ext sync --dry-run` hash the whole store on every run.
+    pub fn findSealed(
+        self: Store,
+        alloc: std.mem.Allocator,
+        id: []const u8,
+        package_digest: []const u8,
+        target: []const u8,
+        compiler: ?[]const u8,
+    ) !?[]u8 {
+        const versions = self.listVersions(alloc, id) catch |err| switch (err) {
+            error.InvalidId => return null,
+            else => return err,
+        };
+        defer {
+            for (versions) |v| alloc.free(v);
+            alloc.free(versions);
+        }
+        const sorted = try alloc.alloc([]const u8, versions.len);
+        defer alloc.free(sorted);
+        @memcpy(sorted, versions);
+        std.mem.sort([]const u8, sorted, {}, lessThanVersion);
+
+        for (sorted) |v| {
+            const version_rel = try self.versionDir(alloc, id, v);
+            defer alloc.free(version_rel);
+            const seal_sub = try std.fs.path.join(alloc, &.{ version_rel, integrity.seal_file });
+            defer alloc.free(seal_sub);
+            const bytes = self.root.readFileAlloc(self.io, seal_sub, alloc, .limited(1 << 20)) catch |err| switch (err) {
+                error.Canceled, error.OutOfMemory => return err,
+                else => continue, // half-written version directory: not a candidate
+            };
+            defer alloc.free(bytes);
+            var seal = integrity.parseSeal(alloc, bytes) catch continue;
+            defer seal.deinit();
+            if (!std.mem.eql(u8, seal.package_digest, package_digest)) continue;
+            if (!std.mem.eql(u8, seal.target, target)) continue;
+            if (compiler) |c| {
+                if (!std.mem.eql(u8, seal.compiler, c)) continue;
+            }
+            integrity.validateVersionDir(alloc, self.io, self.root, version_rel, v, id, .structural) catch |err| {
+                if (!isExtensionFault(err)) return err;
+                continue;
+            };
+            return try alloc.dupe(u8, v);
+        }
+        return null;
+    }
+
     /// All built version ids for `id`, newest-first order not guaranteed. Caller
     /// owns the outer slice and each entry.
     pub fn listVersions(self: Store, alloc: std.mem.Allocator, id: []const u8) ![]const []u8 {
@@ -397,6 +484,10 @@ pub fn openRoot(io: std.Io, cwd: []const u8, ext_root_rel: []const u8) !std.Io.D
         try std.Io.Dir.cwd().openDir(io, cwd, .{});
     defer workspace.close(io);
     return workspace.openDir(io, ext_root_rel, .{ .iterate = true });
+}
+
+fn lessThanVersion(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
 }
 
 fn validateIdentity(id: []const u8, version: []const u8) !void {

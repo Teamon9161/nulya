@@ -33,10 +33,10 @@ pub const Ctx = struct {
     /// against it.
     cwd: []const u8,
     env: *const std.process.Environ.Map,
-    /// The stem of `NULYA_SESSION` when this call runs inside a session (the
-    /// kernel sets that variable for every child of `session step`; `ext run`
-    /// from a shell in a session inherits it). Null outside a session — then
-    /// there is no per-session state (no freshness, no gates).
+    /// `NULYA_SESSION_ID` when this call runs inside a session (the kernel
+    /// publishes it to every child of `session step`; `ext run` from a shell in
+    /// a session inherits it). Null outside a session — then there is no
+    /// per-session state (no freshness, no gates).
     session_id: ?[]const u8,
 
     /// Resolve a model-supplied path against `cwd`. Returned slice is owned by

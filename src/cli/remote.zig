@@ -240,7 +240,14 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // The ordinary local environment of THIS machine — the whole point. No
     // session ref: an agent runs commands, it does not own a ledger, so
     // `startShellTask` here would have nowhere to report and says so.
-    var lenv = try launch.localEnvironment(alloc, io, &cfg, null, "");
+    //
+    // THIS machine's store roots, resolved the way every other nulya process on
+    // it resolves them: an extension version that arrived by `ext push` lands in
+    // the user store here, and a workspace over here may hold its own. The host
+    // never names a directory on this machine (goals/remote-env.md §3.3).
+    const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
+    defer launch.freeExtensionRoots(alloc, ext_roots);
+    var lenv = try launch.localEnvironment(alloc, io, &cfg, null, "", ext_roots);
     defer lenv.deinit();
 
     const read_buf = try alloc.alloc(u8, protocol.max_header_bytes);
@@ -280,6 +287,15 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 }
 
 fn serveOne(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
+    // Whichever verb this is, the session it belongs to is published to
+    // everything spawned from here (DESIGN §5.3). Only the IDENTITY exists on
+    // this machine — the session file is on the host — which is exactly why it
+    // is `NULYA_SESSION_ID` and not `NULYA_SESSION`. Idempotent: one channel
+    // serves one session, so after the first frame this is a no-op.
+    if (req.session.len != 0) {
+        const known = agent.lenv.env.get("NULYA_SESSION_ID") orelse "";
+        if (!std.mem.eql(u8, known, req.session)) try agent.lenv.env.put("NULYA_SESSION_ID", req.session);
+    }
     switch (protocol.Op.parse(req.op)) {
         .hello => try serveHello(agent, req),
         .run_shell => try serveShell(agent, req, payload),
@@ -292,9 +308,9 @@ fn serveOne(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
         .store_stat => try serveStoreStat(agent, req),
         .store_put => try serveStorePut(agent, req, payload),
         .store_commit => try serveStoreCommit(agent),
-        .run_extension => try agent.refuse("extension tools do not run over this channel yet; they still run on the machine the harness runs on"),
+        .run_extension => try serveRunExtension(agent, req, payload),
         .start_task => try agent.refuse("background tasks do not run over this channel yet; they still run on the machine the harness runs on"),
-        .unknown => try agent.refuse("unknown request; this build understands hello, run-shell, put-file, list-dir, store-stat, store-put, store-commit and cancel"),
+        .unknown => try agent.refuse("unknown request; this build understands hello, run-shell, run-extension, put-file, list-dir, store-stat, store-put, store-commit and cancel"),
     }
 }
 
@@ -323,22 +339,58 @@ fn serveHello(agent: *Agent, req: protocol.Request) !void {
     }, "", "");
 }
 
-/// Runs the command while watching for a `cancel` frame, so a canceled step on
-/// the host actually ends the process HERE — the guarantee the exec target
-/// could not make (DESIGN §8.1's first honest limit).
-const ShellTask = struct {
+/// Runs something while watching for a `cancel` frame, so a canceled step on the
+/// host actually ends the process HERE — the guarantee the exec target could not
+/// make (DESIGN §8.1's first honest limit).
+///
+/// One task for both run verbs: a shell command and an extension call are the
+/// same thing to this side — a child of this machine's local environment, with
+/// the same tree kill, the same budget and the same capture.
+const RunTask = struct {
     agent: *Agent,
-    req: environment.ShellRequest,
-    out: ?anyerror!environment.ShellOutcome = null,
+    req: union(enum) {
+        shell: environment.ShellRequest,
+        extension: environment.ExtensionRequest,
+    },
+    out: ?anyerror!Captured = null,
 
-    fn run(self: *ShellTask) void {
-        const result = self.agent.lenv.environment().runShell(self.agent.alloc, self.req);
+    /// The two outcome types are the same four fields; keeping one shape here
+    /// is what lets the reply below be written once.
+    const Captured = struct {
+        stdout: []u8,
+        stderr: []u8,
+        exit_code: u8,
+        timed_out: bool,
+
+        fn deinit(self: Captured, alloc: std.mem.Allocator) void {
+            alloc.free(self.stdout);
+            alloc.free(self.stderr);
+        }
+    };
+
+    fn run(self: *RunTask) void {
+        const result = self.round();
         // Canceled leaves `out` null: the local runner has already killed the
         // whole process tree on that path and there is no outcome to report.
         if (result) |_| {} else |err| {
             if (err == error.Canceled) return;
         }
         self.out = result;
+    }
+
+    fn round(self: *RunTask) anyerror!Captured {
+        const env = self.agent.lenv.environment();
+        const alloc = self.agent.alloc;
+        switch (self.req) {
+            .shell => |r| {
+                const o = try env.runShell(alloc, r);
+                return .{ .stdout = o.stdout, .stderr = o.stderr, .exit_code = o.exit_code, .timed_out = o.timed_out };
+            },
+            .extension => |r| {
+                const o = try env.runExtension(alloc, r);
+                return .{ .stdout = o.stdout, .stderr = o.stderr, .exit_code = o.exit_code, .timed_out = o.timed_out };
+            },
+        }
     }
 };
 
@@ -365,13 +417,44 @@ const ControlWatch = struct {
 };
 
 fn serveShell(agent: *Agent, req: protocol.Request, command: []const u8) !void {
-    const shell_req: environment.ShellRequest = .{
+    return serveRun(agent, .{ .shell = .{
         .command = command,
         .cwd = if (req.cwd.len != 0) req.cwd else ".",
         .max_output_bytes = if (req.max_output_bytes != 0) req.max_output_bytes else 1 << 20,
         .timeout_ms = req.timeout_ms,
-    };
-    var task: ShellTask = .{ .agent = agent, .req = shell_req };
+    } });
+}
+
+/// Run one extension tool HERE, against this machine's workspace and this
+/// machine's store — which is the whole of what a remote session buys
+/// (goals/remote-env.md §3.1).
+///
+/// The frame named `(id, version, tool)`; everything else about the call is
+/// decided on this side, by the same code a local session goes through:
+/// `extension/exec.zig` picks the entry variant for THIS OS, verifies that
+/// version against its own seal, and `extension/protocol.zig` derives
+/// `NULYA_TOOL` / `NULYA_ARG_<k>` from the arguments in the payload. There is no
+/// second implementation of any of it over here, because over here is nulya too.
+///
+/// No presentation file: its reader is the front end, on the host.
+fn serveRunExtension(agent: *Agent, req: protocol.Request, arguments: []const u8) !void {
+    if (req.id.len == 0 or req.version.len == 0 or req.tool.len == 0) {
+        try agent.refuse("run-extension needs an extension id, a version and a tool");
+        return;
+    }
+    return serveRun(agent, .{ .extension = .{
+        .id = req.id,
+        .version = req.version,
+        .tool = req.tool,
+        .cwd = if (req.cwd.len != 0) req.cwd else ".",
+        .request_json = if (arguments.len != 0) arguments else "{}",
+        .max_output_bytes = if (req.max_output_bytes != 0) req.max_output_bytes else 1 << 20,
+        .timeout_ms = req.timeout_ms,
+    } });
+}
+
+fn serveRun(agent: *Agent, request: @FieldType(RunTask, "req")) !void {
+    var task: RunTask = .{ .agent = agent, .req = request };
     var watch: ControlWatch = .{ .agent = agent };
 
     const Race = union(enum) { command: void, control: void };
@@ -381,13 +464,13 @@ fn serveShell(agent: *Agent, req: protocol.Request, command: []const u8) !void {
     // only the mid-command cancel, and losing the command instead would be a
     // worse trade. Same degradation `waitBounded` takes.
     sel.concurrent(.control, ControlWatch.run, .{&watch}) catch {
-        ShellTask.run(&task);
-        return replyShell(agent, &task);
+        RunTask.run(&task);
+        return replyRun(agent, &task);
     };
-    sel.concurrent(.command, ShellTask.run, .{&task}) catch {
+    sel.concurrent(.command, RunTask.run, .{&task}) catch {
         sel.cancelDiscard();
-        ShellTask.run(&task);
-        return replyShell(agent, &task);
+        RunTask.run(&task);
+        return replyRun(agent, &task);
     };
     _ = sel.await() catch {
         sel.cancelDiscard();
@@ -395,7 +478,7 @@ fn serveShell(agent: *Agent, req: protocol.Request, command: []const u8) !void {
     };
     sel.cancelDiscard(); // cancels and JOINS the loser
 
-    if (task.out != null) return replyShell(agent, &task);
+    if (task.out != null) return replyRun(agent, &task);
 
     // The control frame (or EOF) won: cancelling the command task made the
     // local runner kill the whole tree. Answer so the channel stays well formed
@@ -405,15 +488,13 @@ fn serveShell(agent: *Agent, req: protocol.Request, command: []const u8) !void {
     if (!watch.eof) try agent.reply(.{ .ok = true, .canceled = true, .exit_code = 1 }, "", "");
 }
 
-fn replyShell(agent: *Agent, task: *ShellTask) !void {
+fn replyRun(agent: *Agent, task: *RunTask) !void {
     const settled = task.out orelse {
         try agent.reply(.{ .ok = true, .canceled = true, .exit_code = 1 }, "", "");
         return;
     };
     const outcome = settled catch |err| {
-        const msg = try std.fmt.allocPrint(agent.alloc, "could not run the command: {s}", .{@errorName(err)});
-        defer agent.alloc.free(msg);
-        try agent.refuse(msg);
+        try agent.refuseFmt("{s}", .{try runFailure(agent, task.req, err)});
         return;
     };
     defer outcome.deinit(agent.alloc);
@@ -652,6 +733,30 @@ fn serveListDir(agent: *Agent, req: protocol.Request) !void {
     // sentence this build wrote, not something the directory decides the size of.
     const body = try protocol.encodeEntries(a, entries.items);
     try agent.reply(.{ .ok = true, .bytes = body.len, .message = note }, body, "");
+}
+
+/// Why a run did not happen, in that machine's own words. An extension gets the
+/// sentence that names the missing version and the command that delivers it:
+/// "this machine does not have it" is the ONE failure a push fixes, and the model
+/// is the one who has to be told (the host turns this into an ordinary failed
+/// call).
+fn runFailure(agent: *Agent, request: @FieldType(RunTask, "req"), err: anyerror) ![]const u8 {
+    switch (request) {
+        .shell => return std.fmt.allocPrint(agent.arena.allocator(), "could not run the command: {s}", .{@errorName(err)}),
+        .extension => |r| {
+            const missing = err == error.VersionNotFound or err == error.VersionSealInvalid or
+                err == error.VersionEntryNotFound or err == error.VersionPackageMissing;
+            if (!missing) {
+                return std.fmt.allocPrint(agent.arena.allocator(), "could not run {s}@{s} here: {s}", .{ r.id, r.version, @errorName(err) });
+            }
+            return std.fmt.allocPrint(
+                agent.arena.allocator(),
+                "this machine has no usable copy of {s}@{s} ({s}), so its tools cannot run here; " ++
+                    "on the harness machine run `nulya ext push {s}@{s} --env <this session's --env>`",
+                .{ r.id, r.version, @errorName(err), r.id, r.version },
+            );
+        },
+    }
 }
 
 fn lessThanEntry(_: void, a: protocol.Entry, b: protocol.Entry) bool {

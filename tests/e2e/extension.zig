@@ -209,14 +209,17 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     const ws_path = ws_real[0..ws_real_len];
 
     try std.testing.expect(result.entry_rel != null);
-    const entry_abs = try std.fs.path.join(alloc, &.{ ws_path, ext_dir_rel, "versions", result.version, result.entry_rel.? });
-    defer alloc.free(entry_abs);
 
-    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    // The seam is handed an IDENTITY; finding the file that version means, and
+    // checking it against its own seal, is the environment's job — the same one
+    // it does on a remote agent (goals/remote-env.md §3.1).
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_roots = support.workspace_store_roots });
     defer lenv.deinit();
 
     const invocation = try lenv.environment().runExtension(alloc, .{
-        .entry_path = entry_abs,
+        .id = "demo",
+        .version = result.version,
+        .tool = "greet",
         .cwd = ws_path,
         .request_json = "{\"name\":\"zig\"}",
         .max_output_bytes = 1 << 20,
@@ -795,7 +798,7 @@ test "cli: activating into the user store from inside a session says so on stder
     {
         const stderr = try runCliStderr(alloc, io, ws, &.{ exe_abs, "ext", "activate", "--user", "prompts.demo", version }, &.{
             home_env,
-            .{ .key = "NULYA_SESSION", .value = ".nulya/sessions/s-probe.jsonl" },
+            .{ .key = "NULYA_SESSION_ID", .value = "s-probe" },
         });
         defer alloc.free(stderr);
         const expected = try std.fmt.allocPrint(alloc, "note: activating prompts.demo@{s} in the user store from inside session s-probe: prompts.demo now means this version for every workspace on this machine", .{version});
@@ -1568,7 +1571,7 @@ test "bundled handoff: a brief missing sections is refused and nothing is writte
 
     // `session step` sets this for everything it runs; `ext run` is how the same
     // tool is reached from outside, so the test says which session it is in.
-    const in_session: []const EnvPair = &.{.{ .key = "NULYA_SESSION", .value = ".nulya/sessions/s-probe.jsonl" }};
+    const in_session: []const EnvPair = &.{.{ .key = "NULYA_SESSION_ID", .value = "s-probe" }};
 
     // A brief missing two of the three required sections names BOTH of them —
     // one retry, not two — and writes nothing at all.
@@ -2362,9 +2365,11 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> pinn
     var comp = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .pinned_native_tools = &pins });
     defer comp.deinit(alloc);
     const greet = comp.tools.lookup("greet") orelse return error.TestUnexpectedResult;
-    // The frozen script lives under package/, and the binding carries its interpreter.
-    try std.testing.expect(std.mem.indexOf(u8, comp.extension_tool_bindings[0].entry_path, "package") != null);
-    try std.testing.expect(comp.extension_tool_bindings[0].interpreter != null);
+    // The binding names the frozen version; that the frozen SCRIPT under
+    // `package/` is what runs, through the interpreter its manifest declares, is
+    // what the call below proves — and proves better than an assertion about a
+    // string, since the resolution now happens where the spawn does.
+    try std.testing.expectEqualStrings(version, comp.extension_tool_bindings[0].version);
 
     const result = try callNative(alloc, io, greet, ws_path);
     defer alloc.free(result.output);

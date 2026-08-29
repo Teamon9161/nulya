@@ -28,6 +28,9 @@
 //!     {"op":"hello","v":2,"nulya":"<build version>"}
 //!     {"op":"run-shell","cwd":"<dir>","timeout_ms":N|null,"max_output_bytes":N,"bytes":L}
 //!                                                       payload: the command
+//!     {"op":"run-extension","id":…,"version":…,"tool":…,"cwd":…,"timeout_ms":…,
+//!                          "max_output_bytes":N,"bytes":L}
+//!                                                       payload: the arguments JSON
 //!     {"op":"put-file","cwd":"<dir>","path":"<workspace-relative>","bytes":L}
 //!                                                       payload: the file's bytes
 //!     {"op":"list-dir","path":"<dir>"}
@@ -50,10 +53,24 @@
 //!                                     store already holds that version, sealed
 //!     {"ok":false,"message":"…"}
 //!
-//! `run-extension` and `start-task` are named in `Op` and answered `ok:false`
-//! with a sentence saying which phase implements them. They are in the
-//! vocabulary and not in this build on purpose: a host talking to a newer agent,
-//! or the reverse, gets a sentence rather than "unknown op".
+//! `start-task` is named in `Op` and answered `ok:false` with a sentence saying
+//! which phase implements it. It is in the vocabulary and not in this build on
+//! purpose: a host talking to a newer agent, or the reverse, gets a sentence
+//! rather than "unknown op".
+//!
+//! ── Running an extension over there (goals/remote-env.md §3.1) ──────────────
+//!
+//! `run-extension` names an IDENTITY — `(id, version, tool)` — and never a path.
+//! The agent picks the entry variant for ITS OS, verifies that version against
+//! its own seal, joins its own store root, and derives `NULYA_TOOL` /
+//! `NULYA_ARG_<k>` from the very arguments JSON in the payload
+//! (`extension/protocol.zig`). So there is no shell quoting anywhere on this
+//! path and no argv length limit, and the host never models the far file system.
+//!
+//! A version that machine does not hold is `ok:false` with a sentence naming
+//! `nulya ext push` — which the host turns into an ordinary FAILED CALL (exit 1
+//! plus that stderr), so the model reads it and the usage journal records a
+//! truthful `ok=false`, rather than the whole step failing.
 //!
 //! ── Pushing an extension version (`nulya ext push`, DESIGN §7.4) ────────────
 //!
@@ -237,11 +254,21 @@ pub const Request = struct {
     /// `run-shell`: the runner-level capture cap, applied on the agent side so
     /// an enormous output never crosses the channel at all.
     max_output_bytes: usize = 0,
-    /// `store-stat`: which extension, and which immutable version of it. The
-    /// two later verbs of a push name neither — the agent has exactly one open
-    /// push, and a second spelling of "which one" is a second thing to drift.
+    /// `store-stat` and `run-extension`: which extension, and which immutable
+    /// version of it. The two later verbs of a push name neither — the agent has
+    /// exactly one open push, and a second spelling of "which one" is a second
+    /// thing to drift.
     id: []const u8 = "",
     version: []const u8 = "",
+    /// `run-extension`: the tool name that version's frozen manifest declares.
+    /// It becomes `NULYA_TOOL` on the far side, derived there together with the
+    /// argument variables — one implementation of that rule, two machines.
+    tool: []const u8 = "",
+    /// The session these commands belong to, by IDENTITY (`NULYA_SESSION_ID`,
+    /// DESIGN §5.3). Never the session FILE's path: that names a file on the
+    /// host, and a package over there handed one would be told a lie. The id is
+    /// true on any machine, which is exactly why the two were split.
+    session: []const u8 = "",
     /// `store-put`: these bytes are meant to be executed (the compiled entry
     /// under `bin/`). A file copy carries its mode; a payload does not.
     exec: bool = false,

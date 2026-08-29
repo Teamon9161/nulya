@@ -542,13 +542,11 @@ fn compilerIdentity(
 /// machine can name its compiler, from that same compiler. Such a version is
 /// this build's output by content addressing (DESIGN §7.4) — in the destination
 /// root that makes the build a no-op, and in another root it makes the version
-/// copyable. Null when the root holds no such version; a broken copy is skipped
-/// rather than reported, host faults propagate. Caller owns the result.
+/// copyable.
 ///
-/// Without a compiler identity (a compiled package on a machine with no
-/// toolchain) several builds of one source can match — one per compiler that
-/// ever produced it — so the search runs over sorted version ids: which copy is
-/// adopted must not depend on the order a directory listing happens to arrive in.
+/// The matching itself is `Store.findSealed`, because a session whose tools run
+/// on another machine asks the very same question of the very same key
+/// (`Roots.resolveForTarget`, goals/remote-env.md §3.1). Caller owns the result.
 fn findMatchingVersion(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -558,54 +556,7 @@ fn findMatchingVersion(
     target: []const u8,
     compiler: ?[]const u8,
 ) !?[]u8 {
-    const versions = store.Store.init(io, root).listVersions(alloc, id) catch |err| switch (err) {
-        error.InvalidId => return null,
-        else => return err,
-    };
-    defer {
-        for (versions) |v| alloc.free(v);
-        alloc.free(versions);
-    }
-    const sorted = try alloc.alloc([]const u8, versions.len);
-    defer alloc.free(sorted);
-    @memcpy(sorted, versions);
-    std.mem.sort([]const u8, sorted, {}, lessThanVersion);
-
-    for (sorted) |v| {
-        const version_rel = try std.fs.path.join(alloc, &.{ id, "versions", v });
-        defer alloc.free(version_rel);
-        const seal_sub = try std.fs.path.join(alloc, &.{ version_rel, seal_file });
-        defer alloc.free(seal_sub);
-        const bytes = root.readFileAlloc(io, seal_sub, alloc, .limited(1 << 20)) catch |err| switch (err) {
-            error.Canceled, error.OutOfMemory => return err,
-            else => continue, // half-written version directory: not a candidate
-        };
-        defer alloc.free(bytes);
-        var seal = integrity.parseSeal(alloc, bytes) catch continue;
-        defer seal.deinit();
-        if (!std.mem.eql(u8, seal.package_digest, package_digest)) continue;
-        if (!std.mem.eql(u8, seal.target, target)) continue;
-        if (compiler) |c| {
-            if (!std.mem.eql(u8, seal.compiler, c)) continue;
-        }
-        // The seal claims these are our bytes; `.structural` checks the version
-        // directory is complete enough to be that answer. The full re-digest is
-        // not this lookup's job: in the DESTINATION root the answer is "already
-        // built" and whatever consumes it (composition, `ext run`) validates
-        // `.sealed` itself, and a DONOR's copy is re-validated `.sealed` after
-        // it is copied in (`adoptVersionDir`). Digesting here instead would make
-        // `ext sync --dry-run` re-hash every built binary on every run.
-        integrity.validateVersionDir(alloc, io, root, version_rel, v, id, .structural) catch |err| {
-            if (!store.isExtensionFault(err)) return err;
-            continue;
-        };
-        return try alloc.dupe(u8, v);
-    }
-    return null;
-}
-
-fn lessThanVersion(_: void, a: []const u8, b: []const u8) bool {
-    return std.mem.lessThan(u8, a, b);
+    return store.Store.init(io, root).findSealed(alloc, id, package_digest, target, compiler);
 }
 
 /// Copy `<id>/versions/<version>` from one store root into another, byte for

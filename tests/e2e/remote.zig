@@ -13,11 +13,15 @@
 //!      falls back to running here;
 //!   6. a spill lands on the machine whose files the model can open, at the very
 //!      path its footer names (Phase 2);
-//!   7. what is NOT moved yet says so: extension tools and background tasks
-//!      refuse, in sentences, rather than silently touching this machine;
+//!   7. an extension tool runs on the far machine, against the far workspace —
+//!      so `read` and `shell` finally answer about the same repository — while
+//!      what is NOT moved yet (background tasks) still refuses in a sentence;
 //!   8. an extension version pushed over the channel is validated against its
 //!      own seal ON THAT MACHINE before it becomes a version anyone can use,
-//!      and pushing one that is already there does nothing (Phase 3).
+//!      and pushing one that is already there does nothing (Phase 3);
+//!   9. which BUILD of a package serves a remote session is decided once, at
+//!      creation, and a package with no build for that machine stops creation
+//!      instead of failing later (`exec_version`).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -695,7 +699,7 @@ test "a version that does not arrive intact never becomes visible over there" {
 
 // ── what is not moved yet ───────────────────────────────────────────────────
 
-test "extension tools and background tasks refuse in a remote session, in sentences" {
+test "a version the far machine does not hold is a failed call pointing at push, not a dead step" {
     const alloc = std.testing.allocator;
     var threaded = threadedIo(alloc);
     defer threaded.deinit();
@@ -709,18 +713,23 @@ test "extension tools and background tasks refuse in a remote session, in senten
     var renv = try remote.RemoteEnvironment.connect(alloc, io, .{ .spec = spec, .version = "e2e" });
     defer renv.deinit();
 
-    // An extension call is answered as a FAILED CALL, so the sentence reaches
-    // the model through the path every failed extension call already uses —
-    // rather than as a host error, which would fail the whole step.
+    // Nothing was pushed, so the agent cannot run this. The answer is a FAILED
+    // CALL — exit code plus the far side's own sentence — so it reaches the
+    // model through the path every failed extension call already uses, and the
+    // step goes on. A host error here would take the conversation down for
+    // something one `nulya ext push` fixes.
     const ext = try renv.environment().runExtension(alloc, .{
-        .entry_path = "bin/whatever",
+        .id = "nowhere",
+        .version = "v-000000000000000000000000",
+        .tool = "t",
         .cwd = ".",
         .request_json = "{}",
         .max_output_bytes = 1 << 20,
     });
     defer ext.deinit(alloc);
     try std.testing.expect(ext.exit_code != 0);
-    try std.testing.expect(std.mem.indexOf(u8, ext.stderr, "harness") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ext.stderr, "ext push") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ext.stderr, "nowhere") != null);
 
     // A background task has no supervisor over there yet, and says so as its
     // own error so `tools/shell.zig` can turn it into the model's sentence.
@@ -728,6 +737,206 @@ test "extension tools and background tasks refuse in a remote session, in senten
         error.RemoteBackgroundUnsupported,
         renv.environment().startShellTask(alloc, .{ .command = "echo hi", .cwd = "." }),
     );
+}
+
+// ── the extension runs over there ───────────────────────────────────────────
+
+/// The bundled `std`, built into `ws`'s workspace store (compiled at most once
+/// per checkout by the suite's shared cache) and activated, so a `--pin` can
+/// reach it. Returns its version; caller frees.
+fn installStd(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, exe: []const u8) ![]u8 {
+    const version = try support.stageBundled(alloc, io, ws, "std");
+    errdefer alloc.free(version);
+    const activated = try runCli(alloc, io, ws, &.{ exe, "ext", "activate", "std", version });
+    defer alloc.free(activated.stdout);
+    if (activated.code != 0) return error.ActivateFailed;
+    return version;
+}
+
+/// …and delivered to the machine `spec` names.
+fn pushStd(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, exe: []const u8, spec: []const u8) ![]u8 {
+    const version = try installStd(alloc, io, ws, exe);
+    errdefer alloc.free(version);
+    const ref = try std.fmt.allocPrint(alloc, "std@{s}", .{version});
+    defer alloc.free(ref);
+    const pushed = try runCli(alloc, io, ws, &.{ exe, "ext", "push", ref, "--env", spec });
+    defer alloc.free(pushed.stdout);
+    if (pushed.code != 0) return error.PushFailed;
+    return version;
+}
+
+test "an extension tool reads the FAR workspace, and keeps its per-session state there" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // Two sentinels with the SAME name and different bodies: one here, one over
+    // there. Which body comes back is the whole question this phase answers —
+    // before it, `ext:std/read` was a process on this machine reading this
+    // machine's files while `shell` read the other one's.
+    try ws.writeFile(io, .{ .sub_path = launch.ScriptedProvider.read_target, .data = "host-side sentinel\n" });
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    try far.dir.writeFile(io, .{ .sub_path = launch.ScriptedProvider.read_target, .data = "far-side sentinel\n" });
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    // The agent gets a home of its own, so "the far store" really is a second
+    // store and the push below is not a copy into the directory it came from.
+    var far_home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_home = try farHome(io, ws, &far_home_buf);
+    const spec = try homedSpec(alloc, exe, far_home);
+    defer alloc.free(spec);
+
+    const version = try pushStd(alloc, io, ws, exe, spec);
+    defer alloc.free(version);
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs, "--pin", "ext:std/read" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    const step = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "readfile");
+    defer alloc.free(step.stdout);
+    const results = toolResultsLine(step.stdout) orelse return error.NoToolResults;
+    try std.testing.expect(std.mem.indexOf(u8, results, "far-side sentinel") != null);
+    try std.testing.expect(std.mem.indexOf(u8, results, "host-side sentinel") == null);
+
+    // …and the state the tool keeps between calls landed over there too, which
+    // is only possible because the session's IDENTITY crossed the channel while
+    // the session FILE's path — a fact about this machine — did not.
+    const freshness = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/std-freshness.jsonl", .{id});
+    defer alloc.free(freshness);
+    try far.dir.access(io, freshness, .{});
+    try std.testing.expectError(error.FileNotFound, ws.access(io, freshness, .{}));
+}
+
+test "a package pushed nowhere fails its call and says which command delivers it, and the session goes on" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    try ws.writeFile(io, .{ .sub_path = launch.ScriptedProvider.read_target, .data = "host-side sentinel\n" });
+
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    var far_home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_home = try farHome(io, ws, &far_home_buf);
+    const spec = try homedSpec(alloc, exe, far_home);
+    defer alloc.free(spec);
+
+    // Built here, never pushed. Creation still succeeds — the build for that
+    // machine EXISTS, it is simply not over there yet, and which of those two
+    // it is only the far machine can say.
+    const version = try installStd(alloc, io, ws, exe);
+    defer alloc.free(version);
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs, "--pin", "ext:std/read" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    const step = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "readfile");
+    defer alloc.free(step.stdout);
+    // The step SUCCEEDED and the tool failed: the model is told what is missing
+    // and by which command, and nothing on this machine was read instead.
+    try std.testing.expectEqual(@as(u8, 0), step.code);
+    const results = toolResultsLine(step.stdout) orelse return error.NoToolResults;
+    try std.testing.expect(std.mem.indexOf(u8, results, "ext push") != null);
+    try std.testing.expect(std.mem.indexOf(u8, results, "host-side sentinel") == null);
+}
+
+// ── which build serves the session ──────────────────────────────────────────
+
+test "a member with no build for the far machine stops creation, naming the two commands that fix it" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    // A peer that calls itself a machine no store can hold a build for.
+    const spec = try fakeSpec(alloc, "foreign");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    const version = try installStd(alloc, io, ws, exe);
+    defer alloc.free(version);
+
+    const argv = [_][]const u8{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", "/srv/app", "--pin", "ext:std/read" };
+    const new = try runCli(alloc, io, ws, &argv);
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 1), new.code);
+    const err_text = try runCliStderr(alloc, io, ws, &argv, &.{});
+    defer alloc.free(err_text);
+    // Both commands, because both are needed and in that order: produce the
+    // build, then deliver it.
+    try std.testing.expect(std.mem.indexOf(u8, err_text, "--target") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err_text, "ext push") != null);
+    // No session was created: one frozen onto a machine that cannot run its own
+    // composition would fail identically on every step it ever took. (The
+    // directory itself is made before anything is composed, so what is checked
+    // is that it is empty.)
+    var sessions = try ws.openDir(io, ".nulya/sessions", .{ .iterate = true });
+    defer sessions.close(io);
+    var it = sessions.iterate();
+    try std.testing.expect((try it.next(io)) == null);
+}
+
+test "a session whose header predates the exec-version column still steps" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    try ws.writeFile(io, .{ .sub_path = launch.ScriptedProvider.read_target, .data = "here\n" });
+    const version = try installStd(alloc, io, ws, exe);
+    defer alloc.free(version);
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--pin", "ext:std/read" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // Rewrite the header into the shape it had before the column existed. The
+    // rule the optional column buys is that an OLD file still reads, and the
+    // only way to check it is to have one.
+    const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+    defer alloc.free(spath);
+    const before = try ws.readFileAlloc(io, spath, alloc, .unlimited);
+    defer alloc.free(before);
+    try std.testing.expect(std.mem.indexOf(u8, before, "\"exec_version\":\"\"") != null);
+    const after = try std.mem.replaceOwned(u8, alloc, before, ",\"exec_version\":\"\"", "");
+    defer alloc.free(after);
+    try ws.writeFile(io, .{ .sub_path = spath, .data = after });
+
+    const step = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "readfile");
+    defer alloc.free(step.stdout);
+    try std.testing.expectEqual(@as(u8, 0), step.code);
+    const results = toolResultsLine(step.stdout) orelse return error.NoToolResults;
+    try std.testing.expect(std.mem.indexOf(u8, results, "here") != null);
 }
 
 test "nulya task run refuses a remote session rather than running the command here" {

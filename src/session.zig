@@ -159,7 +159,14 @@ pub const AgentSession = struct {
         // composition.
         const active = try alloc.alloc(ledger.ExtensionRef, comp.extensions.len);
         defer alloc.free(active);
-        for (comp.extensions, 0..) |e, i| active[i] = .{ .id = e.id, .version = e.version };
+        for (comp.extensions, 0..) |e, i| active[i] = .{
+            .id = e.id,
+            .version = e.version,
+            // Which build serves a call is decided once, here, and never
+            // re-derived: a resume that asked the far machine again could get a
+            // different answer than the session was composed with.
+            .exec_version = e.exec_version orelse "",
+        };
         const native = try alloc.alloc([]const u8, comp.extension_tool_bindings.len);
         defer alloc.free(native);
         for (comp.extension_tool_bindings, 0..) |b, i| native[i] = b.definition.id;
@@ -490,7 +497,11 @@ pub const AgentSession = struct {
         const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
         const ext_id = rest[0..slash];
         for (self.composition.extensions) |e| {
-            if (std.mem.eql(u8, e.id, ext_id)) return e.version;
+            // The implementation that SERVED this call, which in a session whose
+            // tools run elsewhere is the build for that machine — the version
+            // column answers "which implementation is this evidence about"
+            // (DESIGN §5.5), and the one that ran is the only honest answer.
+            if (std.mem.eql(u8, e.id, ext_id)) return e.exec_version orelse e.version;
         }
         return null;
     }

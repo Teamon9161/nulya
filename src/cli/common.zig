@@ -120,16 +120,21 @@ pub fn targetRootSpec(
 }
 
 /// The id of the session this process is running INSIDE, or null when it is not.
-/// `session step` puts the live session's file path in `NULYA_SESSION` for its
-/// shell children (DESIGN §5.3), so anything the model runs can name the session
-/// it is in without being told. Caller owns the result.
+/// `session step` publishes it as `NULYA_SESSION_ID` to everything it runs
+/// (DESIGN §5.3), so anything the model starts can name the session it is in
+/// without being told. Caller owns the result.
+///
+/// The ID, not the stem of `NULYA_SESSION`: every caller here wants an identity
+/// — a journal column, the default session of a task verb, the `by:` of an
+/// outcome — and a session whose workspace lives on another machine has an
+/// identity there but no session file. The path variable stays, for the callers
+/// that genuinely need a file (`ext activate`'s capability note).
 pub fn envSessionId(alloc: std.mem.Allocator) !?[]u8 {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
-    const path = host.get("NULYA_SESSION") orelse return null;
-    const stem = std.fs.path.stem(path);
-    if (stem.len == 0) return null;
-    return try alloc.dupe(u8, stem);
+    const id = host.get("NULYA_SESSION_ID") orelse return null;
+    if (id.len == 0) return null;
+    return try alloc.dupe(u8, id);
 }
 
 /// Find `--flag <value>` in args; returns the value or null.

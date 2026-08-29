@@ -237,7 +237,9 @@ test "pin: a package nothing else names joins the session that pins one of its t
         defer alloc.free(pinned);
         const header = try readSessionFile(alloc, io, ws, pinned);
         defer alloc.free(header);
-        const member = try std.fmt.allocPrint(alloc, "{{\"id\":\"optin\",\"version\":\"{s}\"}}", .{version});
+        // The PAIRING is the fact — this id at this version — not what else the
+        // frozen entry happens to record beside it.
+        const member = try std.fmt.allocPrint(alloc, "\"id\":\"optin\",\"version\":\"{s}\"", .{version});
         defer alloc.free(member);
         try std.testing.expect(std.mem.indexOf(u8, header, member) != null);
         try std.testing.expect(std.mem.indexOf(u8, header, "ext:optin/look") != null);

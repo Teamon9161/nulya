@@ -376,6 +376,16 @@ pub const ParentRef = struct {
 pub const ExtensionRef = struct {
     id: []const u8,
     version: []const u8,
+    /// Which frozen version of this package actually SERVES a tool call, when
+    /// that is not `version` itself: a session whose tools run on another
+    /// machine (DESIGN §8.2) needs the build for THAT machine's target, and a
+    /// compiled package's two builds are two versions of one package.
+    ///
+    /// Empty for every ordinary session — and for a data or script member, whose
+    /// identity does not depend on a target at all — so an old header reads back
+    /// exactly as it always did (`usage?` / `images` / `environment`, the same
+    /// discipline: an optional column, header `v` unchanged).
+    exec_version: []const u8 = "",
 };
 
 /// The session composition frozen into the header.

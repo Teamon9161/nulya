@@ -184,7 +184,7 @@ test "the wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned s
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
     defer alloc.free(id);
 
-    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_roots = support.workspace_store_roots });
     defer lenv.deinit();
     var model = OneToolModel{ .tool_name = "greet", .args = "{\"name\":\"world\"}" };
     const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
@@ -198,11 +198,12 @@ test "the wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned s
     }, .{ .workspace = ws, .session_path = spath });
     defer sess.deinit();
 
-    // The binding carries the frozen script and this host's interpreter.
+    // The binding names the package and the frozen version; that the right
+    // script variant for THIS host runs, through the interpreter its manifest
+    // declares, is what the step below proves — the resolution moved to the
+    // machine doing the spawning, so its result is observable only there.
     const binding = sess.composition.extension_tool_bindings[0];
-    try std.testing.expect(std.mem.indexOf(u8, binding.entry_path, "package") != null);
-    try std.testing.expect(binding.interpreter != null);
-    try std.testing.expect(std.mem.indexOf(u8, binding.entry_path, if (windows) "run.ps1" else "run.sh") != null);
+    try std.testing.expectEqualStrings("greeter", binding.ext_id);
 
     _ = try sess.step();
 
@@ -356,43 +357,50 @@ test "per-platform entry: one version, this host's script — and a version with
         try store.Store.init(io, ext_root).activate(alloc, "elsewhere", away_version);
     }
 
-    // `ext run`: one line naming the package and this host, and exit 1.
+    // `ext run`: a FAILED CALL naming the package, the version and this host —
+    // not a host fault. Which entry variant a version has is a question only the
+    // machine about to spawn it answers (`extension/exec.zig`), so "there is
+    // none for me" is that machine's report about a call, exactly as it is when
+    // the machine is on the other end of a channel.
     {
         const argv = [_][]const u8{ exe_abs, "ext", "run", "elsewhere", "t", "{}" };
         const run = try runCli(alloc, io, ws, &argv);
         defer alloc.free(run.stdout);
         try std.testing.expectEqual(@as(u8, 1), run.code);
-        try std.testing.expectEqualStrings("", run.stdout);
-        const err_text = try runCliStderr(alloc, io, ws, &argv, &.{});
-        defer alloc.free(err_text);
-        try std.testing.expect(std.mem.indexOf(u8, err_text, "elsewhere") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err_text, @tagName(@import("builtin").os.tag)) != null);
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, err_text, "\n"));
+        try std.testing.expect(std.mem.indexOf(u8, run.stdout, "elsewhere") != null);
+        try std.testing.expect(std.mem.indexOf(u8, run.stdout, @tagName(@import("builtin").os.tag)) != null);
     }
 
-    // Pinning it: a HARD failure that names the package. A session quietly
-    // missing a tool the operator pinned is not the session that was asked for
-    // (the `PinNamesUnknownExtension` rule, for a different reason).
+    // Pinning it: the session STARTS — composition freezes an identity and no
+    // longer asks which file it means — and the tool reports for itself when it
+    // is called. That is the deliberate consequence of moving resolution to the
+    // executing machine: a host cannot answer this question for a session whose
+    // tools run somewhere else, and answering it twice (here for local, there
+    // for remote) would be the duplicated decision the move exists to remove.
     {
         const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:elsewhere/t" };
         const new = try runCli(alloc, io, ws, &argv);
         defer alloc.free(new.stdout);
-        try std.testing.expectEqual(@as(u8, 1), new.code);
-        const err_text = try runCliStderr(alloc, io, ws, &argv, &.{});
-        defer alloc.free(err_text);
-        try std.testing.expect(std.mem.indexOf(u8, err_text, "elsewhere") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err_text, "EntryUnsupportedOnHost") != null);
+        try std.testing.expectEqual(@as(u8, 0), new.code);
     }
 
-    // The same refusal at the library seam, so it is the kernel's answer and not
-    // the CLI's politeness.
-    try std.testing.expectError(error.EntryUnsupportedOnHost, composition.SessionComposition.init(
-        alloc,
-        io,
-        ws_path,
-        &.{".nulya/extensions"},
-        .{ .pinned_native_tools = &[_][]const u8{"ext:elsewhere/t"} },
-    ));
+    // The same at the library seam: composition succeeds and the binding names
+    // the version, and the refusal arrives when the call is made.
+    {
+        var comp = try composition.SessionComposition.init(
+            alloc,
+            io,
+            ws_path,
+            &.{".nulya/extensions"},
+            .{ .pinned_native_tools = &[_][]const u8{"ext:elsewhere/t"} },
+        );
+        defer comp.deinit(alloc);
+        const t = comp.tools.lookup("t") orelse return error.TestUnexpectedResult;
+        const result = try support.callNative(alloc, io, t, ws_path);
+        defer alloc.free(result.output);
+        try std.testing.expect(!result.ok);
+        try std.testing.expect(std.mem.indexOf(u8, result.output, "elsewhere") != null);
+    }
 
     // A draft whose declared variant is NOT in the package never becomes a
     // version: the machine that builds it is the only one that can notice.

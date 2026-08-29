@@ -965,10 +965,10 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     defer resolved.deinit(alloc);
     const m = resolved.manifest;
 
-    const rt = m.runtime orelse {
+    if (m.runtime == null) {
         try printOut(alloc, io, "extension '{s}' has no runtime\n", .{id});
         return 1;
-    };
+    }
     const spec: ?manifest.ToolSpec = blk: {
         for (m.tools) |declared_tool| {
             if (std.mem.eql(u8, declared_tool.name, tool)) break :blk declared_tool;
@@ -989,19 +989,12 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const args_json = owned_args orelse
         if (positional.items.len >= 3) positional.items[positional.items.len - 1] else "{}";
 
-    // A compiled binary lives under `bin/`; a script under `package/`. The
-    // resolution dispatches on runtime kind so this CLI path and session
-    // composition never drift on how a frozen entry is located.
-    const entry_abs = resolved.entryPathAbs(alloc, &search.roots) catch |err| switch (err) {
-        // A per-OS `runtime.entry` that names no variant for this machine
-        // (DESIGN §7.1). `entryPathAbs` already named the package and the host
-        // on stderr, so this only decides the exit code.
-        error.EntryUnsupportedOnHost => return 1,
-        else => return err,
-    };
-    defer alloc.free(entry_abs);
-
-    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    // This command hands the environment the same thing a session's tool
+    // binding does — `(id, version, tool)` — and the environment resolves it
+    // against these very roots (`extension/exec.zig`). One resolution
+    // implementation, so a tool called through the CLI and the same tool on the
+    // model's face cannot drift on which file "this version" means.
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_roots = search.specs });
     defer lenv.deinit();
 
     // `ext run` applies NO timeout by default (D6, DESIGN §7.3/§7.8): the
@@ -1028,11 +1021,14 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // Resolution (active version, integrity, frozen manifest, tool declaration,
     // exact entry path) is the CLI's job; from here on the helper owns the
     // spawn, the capture, and the diagnostics.
-    const invocation = invoke.invokeTool(alloc, lenv.environment(), entry_abs, cwd_path, tool, args_json, .{
+    const invocation = invoke.invokeTool(alloc, lenv.environment(), id, resolved.version, tool, cwd_path, args_json, .{
         .timeout_ms = timeout_ms,
         .max_output_bytes = 1 << 20,
-        .interpreter = if (rt.interpreter) |ip| ip.forHost() else null,
     }) catch |err| switch (err) {
+        // A per-OS `runtime.entry` that names no variant for this machine
+        // (DESIGN §7.1). The resolver already named the package and the host on
+        // stderr, so this only decides the exit code.
+        error.EntryUnsupportedOnHost => return 1,
         // The trailing positional IS the arguments, so a malformed one is a
         // usage error rather than a host fault — and `ext run <id> <tool>` with
         // no JSON at all arrives here too, its tool name having been read as the
