@@ -150,19 +150,20 @@ test("the 'more below' marker is the one clickable thing on the status bar", asy
 }, 120_000)
 
 test("the status line ends in a settings control, and clicking it opens the panel", async () => {
-  // 100 columns is where the line has slack for its two pieces of chrome; the
-  // width the helper renders at is exactly that threshold.
+  // Chrome at the far end, opposite the sidebar handle - and the status line
+  // is found by the tool count rather than by the glyph, so this stays honest
+  // if a card ever draws a gear of its own.
   const { setup } = await crowded(24)
   try {
     await settle(setup, 5)
     const rows = setup.captureCharFrame().split("\n")
-    const at = rows.findIndex((row) => row.includes("settings"))
+    const at = rows.findIndex((row) => row.includes("tools 1+"))
     expect(at).toBeGreaterThanOrEqual(0)
-    // It is chrome at the far end, opposite the sidebar handle — not one more
-    // chip queued among this session's facts.
-    expect(rows[at]!.trimEnd().endsWith("settings")).toBe(true)
+    // Not one more chip queued among this session's own facts: it is the last
+    // thing on the line.
+    expect(rows[at]!.trimEnd().endsWith(style.glyphs.settings)).toBe(true)
 
-    await setup.mockMouse.click(rows[at]!.lastIndexOf("settings"), at)
+    await setup.mockMouse.click(rows[at]!.lastIndexOf(style.glyphs.settings), at)
     await untilFrame(setup, (frame) => frame.includes("settings · tui.toml"))
   } finally {
     setup.renderer.destroy()

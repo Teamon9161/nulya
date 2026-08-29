@@ -24,7 +24,7 @@ exports[`the sidebar comes up docked, beside a transcript that is still there 1`
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ › message nulya  ·  / for commands  ·  @ for files                           │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- ◧ unsafe · scripted-demo · tools 1+0                                           
+ ◧ unsafe · scripted-demo · tools 1+0                                        ⚙  
 "
 `;
 
@@ -52,6 +52,6 @@ exports[`a wider terminal spends the room on the rail's own columns 1`] = `
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ › message nulya  ·  / for commands  ·  @ for files                                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
- ◧ sessions  unsafe · scripted-demo · tools 1+0                                                                settings 
+ ◧ sessions  unsafe · scripted-demo · tools 1+0                                                                      ⚙  
 "
 `;

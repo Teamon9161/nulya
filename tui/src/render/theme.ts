@@ -186,6 +186,18 @@ export interface Glyphs {
    * that would be the second answer to a question the screen has already
    * answered at full size (§6.1 rule 4).
    */
+  /**
+   * The way into `/settings` at the far end of the status line (T92).
+   *
+   * The same character `build` uses, and the one place in this closed
+   * vocabulary where two entries share a shape. It is deliberate: a gear is the
+   * one icon a person reads as "settings" without being told, which is exactly
+   * what `◧` was NOT for the sidebar — and the two never meet, one being a
+   * card's head glyph in the transcript and the other host chrome pinned to the
+   * end of the status line. Position is what tells them apart, and position is
+   * one of the four things a terminal has to build meaning out of.
+   */
+  settings: string
   sidebar: string
   /**
    * A directory that already holds a `.nulya/` (T71, `/cwd`'s browser).
@@ -262,6 +274,7 @@ const unicode_glyphs: Glyphs = {
   dialRight: "›",
   picker: "◈",
   check: "✓",
+  settings: "⚙",
   switchOn: "●",
   switchOff: "○",
   tip: "✻",
@@ -299,6 +312,7 @@ const ascii_glyphs: Glyphs = {
   dialRight: ">",
   picker: "#",
   check: "*",
+  settings: "%",
   switchOn: "*",
   switchOff: "-",
   tip: "*",

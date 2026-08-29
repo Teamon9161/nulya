@@ -123,11 +123,14 @@ export function StatusBar(props: {
    * said so.
    *
    * It closes the line the way the sidebar handle opens it — host chrome at
-   * both ends, this session's own facts in between — and it is a WORD rather
-   * than a glyph for the reason the handle learned the hard way (T70): a
-   * control nobody has met is findable by its name and by nothing else. The
-   * glyph vocabulary is closed (§6.3) and `⚙` already means `ext build`, so
-   * minting a second meaning for it would cost more than the word does.
+   * both ends, this session's own facts in between.
+   *
+   * A GLYPH, where the handle needed a word. T70's lesson was not "always
+   * spell it out": it was that `◧` names nothing to somebody who has not met
+   * it, so the pane it opened went undiscovered. A gear is the opposite case —
+   * the one icon a person reads as "settings" without being told — and two
+   * columns at the end of a line buy what nine did, on every width instead of
+   * only past a hundred.
    */
   onOpenSettings?: () => void
 }) {
@@ -189,22 +192,18 @@ export function StatusBar(props: {
         : `${style.glyphs.sidebar} `
 
   /**
-   * `settings`, at the far end, on a terminal with room for it.
-   *
-   * The same threshold the handle spends its own label at: at 100 columns
-   * `layout()` still has slack after the model, the mode and the chips, so
-   * neither piece of chrome is ever bought with the model id. Under it this
-   * simply is not there — an entrance that has to be cut to `set…` is worse
-   * than one you reach by typing `/settings`, and unlike the sidebar handle
-   * there is no glyph to fall back to (§6.1 rule 4).
+   * `⚙`, at the far end — wherever the sidebar handle can be (60 columns, the
+   * width below which the chips on the right all give up).
    *
    * The two leading columns are air, not a joint: the chips before it are
    * facts about this session and this is not one of them. A ` · ` would say
    * "next thing"; a gap says "different thing" (T70's reasoning for the
-   * handle's own trailing gap, at the other end of the same line).
+   * handle's own trailing gap, at the other end of the same line). The
+   * trailing column is inside the target for the handle's other reason: a
+   * control is easier to hit than it is to read.
    */
   const settingsChip = () =>
-    props.onOpenSettings && screen().width >= sidebar_label_width ? "  settings" : ""
+    props.onOpenSettings && screen().width >= 60 ? `  ${style.glyphs.settings} ` : ""
 
   /** The sidebar control stays discoverable while a transient notice is shown. */
   const SidebarHandle = () =>
