@@ -1,7 +1,7 @@
 # Remote environment — 工作区住在别的机器上
 
-> **状态：设计已审阅通过；§4 的 Phase 1 已落地**（2026-08-29，见 DESIGN §8.1 的 `remote:` 一族与 §14 的 `remote` 动词族）。
-> Phase 2–5 未实施。原有的 [DESIGN §8/§8.1](../DESIGN.md) exec target（`session new --env wsl|ssh`，**只有 `shell` 的命令移动**）；
+> **状态：设计已审阅通过；§4 的 Phase 1 与 Phase 2 已落地**（2026-08-29，见 DESIGN §8 的第四个动词、§8.2 的 `remote:` 一族与 §14 的 `remote` 动词族）。
+> Phase 3–5 未实施。原有的 [DESIGN §8/§8.1](../DESIGN.md) exec target（`session new --env wsl|ssh`，**只有 `shell` 的命令移动**）；
 > 方向笔记在 [PLAN §3.8](../PLAN.md)（「真·remote environment = 第二个 `Environment` 实现」）。本文件答那一节列出而没答的缺口。
 > 八条 physics 与「内核只长 substrate」是尺子（[CLAUDE.md](../../CLAUDE.md)）。
 
@@ -136,6 +136,8 @@ phase 的边界该画在"extension 到底动不动"，不画在它的 kind 上�
 **Phase 1 的诚实降级**（在第四个动词落地之前）：spill 仍写 host，footer 改成写明它在 harness 那台机器上、
 本场的命令够不着。丑，但不撒谎；而且 std 六个 tool 自己封顶预算（goals/std.md D5），spill 对它们**永不触发**，
 真会撞上的只有超过 128 KB 输出的裸 `shell`。
+**这段降级 2026-08-29 随 Phase 2 整个删除**（`emit` 两个 budget 的 `spill_note` 字段与 `launch.remote_spill_note` 一并消失）：
+footer 回到只有路径，因为那个路径现在在模型够得着的那台机器上。
 
 **一个已知的牺牲品：`extensions/handoff`。** 它的契约是"往 `.nulya/handoffs/<id>-<n>.md` 写一个文件、driver 去读"，
 而 driver 在 host。包一旦跑在远端，那个文件落在远端，`drivers/goal.*` 与 TUI 都看不见它。
@@ -352,7 +354,7 @@ nulya ext push <id>@<v> --env <spec>          # 内容寻址的一次拷贝 + �
 - 收益已经是真的：常驻通道（无握手）· **远端真 kill**（限局 ① 消失）· `NULYA_EXE` 到得了对面。
 - TUI：`/env` 多一档 + `remote check` 的错误原样显示。
 
-**Phase 2 · scratch / spill 跟着走**
+**Phase 2 · scratch / spill 跟着走** ✅ **已落地**（2026-08-29，见 §6.2）
 - 内核：`Environment` 第四个动词 `putWorkspaceFile`；`emit` 的 spill 与 `StepOutputLimiter` 经它写。local 实现 = 今天那行。
 - 这之前 footer 用 §3.2 的诚实降级措辞。
 
@@ -391,7 +393,9 @@ nulya ext push <id>@<v> --env <spec>          # 内容寻址的一次拷贝 + �
   ⑤ resume 一场远端 session，够不着目标时**硬失败**且什么都不改。
 - **新增一组 `zig build e2e-remote`**（今天四组并行，`e2e` 仍是全部）——不要往现有组里塞，一组一个进程一个核。
 
-## 6. Phase 1 实施记录（2026-08-29）
+## 6. 实施记录
+
+### 6.1 Phase 1（2026-08-29）
 
 **落地了什么**（现状写进 DESIGN §8.2 / §14；本节只记过程与偏差）：
 
@@ -422,6 +426,33 @@ e2e 里一条通道连跑三次并断言每次都答对（`one channel serves ma
 **测试**：`zig build test` **556 pass / 4 skip**（`environment/remote/{mod,protocol}.zig` 的单测在内）。e2e 逐组：`e2e-ext` 47 · `e2e-core` 48 · `e2e-agent` 23 · `e2e-std` 8 · **`e2e-remote` 12**（约 11 s）。
 **`zig build e2e` 这个聚合步在本机不稳**，而且**与本次改动无关**（把全部改动 `git stash` 之后连跑两次同样失败）。**后来查清并修掉了（同日）**：不是负载也不是哪个测试慢——失败形状是"每个测试都 pass、run step 却报 `test runner failed to respond for 1m…`"，因为 Zig 0.16 的 Windows spawn 是 `bInheritHandles=TRUE` 且没有 handle allowlist（`std/Io/Threaded.zig`），build runner 并发起五个测试进程时，兄弟进程（连同它们 spawn 的每个 `nulya.exe`）互相继承对方 stdout 管道的写端——先跑完的组等 EOF 等到被最慢的进程树扣押超过 watchdog 的 60 s 窗口（`Step/Run.zig` 的 `response_timeout` 只在**没有测试在跑**时计时，恰好就是"全部跑完等关流"那一刻）。这正是 `environment.DetachedStdio` 在单组内部防的同一个病，跨 build-runner 兄弟只有不同时跑能治。修法在 build.zig：**Windows 宿主上聚合步的五个 run 串成链**（每组一份聚合专用的 run step 克隆，命名的单组步保持无链、互不拖累；POSIX 无此继承竞争，保持并行）。代价如实：Windows 上 `zig build e2e` 从"理论 50 s"变成实测约 4 分钟（各组之和），单组仍是迭代的快路。
 
+### 6.2 Phase 2（2026-08-29）：spill 跟着工作区走 + list-dir 的头上限修复
+
+**落地了什么**（现状写进 DESIGN §8 / §8.2；本节只记过程与偏差）：
+
+| 新增 | 是什么 |
+|---|---|
+| `Environment.putWorkspaceFile(rel_path, bytes)` | 第四个动词（DESIGN §8）：把字节写进**这一场 session 的工作区**，路径就是 footer 里那个 workspace 相对的字符串。建父目录是实现这一侧的承诺 |
+| `emit.FileSink` | `emit` 这一侧的接口：一个指针加一个写函数。`emit` 从此**一个目录都不建、一个文件都不写** |
+| 协议 `put-file`（`v: 1 → 2`） | 从"这一期不做"变成真动词：头带 `cwd` + `path` + 长度，负载是文件字节 |
+| `protocol.encodeEntries` / `parseEntries` + 编码器的头上限 | `list-dir` 的 entries 改走负载；超过 `max_header_bytes` 的头**拒绝编码** |
+
+**与设计的偏差，逐条**：
+
+1. **`emit` 与 `Environment` 之间没有 adapter，因为不需要一个。** §3.2 说的是"第四个动词，唯一 consumer 是 `emit`"，落地时第一版真在 `loop.zig` 里写了一个 `SpillSink` struct 把环境包成 sink——然后发现 `emit.FileSink` 与 vtable 那一格**逐位同形**（`{ptr, fn(ptr, rel_path, bytes)}`），于是 `Environment.fileSink()` 直接把 `{ptr, vtable.putWorkspaceFile}` 交出去，那个 struct 删掉。签名一改，编译器当场在那一行说话——这比一个转发函数守得更紧。
+2. **`emit` 的两个入口不再收 `io`。** `emit()` 与 `StepOutputLimiter.init()` 的 `io` 参数换成 sink，`writeStepSpill` 整个删除——它与 `writeSpill` 本来就是同一件事的两份实现（各自 `createDirPath` 一次），"建父目录"移进动词这一侧之后，第二份没有存在的理由。
+3. **`emit` 的单测改用 recording sink，不再真写盘。** 否则仓库里就多了一处"字节变成文件"，而 `FileSink` 存在的全部意义就是不要那第二处。顺带断言变强了：现在拿到的是**被写的那个路径**与**原始字节本身**（"footer 里那个字符串就是 sink 收到的那个字符串"因此是一条可测的断言），而不是"文件存在"。
+4. **远端那侧不是第二份实现，是同一份。** `remote serve` 收到 `put-file` 后调的就是 `agent.lenv` 的 `putWorkspaceFile`——§3.4 那句"对面就是 nulya 自己"第一次被兑现成**同一个函数**而不只是同一个二进制。`cwd` 与 `path` 的拼接只在 agent 一侧发生一次，host 从不学远端的路径拼法（§3.3）。
+5. **协议版本 bump 到 2，一次覆盖两件事**（entries 改走负载 + `put-file` 成为真动词）。`hello` 是唯一协商，所以新旧两端相遇拿到的是一句"版本不匹配、去装个对得上的 build"，不是猜——这正是当初把版本号放在握手里的用途。
+6. **`Channel.last_payload` 而不是让 `controlRound` 返回一对。** 回复的负载从前一律当垃圾读掉（读它只为不让流失步）；现在留在 channel arena 里，生命周期就是这一轮——而想要那些字节的调用方（`remote ls`）要的正好是这一轮。
+7. **`max_entries = 1000` 留着，但理由换了。** 它从前被写成"保证这一帧读得进去"，而那是错的单位（1000 **条** vs 64 **KiB**）；现在头上限由编码器强制，这个常量只再说一件事：一次回答该有多大。截断照旧**说出来**。
+8. **e2e 走 in-process 的真通道，不走 CLI。** `session step` 没有调 budget 的 flag，而 scripted provider 发的命令是写死的，所以从 CLI 那条路触发一次 spill 只能靠真打 128 KB 或者新加一个 scripted 档——两者都是为了测试去动生产面。改成在一条真通道上直接 `emit.emit`（sink 取自 `RemoteEnvironment`），断言 §5 的不变量 ②：footer 里那个路径在**远端工作区**下读得出完整原始字节，在 **host 工作区**下 `FileNotFound`。loop 那一半的接线由 `e2e-core` 已有的 spill 断言（一次真 step 的 `tool_results` 里 `spill_path` 是字符串）与 `emit` 的单测各守一半。为此 `root.zig` 多导出一个 `emit`。
+9. **`tool-presentation/` 明确不走这个动词**，且这不是遗漏：判据是 §3.2 那张表的问题本身——**谁读它**。spill 的读者是模型（手在对面），presentation 的读者是前端（在 host 上读）。同一个 step 里两个文件去两台机器，理由写在 `loop.zig` 那两行之间。
+
+**任务 1 那半是一个真 bug，不是清理**：`serveListDir` 用 `max_entries` 这个**条数**去保证 `max_header_bytes` 这个**字节数**，而 1000 个 255 字节的文件名是四分之一兆——host 侧 `takeDelimiter('\n')` 的 buffer 只有 `max_header_bytes`，于是一个完全合法的目录就能把整条通道判死。修法不止是把 entries 搬进负载：**编码器现在拒绝超界的头**（`error.HeaderTooLarge`），所以下一个往头里塞会长的字段的动词，在造出那一帧的地方就被拦住，而不是在对面变成一条突然不说话的通道。单测钉的是机制而不是数字：1000 个 250 字节名字的 listing 走新路径，头仍在界内、entries 无损回来；一个超界的 `message` / `path` 编不出来。
+
+**测试**：`zig build test` **558 pass / 4 skip**（`protocol.zig` 新增两条：大 listing 走负载、超界的头被拒）。e2e 逐组：`e2e-ext` 47 · `e2e-core` 48 · `e2e-agent` 23 · `e2e-std` 8 · **`e2e-remote` 14**（Phase 2 新增两条：spill 落在远端工作区且 host 上没有、put-file 建得出多层父目录）。
+
 ## 7. 开放问题（此处只列，动手那轮拍板）
 
 1. **`ssh:` 与 `remote:ssh:` 两个词要不要并成一个。** `remote:ssh:` 落地后严格覆盖 `ssh:`（也搬 shell、还搬别的、kill 更真），
@@ -429,21 +460,20 @@ e2e 里一条通道连跑三次并断言每次都答对（`one channel serves ma
    该留。**倾向**：pre-release 不留兼容（`runtime.wire` 的先例），`ssh:` 删掉；但这一刀由人来切。
    顺带同一个问题的另一半：`config.environment.backend = "remote"` 这个**已经能解析、今天硬拒**的词
    与 `--env remote:…` 是两处说同一件事，该退休一个。
-   > **裁决待人确认（Phase 1 采用）**：**一字不动**现有的 `local | wsl | wsl:<distro> | ssh:<dest>`，只**新增** `remote:` 一族。
-   > 删一个用户面的词是不可逆的，而且是**人的**决定，不是实现这一轮该顺手做的事；`config.environment.backend` 同理先不动
-   > （它今天仍是"解析得了、建 environment 时硬拒"，Phase 1 没有让它多说一句话）。两个词并存的代价（一个更弱的拼法还在）
-   > 由这一条问题继续记着。
+   > **已裁决（2026-08-29，人确认）**：**删 `ssh:`，退休 backend 的 `"remote"` 词**——pre-release 不留兼容（`runtime.wire` 先例）。
+   > `wsl:` 保留（独立含义：同一个工作区经 `/mnt/` 看，extension 留 host）。旧 header 里冻着 `ssh:` spec 的场 resume 时
+   > 响亮失败并指路 `remote:ssh:`，不静默翻译。
 2. **两个 target 版本的冻结身份**（§3.1）：冻两列（本文倾向）vs. 收敛到 package digest（PLAN 的候选）。
    后者有 schema 后果，值得在动手前定死。
-   > **裁决待人确认**：这是 **Phase 3** 的事（extension 搬走那一步），**不阻塞 Phase 1**——
-   > Phase 1 的远端场里 `runExtension` 明说拒绝，所以 `exec_version` 这一列一个写者一个读者都还没有。
-   > 提前加一个没人写的 header 列，正是本仓库反复删掉的那种字段。
+   > **已裁决（2026-08-29，人确认）**：**冻两列**——成员是 `(id, v_host)`，远端场额外冻 `exec_version`（可空列，
+   > 只有 compiled 包在 target 不同的远端场上非空）。host 从自己的 store 按 `package_digest + target` 反查（donor 匹配同一把键）。
+   > 「一个 version id 恰好命名一份可执行字节」这条性质保住。
 3. **远端那个二进制是完整 nulya 还是瘦代理，以及它怎么到远端。** 本文倾向完整 nulya + `nulya remote install <dest>` 一次显式手势；
    要不要允许"人答应一次之后自动装/自动升级"是一个真的取舍（省事 vs. 别人的机器上多了一个会自己更新的东西）。
-   > **裁决待人确认（Phase 1 采用）**：**只做显式手势，而且 Phase 1 连 `install` 都不需要**——
-   > 两条规则已经够：命名的传输（`remote:wsl` / `remote:ssh`）假定远端 PATH 上有 `nulya`，
-   > 别的一切用 `remote:exec:<argv…>` 写全。**nulya 在 Phase 1 里绝不往任何机器上写一个字节的可执行文件**，
-   > 于是"自动装/自动升级"这个取舍连提都不用提。`remote install` 是后续轮次的题目。
+   > **已裁决（2026-08-29，人确认）**：**本轮（Phase 2/3）仍不做 `install`**——两条规则继续够用：
+   > 命名的传输假定远端 PATH 上有 `nulya`，别的一切用 `remote:exec:<argv…>` 写全。
+   > nulya 本体绝不往别的机器写可执行文件；`ext push` 推的是 extension 版本的**数据字节**，不在此列。
+   > `remote install` 留给后续轮次。
 4. **`handoff` 的提议从文件变成数据**：这是远端化逼出来的，但它本身是一条独立的收口（`compact` 的 `brief_file` 收字节），
    值不值得先做掉再远端化。
    > **Phase 1 不受影响**：远端场里 extension 根本不跑（明说拒绝），所以 `handoff` 在远端场里只是一个不该被 `--with` 进来的包，

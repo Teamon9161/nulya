@@ -34,10 +34,10 @@ const printErrFmt = common.printErrFmt;
 const printOut = common.printOut;
 const printRaw = common.printRaw;
 
-/// How many directory entries one `list-dir` reply carries. The entries ride in
-/// the header, which is bounded (`protocol.max_header_bytes`), so this bound is
-/// what keeps a directory with a hundred thousand files from producing a frame
-/// the other side refuses to read. Truncation is SAID, never silent.
+/// How many directory entries one `list-dir` reply carries. The entries travel
+/// as PAYLOAD (protocol rule 6), so this is no longer what keeps the frame
+/// readable — it is what keeps one answer to "what is in this directory" a size
+/// a person or a browser can use. Truncation is SAID, never silent.
 const max_entries: usize = 1000;
 
 pub fn dispatchRemote(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -114,7 +114,7 @@ fn remoteLs(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         break;
     }
 
-    const rep = ch.controlRound(.{ .op = protocol.Op.list_dir.wire(), .path = path }) catch |err| {
+    const rep = ch.controlRound(.{ .op = protocol.Op.list_dir.wire(), .path = path }, "") catch |err| {
         try printErrFmt(alloc, io, "could not list '{s}': {s}\n", .{ path, @errorName(err) });
         return 1;
     };
@@ -122,14 +122,20 @@ fn remoteLs(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         try printErrFmt(alloc, io, "{s}\n", .{rep.message});
         return 1;
     }
+    // The listing rode in as payload; it borrows the channel arena, which stays
+    // valid until the next round — and there is none, this verb asks once.
+    const entries = protocol.parseEntries(ch.arena.allocator(), ch.last_payload) catch {
+        try printErrFmt(alloc, io, "could not read the listing of '{s}'\n", .{path});
+        return 1;
+    };
 
     if (common.sliceHasFlag(args, "--json")) {
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
-        try std.json.Stringify.value(rep.entries, .{}, &out.writer);
+        try std.json.Stringify.value(entries, .{}, &out.writer);
         try printOut(alloc, io, "{s}\n", .{out.written()});
     } else {
-        for (rep.entries) |e| {
+        for (entries) |e| {
             try printOut(alloc, io, "{s}{s}\n", .{ e.name, if (e.dir) "/" else "" });
         }
     }
@@ -224,10 +230,10 @@ fn serveOne(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
         // finished. Acknowledged rather than treated as an error — the race is
         // legitimate and the host is about to close the channel anyway.
         .cancel => try agent.reply(.{ .ok = true }, "", ""),
+        .put_file => try servePutFile(agent, req, payload),
         .run_extension => try agent.refuse("extension tools do not run over this channel yet; they still run on the machine the harness runs on"),
-        .put_file => try agent.refuse("writing files over this channel is not implemented in this build"),
         .start_task => try agent.refuse("background tasks do not run over this channel yet; they still run on the machine the harness runs on"),
-        .unknown => try agent.refuse("unknown request; this build understands hello, run-shell, list-dir and cancel"),
+        .unknown => try agent.refuse("unknown request; this build understands hello, run-shell, put-file, list-dir and cancel"),
     }
 }
 
@@ -359,6 +365,37 @@ fn replyShell(agent: *Agent, task: *ShellTask) !void {
     }, outcome.stdout, outcome.stderr);
 }
 
+/// Write one file into this session's workspace on THIS machine.
+///
+/// The bytes go through `agent.lenv`'s `putWorkspaceFile` — the same function a
+/// local session's spill goes through, not a copy of it. That is the point of
+/// the far side being nulya itself: "spill on the far machine" is not a second
+/// implementation of "spill here", it is the same one, reached over a channel.
+///
+/// `path` is workspace-relative and `/`-spelled (it is the string the model will
+/// read in the footer); `cwd` is where that workspace is here. They are joined
+/// exactly once, and only in this direction — the host never learns a path on
+/// this machine (goals/remote-env.md §3.3).
+fn servePutFile(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
+    if (req.path.len == 0) {
+        try agent.refuse("put-file needs a path");
+        return;
+    }
+    const rel = if (req.cwd.len == 0 or std.mem.eql(u8, req.cwd, "."))
+        try agent.alloc.dupe(u8, req.path)
+    else
+        try std.fs.path.join(agent.alloc, &.{ req.cwd, req.path });
+    defer agent.alloc.free(rel);
+
+    agent.lenv.environment().putWorkspaceFile(rel, payload) catch |err| {
+        const msg = try std.fmt.allocPrint(agent.alloc, "could not write '{s}': {s}", .{ req.path, @errorName(err) });
+        defer agent.alloc.free(msg);
+        try agent.refuse(msg);
+        return;
+    };
+    try agent.reply(.{ .ok = true }, "", "");
+}
+
 fn serveListDir(agent: *Agent, req: protocol.Request) !void {
     const path = if (req.path.len != 0) req.path else ".";
     var dir = std.Io.Dir.cwd().openDir(agent.io, path, .{ .iterate = true }) catch |err| {
@@ -375,7 +412,7 @@ fn serveListDir(agent: *Agent, req: protocol.Request) !void {
     var truncated = false;
     var it = dir.iterate();
     while (it.next(agent.io) catch null) |e| {
-        // A name that is not valid UTF-8 cannot go into a JSON header at all
+        // A name that is not valid UTF-8 cannot be encoded as JSON at all
         // (`std.json` would write it as an array of numbers and the host's
         // parse would then declare the channel dead). Skipping it and SAYING SO
         // keeps one odd file from taking the whole listing down.
@@ -397,7 +434,11 @@ fn serveListDir(agent: *Agent, req: protocol.Request) !void {
     } else if (skipped != 0) {
         note = try std.fmt.allocPrint(a, "{d} entries were left out: their names are not valid UTF-8", .{skipped});
     }
-    try agent.reply(.{ .ok = true, .entries = entries.items, .message = note }, "", "");
+    // The listing is the payload: it grows with what this machine holds, and a
+    // header may not (protocol rule 6). The note stays in the header — it is one
+    // sentence this build wrote, not something the directory decides the size of.
+    const body = try protocol.encodeEntries(a, entries.items);
+    try agent.reply(.{ .ok = true, .bytes = body.len, .message = note }, body, "");
 }
 
 fn lessThanEntry(_: void, a: protocol.Entry, b: protocol.Entry) bool {

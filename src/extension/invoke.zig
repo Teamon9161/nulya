@@ -186,6 +186,13 @@ const FakeEnv = struct {
         return error.NoDurableSession;
     }
 
+    fn putWorkspaceFile(ptr: *anyopaque, rel_path: []const u8, bytes: []const u8) anyerror!void {
+        _ = ptr;
+        _ = rel_path;
+        _ = bytes;
+        return error.NotSupported;
+    }
+
     fn handle(self: *FakeEnv) environment.Environment {
         return .{
             .io = self.io,
@@ -195,6 +202,7 @@ const FakeEnv = struct {
                 .runShell = runShell,
                 .runExtension = runExtension,
                 .startShellTask = startShellTask,
+                .putWorkspaceFile = putWorkspaceFile,
             },
         };
     }

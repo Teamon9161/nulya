@@ -10,12 +10,18 @@
 //! axis, not two spellings of one thing, so they have different words
 //! (`ssh:me@box` vs `remote:ssh:me@box`) and the older one is untouched.
 //!
-//! **Phase 1 moves exactly one verb.** `runShell` goes over the channel;
-//! `runExtension` and `startShellTask` refuse, in sentences that say where those
-//! still run and why. Refusing is the whole point of shipping a phase: an
-//! extension that silently read the HOST's files in a session whose workspace is
-//! elsewhere would be the split-brain this design exists to end, wearing a
-//! success.
+//! **Two verbs move so far.** `runShell` and `putWorkspaceFile` go over the
+//! channel; `runExtension` and `startShellTask` refuse, in sentences that say
+//! where those still run and why. Refusing is the whole point of shipping a
+//! phase: an extension that silently read the HOST's files in a session whose
+//! workspace is elsewhere would be the split-brain this design exists to end,
+//! wearing a success.
+//!
+//! `putWorkspaceFile` is what makes a spill footer true here (Phase 2): the
+//! bytes cross the channel and land in the far workspace at the very path the
+//! model is told to open. Before it, the file was written on the host and the
+//! footer carried a clause admitting the model could not reach it — honest, and
+//! useless to the reader.
 //!
 //! **What the far side is.** Not a purpose-built proxy — nulya itself, in a
 //! shell role, the way `nulya task supervise` is (DESIGN §6.1). So the process
@@ -208,6 +214,11 @@ pub const Channel = struct {
     arena: std.heap.ArenaAllocator,
     bounds: Bounds = .default,
     hello: Hello = .{},
+    /// The payload of the last `controlRound` reply, in the channel arena — so
+    /// valid until the next round resets it. A field rather than a return value
+    /// because the arena's lifetime is the round's, and a caller that wants the
+    /// bytes wants them exactly that long (`remote ls` decodes them and prints).
+    last_payload: []const u8 = &.{},
     /// Once true, nothing more is sent or read: a desynchronised channel that
     /// keeps being used answers questions with another request's reply.
     dead: bool = false,
@@ -259,7 +270,7 @@ pub const Channel = struct {
         };
         errdefer ch.arena.deinit();
 
-        const rep = try ch.controlRound(.{ .op = protocol.Op.hello.wire(), .v = protocol.version, .nulya = version });
+        const rep = try ch.controlRound(.{ .op = protocol.Op.hello.wire(), .v = protocol.version, .nulya = version }, "");
         protocol.checkHello(rep) catch |err| switch (err) {
             error.VersionMismatch => {
                 ch.dead = true;
@@ -300,6 +311,11 @@ pub const Channel = struct {
     }
 
     pub fn send(self: *Channel, req: protocol.Request, payload: []const u8) anyerror!void {
+        // The reader refuses a claimed length over `max_payload_bytes` before
+        // allocating (protocol rule on lies) — but by then the payload bytes
+        // are already in the stream and the channel is dead. Refusing HERE is
+        // rule 6's other half: never write a frame the peer must refuse.
+        if (payload.len > protocol.max_payload_bytes) return error.PayloadTooLarge;
         const line = try protocol.encodeRequest(self.alloc, req);
         defer self.alloc.free(line);
         const stdin = self.child.stdin orelse return error.RemoteChannelLost;
@@ -346,12 +362,13 @@ pub const Channel = struct {
         self.reader.interface.readSliceAll(dest) catch return self.readFailure();
     }
 
-    /// A request whose reply carries no payload (`hello`, `list-dir`), under the
-    /// host's patience: an agent that never answers must not hang the caller,
-    /// and at handshake time that is the difference between "this machine is
-    /// unreachable" and a driver that never comes back.
-    pub fn controlRound(self: *Channel, req: protocol.Request) anyerror!protocol.Reply {
-        var ex: ControlExchange = .{ .ch = self, .req = req };
+    /// One round that is not a command — `hello`, `list-dir`, `put-file` — under
+    /// the host's patience: an agent that never answers must not hang the
+    /// caller, and at handshake time that is the difference between "this
+    /// machine is unreachable" and a driver that never comes back. The reply's
+    /// payload, if any, is left in `last_payload`.
+    pub fn controlRound(self: *Channel, req: protocol.Request, payload: []const u8) anyerror!protocol.Reply {
+        var ex: ControlExchange = .{ .ch = self, .req = req, .payload = payload };
         const Race = union(enum) { done: void, expired: void };
         var buf: [2]Race = undefined;
         var sel: std.Io.Select(Race) = .init(self.io, &buf);
@@ -375,16 +392,18 @@ pub const Channel = struct {
         return error.RemoteChannelStalled;
     }
 
-    fn controlRoundUnbounded(self: *Channel, req: protocol.Request) anyerror!protocol.Reply {
+    fn controlRoundUnbounded(self: *Channel, req: protocol.Request, payload: []const u8) anyerror!protocol.Reply {
         if (self.dead) return error.RemoteChannelLost;
         _ = self.arena.reset(.retain_capacity);
-        try self.send(req, "");
+        self.last_payload = &.{};
+        try self.send(req, payload);
         const rep = try self.readHeader();
-        // A reply that DOES carry one is still consumed: leaving bytes in the
-        // stream would desynchronise every later frame.
+        // A reply's payload is ALWAYS consumed, whether or not the caller wants
+        // it: leaving bytes in the stream would desynchronise every later frame.
         if (rep.bytes != 0) {
-            const junk = try self.arena.allocator().alloc(u8, rep.bytes);
-            try self.readExact(junk);
+            const body = try self.arena.allocator().alloc(u8, rep.bytes);
+            try self.readExact(body);
+            self.last_payload = body;
         }
         return rep;
     }
@@ -396,10 +415,11 @@ pub const Channel = struct {
 const ControlExchange = struct {
     ch: *Channel,
     req: protocol.Request,
+    payload: []const u8 = "",
     out: ?anyerror!protocol.Reply = null,
 
     fn run(self: *ControlExchange) void {
-        const result = self.ch.controlRoundUnbounded(self.req);
+        const result = self.ch.controlRoundUnbounded(self.req, self.payload);
         if (result) |_| {} else |err| {
             if (err == error.Canceled) return;
         }
@@ -619,11 +639,31 @@ pub const RemoteEnvironment = struct {
         return error.RemoteBackgroundUnsupported;
     }
 
+    /// The bytes cross the channel and the far agent writes them, relative to
+    /// THIS session's workspace — the same directory its commands run in, which
+    /// is why the frame carries `cwd` as well as the relative path. So a spill
+    /// footer names a file the model can actually open with the very next
+    /// command it runs (goals/remote-env.md §3.2).
+    fn putWorkspaceFileImpl(ptr: *anyopaque, rel_path: []const u8, bytes: []const u8) anyerror!void {
+        const self: *RemoteEnvironment = @ptrCast(@alignCast(ptr));
+        const rep = try self.ch.controlRound(.{
+            .op = protocol.Op.put_file.wire(),
+            .cwd = self.remoteCwd(),
+            .path = rel_path,
+            .bytes = bytes.len,
+        }, bytes);
+        // A refusal is the far side's own sentence about its own file system,
+        // and the caller (`emit`) treats a failed spill exactly as it treats a
+        // failed local write: it does not pretend the file is there.
+        if (!rep.ok) return error.RemoteRefused;
+    }
+
     const vtable: environment_mod.Environment.VTable = .{
         .dialect = dialectImpl,
         .runShell = runShellImpl,
         .runExtension = runExtensionImpl,
         .startShellTask = startShellTaskImpl,
+        .putWorkspaceFile = putWorkspaceFileImpl,
     };
 };
 

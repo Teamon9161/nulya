@@ -1087,19 +1087,16 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
     defer launch.freeExtensionRoots(alloc, ext_roots);
 
+    // Workspace-relative, and deliberately so: a spill is written through the
+    // environment's `putWorkspaceFile`, so this one string is the path on
+    // whichever machine this session's workspace lives on (DESIGN §8.2).
     const scratch = try launch.sessionScratchDir(alloc, id);
     defer alloc.free(scratch);
-    // A spill lands where the harness runs. When the commands do not, the
-    // pointer the model reads has to say so (goals/remote-env.md §3.2); the
-    // shell layer is the only place that knows both facts.
-    const spill_note = lenv.spillNote();
     var sess = session.AgentSession.openDurable(alloc, .{
         .model = holder.model(),
         .step_ctx = .{
             .tool_context = .{ .environment = lenv.handle(), .cwd = cwd_path },
             .scratch_dir = scratch,
-            .budget = .{ .spill_note = spill_note },
-            .step_budget = .{ .spill_note = spill_note },
             .retry = cfg.provider.retry,
             .observer = if (stream) |s| s.observer() else null,
             .gate = if (gate) |g| g.gate() else null,

@@ -695,12 +695,6 @@ pub const remote_background_refusal =
     "background tasks run where the harness runs, and this session's commands run elsewhere; " ++
     "run it in the foreground with `shell`, or start it on that machine yourself\n";
 
-/// The clause a spill footer carries in a remote session. The file is real and
-/// the path is right — it is just on the WRONG MACHINE for the reader, and a
-/// pointer that says nothing about that is a pointer the model will waste a
-/// turn on (goals/remote-env.md §3.2). Phase 2 moves the file instead.
-pub const remote_spill_note = " — on the harness host, which this session's commands cannot reach";
-
 /// The execution environment a session runs its tools behind: today's local
 /// backend, or the remote channel (DESIGN §8.1). A union rather than two call
 /// paths so every verb keeps one shape — build it, hand out the handle, deinit.
@@ -733,14 +727,6 @@ pub const SessionEnvironment = union(enum) {
             .local => |*l| try l.env.put("NULYA_SESSION", session_path),
             .remote => {},
         }
-    }
-
-    /// The clause `emit` appends inside a spill footer, for this environment.
-    pub fn spillNote(self: *const SessionEnvironment) []const u8 {
-        return switch (self.*) {
-            .local => "",
-            .remote => remote_spill_note,
-        };
     }
 };
 

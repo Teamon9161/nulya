@@ -13,6 +13,7 @@ const support = @import("support");
 pub const build_ext = support.build_ext;
 pub const composition = support.composition;
 pub const config = support.config;
+pub const emit = support.emit;
 pub const environment = support.environment;
 pub const integrity = support.integrity;
 pub const launch = support.launch;

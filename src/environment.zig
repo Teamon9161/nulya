@@ -308,6 +308,7 @@ pub const Environment = struct {
         runShell: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator, req: ShellRequest) anyerror!ShellOutcome,
         runExtension: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator, req: ExtensionRequest) anyerror!ExtensionOutcome,
         startShellTask: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator, req: TaskRequest) anyerror!TaskStart,
+        putWorkspaceFile: *const fn (ptr: *anyopaque, rel_path: []const u8, bytes: []const u8) anyerror!void,
     };
 
     pub fn dialect(self: Environment) Dialect {
@@ -329,6 +330,34 @@ pub const Environment = struct {
     /// belongs to no session — there would be nowhere to report the result.
     pub fn startShellTask(self: Environment, alloc: std.mem.Allocator, req: TaskRequest) !TaskStart {
         return self.vtable.startShellTask(self.ptr, alloc, req);
+    }
+
+    /// Write `bytes` into this session's workspace at `rel_path`, creating the
+    /// parent directories. The fourth verb, and the one `emit` spills through
+    /// (DESIGN §8, goals/remote-env.md §3.2).
+    ///
+    /// `rel_path` is workspace-relative and spelled with `/` — it is the SAME
+    /// string the model reads in the footer that points at the file, which is
+    /// the whole invariant this verb buys: where the bytes land and where the
+    /// reader is sent are one string, on whichever machine the workspace is.
+    /// A footer pointing at the harness's disk in a session whose commands run
+    /// elsewhere is a sentence the model cannot act on, and `emit`'s third
+    /// guarantee ("the full output is always on disk and the text points at it")
+    /// would be false with it.
+    ///
+    /// No allocator: an implementation that needs one has its own (the channel
+    /// has), and every caller here is handing over bytes it already owns.
+    pub fn putWorkspaceFile(self: Environment, rel_path: []const u8, bytes: []const u8) !void {
+        return self.vtable.putWorkspaceFile(self.ptr, rel_path, bytes);
+    }
+
+    /// This environment as the sink `emit` spills through. No adapter struct
+    /// anywhere: `emit.FileSink` is exactly "a pointer and that one function",
+    /// which is what a vtable entry already is, so the two are the same value
+    /// twice. If either signature moves the other has to, and the compiler says
+    /// so at this line.
+    pub fn fileSink(self: Environment) emit.FileSink {
+        return .{ .ptr = self.ptr, .writeFn = self.vtable.putWorkspaceFile };
     }
 };
 
@@ -999,11 +1028,29 @@ pub const LocalEnvironment = struct {
         return .{ .task_id = task_id, .log_path = log_path };
     }
 
+    /// The ONE place in this repository where a workspace file is written from
+    /// bytes. A remote session does not get a second copy of this code: its
+    /// environment forwards the bytes over the channel and the `nulya remote
+    /// serve` on the other side calls exactly this function (`cli/remote.zig`),
+    /// which is what makes "spill on the far machine" the same behaviour as
+    /// "spill here" rather than a re-implementation of it.
+    fn putWorkspaceFileImpl(ptr: *anyopaque, rel_path: []const u8, bytes: []const u8) anyerror!void {
+        const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
+        const cwd = std.Io.Dir.cwd();
+        // `createDirPath` is idempotent (an existing directory answers
+        // `.existed`), so `try` only surfaces genuine failures — crucially
+        // `error.Canceled`, which has to reach the step boundary rather than be
+        // swallowed as "could not spill".
+        if (std.fs.path.dirname(rel_path)) |dir| try cwd.createDirPath(self.io, dir);
+        try cwd.writeFile(self.io, .{ .sub_path = rel_path, .data = bytes });
+    }
+
     const vtable: Environment.VTable = .{
         .dialect = dialectImpl,
         .runShell = runShellImpl,
         .runExtension = runExtensionImpl,
         .startShellTask = startShellTaskImpl,
+        .putWorkspaceFile = putWorkspaceFileImpl,
     };
 };
 

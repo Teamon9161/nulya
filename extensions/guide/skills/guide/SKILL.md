@@ -288,10 +288,12 @@ Store and scope:
   The far end is a `nulya remote serve` reached through one long-lived channel,
   so there is no per-command connection, cancelling a step really does kill the
   command's process tree over there, and **that machine never needs an API key
-  — the model connection stays here**. Today `remote:` moves `shell` and
-  nothing else: extension tools and background tasks refuse in such a session
-  rather than quietly touching this machine's files, and a spilled tool output
-  still lands here (its footer says so). Two verbs answer the questions a
+  — the model connection stays here**. Today `remote:` moves `shell` and the
+  workspace files the harness itself writes: a spilled tool output lands over
+  there, at the workspace-relative path its footer names, so the next command
+  can open it. Extension tools and background tasks still refuse in such a
+  session rather than quietly touching this machine's files. Two verbs answer
+  the questions a
   driver has before offering a machine to someone: `nulya remote check --env
   <spec>` reports what answered, and `nulya remote ls --env <spec> [<dir>]`
   lists a directory over there exactly, names and kinds.

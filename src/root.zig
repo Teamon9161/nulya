@@ -21,6 +21,7 @@
 pub const build_ext = @import("extension/build/build_ext.zig");
 pub const composition = @import("composition.zig");
 pub const config = @import("config.zig");
+pub const emit = @import("emit.zig");
 pub const environment = @import("environment.zig");
 pub const integrity = @import("extension/integrity.zig");
 pub const launch = @import("launch.zig");

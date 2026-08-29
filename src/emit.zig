@@ -9,9 +9,14 @@
 //! Guarantees:
 //!   1. per-line clip     — no single line blows up a result
 //!   2. byte budget       — returned text is bounded by `max_bytes`
-//!   3. auto-spill        — the full raw output is ALWAYS written to disk when
-//!                          anything was truncated, and the model-visible text
-//!                          contains the spill path
+//!   3. auto-spill        — the full raw output is ALWAYS written to the
+//!                          WORKSPACE when anything was truncated, and the
+//!                          model-visible text contains the spill path. Both
+//!                          halves matter: the path is workspace-relative and
+//!                          the bytes go through `FileSink`, so in a session
+//!                          whose workspace lives on another machine the file
+//!                          lands where the reader's hands are, not where the
+//!                          harness happens to run.
 //!   4. determinism       — spill filename derives from `seq`, never a runtime
 //!                          counter, so a replayed ledger reproduces byte-for-byte
 //!   5. valid UTF-8       — the returned text is valid UTF-8 whatever the tool
@@ -19,6 +24,25 @@
 //!                          (`utf8Lossy`)
 
 const std = @import("std");
+
+/// Where a spill's bytes go. `emit` writes no files itself: it hands the
+/// workspace-relative path and the bytes to the session's environment, which is
+/// the thing that knows which machine the workspace is on
+/// (`Environment.putWorkspaceFile`, DESIGN §8). The interface lives here rather
+/// than in `environment.zig` because `emit` must stay importable by everything
+/// and know nothing about processes — and there is no adapter between the two:
+/// this IS the shape of a vtable entry, so `Environment.fileSink()` just hands
+/// over the pointer and that function.
+pub const FileSink = struct {
+    ptr: *anyopaque,
+    writeFn: *const fn (ptr: *anyopaque, rel_path: []const u8, bytes: []const u8) anyerror!void,
+
+    /// Write `bytes` at `rel_path`, creating parents. Implementations own that
+    /// promise — `emit` never creates a directory of its own.
+    pub fn write(self: FileSink, rel_path: []const u8, bytes: []const u8) anyerror!void {
+        return self.writeFn(self.ptr, rel_path, bytes);
+    }
+};
 
 pub const OutputBudget = struct {
     /// Hard byte ceiling for a single tool result entering context.
@@ -30,23 +54,11 @@ pub const OutputBudget = struct {
     head_percent: u8 = 25,
     /// Percentage of the body budget reserved for the tail on byte overflow.
     tail_percent: u8 = 75,
-    /// Appended inside the spill footer, after the path. Empty by default, and
-    /// the shell layer is the only thing that ever sets it (`launch.zig`), for
-    /// the one case where the pointer is not reachable by the reader: a session
-    /// whose commands run on another machine spills HERE, and saying nothing
-    /// would hand the model a path it cannot open (goals/remote-env.md §3.2).
-    /// `emit` does not compose the sentence — it knows nothing about machines,
-    /// it only refuses to print a pointer without whatever the caller attached
-    /// to it.
-    spill_note: []const u8 = "",
 };
 
 pub const StepOutputBudget = struct {
     /// Hard byte ceiling for all tool result text returned by one model step.
     max_bytes: usize = 128 * 1024,
-    /// See `OutputBudget.spill_note`: the same clause, for the step-level
-    /// footer, so one session cannot say two different things about one file.
-    spill_note: []const u8 = "",
 };
 
 pub const Emitted = struct {
@@ -62,11 +74,11 @@ pub const Emitted = struct {
 };
 
 /// Pass `raw` through the output discipline. `tool`, `event_seq`, and
-/// `call_index` name the spill file; `scratch_dir` is where it lands; `io`
-/// performs the spill write.
+/// `call_index` name the spill file; `scratch_dir` is where it lands; `sink`
+/// performs the spill write, wherever this session's workspace is.
 pub fn emit(
     alloc: std.mem.Allocator,
-    io: std.Io,
+    sink: FileSink,
     raw: []const u8,
     tool: []const u8,
     event_seq: u64,
@@ -90,14 +102,14 @@ pub fn emit(
     if (clipped.items.len > budget.max_bytes) truncated = true;
 
     var spill_path: ?[]const u8 = null;
-    if (truncated) spill_path = try writeSpill(alloc, io, raw, tool, event_seq, call_index, scratch_dir);
+    if (truncated) spill_path = try writeSpill(alloc, sink, raw, tool, event_seq, call_index, scratch_dir);
     errdefer if (spill_path) |p| alloc.free(p);
 
     var final_text: std.ArrayList(u8) = .empty;
     errdefer final_text.deinit(alloc);
 
     if (spill_path) |path| {
-        const footer = try std.fmt.allocPrint(alloc, "\n[full output: {s}{s}]", .{ path, budget.spill_note });
+        const footer = try std.fmt.allocPrint(alloc, "\n[full output: {s}]", .{path});
         defer alloc.free(footer);
         const body_budget = budget.max_bytes -| footer.len;
 
@@ -254,15 +266,15 @@ pub fn joinRel(alloc: std.mem.Allocator, parts: []const []const u8) ![]u8 {
 }
 
 pub const StepOutputLimiter = struct {
-    io: std.Io,
+    sink: FileSink,
     scratch_dir: []const u8,
     event_seq: u64,
     budget: StepOutputBudget,
     used: usize = 0,
 
-    pub fn init(io: std.Io, scratch_dir: []const u8, event_seq: u64, budget: StepOutputBudget) StepOutputLimiter {
+    pub fn init(sink: FileSink, scratch_dir: []const u8, event_seq: u64, budget: StepOutputBudget) StepOutputLimiter {
         return .{
-            .io = io,
+            .sink = sink,
             .scratch_dir = scratch_dir,
             .event_seq = event_seq,
             .budget = budget,
@@ -296,7 +308,7 @@ pub const StepOutputLimiter = struct {
         var path_owned = spill_path.* == null;
         const path = spill_path.* orelse try stepSpillPath(alloc, self.scratch_dir, tool_name, self.event_seq, call_index);
         errdefer if (path_owned) alloc.free(path);
-        const footer = try std.fmt.allocPrint(alloc, "\n[tool result clipped by step output budget; full output: {s}{s}]", .{ path, self.budget.spill_note });
+        const footer = try std.fmt.allocPrint(alloc, "\n[tool result clipped by step output budget; full output: {s}]", .{path});
         defer alloc.free(footer);
 
         // A replacement must never cost more than what it replaces: a result
@@ -309,7 +321,7 @@ pub const StepOutputLimiter = struct {
         }
 
         if (path_owned) {
-            try writeStepSpill(self.io, path, output.*);
+            try self.sink.write(path, output.*);
             spill_path.* = path;
             path_owned = false;
         }
@@ -338,18 +350,9 @@ fn stepSpillPath(
     return joinRel(alloc, &.{ scratch_dir, "tool-output", name });
 }
 
-fn writeStepSpill(io: std.Io, path: []const u8, data: []const u8) !void {
-    const cwd = std.Io.Dir.cwd();
-    // `createDirPath` is idempotent (an existing dir returns `.existed`, not an
-    // error), so `try` only surfaces genuine failures — crucially `error.Canceled`,
-    // which must reach the step boundary instead of being swallowed here.
-    if (std.fs.path.dirname(path)) |dir| try cwd.createDirPath(io, dir);
-    try cwd.writeFile(io, .{ .sub_path = path, .data = data });
-}
-
 fn writeSpill(
     alloc: std.mem.Allocator,
-    io: std.Io,
+    sink: FileSink,
     raw: []const u8,
     tool: []const u8,
     event_seq: u64,
@@ -358,16 +361,11 @@ fn writeSpill(
 ) ![]const u8 {
     const dir = try joinRel(alloc, &.{ scratch_dir, "tool-output" });
     defer alloc.free(dir);
-    const cwd = std.Io.Dir.cwd();
-    // `createDirPath` is idempotent (an existing dir returns `.existed`, not an
-    // error), so `try` only surfaces genuine failures — crucially `error.Canceled`,
-    // which must reach the step boundary instead of being swallowed here.
-    try cwd.createDirPath(io, dir);
     const name = try spillName(alloc, tool, event_seq, call_index);
     defer alloc.free(name);
     const path = try joinRel(alloc, &.{ dir, name });
     errdefer alloc.free(path);
-    try cwd.writeFile(io, .{ .sub_path = path, .data = raw });
+    try sink.write(path, raw);
     return path;
 }
 
@@ -407,50 +405,86 @@ fn isUtf8Continuation(byte: u8) bool {
     return (byte & 0b1100_0000) == 0b1000_0000;
 }
 
+// ── tests ───────────────────────────────────────────────────────────────────
+
+/// A sink that keeps what it was handed instead of writing it. Every test here
+/// wants the same two answers — WHICH path was spilled to and WHAT bytes went
+/// there — and asking a file system for them would put a second "bytes become a
+/// file" implementation in the repository, which is the one thing `FileSink`
+/// exists to prevent.
+const RecordingSink = struct {
+    alloc: std.mem.Allocator,
+    path: ?[]u8 = null,
+    data: ?[]u8 = null,
+
+    fn writeImpl(ptr: *anyopaque, rel_path: []const u8, bytes: []const u8) anyerror!void {
+        const self: *RecordingSink = @ptrCast(@alignCast(ptr));
+        self.deinit();
+        self.path = try self.alloc.dupe(u8, rel_path);
+        self.data = try self.alloc.dupe(u8, bytes);
+    }
+
+    fn sink(self: *RecordingSink) FileSink {
+        return .{ .ptr = self, .writeFn = writeImpl };
+    }
+
+    fn deinit(self: *RecordingSink) void {
+        if (self.path) |p| self.alloc.free(p);
+        if (self.data) |d| self.alloc.free(d);
+        self.path = null;
+        self.data = null;
+    }
+};
+
 test "emit passes small output through untouched, no spill" {
     const alloc = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const out = try emit(alloc, io, "hello\nworld\n", "shell", 1, 0, ".", .{});
+    var rec: RecordingSink = .{ .alloc = alloc };
+    defer rec.deinit();
+    const out = try emit(alloc, rec.sink(), "hello\nworld\n", "shell", 1, 0, ".", .{});
     defer out.deinit(alloc);
     try std.testing.expectEqualStrings("hello\nworld\n", out.text);
     try std.testing.expect(out.spill_path == null);
+    try std.testing.expect(rec.path == null);
 }
 
 test "emit clips an over-long line with a self-describing marker and footer" {
     const alloc = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    var rec: RecordingSink = .{ .alloc = alloc };
+    defer rec.deinit();
     const long = "x" ** 40;
-    const out = try emit(alloc, io, long, "shell", 2, 0, ".", .{ .max_line_bytes = 10 });
+    const out = try emit(alloc, rec.sink(), long, "shell", 2, 0, ".", .{ .max_line_bytes = 10 });
     defer out.deinit(alloc);
     // The path the model reads is spelled with `/` on every OS (`joinRel`): a
     // relative scratch dir yields no native separator anywhere in it.
     try std.testing.expectEqualStrings("./tool-output/shell-2-0.txt", out.spill_path.?);
     try std.testing.expect(std.mem.startsWith(u8, out.text, "xxxxxxxxxx\u{2026}[+30 bytes]"));
     try std.testing.expect(std.mem.indexOf(u8, out.text, "[full output: ") != null);
-    try std.testing.expect(out.spill_path != null);
-    if (out.spill_path) |p| std.Io.Dir.cwd().deleteFile(io, p) catch {};
+    // The footer's path and the sink's destination are ONE string: that is the
+    // whole promise of guarantee 3, and what makes it survive a workspace that
+    // lives on another machine.
+    try std.testing.expectEqualStrings(out.spill_path.?, rec.path.?);
 }
 
 test "emit keeps hard byte budget on whole-output truncation" {
     const alloc = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    var rec: RecordingSink = .{ .alloc = alloc };
+    defer rec.deinit();
     const raw = ("0123456789abcdef\n" ** 40);
-    const out = try emit(alloc, io, raw, "shell", 3, 0, ".", .{ .max_bytes = 160 });
+    const out = try emit(alloc, rec.sink(), raw, "shell", 3, 0, ".", .{ .max_bytes = 160 });
     defer out.deinit(alloc);
     try std.testing.expect(out.text.len <= 160);
     try std.testing.expect(std.mem.indexOf(u8, out.text, "[full output: ") != null);
     try std.testing.expect(out.spill_path != null);
-    if (out.spill_path) |p| std.Io.Dir.cwd().deleteFile(io, p) catch {};
 }
 
 test "emit does not split utf-8 while clipping a line" {
     const alloc = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const out = try emit(alloc, io, "你好世界", "shell", 4, 0, ".", .{ .max_line_bytes = 5 });
+    var rec: RecordingSink = .{ .alloc = alloc };
+    defer rec.deinit();
+    const out = try emit(alloc, rec.sink(), "你好世界", "shell", 4, 0, ".", .{ .max_line_bytes = 5 });
     defer out.deinit(alloc);
     try std.testing.expect(std.unicode.utf8ValidateSlice(out.text));
     try std.testing.expect(std.mem.startsWith(u8, out.text, "你"));
-    if (out.spill_path) |p| std.Io.Dir.cwd().deleteFile(io, p) catch {};
 }
 
 test "utf8Lossy leaves valid input alone and repairs the rest byte for byte" {
@@ -474,39 +508,37 @@ test "utf8Lossy leaves valid input alone and repairs the rest byte for byte" {
     try std.testing.expectEqual(@as(usize, 2), torn.replaced);
 }
 
-test "emit repairs invalid utf-8, says so, and keeps the raw bytes on disk" {
+test "emit repairs invalid utf-8, says so, and hands the RAW bytes to the sink" {
     const alloc = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    var rec: RecordingSink = .{ .alloc = alloc };
+    defer rec.deinit();
     const raw = "before \xb0\xe6 after\n[exit 0]";
-    const out = try emit(alloc, io, raw, "shell", 91, 0, ".", .{});
+    const out = try emit(alloc, rec.sink(), raw, "shell", 91, 0, ".", .{});
     defer out.deinit(alloc);
 
     try std.testing.expect(std.unicode.utf8ValidateSlice(out.text));
     try std.testing.expect(std.mem.indexOf(u8, out.text, "not valid UTF-8") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.text, "[exit 0]\n[full output: ") != null);
 
-    const path = out.spill_path.?;
-    const spilled = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .unlimited);
-    defer alloc.free(spilled);
-    try std.testing.expectEqualStrings(raw, spilled);
-    std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    // What the model reads was repaired; what was kept is the original, down to
+    // the bytes that could not be shown.
+    try std.testing.expectEqualStrings(raw, rec.data.?);
+    try std.testing.expectEqualStrings(out.spill_path.?, rec.path.?);
 }
 
 test "step output limiter clips an oversized aggregate result and spills it" {
     const alloc = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    var rec: RecordingSink = .{ .alloc = alloc };
+    defer rec.deinit();
     const long = "x" ** 600;
     var output: []const u8 = try alloc.dupe(u8, long);
     var spill_path: ?[]const u8 = null;
     defer {
         alloc.free(output);
-        if (spill_path) |p| {
-            std.Io.Dir.cwd().deleteFile(io, p) catch {};
-            alloc.free(p);
-        }
+        if (spill_path) |p| alloc.free(p);
     }
 
-    var limiter = StepOutputLimiter.init(io, ".", 7, .{ .max_bytes = 160 });
+    var limiter = StepOutputLimiter.init(rec.sink(), ".", 7, .{ .max_bytes = 160 });
     try limiter.apply(alloc, "shell", 2, &output, &spill_path);
 
     // The body is clipped to the budget; the pointer footer rides on top of it
@@ -516,14 +548,17 @@ test "step output limiter clips an oversized aggregate result and spills it" {
     try std.testing.expect(std.mem.indexOf(u8, output, "clipped by step output budget; full output: ") != null);
     try std.testing.expect(std.mem.endsWith(u8, output, "]"));
     try std.testing.expectEqual(@as(usize, 160), limiter.used);
-    try std.testing.expect(spill_path != null);
+    try std.testing.expectEqualStrings(spill_path.?, rec.path.?);
+    // The whole result is kept, not the prefix the model was shown.
+    try std.testing.expectEqualStrings(long, rec.data.?);
 }
 
 test "step budget exhaustion never blanks a later result: the pointer floor survives" {
     const alloc = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    var rec: RecordingSink = .{ .alloc = alloc };
+    defer rec.deinit();
 
-    var limiter = StepOutputLimiter.init(io, ".", 9, .{ .max_bytes = 8 });
+    var limiter = StepOutputLimiter.init(rec.sink(), ".", 9, .{ .max_bytes = 8 });
 
     var first: []const u8 = try alloc.dupe(u8, "aaaaaaaa"); // exactly the budget
     defer alloc.free(first);
@@ -538,10 +573,7 @@ test "step budget exhaustion never blanks a later result: the pointer floor surv
     var second_spill: ?[]const u8 = null;
     defer {
         alloc.free(second);
-        if (second_spill) |p| {
-            std.Io.Dir.cwd().deleteFile(io, p) catch {};
-            alloc.free(p);
-        }
+        if (second_spill) |p| alloc.free(p);
     }
     try limiter.apply(alloc, "shell", 1, &second, &second_spill);
 
@@ -553,9 +585,10 @@ test "step budget exhaustion never blanks a later result: the pointer floor surv
 
 test "a short result over the spent budget stays verbatim instead of becoming a longer pointer" {
     const alloc = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    var rec: RecordingSink = .{ .alloc = alloc };
+    defer rec.deinit();
 
-    var limiter = StepOutputLimiter.init(io, ".", 9, .{ .max_bytes = 8 });
+    var limiter = StepOutputLimiter.init(rec.sink(), ".", 9, .{ .max_bytes = 8 });
 
     var first: []const u8 = try alloc.dupe(u8, "aaaaaaaa");
     defer alloc.free(first);
@@ -571,4 +604,6 @@ test "a short result over the spent budget stays verbatim instead of becoming a 
 
     try std.testing.expectEqualStrings("ok [exit 0]", second);
     try std.testing.expect(second_spill == null);
+    // Nothing was written for it, either.
+    try std.testing.expect(rec.path == null);
 }

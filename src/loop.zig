@@ -375,7 +375,9 @@ pub fn runStepWithPrompt(
         alloc.free(results);
     }
 
-    var step_output = emit.StepOutputLimiter.init(step_ctx.tool_context.environment.io, step_ctx.scratch_dir, base_seq, step_ctx.step_budget);
+    // Spills go through the environment, so they land on whichever machine holds
+    // this session's workspace (DESIGN §8.2) — the whole of that wiring.
+    var step_output = emit.StepOutputLimiter.init(step_ctx.tool_context.environment.fileSink(), step_ctx.scratch_dir, base_seq, step_ctx.step_budget);
 
     // Execute the batch serially. On cancellation the batch is NOT abandoned: the
     // ledger invariant is "one assistant tool-call batch ↔ exactly one matching
@@ -585,9 +587,13 @@ fn execOne(
     };
     defer alloc.free(raw_output);
 
+    // The presentation file is a DRIVER-facing artifact: the front end reads it
+    // on the host, so it stays a host file and never travels the workspace verb
+    // (goals/remote-env.md §3.2 — the table is "who reads it", not "who wrote
+    // it"). The spill below is the opposite case: the MODEL reads it.
     const presentation = readPresentationFile(alloc, io, presentation_file) catch null;
     errdefer if (presentation) |p| alloc.free(p);
-    const emitted = try emit.emit(alloc, io, raw_output, call.tool, event_seq, call_index, step_ctx.scratch_dir, step_ctx.budget);
+    const emitted = try emit.emit(alloc, step_ctx.tool_context.environment.fileSink(), raw_output, call.tool, event_seq, call_index, step_ctx.scratch_dir, step_ctx.budget);
     return .{
         .entry = .{
             .call_id = call.id,

@@ -25,24 +25,29 @@
 //! ── The verbs ───────────────────────────────────────────────────────────────
 //!
 //! host → agent
-//!     {"op":"hello","v":1,"nulya":"<build version>"}
+//!     {"op":"hello","v":2,"nulya":"<build version>"}
 //!     {"op":"run-shell","cwd":"<dir>","timeout_ms":N|null,"max_output_bytes":N,"bytes":L}
 //!                                                       payload: the command
+//!     {"op":"put-file","cwd":"<dir>","path":"<workspace-relative>","bytes":L}
+//!                                                       payload: the file's bytes
 //!     {"op":"list-dir","path":"<dir>"}
 //!     {"op":"cancel"}
 //!
 //! agent → host
-//!     {"ok":true,"v":1,"nulya":…,"os":…,"arch":…,"home":…,"cwd":…,"dialect":…}
+//!     {"ok":true,"v":2,"nulya":…,"os":…,"arch":…,"home":…,"cwd":…,"dialect":…}
 //!     {"ok":true,"exit_code":N,"timed_out":B,"canceled":B,"bytes":L,"out":M}
 //!                                     payload: stdout ++ stderr, `out` long and
 //!                                     `bytes - out` long respectively
-//!     {"ok":true,"entries":[{"name":"…","dir":B},…]}
+//!     {"ok":true,"bytes":L,"message":"<note>"}
+//!                                     payload: [{"name":"…","dir":B},…] — the
+//!                                     directory listing, as JSON (`encodeEntries`)
+//!     {"ok":true}                     put-file wrote it
 //!     {"ok":false,"message":"…"}
 //!
-//! `run-extension`, `put-file` and `start-task` are named in `Op` and answered
-//! `ok:false` with a sentence saying which phase implements them. They are in
-//! the vocabulary and not in this build on purpose: a host talking to a newer
-//! agent, or the reverse, gets a sentence rather than "unknown op".
+//! `run-extension` and `start-task` are named in `Op` and answered `ok:false`
+//! with a sentence saying which phase implements them. They are in the
+//! vocabulary and not in this build on purpose: a host talking to a newer agent,
+//! or the reverse, gets a sentence rather than "unknown op".
 //!
 //! ── The rules ───────────────────────────────────────────────────────────────
 //!
@@ -74,13 +79,27 @@
 //!     same `isSecretKey` denylist (physics #6, run on both machines by the
 //!     same code). The remote side of a nulya session never needs an API key:
 //!     the model connection stays on the host.
+//!
+//!  6. **Nothing that grows with what the far machine holds rides in a header.**
+//!     A header is bounded (`max_header_bytes`) because the other side reads it
+//!     with one delimited read into one buffer; a payload is not. So a listing,
+//!     a command, a command's output and a file's bytes are all payload, and
+//!     `encodeRequest` / `encodeReply` REFUSE a header over the bound rather
+//!     than write a frame the peer cannot read. That refusal is the rule's
+//!     enforcement, not a comment asking future verbs to remember it: a listing
+//!     of a thousand 255-byte names is a quarter of a megabyte, and carrying it
+//!     in the header once made a perfectly ordinary directory able to kill the
+//!     channel.
 
 const std = @import("std");
 
 /// The protocol this build speaks. Bumped when a frame changes meaning — never
 /// to add a verb, which rule 4 covers by answering `ok:false` for one it does
 /// not implement.
-pub const version: u32 = 1;
+///
+/// v2: `list-dir` answers its entries as a payload instead of a header field
+/// (rule 6), and `put-file` became a real verb instead of a refusal.
+pub const version: u32 = 2;
 
 /// The longest header line either side will read before refusing. Headers are
 /// small by construction (paths and numbers; the command travels as payload),
@@ -99,6 +118,10 @@ pub const Error = error{
     BadFrame,
     /// The header's `bytes` exceeds `max_payload_bytes`.
     PayloadTooLarge,
+    /// Encoding produced a header line over `max_header_bytes` — a frame the
+    /// peer could not read back (rule 6). Refused at the writer, so the bug
+    /// belongs to whoever put a growing field in a header.
+    HeaderTooLarge,
     /// The peer speaks a different `v` (rule 4).
     VersionMismatch,
     /// The stream ended where a frame was expected.
@@ -152,11 +175,15 @@ pub const Request = struct {
     v: u32 = 0,
     /// `hello` only: the build version, for the diagnostic, never for a gate.
     nulya: []const u8 = "",
-    /// `run-shell`: the directory to run in, as the AGENT's machine spells it.
-    /// `"."` means that machine's workspace, which is where the agent was
-    /// started — the host never translates a path (goals/remote-env.md §3.3).
+    /// `run-shell` and `put-file`: the session's workspace, as the AGENT's
+    /// machine spells it. `"."` means that machine's workspace, which is where
+    /// the agent was started — the host never translates a path
+    /// (goals/remote-env.md §3.3).
     cwd: []const u8 = "",
-    /// `list-dir`.
+    /// `list-dir`: the directory to list. `put-file`: the destination, relative
+    /// to `cwd` and spelled with `/` — it is the very string the model reads in
+    /// a spill footer, which is what makes "where it was written" and "where the
+    /// model is told to look" one fact rather than two.
     path: []const u8 = "",
     /// `run-shell`: the agent's own wall-clock budget for the command.
     timeout_ms: ?u32 = null,
@@ -170,10 +197,30 @@ pub const Request = struct {
 /// One directory entry, as `list-dir` answers it. Exact rather than parsed out
 /// of an `ls`: a file name may contain a newline, and a directory browser needs
 /// the kind anyway.
+///
+/// A listing travels as PAYLOAD (rule 6). It is JSON rather than raw bytes
+/// because unlike a command's output it is not arbitrary: a name that is not
+/// valid UTF-8 is dropped by the writer, with a note, so what crosses is always
+/// encodable — see `cli/remote.zig`.
 pub const Entry = struct {
     name: []const u8,
     dir: bool = false,
 };
+
+/// Encode a listing as one payload. Caller owns the result.
+pub fn encodeEntries(alloc: std.mem.Allocator, entries: []const Entry) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try std.json.Stringify.value(entries, .{}, &out.writer);
+    return out.toOwnedSlice();
+}
+
+/// Decode one. Borrows `arena`, like every other parsed frame. An empty payload
+/// is an empty listing, not a malformed one: a directory can be empty.
+pub fn parseEntries(arena: std.mem.Allocator, payload: []const u8) Error![]const Entry {
+    if (payload.len == 0) return &.{};
+    return std.json.parseFromSliceLeaky([]const Entry, arena, payload, json_opts) catch return error.BadFrame;
+}
 
 /// One reply header. Same discipline as `Request`.
 pub const Reply = struct {
@@ -197,12 +244,11 @@ pub const Reply = struct {
     /// The command was killed because the host asked (rule 3), so the output
     /// below is partial and the exit code means nothing.
     canceled: bool = false,
-    /// Payload length: stdout followed by stderr.
+    /// Payload length: `run-shell`'s stdout followed by its stderr, or
+    /// `list-dir`'s encoded entries.
     bytes: usize = 0,
     /// How many of `bytes` are stdout; the remainder is stderr.
     out: usize = 0,
-    /// `list-dir`.
-    entries: []const Entry = &.{},
 };
 
 const json_opts: std.json.ParseOptions = .{ .allocate = .alloc_always, .ignore_unknown_fields = true };
@@ -214,6 +260,11 @@ const json_opts: std.json.ParseOptions = .{ .allocate = .alloc_always, .ignore_u
 /// `std.json` escapes a newline inside any string, so no field value — a
 /// command's text, a path, a diagnostic — can end the header line early. The
 /// unit test below pins that rather than trusting it.
+///
+/// The encoder also enforces rule 6: a line over `max_header_bytes` is refused
+/// instead of written, because the reader on the other side takes a header with
+/// one delimited read into a buffer exactly that big. Refusing HERE is the only
+/// place the fault can still be attributed to the frame that caused it.
 pub fn encodeRequest(alloc: std.mem.Allocator, req: Request) ![]u8 {
     return encodeLine(alloc, req);
 }
@@ -227,6 +278,7 @@ fn encodeLine(alloc: std.mem.Allocator, value: anytype) ![]u8 {
     errdefer out.deinit();
     try std.json.Stringify.value(value, .{}, &out.writer);
     try out.writer.writeByte('\n');
+    if (out.written().len > max_header_bytes) return error.HeaderTooLarge;
     return out.toOwnedSlice();
 }
 
@@ -323,6 +375,50 @@ test "a frame that is not this protocol is refused, and a claimed length is not 
     // for it. This is the cheapest lie a broken peer can tell.
     const huge = "{\"op\":\"run-shell\",\"bytes\":99999999999}";
     try std.testing.expectError(error.PayloadTooLarge, parseRequest(arena, huge));
+}
+
+test "a big listing travels as payload, and the header it rides behind stays readable" {
+    const alloc = std.testing.allocator;
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The shape that broke this before entries were payload: an ordinary
+    // directory, at the listing cap, with names near what a file system allows.
+    // A quarter of a megabyte of names — many times the header bound.
+    var entries: std.ArrayList(Entry) = .empty;
+    for (0..1000) |i| {
+        const name = try std.fmt.allocPrint(arena, "{d}-{s}", .{ i, "n" ** 250 });
+        try entries.append(arena, .{ .name = name, .dir = i % 2 == 0 });
+    }
+
+    const payload = try encodeEntries(alloc, entries.items);
+    defer alloc.free(payload);
+    try std.testing.expect(payload.len > max_header_bytes);
+
+    const line = try encodeReply(alloc, .{ .ok = true, .bytes = payload.len });
+    defer alloc.free(line);
+    try std.testing.expect(line.len < max_header_bytes);
+
+    const back = try parseEntries(arena, payload);
+    try std.testing.expectEqual(entries.items.len, back.len);
+    try std.testing.expectEqualStrings(entries.items[0].name, back[0].name);
+    try std.testing.expectEqualStrings(entries.items[999].name, back[999].name);
+    try std.testing.expect(back[0].dir and !back[1].dir);
+
+    // An empty directory is an empty listing, not a broken frame.
+    try std.testing.expectEqual(@as(usize, 0), (try parseEntries(arena, "")).len);
+}
+
+test "a header that would outgrow the reader's buffer is refused instead of written" {
+    const alloc = std.testing.allocator;
+    const huge = try alloc.alloc(u8, max_header_bytes + 1);
+    defer alloc.free(huge);
+    @memset(huge, 'm');
+    // Whoever puts a growing value in a header learns it here, at the frame that
+    // caused it, rather than on the far side as a channel that went quiet.
+    try std.testing.expectError(error.HeaderTooLarge, encodeReply(alloc, .{ .ok = false, .message = huge }));
+    try std.testing.expectError(error.HeaderTooLarge, encodeRequest(alloc, .{ .op = Op.list_dir.wire(), .path = huge }));
 }
 
 test "unknown verbs stay in the vocabulary instead of becoming errors" {

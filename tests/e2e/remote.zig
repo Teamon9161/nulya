@@ -11,8 +11,10 @@
 //!   4. no host secret reaches a command the agent runs;
 //!   5. a session frozen onto a machine that does not answer refuses, and never
 //!      falls back to running here;
-//!   6. what Phase 1 does NOT move says so: extension tools and background
-//!      tasks refuse, in sentences, rather than silently touching this machine.
+//!   6. a spill lands on the machine whose files the model can open, at the very
+//!      path its footer names (Phase 2);
+//!   7. what is NOT moved yet says so: extension tools and background tasks
+//!      refuse, in sentences, rather than silently touching this machine.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -20,6 +22,7 @@ const support = @import("support.zig");
 
 const remote = support.remote;
 const environment = support.environment;
+const emit = support.emit;
 
 const runCli = support.runCli;
 const runCliEnv = support.runCliEnv;
@@ -425,7 +428,92 @@ test "a peer that never answers is a stall, not a wait forever" {
     }));
 }
 
-// ── what Phase 1 does not move ──────────────────────────────────────────────
+// ── the spill follows the workspace ─────────────────────────────────────────
+
+test "a spill lands in the far workspace, at the path its footer names, and nowhere here" {
+    const alloc = std.testing.allocator;
+    var threaded = threadedIo(alloc);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const spec = try execSpec(alloc, exe, "");
+    defer alloc.free(spec);
+
+    // "The other machine's workspace" — a directory that is not this process's
+    // cwd, which is what makes "here" and "there" distinguishable at all.
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &abs_buf);
+
+    var renv = try remote.RemoteEnvironment.connect(alloc, io, .{
+        .spec = spec,
+        .workspace = far_abs,
+        .version = "e2e",
+    });
+    defer renv.deinit();
+
+    // A line over the budget: the smallest thing that makes `emit` spill, so the
+    // test is about WHERE the file goes rather than about moving a lot of bytes.
+    const raw = "x" ** 400;
+    const out = try emit.emit(
+        alloc,
+        renv.environment().fileSink(),
+        raw,
+        "shell",
+        7,
+        0,
+        ".nulya/scratch/s-remote-spill",
+        .{ .max_line_bytes = 40 },
+    );
+    defer out.deinit(alloc);
+
+    const path = out.spill_path orelse return error.NoSpill;
+    // The footer the MODEL reads names it, and that is the only string used to
+    // find it below: where the bytes went and where the reader is sent are one
+    // fact, which is the whole point of the fourth verb.
+    try std.testing.expect(std.mem.indexOf(u8, out.text, path) != null);
+
+    const there = try far.dir.readFileAlloc(io, path, alloc, .unlimited);
+    defer alloc.free(there);
+    try std.testing.expectEqualStrings(raw, there);
+
+    // …and nothing was written under the harness's own workspace. Before the
+    // spill followed the workspace this was the ONLY place the file existed,
+    // and the footer pointed the model at a machine it could not reach.
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, path, .{}));
+}
+
+test "put-file creates the directories the path names" {
+    const alloc = std.testing.allocator;
+    var threaded = threadedIo(alloc);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const spec = try execSpec(alloc, exe, "");
+    defer alloc.free(spec);
+
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &abs_buf);
+
+    var renv = try remote.RemoteEnvironment.connect(alloc, io, .{ .spec = spec, .workspace = far_abs, .version = "e2e" });
+    defer renv.deinit();
+
+    // A spill path is several levels deep and none of them exist on a fresh
+    // machine, so "creates the parents" is part of the verb, not of its callers.
+    try renv.environment().putWorkspaceFile(".nulya/scratch/s-x/tool-output/deep.txt", "bytes");
+    const back = try far.dir.readFileAlloc(io, ".nulya/scratch/s-x/tool-output/deep.txt", alloc, .unlimited);
+    defer alloc.free(back);
+    try std.testing.expectEqualStrings("bytes", back);
+}
+
+// ── what is not moved yet ───────────────────────────────────────────────────
 
 test "extension tools and background tasks refuse in a remote session, in sentences" {
     const alloc = std.testing.allocator;
