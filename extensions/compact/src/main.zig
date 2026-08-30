@@ -338,6 +338,8 @@ fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: 
 
     var moved: std.ArrayList([]const u8) = .empty;
     var first: []const u8 = "";
+    var unknown: std.ArrayList([]const u8) = .empty;
+    var first_unknown: []const u8 = "";
     for (tasks.items) |entry| {
         if (entry != .object) continue;
         const name = stringField(entry.object, "task") orelse continue;
@@ -346,9 +348,21 @@ fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: 
             try warn(alloc, io, "compact: {s} keeps reporting into {s}: {s}\n", .{ name, parent, detail(done) });
             continue;
         }
+        const command = stringField(entry.object, "command") orelse "";
+        if (isUnreachable(entry.object)) {
+            // Retargeted the same as any other row (the race this exists to
+            // close does not know or care whether the far machine will ever
+            // answer again), but NOT folded into the same sentence as `moved`:
+            // that sentence says "still running", a claim about a machine this
+            // host cannot currently reach. Saying nothing instead would drop
+            // the fact that a result may still arrive — the same shape `⑤`'s
+            // `unreachable` state exists to avoid one level down.
+            if (first_unknown.len == 0) first_unknown = name;
+            try unknown.append(alloc, try std.fmt.allocPrint(alloc, "{s} ({s})", .{ name, command }));
+            continue;
+        }
         if (!isLive(entry.object)) continue;
         if (first.len == 0) first = name;
-        const command = stringField(entry.object, "command") orelse "";
         const elapsed: ?i64 = switch (entry.object.get("elapsed_s") orelse std.json.Value{ .null = {} }) {
             .integer => |n| n,
             else => null,
@@ -358,24 +372,42 @@ fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: 
         else
             try std.fmt.allocPrint(alloc, "{s} ({s})", .{ name, command }));
     }
-    if (moved.items.len == 0) return "";
+    if (moved.items.len == 0 and unknown.items.len == 0) return "";
 
-    return std.fmt.allocPrint(
-        alloc,
-        "\nBackground tasks still running when this session was forked: {s} — nulya task status {s}; their results will arrive here when they finish.\n",
-        .{ try std.mem.join(alloc, ", ", moved.items), first },
-    );
+    var out: std.ArrayList(u8) = .empty;
+    if (moved.items.len != 0) {
+        try out.print(
+            alloc,
+            "\nBackground tasks still running when this session was forked: {s} — nulya task status {s}; their results will arrive here when they finish.\n",
+            .{ try std.mem.join(alloc, ", ", moved.items), first },
+        );
+    }
+    if (unknown.items.len != 0) {
+        try out.print(
+            alloc,
+            "\nBackground tasks with unknown remote state at fork: {s} — nulya task status {s}; their machine could not be reached when this session was forked, so whether they are still running is not known, but they were retargeted here and may still report.\n",
+            .{ try std.mem.join(alloc, ", ", unknown.items), first_unknown },
+        );
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 /// Is this row still expected to produce a result? The same two states
 /// `task list --running` keeps (`cli/task.zig`'s `isLive`), read off the row
 /// rather than re-derived: this package does not get to disagree with the kernel
-/// about what a task is doing. `unreachable` is deliberately NOT live — nobody
-/// here knows whether that machine's task is running, and the footer's sentence
-/// is a promise, not a guess.
+/// about what a task is doing. `unreachable` is handled separately
+/// (`isUnreachable`, above) rather than folded in here or dropped: nobody here
+/// knows whether that machine's task is running, so it earns its own sentence
+/// that says so, instead of either promise this function's two other outcomes
+/// would otherwise make on its behalf.
 fn isLive(row: std.json.ObjectMap) bool {
     const state = stringField(row, "state") orelse return false;
     return std.mem.eql(u8, state, "running") or std.mem.eql(u8, state, "starting");
+}
+
+fn isUnreachable(row: std.json.ObjectMap) bool {
+    const state = stringField(row, "state") orelse return false;
+    return std.mem.eql(u8, state, "unreachable");
 }
 
 fn warn(alloc: std.mem.Allocator, io: std.Io, comptime fmt: []const u8, fmt_args: anytype) !void {
@@ -820,7 +852,6 @@ fn answer(alloc: std.mem.Allocator, io: std.Io, outcome: Outcome) !noreturn {
         },
     }
 }
-
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 

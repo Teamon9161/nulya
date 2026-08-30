@@ -395,3 +395,70 @@ projectState(...)` 改成 `projectState(...) catch return null`——与紧邻�
 产生非法 UTF-8）；`tests/e2e/remote.zig` 新增一条——远端 `status.json` 说
 `"running"` 但 `.lock` 是目录（真实 `error.IsDir`），断言 `task list --json`
 读出 `"state":"unreachable"` 而不是 `"state":"lost"`。
+
+### 7.5 第四轮 review 的四条（2026-08-30）：本机 lease 故障别把 task 吞掉、compact 的 unknown-state footer、ground 预算算成真的硬上限、"resolves itself" 那句话改准
+
+**① §7.4 里 `readRow` 本机分支那处 `.state = projectState(...) catch return
+null` 本身是新 bug**（不是历史遗留，是上一轮引入的）：一次真实的 `.lock` 读
+故障会让 `readRow` 整体返回 `null`，而 `null` 经 `lookupRow` 变成
+`taskStatus`/`taskWait`/`taskKill` 的"no such task"——比 `lost` 更强的一句假
+话：claim 与 status 都还在，只是这一次读不出锁，`task list` 把它悄悄漏成一行
+不存在的任务。改回 `.state = try projectState(...)`（不折进 `null`），错误
+往上传播，`task list`/`status`/`wait` 响亮失败而不是报告一个不存在的任务；
+`readRow` 头顶的文档注释与 `.state` 那一行各补一句，说清"为什么这里**不**跟
+`readStatus` 用同一条 `catch return null`"（一个 skip 掉一行列表，一个是对
+"这任务存不存在"这个问题给出错误答案，程度不同）。**测试**：`cli/task.zig`
+新增单测直接钉 `projectState`（`.lock` 是目录）——Windows 上这个组合实际抛的
+是 `error.Unexpected`（NTSTATUS INVALID_PARAMETER，非 `error.IsDir`：带
+`lock=.exclusive` 的 open 在目录上撞的是另一条 NT 路径），所以断言改成"任何
+错误都要传播"而不是钉某个具体错误名——真正要守的不变量是"这是一个错误，不是
+一个值"。`tests/e2e/background.zig` 新增一条端到端的：手搓一个本机 claim 目录
+（status 写 running、`.lock` 是目录），`task status` 前后两次调用分别验证
+①退出码非零 ②stdout 为空（没有走到"打印 state"那一步）③stderr 里没有
+"no such task"。两条都在临时改回 `catch return null` 后验证过会红。
+
+**② compact 的 `unreachable` retarget 从"完全不提"改成单独一句 unknown-state
+footer**：`handOverTasks` 新增第二个桶 `unknown`（`isUnreachable`），与
+`moved`（`isLive`）平行收集、平行生成句子——"Background tasks with unknown
+remote state at fork: … their machine could not be reached when this session
+was forked, so whether they are still running is not known, but they were
+retargeted here and may still report."，与"still running"那句**互斥且不
+覆盖**（两句可以同时出现，各管各的事实）。retarget 本身不变（§7.1 已经改成
+对每一行都做，这里只是 footer 怎么说）。**测试**：`tests/e2e/background.zig`
+新增一条——真实起一台"曾经可达、后来不可达"的远端机器（复制本进程的可执行
+文件到工作区、指向那份拷贝的 `remote:exec:` spec、在拷贝还在时正常
+`append`+`step` 拿到一个真实 ledger seq、再删掉那份拷贝让后续连接必然失败），
+手搓一个本机 claim 目录模拟"任务的报告没跟着回来"，`task list --json` 确认
+读成 `unreachable`，跑 `compact` 后**直接读子场 inbox 里那条被 deposit 的
+brief**（不 step 子场——fork 在没给 `--env` 时继承父场的 `environment`，子场
+会带着同一个已经不可达的 exec target，`session step` 对任何一步都要先建
+environment、不管这一步会不会真的调 shell，所以 step 子场会跟 step 父场
+一样失败），断言新句子的三个关键片段都在、且旧句子"still running when this
+session was forked"不在。在临时改回旧 `handOverTasks` 后验证过会红。
+
+**③ ground 的 `max_document_bytes` 改成真的硬上限**：旧代码先把正文裁到
+`max_document_bytes`，再把说明性 marker **追加**在后面——于是 `render` 真正
+返回的字节数是 `max_document_bytes + marker.len`，注释说的"hard ceiling"其实
+只管到正文那一段。改成先量 marker（`std.fmt.bufPrint` 到一个 256 字节的栈
+buffer，两个 `usize` 十进制数字 + 固定文案，远够用）、正文预算收成
+`max_document_bytes -| marker.len`，`clipToBudget` 返回值因此**恒 ≤
+max_document_bytes**。测试断言从 `clipped.len <= max_document_bytes + 200`
+改成 `clipped.len <= max_document_bytes`（真正的硬上限，不再留一个"够用就行"
+的容差）。
+
+**④ "那台机器一回来就自己解决" 这句承诺删除，不新增机制**：`start-task` 的
+channel-故障分支（`src/environment/remote/mod.zig`）与
+`docs/goals/remote-env.md` §6 偏差 6 都写着这句话，而它不成立——`task-poll`
+对"supervisor 还没写 status"与"对面根本没有这个任务目录"给的是同一个空答案，
+所以一个从未真正送达对面的 `start-task` 请求会让这一行永远读成 `starting`，
+不管那台机器回不回来。按 review 的建议**不新增机制**（真要收敛需要
+`start-task` 能安全重放，今天重放一次就是起两个 supervisor，代价比这个窄
+边界本身大得多）：两处注释都改成如实记录这是一个已知、边界很窄的缺口（channel
+恰好断在"claim 已经写下、请求还没真正送达"这一小段窗口），不再暗示它会自愈。
+只改文字，不改代码，不加测试——没有行为可断言，只有一句不该说的承诺被删掉。
+
+**四条修完之后**：本机 / 远端两侧对"读不出一个事实"的处理终于对齐到同一条
+纪律——本机 `.lock` 故障、远端 `.lock` 故障、远端 `status.json`/`report.txt`
+故障，四个位置现在都是"传播错误或读成 unreachable"，没有一个还在把"读不出"
+悄悄变成"没有"或"死了"。这轮 review 到这里为止，不再继续找 remote Phase 4 /
+ground 这两块的边角。

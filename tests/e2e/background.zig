@@ -12,6 +12,7 @@ const environment = support.environment;
 const ledger = support.ledger;
 const runCli = support.runCli;
 const runCliEnv = support.runCliEnv;
+const runCliStderr = support.runCliStderr;
 
 /// How long a wait here sits before calling it a failure — as an argument to
 /// `nulya task wait`, and as a poll count at 50 ms in `waitUntilRunning`.
@@ -441,6 +442,48 @@ test "background task: `task run` outside a session refuses, and names the two w
     try std.testing.expectEqual(@as(u8, 0), waited.code);
 }
 
+test "background task: a real fault reading the local lease propagates, not 'no such task' and not lost" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    const exe = (try nulyaExe(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // No real session needed — `task status`'s lookup only requires the claim
+    // directory to exist (`environment.claimTaskSlot`'s layout), the same
+    // shape a real `task run` would have left.
+    const dir = ".nulya/scratch/s-fakelease/tasks/t1";
+    try ws.createDirPath(io, dir);
+    try ws.writeFile(io, .{ .sub_path = dir ++ "/status.json", .data =
+        \\{"v":1,"task":"s-fakelease/t1","session":"s-fakelease","command":"sleep 30","cwd":".","started":"2026-08-19T10:00:00Z","state":"running"}
+        \\
+    });
+    // `.lock` is a DIRECTORY, not a missing or held file — the same real I/O
+    // fault `cli/task.zig`'s own unit test builds, reached through the CLI:
+    // before this fix, `readRow`'s local branch folded this into a vanished
+    // row, and `task status` reported the task did not exist at all — a
+    // stronger, false claim than either "lost" or "cannot tell".
+    try ws.createDirPath(io, dir ++ "/.lock");
+
+    const run = try runCli(alloc, io, ws, &.{ exe, "task", "status", "s-fakelease/t1" });
+    defer alloc.free(run.stdout);
+    try std.testing.expect(run.code != 0);
+    // Nothing was ever printed as an answer — this errored before `taskStatus`
+    // reached its `state: {s}` line, so there is no "state: lost" to check for
+    // separately: propagating means no Row was ever built to print one from.
+    try std.testing.expectEqualStrings("", run.stdout);
+
+    // And the specific wrong claim this fix removes: `lookupRow` returning
+    // null (which `taskStatus` turns into exactly this sentence) is what a
+    // real lease fault used to be folded into.
+    const err_text = try runCliStderr(alloc, io, ws, &.{ exe, "task", "status", "s-fakelease/t1" }, &.{});
+    defer alloc.free(err_text);
+    try std.testing.expect(std.mem.indexOf(u8, err_text, "no such task") == null);
+}
+
 // ── The model-facing half: `shell {background:true}` ────────────────────────
 
 test "background shell: the model starts a task, is told so, and reads the report on a later step" {
@@ -713,6 +756,136 @@ test "background task: compact retargets the parent's running tasks and says so 
     defer alloc.free(after);
     try std.testing.expect(std.mem.indexOf(u8, after, "\"kind\":\"task_finished\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, after, "FORK-SURVIVOR") != null);
+}
+
+/// The single deposited event in a fresh session's inbox — what a compaction
+/// leaves before anything ever steps that session (`session append`'s
+/// `msg-<nanos>-<hex>.json` naming is not something a caller can predict, so
+/// this reads whatever is there instead of guessing the name). Caller owns
+/// the bytes.
+fn soleInboxFile(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8) ![]u8 {
+    const inbox_rel = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.inbox", .{id});
+    defer alloc.free(inbox_rel);
+    var dir = try ws.openDir(io, inbox_rel, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+        return dir.readFileAlloc(io, entry.name, alloc, .unlimited);
+    }
+    return error.NoInboxFile;
+}
+
+test "background task: compact retargets an unreachable-machine task without claiming it is still running" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    const exe = (try nulyaExe(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = far_buf[0..try far.dir.realPath(io, &far_buf)];
+
+    const ref = try support.buildBundled(alloc, io, ws, exe, "compact");
+    defer alloc.free(ref);
+
+    // A REAL channel first: a copy of this test binary this test can delete
+    // later, so the parent gets a real ledger event through a machine that
+    // actually answers — this is "a machine went offline between sessions",
+    // not "the spec never worked", which is the shape `remote.zig` already
+    // covers and the shape compact's own footer text has to survive.
+    const exe_dir_path = std.fs.path.dirname(exe).?;
+    const exe_name = std.fs.path.basename(exe);
+    var exe_dir = try std.Io.Dir.cwd().openDir(io, exe_dir_path, .{});
+    defer exe_dir.close(io);
+    const far_exe_rel = try std.fmt.allocPrint(alloc, "far-nulya{s}", .{std.fs.path.extension(exe)});
+    defer alloc.free(far_exe_rel);
+    try exe_dir.copyFile(exe_name, ws, far_exe_rel, io, .{});
+    var ws_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_abs = ws_buf[0..try ws.realPath(io, &ws_buf)];
+    const far_exe_abs = try std.fs.path.join(alloc, &.{ ws_abs, far_exe_rel });
+    defer alloc.free(far_exe_abs);
+
+    const env_spec = try std.fmt.allocPrint(alloc, "remote:exec:{s}", .{far_exe_abs});
+    defer alloc.free(env_spec);
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", env_spec, "--workspace", far_abs });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+
+    // One real turn while the machine is actually there — the only way
+    // `brief_file` mode has a real seq to fork from.
+    {
+        const ap = try runCli(alloc, io, ws, &.{ exe, "session", "append", parent, "probe the box" });
+        defer alloc.free(ap.stdout);
+        const step = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", parent }, "NULYA_SCRIPTED_MODE", "finish");
+        defer alloc.free(step.stdout);
+        try std.testing.expectEqual(@as(u8, 0), step.code);
+    }
+
+    // The claim this machine has for a task, with nothing behind it — the
+    // same shape a real `task run` leaves once its report has not come back.
+    const task_dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{parent});
+    defer alloc.free(task_dir);
+    try ws.createDirPath(io, task_dir);
+    const task = try taskName(alloc, parent, "t1");
+    defer alloc.free(task);
+
+    // Now the machine goes away. Deleting the COPY, not the frozen spec in
+    // the header, is what keeps this "was reachable, now is not" rather than
+    // a spec that never worked — `session step` needs the environment for
+    // every turn regardless of whether a tool is called, so a spec broken
+    // from the start could never have produced the ledger event above.
+    try ws.deleteFile(io, far_exe_rel);
+
+    {
+        const listed = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", parent, "--json" });
+        defer alloc.free(listed.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"state\":\"unreachable\"") != null);
+    }
+
+    try ws.writeFile(io, .{ .sub_path = "brief.md", .data = "Phase 1 done. Next: UNREACHABLE-BRIEF.\n" });
+    const session_arg = try std.fmt.allocPrint(alloc, "session={s}", .{parent});
+    defer alloc.free(session_arg);
+    const forked = try runCli(alloc, io, ws, &.{ exe, "ext", "run", ref, "compact", "--arg", session_arg, "--arg", "brief_file=brief.md" });
+    defer alloc.free(forked.stdout);
+    if (forked.code != 0) {
+        std.debug.print("compact failed: {s}\n", .{forked.stdout});
+        return error.TestUnexpectedResult;
+    }
+    const result = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, forked.stdout, " \r\n"), .{});
+    defer result.deinit();
+    const child = try alloc.dupe(u8, result.value.object.get("session").?.string);
+    defer alloc.free(child);
+
+    // The carried brief is DEPOSITED, not stepped — compact never touches the
+    // child's environment (§6, "6. Carry the brief over ... deposited, not
+    // stepped"). Read it straight out of the inbox rather than stepping the
+    // child, which would inherit the parent's now-gone exec target (fork
+    // inherits `environment`/`remote_workspace` when `--env` is not given)
+    // and fail to step for the same reason the parent could not any more.
+    const deposited = try soleInboxFile(alloc, io, ws, child);
+    defer alloc.free(deposited);
+    for ([_][]const u8{
+        "Background tasks with unknown remote state at fork",
+        task,
+        "may still report",
+    }) |needle| {
+        try std.testing.expect(std.mem.indexOf(u8, deposited, needle) != null);
+    }
+    // The claim this fix removes: an unreachable task must never be folded
+    // into the sentence that promises a task is still running.
+    try std.testing.expect(std.mem.indexOf(u8, deposited, "still running when this session was forked") == null);
+
+    // The claim moved with the conversation — the parent no longer lists it.
+    const listed = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", parent, "--json" });
+    defer alloc.free(listed.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, task) == null);
 }
 
 test "background task: a result that landed before the fork follows the conversation into the child" {

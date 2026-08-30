@@ -843,9 +843,16 @@ pub const RemoteEnvironment = struct {
             // The claim STAYS. Whether that machine started the task before the
             // channel broke is unknown, and releasing the name would make a task
             // that did start invisible here forever — nothing to poll, nothing
-            // to kill. A name held for a task that never started reads
-            // `starting` until that machine answers again, which is the honest
-            // shape of "unknown" and resolves itself.
+            // to kill. A name held for a task that never started also reads
+            // `starting`, and that is the honest shape of "unknown" — but it
+            // does NOT resolve itself: `task-poll` answers empty for "no status
+            // yet" and "there is no such task directory over there" alike, so a
+            // request that never reached that machine reads `starting` forever,
+            // not just until it answers again. Retrying `start-task` would need
+            // it to be safe to ask twice (it is not, today — a second spawn is a
+            // second supervisor), so this is a known, narrow gap — a channel
+            // that drops between claiming the name and getting a reply — rather
+            // than a promise this code keeps.
             return err;
         };
         if (!rep.ok) {

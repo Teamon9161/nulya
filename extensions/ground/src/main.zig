@@ -132,14 +132,24 @@ fn render(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
 /// Cut an assembled document down to `max_document_bytes`, UTF-8-safe, with a
 /// marker saying so. Pulled out of `render` so the invariant can be tested
 /// against a document git never had to be coaxed into producing.
+///
+/// The marker is measured BEFORE the prefix is cut, and the cut uses what is
+/// left over — not measured after appending it to a `max_document_bytes`-sized
+/// prefix. The latter would make `max_document_bytes` describe the prefix
+/// alone, with the true ceiling on what `render` returns being that plus
+/// however many bytes the marker happens to be: the same "budget that is not
+/// actually the size of what gets returned" shape `instructions.zig`'s own
+/// `one()` exists to avoid for a single quoted file.
 fn clipToBudget(alloc: std.mem.Allocator, document: []const u8) ![]const u8 {
     if (document.len <= max_document_bytes) return document;
-    const end = instructions.boundaryAtOrBefore(document, max_document_bytes);
-    return std.fmt.allocPrint(
-        alloc,
-        "{s}\n\n[ground: this document was {d} bytes; the render budget is {d}, so it was cut here.]\n",
-        .{ document[0..end], document.len, max_document_bytes },
-    );
+    var marker_buf: [256]u8 = undefined;
+    const marker = std.fmt.bufPrint(
+        &marker_buf,
+        "\n\n[ground: this document was {d} bytes; the render budget is {d}, so it was cut here.]\n",
+        .{ document.len, max_document_bytes },
+    ) catch unreachable; // two usize values in decimal, comfortably under 256 bytes
+    const end = instructions.boundaryAtOrBefore(document, max_document_bytes -| marker.len);
+    return std.fmt.allocPrint(alloc, "{s}{s}", .{ document[0..end], marker });
 }
 
 /// Write the document into a directory this invocation owns, and answer where.
@@ -214,7 +224,10 @@ test "an oversized document is clipped to the budget, not merely UTF-8 validated
     @memset(huge, 'x');
     const clipped = try clipToBudget(alloc, huge);
     try std.testing.expect(clipped.len < huge.len);
-    try std.testing.expect(clipped.len <= max_document_bytes + 200);
+    // A HARD ceiling: the marker is measured before the cut, not appended
+    // after it, so what `clipToBudget` returns is never larger than what it
+    // names — not "the budget plus however many bytes a marker happens to be".
+    try std.testing.expect(clipped.len <= max_document_bytes);
     try std.testing.expect(std.mem.indexOf(u8, clipped, "cut here") != null);
     try std.testing.expect(std.unicode.utf8ValidateSlice(clipped));
 }

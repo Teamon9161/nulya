@@ -1317,9 +1317,19 @@ const RowRef = struct {
 /// One task's state, from whichever machine holds it — this disk for a local
 /// session, the channel for a remote one, with any report it has left collected
 /// on the way past (`pollAndDeliver`).
-/// Null means the row is skipped: a status that exists but does not parse, or
-/// a lease that exists but cannot be read, is a fault, and nothing here makes
-/// up a state on a supervisor's behalf — the same rule on either machine.
+///
+/// Null means the row is SKIPPED: a status that exists but does not parse is a
+/// fault, and nothing here makes up a state on a supervisor's behalf. A real
+/// fault reading the LEASE is deliberately not folded into that same null,
+/// even though it is the same kind of fault: `lookupRow`, below, turns a null
+/// row into "no such task", and a `.lock` this machine cannot open is not
+/// evidence the task itself does not exist — that would trade "cannot answer"
+/// for a stronger, false claim than the one a skipped listing row makes. That
+/// fault propagates as an error instead, so `task list`/`status`/`wait` fail
+/// loudly rather than reporting a confident lie. Rare enough — a real I/O
+/// fault on a lock file, not its ordinary absence — that failing the whole
+/// call is the honest choice; a per-row "unreadable" state can be introduced
+/// if a second caller ever needs "skip this one row, list the rest".
 fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef) !?Row {
     if (try far.isRemote(ref.session)) {
         var row: Row = .{
@@ -1369,11 +1379,11 @@ fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef) !?Row {
         .full = ref.full,
         .session = ref.session,
         .dir = ref.dir,
-        // Same rule as the line above: a real fault reading `.lock` (not just
-        // its ordinary absence, which `leaseHeldIn` already answers as "not
-        // held") skips the row instead of guessing running or lost on a
-        // supervisor's behalf.
-        .state = projectState(arena, io, ref.dir, status) catch return null,
+        // NOT `catch return null` — see the doc comment above. Folding a real
+        // `.lock` read fault into a vanished row would make `lookupRow` answer
+        // "no such task" for a task whose claim (and status) are right there;
+        // this propagates instead, so the caller fails loudly.
+        .state = try projectState(arena, io, ref.dir, status),
         .status = status,
         .notify = ref.notify,
     };
@@ -1998,6 +2008,42 @@ test "lost is a projection: a running status whose lease nobody holds" {
     var done = running;
     done.state = .done;
     try std.testing.expectEqual(Projected.done, try projectState(alloc, io, dir, done));
+}
+
+test "a real fault reading the lease propagates — it is not the same claim as an unheld one" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = buf[0..try tmp.dir.realPath(io, &buf)];
+
+    const running: Status = .{
+        .task = "s-1/t1",
+        .session = "s-1",
+        .command = "sleep 30",
+        .cwd = ".",
+        .started = "2026-08-19T10:00:00Z",
+    };
+    // `.lock` is a DIRECTORY here, not a missing or held file — a real I/O
+    // fault, not "nobody holds it" (the test right above this one). Reading
+    // this as `lost` would say a supervisor died when the honest answer is
+    // this machine could not check; `readRow` relies on this propagating
+    // rather than folding into `null`, because a null row reads as "no such
+    // task" to `lookupRow`, a claim stronger than a skipped listing row.
+    //
+    // Not `expectError(error.IsDir, ...)`: opening a directory with a
+    // nonblocking exclusive lock request surfaces as `error.Unexpected` on
+    // this platform (an NTSTATUS the Windows layer does not name), not the
+    // `error.IsDir` a plain read gets. The property under test is "an error
+    // propagates instead of a value", not which one.
+    const lock_path = try std.fs.path.join(alloc, &.{ dir, lock_file });
+    defer alloc.free(lock_path);
+    try std.Io.Dir.cwd().createDirPath(io, lock_path);
+
+    if (projectState(alloc, io, dir, running)) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
 }
 
 test "the report frames the output verbatim, and says so when there is none" {
