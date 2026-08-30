@@ -24,6 +24,12 @@
 //!   foreign    answers `hello` correctly, calling itself an os and arch that do
 //!              not exist — the machine a host has no build for
 //!   silent     answers nothing at all, ever
+//!   stalereport  answers `hello` correctly, then answers the next request (a
+//!              `task-poll`) with a WELL-FORMED `TaskSnapshot` whose `report` is
+//!              present while `status` still says `running` — the window a real
+//!              supervisor's `report.txt`-then-`status.json` write order opens
+//!              for one poll, and that no real peer can be paused inside on
+//!              purpose (`cli/task.zig`'s `pollAndDeliver`)
 //!
 //! The frames are written by hand rather than through `protocol.zig`: a fake
 //! whose encoder is the real one could not produce a frame the real one refuses
@@ -83,6 +89,26 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, mode, "liar")) {
         try out.writeStreamingAll(io, "{\"ok\":true,\"exit_code\":0,\"bytes\":99999999999,\"out\":0}\n");
+        return;
+    }
+    if (std.mem.eql(u8, mode, "stalereport")) {
+        // Hand-written, like the rest of this file, but WELL-FORMED — this mode
+        // is not testing framing, it is testing whether the host trusts a
+        // `report` present over a `status` that has not caught up to it. The
+        // inner `status` string is itself JSON — `cli/task.zig`'s `Status`,
+        // with every field it declares as required (`task`, `session`,
+        // `command`, `cwd`, `started`) present, or the host's own parse simply
+        // fails and the row vanishes instead of exercising the race at all —
+        // and its quotes are escaped the way `std.json.Stringify` would escape
+        // them for any string field.
+        const payload = "{\"status\":\"{\\\"v\\\":1,\\\"task\\\":\\\"s-1/t1\\\",\\\"session\\\":\\\"s-1\\\"," ++
+            "\\\"command\\\":\\\"echo hi\\\",\\\"cwd\\\":\\\".\\\",\\\"started\\\":\\\"2026-08-30T00:00:00Z\\\"," ++
+            "\\\"state\\\":\\\"running\\\",\\\"exit_code\\\":null}\"," ++
+            "\"report\":\"[background task s-1/t1 finished] echo hi \\u00b7 exit 0 \\u00b7 0.1s\\n--- output ---\\nhi\\n\"," ++
+            "\"lease_held\":true}";
+        const header = try std.fmt.allocPrint(alloc, "{{\"ok\":true,\"bytes\":{d}}}\n", .{payload.len});
+        try out.writeStreamingAll(io, header);
+        try out.writeStreamingAll(io, payload);
         return;
     }
     // `die`: nothing at all, and the process ends. The host sees EOF where a

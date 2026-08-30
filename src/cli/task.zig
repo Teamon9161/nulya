@@ -1127,11 +1127,19 @@ fn pollAndDeliver(
     if (snap.report.len == 0 or status_bytes.len == 0) return answer;
     if (markerPresent(alloc, io, host_dir, delivered_file)) return answer;
 
-    // The far side writes its report BEFORE it says `done`, so a report present
-    // is a task finished; the exit code comes from the status it wrote with it.
+    // The far side writes its report BEFORE it says `done` (the write order in
+    // `runShellTask` above), so ONE poll can land in between: a report already
+    // there, `status.json` still saying whatever it said before (typically
+    // `running`, exit code null). Depositing on report-presence alone would
+    // read THAT status for the exit code — wrong, and permanently: `delivered`
+    // gets written, so the correct `done` status that lands on the very next
+    // poll is never looked at again. `state == .done` is what actually finished
+    // means; a report with no matching `done` yet is simply asked about again
+    // later, the same as one that has not been written at all.
     const parsed = std.json.parseFromSlice(Status, alloc, std.mem.trim(u8, status_bytes, " \t\r\n"), json_opts) catch
         return answer;
     defer parsed.deinit();
+    if (parsed.value.state != .done) return answer;
 
     try depositReport(alloc, io, .{
         .dir = host_dir,
@@ -1884,17 +1892,39 @@ fn taskRetarget(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
         return 1;
     };
 
-    // The marker first, so a supervisor finishing right now sees the new target
-    // (and re-checks after depositing, which closes the remaining window).
     const cwd = std.Io.Dir.cwd();
+    const from = row.session;
+    const name = try depositName(arena, from, std.fs.path.basename(row.dir));
+
+    // `.done` is terminal: no supervisor is still racing to deposit a result,
+    // so there is nothing "write the marker first" protects against, and the
+    // only thing worth moving is a deposit already sitting here undrained (the
+    // fork-boundary window `extensions/compact`'s `handOverTasks` retargets
+    // EVERY row for). Writing the marker unconditionally on a row already
+    // consumed would make that task forward FOREVER along every future
+    // continuation — a compaction ten forks from now would still be dragging
+    // it along, long after its result was read and forgotten
+    // (`docs/goals/review-fork-remote.md`). So: move first, and only mark the
+    // notify pointer when there was something to move.
+    if (row.state == .done) {
+        const moved = try moveDeposit(arena, io, if (row.notify) |n| n else from, to, name);
+        if (moved) {
+            const tmp = try std.fs.path.join(arena, &.{ row.dir, ".notify.tmp" });
+            const final = try std.fs.path.join(arena, &.{ row.dir, notify_file });
+            try cwd.writeFile(io, .{ .sub_path = tmp, .data = to });
+            try cwd.rename(tmp, cwd, final, io);
+        }
+        try printOut(alloc, io, "{s} -> {s}{s}\n", .{ row.full, to, if (moved) " (result moved)" else "" });
+        return 0;
+    }
+
+    // Still live: the marker goes down FIRST, so a supervisor finishing right
+    // now sees the new target (and re-checks after depositing, which closes
+    // the remaining window).
     const tmp = try std.fs.path.join(arena, &.{ row.dir, ".notify.tmp" });
     const final = try std.fs.path.join(arena, &.{ row.dir, notify_file });
     try cwd.writeFile(io, .{ .sub_path = tmp, .data = to });
     try cwd.rename(tmp, cwd, final, io);
-
-    // If the report already landed and nobody has drained it yet, it moves too.
-    const from = row.session;
-    const name = try depositName(arena, from, std.fs.path.basename(row.dir));
     const moved = try moveDeposit(arena, io, if (row.notify) |n| n else from, to, name);
 
     try printOut(alloc, io, "{s} -> {s}{s}\n", .{ row.full, to, if (moved) " (result moved)" else "" });

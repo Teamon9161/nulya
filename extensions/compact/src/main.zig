@@ -283,10 +283,28 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     //    retargeting has already happened either way — the note only describes it.
     const note_ok = std.unicode.utf8ValidateSlice(tasks_footer);
     if (!note_ok) try warn(alloc, io, "compact: the background-task note was not valid UTF-8 and was left out of {s}'s brief\n", .{new_id});
-    const handed = try runNulya(alloc, io, exe, &.{ "session", "append", new_id, if (note_ok)
-        try std.fmt.allocPrint(alloc, "{s}{s}", .{ carried, tasks_footer })
-    else
-        carried });
+    const full_text = if (note_ok) try std.fmt.allocPrint(alloc, "{s}{s}", .{ carried, tasks_footer }) else carried;
+
+    // The brief travels as a FILE, not an argv word. It is not small by
+    // construction: a handoff section alone can be 64 KiB, `brief_file` reads
+    // up to 4 MiB, and `tasks_footer` grows with however many tasks this
+    // session had running. All of that landing on a command line risks the
+    // OPERATING SYSTEM's argv length limit, not `session append`'s own, and
+    // Windows's is well within reach of a legitimate brief. Hitting it here
+    // would mean the child session already exists and its tasks are already
+    // retargeted — the orphan continuation step 4's ordering exists to
+    // prevent, just reached from the other end. `session append --file`
+    // already exists for exactly this (up to 8 MiB), so this writes the brief
+    // to a scratch file this compaction owns (named after the child session
+    // id, which is unique) and hands over the path instead.
+    const scratch_dir = ".nulya/scratch/compact";
+    try std.Io.Dir.cwd().createDirPath(io, scratch_dir);
+    const brief_path = try std.fmt.allocPrint(alloc, "{s}/{s}.md", .{ scratch_dir, new_id });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = brief_path, .data = full_text });
+    const handed = try runNulya(alloc, io, exe, &.{ "session", "append", new_id, "--file", brief_path });
+    // The file did its one job the moment `session append` read it, win or
+    // lose; leaving it behind would be one more file per compaction, forever.
+    std.Io.Dir.cwd().deleteFile(io, brief_path) catch {};
     if (handed.code != 0) {
         return .{ .failed = try fail(alloc, "{s} was created but the summary could not be carried into it: {s}", .{ new_id, detail(handed) }) };
     }
@@ -311,8 +329,12 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
 /// the parent's inbox: exactly the window `task retarget`'s `moveDeposit` half
 /// exists for. Asking `--running` filtered that window out and lost the result
 /// there, which is the same loss the whole procedure is meant to prevent. On a
-/// row whose result a step already drained, `moveDeposit` finds nothing and the
-/// retarget is a harmless no-op.
+/// `.done` row whose result a step already drained, `moveDeposit` finds
+/// nothing to move and `task retarget` leaves the notify pointer untouched —
+/// a real no-op, not merely a harmless one: writing that pointer anyway would
+/// make a long-finished, already-read task follow every future compaction
+/// down the fork chain forever (`cli/task.zig`'s `taskRetarget`,
+/// `docs/goals/review-fork-remote.md`).
 ///
 /// The footer is still only the live ones: it promises "their results will
 /// arrive here", and a task whose result has already been read is not part of
@@ -432,8 +454,9 @@ fn briefFromFile(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Ar
     }
 
     // The fork point is where the old ledger stands right now. `session events`
-    // is a read-only tail (DESIGN §14), so asking costs the old file nothing.
-    const listed = try runNulya(alloc, io, exe, &.{ "session", "events", args.session });
+    // is a read-only tail (DESIGN §14), so asking costs the old file nothing —
+    // but it is the WHOLE tail, so this reads with `runNulyaScan`'s bigger cap.
+    const listed = try runNulyaScan(alloc, io, exe, &.{ "session", "events", args.session });
     if (listed.code != 0) {
         return .{ .failed = try fail(alloc, "cannot read the events of {s}: {s}", .{ args.session, detail(listed) }) };
     }
@@ -461,8 +484,9 @@ fn briefFromLedger(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: 
     }
 
     // `session events` is a read-only tail (DESIGN §14), so asking costs the old
-    // file nothing.
-    const listed = try runNulya(alloc, io, exe, &.{ "session", "events", args.session });
+    // file nothing — but it is the WHOLE tail, so this reads with
+    // `runNulyaScan`'s bigger cap.
+    const listed = try runNulyaScan(alloc, io, exe, &.{ "session", "events", args.session });
     if (listed.code != 0) {
         return .{ .failed = try fail(alloc, "cannot read the events of {s}: {s}", .{ args.session, detail(listed) }) };
     }
@@ -750,17 +774,43 @@ fn readFileMaybe(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !?[]u8 
 
 const Run = struct { code: u8, stdout: []u8, stderr: []u8 };
 
+/// The largest ledger tail the two fork-only branches will read in one gulp —
+/// `briefFromFile` and `briefFromLedger` both ask `session events <old>` with
+/// no `--since`, which is the WHOLE ledger (DESIGN §14: a read-only tail, but
+/// an unbounded one). `max_child_output` (4 MiB) is sized for a bounded
+/// child's output; a long-lived session is exactly what compaction exists to
+/// shorten, so the longer it ran before someone compacted it, the bigger this
+/// read gets — hitting the ordinary cap here would mean the session most in
+/// need of compacting is the one these two branches refuse to look at,
+/// exactly backwards from what they are for (`briefFromSession`'s default
+/// path never hits this: it reads one `session step`'s new events, not the
+/// ledger's history). Still a cap, not `.unlimited`, for the reason
+/// `protocol.zig`'s `max_payload_bytes` is one: a size no real ledger will
+/// reach, not a budget tuned to the common case; a true streaming scan is a
+/// later optimisation, not needed to fix this.
+const max_ledger_scan_bytes: usize = 64 << 20;
+
 /// One `nulya <args…>` invocation, in this process's working directory — which
 /// is the workspace, because that is where the host spawns an extension
 /// (DESIGN §7.6). Output is captured, never inherited: stdout here is data.
 fn runNulya(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, tail: []const []const u8) !Run {
+    return runNulyaLimited(alloc, io, exe, tail, max_child_output);
+}
+
+/// Like `runNulya`, for a read that may legitimately be an entire session's
+/// ledger rather than one bounded child's output.
+fn runNulyaScan(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, tail: []const []const u8) !Run {
+    return runNulyaLimited(alloc, io, exe, tail, max_ledger_scan_bytes);
+}
+
+fn runNulyaLimited(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, tail: []const []const u8, stdout_limit: usize) !Run {
     const argv = try alloc.alloc([]const u8, tail.len + 1);
     argv[0] = exe;
     @memcpy(argv[1..], tail);
 
     const result = try std.process.run(alloc, io, .{
         .argv = argv,
-        .stdout_limit = .limited(max_child_output),
+        .stdout_limit = .limited(stdout_limit),
         .stderr_limit = .limited(max_child_output),
     });
     return .{

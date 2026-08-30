@@ -1231,6 +1231,65 @@ test "a step collects a far task's report even when no task verb ever asked" {
     try std.testing.expect(std.mem.indexOf(u8, step2.stdout, launch.ScriptedProvider.background_marker) != null);
 }
 
+test "a report present while status still says running is not delivered — only `done` is finished" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    // A real supervisor writes `report.txt` BEFORE it writes `state:"done"`
+    // (`cli/task.zig`'s `runShellTask`), so one poll can land in the window
+    // between the two writes — a report already there, status still saying
+    // whatever it said before. No real peer can be paused inside that window
+    // on purpose, so this uses `fake_remote`'s `stalereport` mode, which
+    // answers a `task-poll` with exactly that: a WELL-FORMED snapshot whose
+    // `report` is non-empty and whose `status` says `running`.
+    const spec = try fakeSpec(alloc, "stalereport");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // No task was ever actually started — the fake answers every poll with the
+    // same fixed reply regardless of what was asked — so only the local CLAIM
+    // needs to exist: the name and its directory, exactly what a real `shell
+    // {background:true}` would have made before any command ran over there.
+    const task_dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{id});
+    defer alloc.free(task_dir);
+    try ws.createDirPath(io, task_dir);
+
+    const listed = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--json" });
+    defer alloc.free(listed.stdout);
+    try std.testing.expectEqual(@as(u8, 0), listed.code);
+    // The row says what it actually knows: `status.state` was `running`, and
+    // the listing reads that, not `done` — the bug's report-presence shortcut
+    // would have made no difference here, which is what made it easy to miss.
+    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"state\":\"running\"") != null);
+
+    // The bug's whole shape: depositing on report-presence alone would have
+    // written this `task_finished` by now — with `exit_code:1`, read off the
+    // stale `running` status, which never carries one — rather than waiting
+    // for the real exit code the far side never got to send.
+    const deposit = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.inbox/task-{s}-t1.json", .{ id, id });
+    defer alloc.free(deposit);
+    try std.testing.expect(!exists(io, ws, deposit));
+
+    // And `delivered` must not exist either: writing it here would mean the
+    // correct `done` status — if the far side ever got to send it — could
+    // never be looked at again, because `pollAndDeliver` skips any task that
+    // already has this marker.
+    const delivered = try std.fmt.allocPrint(alloc, "{s}/delivered", .{task_dir});
+    defer alloc.free(delivered);
+    try std.testing.expect(!exists(io, ws, delivered));
+}
+
 test "killing a remote task ends the process tree on that machine" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

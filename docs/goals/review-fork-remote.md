@@ -457,6 +457,102 @@ channel-故障分支（`src/environment/remote/mod.zig`）与
 恰好断在"claim 已经写下、请求还没真正送达"这一小段窗口），不再暗示它会自愈。
 只改文字，不改代码，不加测试——没有行为可断言，只有一句不该说的承诺被删掉。
 
+### 7.6 第五轮 review 的三条（2026-08-30）：远端 report 必须等 `status.done`、compact 的 brief 改走 `--file`、compact 对整份 ledger 的扫描不再套小 cap
+
+这轮 review 又指出四点，其中三点确认属实并修了；第四点（compact 无条件
+retarget `.done` row 会让早已消费完的历史任务沿 fork 链永远迁移）review 自己
+的措辞里其实混在了"② compact carry 改走 `--file`"一节的讨论里，但结论段单独
+列了它，逐一核实后一并修。
+
+**① remote task 有一个 `report written → done written` 的投递竞态，是本轮
+最高优先级**：远端 supervisor 的写入顺序是 `report.txt` 先落地、`status.json`
+的 `state:"done"` 后写（`runShellTask`，两次写之间没有任何东西能让第三方暂停
+在中间，但顺序本身是真实的、可复现的），而 host 侧 `pollAndDeliver` 只看
+`report.len != 0`，不管 `status.state` 是什么就投递——一次 poll 恰好落在两次
+写之间，会读到"report 已经有、status 还说 running"，`depositReport` 拿
+`parsed.value.exit_code orelse 1` 当退出码（读的是旧 status，从来没有
+`exit_code`，永远塌成 `1`），且 `delivered` 标记一旦写下，后面到达的正确
+`done` 状态再也不会被看一眼——不是"偶尔"错误，是"哪次 poll 恰好撞上那个窗口"
+就一定错误。**修法**：`pollAndDeliver` 在 `report`/`status_bytes` 都非空、且
+`delivered` 未写的前提下，解析出 `status.state` 之后多判一步——`!= .done`
+就照旧 `return answer`（等于"这一轮什么都还没定"，与 `report` 尚未写入是
+同一个分支），只有 `.done` 才走 `depositReport`。**测试的做法**：这个窗口窄到
+真实的两次文件写之间插不进第三个观察者，所以没有用真实 supervisor 去赌时序,
+而是扩展 `tests/fake_remote.zig`（已有的"故意说谎的对端"角色）新增
+`stalereport` 模式——`hello` 握手照常，随后对（唯一会来的）`task-poll`
+请求，手写一个**协议上完全合法**的 `TaskSnapshot`：`report` 非空、
+`status` 是一份完整的（`Status` 结构体每个必填字段都给了，否则 host 侧
+`readRow` 的 `parseFromSliceLeaky` 直接失败、整行从列表里消失，这是写这个
+假端点时先踩的一个坑，与本次要测的 bug 无关）、`state:"running"` 的 JSON。
+`tests/e2e/remote.zig` 新测试只需要本机有一个空的任务 claim 目录（`t1`，模拟
+`shell {background:true}` 已经登记好名字但命令还没跑完）指向这个假端点，跑
+一次 `task list --session <id> --json`，断言：行本身诚实地显示 `running`
+（bug 修不修都一样，这正是 bug 容易被漏掉的原因）、**inbox 里没有出现
+`task_finished`**、**`delivered` 标记不存在**。改回旧逻辑（去掉
+`state != .done` 那一判）后验证过这条测试会红。
+
+**② compact 最后一步把整段 brief（含 `tasks_footer`）塞进 argv，且这发生在
+child 已经建好、parent 的 task 已经被 retarget 之后**：`handoff` 一个 section
+上限 64 KiB、`brief_file` 读到 4 MiB、`tasks_footer` 随任务数增长没有上限，这些
+最终全部拼成**一个命令行参数**交给子进程——Windows 的命令行长度限制比这些
+数字小得多，一旦撞上，`session append` 这个子进程根本起不来，而这正是之前
+几轮努力想消灭的"child created, tasks retargeted, 但摘要没能带过去"那个孤儿
+continuation，只是从另一头撞上同一个问题。kernel 已经有走文件的路
+（`session append <id> --file <path>`，8 MiB 上限），只是 compact 最后一步
+没有用它。**修法**：把 `carried ++ tasks_footer` 写进这次 compaction 自己
+持有的一个 scratch 文件（`.nulya/scratch/compact/<child-id>.md`——用 child
+session id 命名，天然不冲突，因为每次 compaction 恰好只造一个 child），
+`session append` 换成 `--file <path>`，文件在被读走之后（不论成败）立刻删掉，
+不留下一个文件一次 compaction 的痕迹。**测试**：这类文件系统层面的重构，
+其余全部行为（brief 的实际字节内容、"结果送到了哪个 session"）没有变化，
+所以靠已有的 compact e2e 覆盖面（`tests/e2e/extension.zig` 的多条 compact
+测试、`tests/e2e/session.zig` 的 `drivers/goal` 全链路测试）逐字节比对
+carried 内容不变、child 仍然收到摘要——这些测试全部照常通过就是这条修复没有
+引入行为差异的证据；没有为"argv 太长"这个场景本身单独构造回归测试，因为要
+真实撞穿操作系统命令行上限需要构造一个几十 KB 到几 MB 的假 brief，收益（证明
+一个已经从代码上排除的路径确实会失败）不足以抵消测试运行时的成本。
+
+**③ `brief=latest` / `brief_file` 这两条 fork-only 分支读 `session events
+<old>` 时没有传 `--since`，等于读整份 ledger，却套用了给"一次子进程调用的
+输出"设计的 4 MiB `stdout_limit`**：`briefFromSession`（默认路径）只解析一次
+`session step` 新产生的事件，永远不会撞这个上限；但这两条分支恰恰是"老
+session 已经长得足够需要压缩"才会走到的路径，越是该被压缩的 session，这次
+读取就越大——在这两条分支上应用通用 cap，等于让最需要压缩的 session 被
+compact 自己拒绝服务。**修法（按 review 建议的最小方案，不新增 CLI 参数、不
+做流式扫描）**：`runNulya` 拆成 `runNulyaLimited`（新增一个 `stdout_limit`
+参数）之上的两个具名调用点——`runNulya`（原有 4 MiB，其余七个调用点不变）与
+`runNulyaScan`（64 MiB，只给这两条 `session events` 全量扫描用，量级参照
+`protocol.zig` 的 `max_payload_bytes`：一个真实答案不会碰到、但仍然是一个
+上限而非 `.unlimited` 的数字）。**测试**：与②同理，这是把已经正确的行为从
+一个太小的 cap 下解放出来，不是修一个可观察的错误输出，所以靠既有 compact
+覆盖面确认两条分支照常工作；没有构造一个超过 4 MiB 的假 ledger 去证明旧
+代码会在那个具体大小上失败，因为那本来就是 cap 数字本身决定的，不是需要
+用测试去发现的逻辑错误。
+
+**④（review 结论段里单列的第三条）`.done` 的 task 无条件 retarget，会让已经
+读过的历史结果沿 fork 链永远迁移**：`taskRetarget` 之前不分 row 的状态，一律
+先写 `notify` 指针再尝试 `moveDeposit`——对一个早已 `.done` 且结果已经被
+`session step` 排干的任务，`moveDeposit` 确实找不到东西可搬，行为上"看起来"
+是无害的，但 `notify` 指针已经被永久改写指向了这一次的 child；下一次这个
+session 又被 compact，`handOverTasks`（③②，`docs/goals/review-fork-remote.md`
+§7.1 定的规则："EVERY row 都 retarget，不只是 running 的"）会再把它往下搬一层，
+如此无限累积——不是正确性事故（没有重复投递），是 `/tasks` 与 `task list`
+的噪音随 compact 次数线性增长，永远不会自己停下来。**修法**：`taskRetarget`
+按 `row.state == .done` 分两条路——`.done` 时先 `moveDeposit`，**只有真的搬走
+了东西才写 `notify`**（此时把它当"仍需要收尾"的信号，与 review 建议一致）；
+非 `.done`（`running`/`starting`/`lost`/`unreachable`）保持原来的顺序不变——
+`notify` 先落地，为的是正在运行的 supervisor 完成时能看见新目标（这条窗口
+review 没有质疑，属于更早一轮已经关闭的问题）。**测试**：`tests/e2e/
+background.zig` 新增一条——起一个任务、等它 `.done`、直接删掉它在 parent
+inbox 里的 deposit 文件模拟"已经被排干"，retarget 到一个 child、断言输出没有
+`(result moved)` 且 `notify` 文件不存在，再 retarget 到第二个 grandchild、
+断言同样没有 `notify` 文件（证明第一次调用没有留下一个后续调用会看见的
+指针）。改回"无条件写 notify"后验证过这条测试会红。
+
+**测试**：`zig build test`（含新单测所在的所有既有单测）与全部五组
+`zig build e2e`（164/166，2 个既有 skip）全绿；①③④ 三处代码改动均在临时
+撤回后确认对应新测试会红，②是纯粹的通道切换（无新增断言点）。
+
 **四条修完之后**：本机 / 远端两侧对"读不出一个事实"的处理终于对齐到同一条
 纪律——本机 `.lock` 故障、远端 `.lock` 故障、远端 `status.json`/`report.txt`
 故障，四个位置现在都是"传播错误或读成 unreachable"，没有一个还在把"读不出"

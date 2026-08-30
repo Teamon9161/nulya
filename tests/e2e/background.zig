@@ -408,6 +408,72 @@ test "background task: retarget delivers the result to another session, before o
     try std.testing.expect(std.mem.indexOf(u8, second_delivered, "LATE-TWO") != null);
 }
 
+test "background task: retargeting an already-drained `.done` task is a real no-op, not a permanent forward" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    const exe = (try nulyaExe(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const parent = try newSession(alloc, io, ws, exe);
+    defer alloc.free(parent);
+    const child = try newSession(alloc, io, ws, exe);
+    defer alloc.free(child);
+    const grandchild = try newSession(alloc, io, ws, exe);
+    defer alloc.free(grandchild);
+
+    {
+        const started = try runCli(alloc, io, ws, &.{ exe, "task", "run", "--session", parent, "--", "echo DONE-AND-DRAINED" });
+        defer alloc.free(started.stdout);
+        try std.testing.expectEqual(@as(u8, 0), started.code);
+    }
+    const t1 = try taskName(alloc, parent, "t1");
+    defer alloc.free(t1);
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", t1, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // Drained: whatever reads the deposit (a `session step`, here just deleted
+    // directly, since what matters to `taskRetarget` is "is anything pending",
+    // not who removed it) leaves nothing left to move.
+    {
+        const dep_path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.inbox/task-{s}-t1.json", .{ parent, parent });
+        defer alloc.free(dep_path);
+        try ws.deleteFile(io, dep_path);
+    }
+
+    // First retarget: nothing to move, so this is a REAL no-op — no "(result
+    // moved)", and no notify pointer left behind either. A pointer written
+    // anyway would be invisible to this one call, but it is exactly what
+    // would make the task follow every future compaction down the fork chain
+    // forever (`docs/goals/review-fork-remote.md`).
+    {
+        const moved = try runCli(alloc, io, ws, &.{ exe, "task", "retarget", t1, "--to", child });
+        defer alloc.free(moved.stdout);
+        try std.testing.expectEqual(@as(u8, 0), moved.code);
+        try std.testing.expect(std.mem.indexOf(u8, moved.stdout, "result moved") == null);
+    }
+    const notify_path = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1/notify", .{parent});
+    defer alloc.free(notify_path);
+    try std.testing.expectError(error.FileNotFound, ws.access(io, notify_path, .{}));
+
+    // A second retarget, to yet another session, must not find a phantom
+    // pointer left by the first one either — a task this thoroughly finished
+    // must not migrate just because something keeps asking about it.
+    {
+        const moved = try runCli(alloc, io, ws, &.{ exe, "task", "retarget", t1, "--to", grandchild });
+        defer alloc.free(moved.stdout);
+        try std.testing.expectEqual(@as(u8, 0), moved.code);
+        try std.testing.expect(std.mem.indexOf(u8, moved.stdout, "result moved") == null);
+    }
+    try std.testing.expectError(error.FileNotFound, ws.access(io, notify_path, .{}));
+}
+
 test "background task: `task run` outside a session refuses, and names the two ways in" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
