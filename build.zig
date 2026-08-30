@@ -136,6 +136,18 @@ pub fn build(b: *std.Build) void {
     const agent_external_tests = b.addTest(.{ .root_module = agent_external_mod, .filters = test_filters });
     test_step.dependOn(&b.addRunArtifact(agent_external_tests).step);
 
+    // …and the `compact` package, which renders the text a forked session opens
+    // with: the per-section cap that must not split a character, because the
+    // `session append` on the other side of it refuses bytes that are not valid
+    // UTF-8 and the fork is already irreversible by then.
+    const compact_ext_mod = b.createModule(.{
+        .root_source_file = b.path("extensions/compact/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const compact_ext_tests = b.addTest(.{ .root_module = compact_ext_mod, .filters = test_filters });
+    test_step.dependOn(&b.addRunArtifact(compact_ext_tests).step);
+
     // …and the `ground` package, whose whole job is shaping text: the two-level
     // map's per-directory budget and the cut that must not split a character.
     // Rooted at its `main.zig`, which imports the three modules that do the

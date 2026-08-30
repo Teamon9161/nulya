@@ -233,6 +233,26 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
         .harvested => |h| h,
     };
 
+    // 4b. Assemble what will be carried, and CHECK it — before anything moves.
+    //     `session append` refuses bytes that are not valid UTF-8 (a header that
+    //     is not §3's shape, BUGS #22), and everything below is irreversible:
+    //     checking after the fork would leave a child that can never receive its
+    //     summary, holding the parent's tasks, with nobody reading either. So
+    //     the order is render → validate → fork, and it stays that way for
+    //     whatever bad bytes a future brief source brings (`brief_file` reads a
+    //     file this package did not write).
+    //
+    //     The parent pointer is written by code (see `parent_footer`).
+    const footer = try std.fmt.allocPrint(alloc, parent_footer, .{ args.session, found.seq, args.session });
+    const carried = try std.fmt.allocPrint(alloc, "{s}\n{s}{s}", .{ summary_marker, found.summary, footer });
+    if (!std.unicode.utf8ValidateSlice(carried)) {
+        return .{ .failed = try fail(
+            alloc,
+            "the brief for {s} is not valid UTF-8, which `session append` refuses; nothing moved",
+            .{args.session},
+        ) };
+    }
+
     // 5. The fork. The kernel checks the parent exists and carries its frozen
     //    model identity over (a compaction must not change who the conversation
     //    is with); composition is resolved fresh, because a new session is
@@ -253,12 +273,20 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     //     one over never fails the fork; the result simply stays with the parent.
     const tasks_footer = try handOverTasks(alloc, io, exe, args.session, new_id);
 
-    // 6. Carry the brief over, with the parent pointer written by code (see
-    //    `parent_footer`). It is deposited, not stepped: it waits in the new
+    // 6. Carry the brief over. It is deposited, not stepped: it waits in the new
     //    session's inbox exactly like a turn typed before a step runs.
-    const footer = try std.fmt.allocPrint(alloc, parent_footer, .{ args.session, found.seq, args.session });
-    const carried = try std.fmt.allocPrint(alloc, "{s}\n{s}{s}{s}", .{ summary_marker, found.summary, footer, tasks_footer });
-    const handed = try runNulya(alloc, io, exe, &.{ "session", "append", new_id, carried });
+    //
+    //    The task note is the one part assembled AFTER the fork, so it is the
+    //    one part that cannot be refused on the brief's behalf: it is generated
+    //    from task names and their commands and is valid by construction, and if
+    //    it somehow is not, it costs a sentence rather than the summary. The
+    //    retargeting has already happened either way — the note only describes it.
+    const note_ok = std.unicode.utf8ValidateSlice(tasks_footer);
+    if (!note_ok) try warn(alloc, io, "compact: the background-task note was not valid UTF-8 and was left out of {s}'s brief\n", .{new_id});
+    const handed = try runNulya(alloc, io, exe, &.{ "session", "append", new_id, if (note_ok)
+        try std.fmt.allocPrint(alloc, "{s}{s}", .{ carried, tasks_footer })
+    else
+        carried });
     if (handed.code != 0) {
         return .{ .failed = try fail(alloc, "{s} was created but the summary could not be carried into it: {s}", .{ new_id, detail(handed) }) };
     }
@@ -273,18 +301,30 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     } };
 }
 
-/// Retarget every task the parent still has running to the child, and describe
-/// them for the carried brief. Empty when there are none — a session with no
-/// background work says nothing about background work.
+/// Retarget every task that reports into the parent to the child, and describe
+/// the live ones for the carried brief. Empty when there are none — a session
+/// with no background work says nothing about background work.
 ///
-/// The kernel is the authority on what "still running" means: this asks
-/// `task list --running --json` rather than re-deriving `lost` from lease files,
-/// the same discipline the front end follows. Every failure here is a warning on
-/// stderr and nothing more: the fork has already happened, and a task whose
-/// delivery could not be moved still reports into the parent's inbox, where it
-/// is findable — losing the whole compaction over it would be the worse trade.
+/// EVERY row, not just the running ones. The question this has to answer is
+/// "which results should follow me", and a task that finished a moment ago —
+/// after the fork point, before this line — has a result sitting undrained in
+/// the parent's inbox: exactly the window `task retarget`'s `moveDeposit` half
+/// exists for. Asking `--running` filtered that window out and lost the result
+/// there, which is the same loss the whole procedure is meant to prevent. On a
+/// row whose result a step already drained, `moveDeposit` finds nothing and the
+/// retarget is a harmless no-op.
+///
+/// The footer is still only the live ones: it promises "their results will
+/// arrive here", and a task whose result has already been read is not part of
+/// that promise. `state` is the kernel's own projection, so what counts as live
+/// is not re-derived here.
+///
+/// Every failure is a warning on stderr and nothing more: the fork has already
+/// happened, and a task whose delivery could not be moved still reports into the
+/// parent's inbox, where it is findable — losing the whole compaction over it
+/// would be the worse trade.
 fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: []const u8, child: []const u8) ![]const u8 {
-    const listed = try runNulya(alloc, io, exe, &.{ "task", "list", "--session", parent, "--running", "--json" });
+    const listed = try runNulya(alloc, io, exe, &.{ "task", "list", "--session", parent, "--json" });
     if (listed.code != 0) {
         try warn(alloc, io, "compact: could not list {s}'s background tasks: {s}\n", .{ parent, detail(listed) });
         return "";
@@ -306,6 +346,7 @@ fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: 
             try warn(alloc, io, "compact: {s} keeps reporting into {s}: {s}\n", .{ name, parent, detail(done) });
             continue;
         }
+        if (!isLive(entry.object)) continue;
         if (first.len == 0) first = name;
         const command = stringField(entry.object, "command") orelse "";
         const elapsed: ?i64 = switch (entry.object.get("elapsed_s") orelse std.json.Value{ .null = {} }) {
@@ -324,6 +365,17 @@ fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: 
         "\nBackground tasks still running when this session was forked: {s} — nulya task status {s}; their results will arrive here when they finish.\n",
         .{ try std.mem.join(alloc, ", ", moved.items), first },
     );
+}
+
+/// Is this row still expected to produce a result? The same two states
+/// `task list --running` keeps (`cli/task.zig`'s `isLive`), read off the row
+/// rather than re-derived: this package does not get to disagree with the kernel
+/// about what a task is doing. `unreachable` is deliberately NOT live — nobody
+/// here knows whether that machine's task is running, and the footer's sentence
+/// is a promise, not a guess.
+fn isLive(row: std.json.ObjectMap) bool {
+    const state = stringField(row, "state") orelse return false;
+    return std.mem.eql(u8, state, "running") or std.mem.eql(u8, state, "starting");
 }
 
 fn warn(alloc: std.mem.Allocator, io: std.Io, comptime fmt: []const u8, fmt_args: anytype) !void {
@@ -507,13 +559,30 @@ fn renderHandoff(alloc: std.mem.Allocator, session_id: []const u8, args_json: []
     return try out.toOwnedSlice();
 }
 
-/// One section, trimmed and capped. Whitespace-only is empty, and the cut is on
-/// a byte boundary of the model's own text — this is a brief being carried, not
-/// bytes being stored, and the whole call stays in the parent ledger.
+/// One section, trimmed and capped. Whitespace-only is empty, and the cut lands
+/// on a CHARACTER boundary, never inside one: the rendered brief goes through
+/// `session append`, which refuses bytes that are not valid UTF-8 (BUGS #22),
+/// so a cap that fell mid-character would turn a perfectly good handoff into a
+/// refused one — and it would do it only for the briefs long enough to be cut,
+/// which is the worst kind of rarely.
+///
+/// Same rule `emit.validUtf8PrefixLen` follows in the kernel. The two cannot
+/// share code: an extension is compiled from its own frozen snapshot and reaches
+/// nothing under `src/` (DESIGN §7.4).
 fn handoffSection(obj: std.json.ObjectMap, key: []const u8) []const u8 {
     const raw = stringField(obj, key) orelse return "";
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-    return trimmed[0..@min(trimmed.len, max_section_bytes)];
+    return trimmed[0..utf8PrefixLen(trimmed, max_section_bytes)];
+}
+
+/// The longest prefix of `s` no longer than `max_len` that does not end inside a
+/// multi-byte character. Nothing here validates `s` itself — a cut cannot repair
+/// bytes that were already bad, and the one gate that must not be passed is the
+/// check on the assembled text in `compact`.
+fn utf8PrefixLen(s: []const u8, max_len: usize) usize {
+    var end = @min(s.len, max_len);
+    while (end > 0 and end < s.len and (s[end] & 0b1100_0000) == 0b1000_0000) end -= 1;
+    return end;
 }
 
 /// The seven-step path: ask the OLD session to summarise itself (steps 2-4).
@@ -750,4 +819,91 @@ fn answer(alloc: std.mem.Allocator, io: std.Io, outcome: Outcome) !noreturn {
             std.process.exit(1);
         },
     }
+}
+
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+/// The one shape these tests need from the ledger: a call's arguments as the
+/// object `renderHandoff` parses out of them.
+fn testArgs(arena: std.mem.Allocator, pairs: []const [2][]const u8) !std.json.ObjectMap {
+    var obj: std.json.ObjectMap = .empty;
+    for (pairs) |pair| try obj.put(arena, pair[0], .{ .string = pair[1] });
+    return obj;
+}
+
+test "a capped section is cut between characters, never inside one" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The boundary case that used to render a brief `session append` refuses:
+    // the cap falls one byte into a multi-byte character, so a plain byte slice
+    // ends on half of it.
+    var straddling: std.ArrayList(u8) = .empty;
+    try straddling.appendNTimes(arena, 'a', max_section_bytes - 1);
+    try straddling.appendSlice(arena, "字"); // three bytes, across the cap
+
+    const obj = try testArgs(arena, &.{
+        .{ "done", straddling.items },
+        .{ "keep", "  你好，世界  " },
+    });
+
+    const section = handoffSection(obj, "done");
+    try std.testing.expect(std.unicode.utf8ValidateSlice(section));
+    try std.testing.expect(section.len <= max_section_bytes);
+    // The whole character goes rather than half of it staying: what survives is
+    // the run that came before it.
+    try std.testing.expectEqual(max_section_bytes - 1, section.len);
+
+    // A section that fits is untouched, multi-byte characters and all.
+    try std.testing.expectEqualStrings("你好，世界", handoffSection(obj, "keep"));
+    try std.testing.expectEqualStrings("", handoffSection(obj, "missing"));
+}
+
+test "a brief long enough to be cut still renders as valid UTF-8" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Every section over the cap and every one of them ending mid-character:
+    // this is the shape that forked a child and then could carry nothing into it.
+    var section: std.ArrayList(u8) = .empty;
+    try section.appendNTimes(arena, 'x', max_section_bytes - 1);
+    try section.appendSlice(arena, "汉");
+
+    var args: std.Io.Writer.Allocating = .init(arena);
+    var jw: std.json.Stringify = .{ .writer = &args.writer };
+    try jw.beginObject();
+    for ([_][]const u8{ "done", "next_task", "keep", "drop" }) |key| {
+        try jw.objectField(key);
+        try jw.write(section.items);
+    }
+    try jw.endObject();
+
+    const rendered = (try renderHandoff(arena, "s-1", args.written())).?;
+    try std.testing.expect(std.unicode.utf8ValidateSlice(rendered));
+}
+
+test "the footer describes the live tasks, and only those" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Whether a row is retargeted and whether it is DESCRIBED are two different
+    // questions: a finished row still has to move (its result may be undrained),
+    // but it is not something whose result "will arrive here".
+    for ([_][]const u8{ "running", "starting" }) |live| {
+        const row = try testArgs(arena, &.{.{ "state", live }});
+        try std.testing.expect(isLive(row));
+    }
+    for ([_][]const u8{ "done", "lost", "unreachable" }) |finished| {
+        const row = try testArgs(arena, &.{.{ "state", finished }});
+        try std.testing.expect(!isLive(row));
+    }
+    // A row whose state this build cannot read is not claimed to be live.
+    var unknown: std.json.ObjectMap = .empty;
+    try std.testing.expect(!isLive(unknown));
+    try unknown.put(arena, "state", .{ .integer = 3 });
+    try std.testing.expect(!isLive(unknown));
 }

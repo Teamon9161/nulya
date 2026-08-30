@@ -1341,3 +1341,88 @@ test "a task whose machine will not answer reads as unreachable, not as lost or 
     defer alloc.free(err);
     try std.testing.expect(std.mem.indexOf(u8, err, "did not answer") != null);
 }
+
+test "a step collects the reports of the tasks that report INTO it, not only the ones it started" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const spec = try execSpec(alloc, exe, "");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    // Two sessions on the same machine: the one that STARTS the task, and the
+    // one the task is handed to. That is what a compaction leaves behind, and
+    // `notify` is readable from outside precisely so the second one can collect.
+    var ids: [2][]u8 = undefined;
+    for (&ids) |*slot| {
+        const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs });
+        defer alloc.free(new.stdout);
+        slot.* = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    }
+    const owner = ids[0];
+    defer alloc.free(owner);
+    const reader = ids[1];
+    defer alloc.free(reader);
+
+    try far.dir.writeFile(io, .{ .sub_path = "hold", .data = "" });
+    const command = switch (try farDialect(alloc, io, ws, exe, spec)) {
+        .bash => "while [ -e hold ]; do sleep 0.05; done; echo RETARGET-SURVIVOR",
+        .powershell => "while (Test-Path 'hold') { Start-Sleep -Milliseconds 50 }; Write-Output RETARGET-SURVIVOR",
+    };
+    {
+        const run = try runCli(alloc, io, ws, &.{ exe, "task", "run", "--session", owner, "--", command });
+        defer alloc.free(run.stdout);
+        try std.testing.expectEqual(@as(u8, 0), run.code);
+    }
+    const task_name = try std.fmt.allocPrint(alloc, "{s}/t1", .{owner});
+    defer alloc.free(task_name);
+
+    // Hand it over while it is still HELD: with no report to fetch, the retarget
+    // itself cannot have delivered anything, so whatever arrives below arrived
+    // because the reading session went and got it.
+    var tries: usize = 0;
+    while (tries < 3600) : (tries += 1) {
+        const live = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", owner, "--running" });
+        defer alloc.free(live.stdout);
+        if (std.mem.indexOf(u8, live.stdout, "running") != null) break;
+        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    }
+    {
+        const moved = try runCli(alloc, io, ws, &.{ exe, "task", "retarget", task_name, "--to", reader });
+        defer alloc.free(moved.stdout);
+        try std.testing.expectEqual(@as(u8, 0), moved.code);
+    }
+
+    try far.dir.deleteFile(io, "hold");
+    const report_rel = try relTaskPath(alloc, owner, "t1", "report.txt");
+    defer alloc.free(report_rel);
+    tries = 0;
+    while (tries < 3600 and !exists(io, far.dir, report_rel)) : (tries += 1) {
+        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    }
+    try std.testing.expect(exists(io, far.dir, report_rel));
+
+    // Nothing has been deposited here: no `task` verb has run since the report
+    // appeared, and the far supervisor cannot reach this machine's inboxes.
+    const deposit = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.inbox/task-{s}-t1.json", .{ reader, owner });
+    defer alloc.free(deposit);
+    try std.testing.expect(!exists(io, ws, deposit));
+
+    // The reading session's own step sweeps for it — over the channel it opens
+    // anyway, for a task it never started — and the drain at its boundary puts
+    // it in front of the model in that same step.
+    const step = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", reader, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "finish");
+    defer alloc.free(step.stdout);
+    try std.testing.expectEqual(@as(u8, 0), step.code);
+    try std.testing.expect(std.mem.indexOf(u8, step.stdout, "\"kind\":\"task_finished\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.stdout, "RETARGET-SURVIVOR") != null);
+}

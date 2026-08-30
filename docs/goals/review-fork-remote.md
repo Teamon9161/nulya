@@ -111,6 +111,7 @@ readdir 的 `entry.name` / `child.name` 原样写进文档，POSIX 文件名不�
 
 ## 7. 实施记录
 
+### 7.0 ①⑥ 落地（2026-08-30）：fork 继承环境、prompt 文件名验 UTF-8
 **2026-08-30，①⑥ 落地（`src/cli/session.zig`，只此一个文件；②③④⑤ 由并行的其它 lane 负责，未动 `cli/task.zig` / `cli/remote.zig` / `extensions/compact/` / `extensions/ground/`）。**
 
 ① `createSession` 新增 `env_named` / `inherit_env` 两个局部：`env_named = flagValue(args, "--env")`（不 `orelse ""`，"缺席"与显式 `local` 分得开）；`inherit_env = env_named == null and parent_header != null`。`exec` 三路合一——命名了就 `normalizeExecSpec(e)`，没命名但有父场就取 `normalizeExecSpec(parent_header.?.value.environment)`（header 里存的本来就是创建时归一过的值，所以这一次是**保证规范形**而不是修复——冻进 child 的值不该取决于它走的是哪个分支），否则 `normalizeExecSpec("")`。`execTargetRefusal` 走同一次调用，不分叉；只有报错文案分叉，`inherit_env` 时点名 `parent.?.session` 与继承来的值，并附一句"在这个 fork 上显式写 `--env` 换一台机器"。`remote_workspace` 同一形状：`flagValue(args, "--workspace") orelse (if (inherit_env) parent_header.?.value.remote_workspace else "")`；后面那条"只在 remote 族接受"的校验完全不变，因为它只关心最终的 `exec`/`remote_workspace` 组合，不关心来源。
@@ -129,3 +130,142 @@ readdir 的 `entry.name` / `child.name` 原样写进文档，POSIX 文件名不�
 **跑法与结果**（Windows，`.claude/worktrees/agent-acb6fa8d514e520bd`，基线 `0635ae9`）：`zig build test` → 569/573 pass（4 skip）；`zig build e2e-core` → 50/51 pass、1 skip（就是上面那条 POSIX-only 测试，在这台 Windows 机器上如预期跳过）；`zig build e2e`（全部五组）在改动落地、`zig fmt` 之前跑过一次，155/157 pass（2 skip），随后 `zig fmt` 只重排了新增代码的换行（多行 argv 字面量），语义零改动，重新单独确认 `zig build test` 与 `zig build e2e-core` 仍是同样的绿。三个新用例各自用 `-Dtest-filter` 单独跑过，逐一确认它们各自绿（而不只是整体计数对得上）。
 
 **DESIGN.md / CLAUDE.md / guide skill 同步**：DESIGN §8.1（`Header.environment` 段落后新增一段说 fork 继承）与 §14 命令表的 `session new --parent` 那一条都补了这条规则；CLAUDE.md 追加一条"也跑通"记录（`src/root.zig` 那条之后）；`extensions/guide/skills/guide/SKILL.md` 的 `--parent` 那条项目符号补了 `--env`/`--workspace` 继承说明——它是模型会读到的文本，不出现 `DESIGN §x`，只讲行为。
+### 7.1 ②③ 落地（2026-08-30）：一份答案的 sweep、跟着走的结果、fork 之前的那次校验
+
+本节记 §3（②）与 §4（③）。§1 / §2 / §5 / §6 属另一条 lane。
+
+**改动落点**：`src/cli/task.zig`（`Far` 两处 + `sweepRemoteReports` 整个）· `src/cli/session.zig`
+（调用点一行 + 它上面那段注释）· `extensions/compact/src/main.zig`（`handOverTasks` /
+`compact` 的顺序 / `handoffSection` / 新 `utf8PrefixLen` / 新 `isLive`）· `build.zig`
+（`extensions/compact` 的 test module）· `docs/DESIGN.md` §8.2 / §11 · `CLAUDE.md` 两条。
+`src/environment/remote/*` 与 `src/cli/remote.zig` **一个字节都没动**。
+
+#### ② a — sweep 就是 `collectRows`，不是第二份遍历
+
+`sweepRemoteReports` 从"走一遍 `sessionTasksDir(<本场>)`"变成：
+
+```
+var far: Far = .init(alloc, io);
+far.lend(session_id, ch);              // 借通道
+_ = collectRows(arena, io, &far, session_id);   // 行丢掉，投递是路上顺手做的
+```
+
+签名少了 `cwd` 那个参数——**它正是那个 bug 的形状**：调用方把自己的
+`remoteWorkspace()` 交出来，而每个任务的 `cwd` 该由它 **owner 场**的 header 说，
+`Far.cwdFor(owner)` 早就是那个答案。现在没有第二处能回答它。
+
+`Far` 多两个字段一个方法（`lent_spec` / `lent` / `lend`）。**按 spec 键而不是按
+session 键**，这是契约没说但必须这样的一点：retarget 之后要问的是**别人那一场**的机器，
+按 session 借的话 `channelFor(owner)` 会重连——而 owner 与 reader 冻在同一台机器上
+正是 compaction 的常态。`lend` 的 spec 取自 `linkFor(session_id)`，也就是那一场 header
+的那一列，所以借用不引入第二个"这一场在哪台机器上"的答案。
+
+**留下的两处代价，写下来不是欠账**：
+
+1. **owner 在另一台机器上时，扫描会连一次。** 没有加"只用借来的通道"的模式位——
+   那正是 CLAUDE.md 说的 flag，而它买到的是"一个读者比它旁边的 `task list` 答得少"。
+   `Channel.connect` 失败即 `unreached`，扫描 best-effort，step 照常。
+2. **本场是 local 时不扫。** 调用点仍在 `if (lenv == .remote)` 里，因为那里没有可借的通道，
+   而让每次本机 `session step` 都可能停下来跟一台远端机器握手，代价落在最热的路径上。
+   这种任务（远端 owner，retarget 进一个 local 场）由任何 `task` 动词收走——TUI 每 1–2 s
+   就在轮。契约那句"不同的机器该开就开（或留给下一个 `task` 动词）"两条都用上了：
+   有通道时前者，没通道时后者。
+
+顺带：扫描现在与 `task list --session X` 走同一条路，于是它也读 `notify`、也对
+已 `delivered` 的远端行 poll 一次（旧 sweep 提前 skip 过）。这不是新代价——
+`task list` 一直在这么做，而两个答案变一个答案的收益远大于每步多几帧。
+
+**`RemoteEnvironment.remoteWorkspace()` 一并删掉**（`src/environment/remote/mod.zig`）：
+它是当年**专为**这个调用点加的公开访问器，参数没了之后读者归零——CLAUDE.md 那条
+"一个动词没有语义就是该删的信号"。私有的 `remoteCwd()` 照旧（内部还在用）。
+
+#### ② b — compact 交接的是"该跟我走的"，不是"还在跑的"
+
+`handOverTasks` 的 `task list` 去掉 `--running`，retarget 每一行；footer 用新的
+`isLive(row)` 只描述 `running`/`starting`。理由写在函数注释里：`--running` 滤掉的正是
+`moveDeposit` 那条路存在的理由——**结果已落地、还没人排干**，也就是 fork 与任务完成
+之间那个窗口留下的状态。`unreachable` **不算 live**（那一行没人知道它在不在跑，而 footer
+是一句承诺）。
+
+#### ③ — 顺序是渲染 → 校验 → fork，裁剪按字符边界
+
+两件都做了，落点按契约那句"更早更好"选：
+
+- `handoffSection` 的 `trimmed[0..@min(…)]` 换成 `trimmed[0..utf8PrefixLen(trimmed, cap)]`。
+  `utf8PrefixLen` 是 `emit.validUtf8PrefixLen` 那五行的第二份——**不得不是**：extension
+  从自己的冻结 snapshot 编译，够不着 `src/`（`extensions/agent/src/record.zig` 抄
+  `journals/journal.zig` 是同一条先例）。注释点名了出处。
+- `compact()` 里新的一步 4b：`footer` + `carried` 在 fork **之前**拼好并
+  `utf8ValidateSlice` 一次，不合格就 `failed` 且什么都没动。于是"孤儿 child"这个状态
+  不再取决于我们今天想到了哪些坏字节来源——`brief_file` 读的是这个包没写过的文件。
+- fork **之后**才拼得出来的只有 `tasks_footer`（retarget 要 child 的 id）。它由代码从
+  任务名与命令生成、必然合法（`task list --json` 里非法 UTF-8 的 `command` 会被
+  `std.json.Stringify` 写成数字数组，于是 `stringField` 读回 null），仍单独验一次：
+  不合格就**少这一句**并往 stderr 说一声，而不是少一场 session——retarget 已经发生，
+  那句话只是描述它。
+
+#### 契约里说得不够准的一处
+
+§3a 写"正确的 sweep 基本就是跑一遍 `collectRows(only=session)`"，这是对的；但它把
+"pays no second connection"当成唯一要保住的东西，而**真正的不变量是 `cwd` 取 owner 的
+那一条**——契约在下一句才提到它，且没说这正是旧签名里 `cwd` 参数的由来。删掉那个参数
+是这次改动里最能防止复发的一步：那个洞不是"扫描扫得不够广"，是"调用方被允许回答一个
+不属于它的问题"。
+
+另外，§3a 说的"pays no second connection"在 retarget 跨机器时**做不到**，契约自己在
+括号里给了两条出路。取了"该开就开"，理由见上面第 1 条。
+
+#### 开放那条（fork 要不要搬走父场 inbox 里其余未排干的 deposit）
+
+没动手。实现过程中冒出来的、能让这个决定更清楚的两件事：
+
+- **`task_finished` 这一类已经有答案了，而且答案是"搬"**：`moveDeposit` 就是在搬它，
+  只不过是**逐任务**搬、由 `task retarget` 顺手做的。所以问题不是"要不要搬"，而是
+  "剩下那两类（`capability_note`、排队的 `user_text`）凭什么不搬"——今天的不对称
+  纯粹来自 retarget 恰好握着那个文件名，不是任何人想过的边界。
+- **搬的落点确实该是 `session new --parent`，但只对 fork 那一刻在 inbox 里的东西成立。**
+  `task_finished` 不一样：它在 fork 之后还会**继续到达**父场的 inbox（任务的 `notify`
+  没改的话），所以它需要的是 retarget 那个持续生效的指向，而不是一次性的搬运。
+  如果整个 inbox 都由 `--parent` 搬走，`task retarget` 的 `moveDeposit` **仍然不能删**
+  ——两者服务的是不同的时间段。裁决时值得把这一条摆在旁边：它意味着"整个 inbox 跟着走"
+  不是"compact 少做一件事"，而是"内核多做一件事、compact 一件都不少"。
+
+#### 测试
+
+- `extensions/compact` 第一次挂进 `zig build test`（`build.zig` 新 test module，
+  `std`/`agent`/`ground` 的同一条先例）。三条单测：**按字符边界裁**（`max_section_bytes - 1`
+  个 ASCII + 一个三字节汉字，恰好跨界）· **整份 brief 仍是合法 UTF-8**（四节全部越界）·
+  **footer 只描述 live 的行**（含"读不出的 state 不算 live"）。
+- `tests/e2e/background.zig` +1：**fork 之前就落地、还没人排干的结果跟着走**——
+  deposit 从父场 inbox 消失、在 child inbox 出现、child 的下一步把它排进自己的 ledger，
+  而 footer 不提它。
+- `tests/e2e/remote.zig` +1：**一场 session 的 step 收的是"报告进它"的任务，不只是它起的**
+  ——两场远端 session 同机同工作区，任务在 owner 场起、**在还被 hold 住时** retarget 给
+  reader 场（所以 retarget 自己不可能已经投递过），放行、等对面写出 `report.txt`、
+  确认 host 上还没有 deposit，然后**只**跑 `session step <reader>`。
+
+**先红验证过三处**：`handoffSection` 换回裸字节切片 → 两条 UTF-8 单测当场红 ·
+`handOverTasks` 换回 `--running` → 新的 background e2e 在 `deposit 从父场消失` 那一行红 ·
+`sweepRemoteReports` 换回旧的 `sessionTasksDir` 遍历 → 新的 remote e2e 在
+`"kind":"task_finished"` 那一行红。
+
+**数字**：`zig build test` 576（572 pass / 4 skip，+3）· `e2e-core` 49（+1）·
+`e2e-remote` 25（+1）· `e2e-ext` 51（50 pass / 1 skip，不变）。
+
+### 7.2 合并时记下的一条代价（审阅者补，未修）
+
+②a 把 sweep 塌进 `collectRows` 是对的，但顺带丢掉了一个只有 sweep 有的短路：
+旧 sweep 在**发帧之前**就 `if (markerPresent(delivered_file)) continue`，而
+`pollAndDeliver` 是**先 `pollTaskOn` 再看** `delivered`。于是一个远端场每 step
+要为**每个已完成且已交付**的任务各付一次 round trip，且这个数只增不减。
+
+**不阻塞**，因为它不是这次引入的：`task list --session <id> --json` 走的就是这条
+路，而 TUI 状态栏一直在轮询它——这个代价在轮询侧早就在付了，本次只是让 step
+路径也开始付同一份。
+
+**要修就不该修成一个 flag**（"只投递不看状态"就是那个 CLAUDE.md 警告的模式位）。
+更像答案的形状：**一个 delivered 的任务已经结束，而结束了的状态不会再变**，所以
+host 在交付时把那份 status 留在自己这边（`delivered` 旁边），此后 `readRow` 读本地
+副本、不再发帧。它同时修好轮询侧，并且让一个已完成的远端任务在机器够不着时仍能
+显示 `done` 而不是 `unreachable`——今天那种情况下 `task list` 会永远说
+`unreachable`，而那句话对一个早就交付过的任务是假的。等第一次真的嫌慢再做。

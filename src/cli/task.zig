@@ -949,6 +949,13 @@ const Far = struct {
     /// buffer, so it may not be moved — and an `ArrayList` of them would move
     /// them all the first time a second machine turned up.
     links: std.ArrayList(*Link),
+    /// A channel someone else already opened, and the spec it reaches. Borrowed,
+    /// never closed here. Keyed by SPEC and not by session on purpose: a task
+    /// retargeted from one session to another still belongs to the machine its
+    /// OWNER was frozen to, so "can this be reused" is a question about the
+    /// machine, not about who is asking.
+    lent_spec: []const u8 = "",
+    lent: ?*remote.Channel = null,
 
     const Link = struct {
         session: []u8,
@@ -1021,11 +1028,28 @@ const Far = struct {
         return link;
     }
 
+    /// Hand this collector a channel the caller already has open, for whichever
+    /// machine `session_id` was frozen to. The channel stays the caller's — this
+    /// only says "if you need that machine, it is already reachable here".
+    ///
+    /// The spec comes from `linkFor`, i.e. from that session's own header: the
+    /// one place "where does this run" is recorded, so lending cannot introduce
+    /// a second answer to it.
+    fn lend(self: *Far, session_id: []const u8, ch: *remote.Channel) !void {
+        const link = try self.linkFor(session_id);
+        if (link.spec.len == 0) return; // a local session has no machine to lend
+        self.lent_spec = link.spec;
+        self.lent = ch;
+    }
+
     /// The open channel to that session's machine, or null when there is nothing
     /// to ask (local) or nothing answering (unreachable, already reported).
     fn channelFor(self: *Far, session_id: []const u8) !?*remote.Channel {
         const link = try self.linkFor(session_id);
         if (link.spec.len == 0 or link.unreached) return null;
+        if (self.lent) |ch| {
+            if (std.mem.eql(u8, link.spec, self.lent_spec)) return ch;
+        }
         if (link.ch) |*ch| return ch;
         const l = remote.parseSpec(link.spec) catch {
             link.unreached = true;
@@ -1101,10 +1125,25 @@ fn pollAndDeliver(
     return .{ .status = status_bytes };
 }
 
-/// Collect every finished-but-undelivered report of `session_id` over a channel
-/// that is ALREADY open — what `session step` does before it steps, so a driver
-/// that never runs a `task` verb still gets its results, and pays no second
-/// connection for them.
+/// Collect every finished-but-undelivered report of `session_id`'s tasks over a
+/// channel that is ALREADY open — what `session step` does before it steps, so a
+/// driver that never runs a `task` verb still gets its results, and pays no
+/// second connection for them.
+///
+/// This is `task list --session <id>` with the rows thrown away, and that is the
+/// point: which tasks report into a session has exactly one answer
+/// (`collectRows`), and it is not "the ones under this session's own directory".
+/// A task another session retargeted here reports here — `notify` is readable
+/// from outside for precisely that — and a sweep that only walked
+/// `sessionTasksDir` could never see one, so the promise above was false for
+/// every retargeted task. `readRow` already delivers on the way past
+/// (`pollAndDeliver`), with each task's cwd taken from its OWNER's header rather
+/// than from the caller's, which is the other half of the same correction.
+///
+/// The caller's channel is lent, not adopted: a task whose owner is frozen to
+/// the same machine is polled over it. An owner on a DIFFERENT machine still
+/// costs a connection here — the same one `task list` pays — because the
+/// alternative is a reader that silently answers less than the verb beside it.
 ///
 /// Best effort by construction: a report that cannot be fetched now is fetched
 /// by the next asker, and a step must not fail because a task's machine hiccuped.
@@ -1113,24 +1152,15 @@ pub fn sweepRemoteReports(
     io: std.Io,
     ch: *remote.Channel,
     session_id: []const u8,
-    cwd: []const u8,
 ) void {
     var arena_state: std.heap.ArenaAllocator = .init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const tasks_dir = launch.sessionTasksDir(arena, session_id) catch return;
-    var tasks = std.Io.Dir.cwd().openDir(io, tasks_dir, .{ .iterate = true }) catch return;
-    defer tasks.close(io);
-
-    var it = tasks.iterate();
-    while (it.next(io) catch null) |entry| {
-        if (entry.kind != .directory or !isSlot(entry.name)) continue;
-        const dir = emit.joinRel(arena, &.{ tasks_dir, entry.name }) catch continue;
-        if (markerPresent(alloc, io, dir, delivered_file)) continue;
-        const full = std.fmt.allocPrint(arena, "{s}/{s}", .{ session_id, entry.name }) catch continue;
-        _ = pollAndDeliver(alloc, arena, io, ch, cwd, session_id, entry.name, dir, full) catch continue;
-    }
+    var far: Far = .init(alloc, io);
+    defer far.deinit();
+    far.lend(session_id, ch) catch return;
+    _ = collectRows(arena, io, &far, session_id) catch return;
 }
 
 // ── `nulya task run`: the CLI twin of `shell {background:true}` ─────────────

@@ -686,12 +686,6 @@ pub const RemoteEnvironment = struct {
         return if (self.workspace.len != 0) self.workspace else ".";
     }
 
-    /// The same string, for a shell-layer caller that talks to this channel
-    /// itself (`cli/task.zig` collecting a far task's report).
-    pub fn remoteWorkspace(self: *const RemoteEnvironment) []const u8 {
-        return self.remoteCwd();
-    }
-
     fn dialectImpl(ptr: *anyopaque) environment_mod.Dialect {
         const self: *RemoteEnvironment = @ptrCast(@alignCast(ptr));
         return self.dialect_val;

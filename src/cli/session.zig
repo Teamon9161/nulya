@@ -1184,18 +1184,19 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     try lenv.publishSession(spath, id);
     // A background task on another machine cannot deposit its own report: the
     // session file is here (DESIGN §8.2). So before this process steps, it asks
-    // that machine about this session's tasks over the channel it has just
-    // opened, and turns any finished report into the `task_finished` the inbox
-    // already understands — which `prepareStep` then drains at the step
-    // boundary, exactly as it drains one a local supervisor deposited.
+    // that machine about the tasks that report into this session — its own and
+    // any another session retargeted here — over the channel it has just opened,
+    // and turns any finished report into the `task_finished` the inbox already
+    // understands, which `prepareStep` then drains at the step boundary, exactly
+    // as it drains one a local supervisor deposited.
     //
-    // Over the OPEN channel on purpose: a driver polling `nulya task list`
-    // collects these too, and doing it here as well costs a few frames instead
-    // of a second connection, so a bare `session step` loop with no driver
-    // around it still receives its results.
+    // The open channel is LENT rather than re-opened: a driver polling
+    // `nulya task list` collects these too, and doing it here as well costs a
+    // few frames instead of a second connection, so a bare `session step` loop
+    // with no driver around it still receives its results.
     if (lenv == .remote) {
         var renv = &lenv.remote;
-        task_cli.sweepRemoteReports(alloc, io, &renv.ch, id, renv.remoteWorkspace());
+        task_cli.sweepRemoteReports(alloc, io, &renv.ch, id);
     }
 
     // Reconstruct the model frozen at creation, re-resolving only the credential.

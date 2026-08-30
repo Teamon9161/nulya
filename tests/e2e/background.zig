@@ -714,3 +714,84 @@ test "background task: compact retargets the parent's running tasks and says so 
     try std.testing.expect(std.mem.indexOf(u8, after, "\"kind\":\"task_finished\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, after, "FORK-SURVIVOR") != null);
 }
+
+test "background task: a result that landed before the fork follows the conversation into the child" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    const exe = (try nulyaExe(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try support.buildBundled(alloc, io, ws, exe, "compact");
+    defer alloc.free(ref);
+
+    const parent = try newSession(alloc, io, ws, exe);
+    defer alloc.free(parent);
+    {
+        const ap = try runCli(alloc, io, ws, &.{ exe, "session", "append", parent, "probe the box" });
+        defer alloc.free(ap.stdout);
+        const step = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", parent }, "NULYA_SCRIPTED_MODE", "finish");
+        defer alloc.free(step.stdout);
+        try std.testing.expectEqual(@as(u8, 0), step.code);
+    }
+
+    // A task that FINISHED before the compaction and whose report nobody has
+    // drained yet — the same state a task reaches by finishing inside the window
+    // between the fork and the retarget, reached deterministically. Its result is
+    // sitting in the parent's inbox: a session about to stop being read.
+    {
+        const started = try runCli(alloc, io, ws, &.{ exe, "task", "run", "--session", parent, "--", "echo WINDOW-SURVIVOR" });
+        defer alloc.free(started.stdout);
+        try std.testing.expectEqual(@as(u8, 0), started.code);
+    }
+    const task = try taskName(alloc, parent, "t1");
+    defer alloc.free(task);
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", task, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+    const before = (try inboxDeposit(alloc, io, ws, parent, parent, "t1")).?;
+    defer alloc.free(before);
+
+    try ws.writeFile(io, .{ .sub_path = "brief.md", .data = "Phase 1 done. Next: WINDOW-BRIEF.\n" });
+    const session_arg = try std.fmt.allocPrint(alloc, "session={s}", .{parent});
+    defer alloc.free(session_arg);
+    const forked = try runCli(alloc, io, ws, &.{ exe, "ext", "run", ref, "compact", "--arg", session_arg, "--arg", "brief_file=brief.md" });
+    defer alloc.free(forked.stdout);
+    if (forked.code != 0) {
+        std.debug.print("compact failed: {s}\n", .{forked.stdout});
+        return error.TestUnexpectedResult;
+    }
+    const result = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, forked.stdout, " \r\n"), .{});
+    defer result.deinit();
+    const child = try alloc.dupe(u8, result.value.object.get("session").?.string);
+    defer alloc.free(child);
+
+    // The undelivered result moved with the conversation: it is no longer
+    // waiting in a file nobody will read again.
+    try std.testing.expect((try inboxDeposit(alloc, io, ws, parent, parent, "t1")) == null);
+    const moved = (try inboxDeposit(alloc, io, ws, child, parent, "t1")).?;
+    defer alloc.free(moved);
+    try std.testing.expect(std.mem.indexOf(u8, moved, "WINDOW-SURVIVOR") != null);
+
+    // …and the child's first step drains it into its own ledger, where the model
+    // reads it — the retarget is not a filing change, it is a delivery.
+    {
+        const step = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", child, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "finish");
+        defer alloc.free(step.stdout);
+        try std.testing.expectEqual(@as(u8, 0), step.code);
+    }
+    const child_file = try support.readSessionFile(alloc, io, ws, child);
+    defer alloc.free(child_file);
+    try std.testing.expect(std.mem.indexOf(u8, child_file, "\"kind\":\"task_finished\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, child_file, "WINDOW-SURVIVOR") != null);
+
+    // The carried brief does NOT announce it: that sentence promises results
+    // still to come, and this one has already arrived. Moving a result and
+    // describing a running task are two different questions.
+    try std.testing.expect(std.mem.indexOf(u8, child_file, "Background tasks still running") == null);
+}
