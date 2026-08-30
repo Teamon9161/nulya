@@ -179,5 +179,8 @@ export function backgroundNote(
     return { text: join(...(bad ? [`exit ${live.exit_code}`] : [])), failed: bad }
   }
   if (live.state === "lost") return { text: join("lost"), failed: false }
+  // Not the running fallback: "running 12s" about a machine nobody can ask
+  // would be a guess dressed as a clock (goals/remote-env.md §6.7).
+  if (live.state === "unreachable") return { text: join("unreachable"), failed: false }
   return { text: join(`running${live.elapsed_s !== null ? ` ${seconds(live.elapsed_s)}` : ""}`), failed: false }
 }

@@ -167,7 +167,7 @@ import { createPluginHost, pluginKeyOf } from "../plugins/host.ts"
 import { PluginContext } from "../plugins/context.ts"
 import { wrapExtNote } from "../extnote.ts"
 import { runCompact } from "../compact.ts"
-import { headline, nextHandoff, type HandoffFile } from "../handoff.ts"
+import { briefPreview, headline, nextHandoff, type HandoffProposal } from "../handoff.ts"
 import { renderSessionPrompt } from "../sessionprompt.ts"
 import { formatWithRef, parseWithRef, type WithRef } from "../with.ts"
 import { builtin_tools, orphanPins, resolvableStandingPins, toolId } from "../pins.ts"
@@ -834,8 +834,8 @@ export function App(props: AppProps) {
   const [refusal, setRefusal] = createSignal<string | null>(null)
 
   /** A handover the model proposed and nobody has answered yet (tui.md §5.8). */
-  const [handoff, setHandoff] = createSignal<HandoffFile | null>(null)
-  /** Handoff files this process has already acted on or dismissed. */
+  const [handoff, setHandoff] = createSignal<HandoffProposal | null>(null)
+  /** Call ids of handovers this process has already acted on or dismissed. */
   const [handoffsSeen, setHandoffsSeen] = createSignal<ReadonlySet<string>>(new Set())
   let composer: ComposerApi | null = null
   let scroll: ScrollBoxRenderable | null = null
@@ -2755,10 +2755,11 @@ export function App(props: AppProps) {
   // ── The model's handover proposal (tui.md §5.8) ───────────────────────────
 
   /**
-   * After every step, look at the directory (DESIGN §11): a new
-   * `.nulya/handoffs/<session>-<n>.md` is the model saying a phase is done and
-   * the rest does not need the transcript. Exactly the signal `drivers/goal.*`
-   * watches for — a file, not a protocol — so both drivers read the same thing.
+   * After every step, look at the transcript this front end already holds
+   * (DESIGN §11): an accepted `handoff` call is the model saying a phase is done
+   * and the rest does not need the transcript. Its arguments ARE the brief, so
+   * there is nothing to read off disk — exactly the signal `drivers/goal.*`
+   * watches for in the step's own stream, from the same source.
    *
    * `unsafe` follows it; `ask` puts it on screen, because a fork is the one move
    * that changes which session the person is talking to.
@@ -2766,18 +2767,18 @@ export function App(props: AppProps) {
   const checkHandoff = () => {
     const here = live()
     if (!here || handoff()) return
-    const found = nextHandoff(here.ws, here.id, handoffsSeen())
+    const found = nextHandoff(here.state.snapshot.items, handoffsSeen())
     if (!found) return
     if (mode() === "unsafe") {
-      setHandoffsSeen(new Set([...handoffsSeen(), found.path]))
-      void followHandoffFile(found)
+      setHandoffsSeen(new Set([...handoffsSeen(), found.callId]))
+      void followProposal(found)
       return
     }
     setHandoff(found)
     holdNotice(`handoff proposed · ${headline(found.brief)} · Enter follow · Esc dismiss`)
   }
 
-  /** A step just ended: that is when a handoff file can have appeared. */
+  /** A step just ended: that is when a handoff call can have landed. */
   createEffect(() => {
     if (status() !== "idle") return
     // …and the one case where a question outlives its step: Ctrl+C killed the
@@ -2811,20 +2812,22 @@ export function App(props: AppProps) {
    * does it on a brief somebody already wrote.
    *
    * Two callers, and they differ only in who asked: the model's handoff
-   * proposal below (`/compact`'s `brief_file` branch, DESIGN §11 — the summary
-   * exists, so the old session is left byte-identical), and a plugin calling
-   * `api.actions.compact` (`extensions/plan`'s approve step).
+   * proposal below (`/compact`'s ledger branch, DESIGN §11 — the brief is
+   * already a frozen call, so the old session is left byte-identical), and a
+   * plugin calling `api.actions.compact` (`extensions/plan`'s approve step,
+   * which wrote its own brief to a file).
    * The guards, the tab move and the recovery when the lease was lost belong to
    * the act, not to whoever requested it, so they live here once.
    *
    * Throws with a sentence: the handoff path shows it as a notice, the plugin
    * path gets it as a rejected promise and says it in its own words.
    */
-  const forkHere = async (options: { briefFile?: string; focus?: string }) => {
+  const forkHere = async (options: { briefFile?: string; focus?: string; brief?: string; briefSeq?: number }) => {
     const source = live()
     if (!source) throw new Error("this tab has no session yet · nothing to fork")
     if (source.attach.status() !== "idle") throw new Error("a step is running · fork when it stops")
-    setNotice(options.briefFile ? `forking on ${options.briefFile}…` : "compacting…")
+    const carrying = options.briefFile ?? (options.brief || options.briefSeq !== undefined ? "the handover it proposed" : null)
+    setNotice(carrying ? `forking on ${carrying}…` : "compacting…")
     try {
       const result = await runCompact(source.ws, source.id, options)
       tabs.replace(source.id, result.session, { created: true, effort: source.effort() })
@@ -2839,10 +2842,16 @@ export function App(props: AppProps) {
     }
   }
 
-  /** The model's handover proposal, followed. */
-  const followHandoffFile = async (file: HandoffFile) => {
+  /**
+   * The model's handover proposal, followed.
+   *
+   * `brief_seq` names the very call that was offered rather than "the newest
+   * one": a person who dismissed a later handover and then follows an earlier
+   * one must fork on the brief they were shown, not on the one they said no to.
+   */
+  const followProposal = async (proposal: HandoffProposal) => {
     try {
-      await forkHere({ briefFile: file.path })
+      await forkHere(proposal.seq !== null ? { briefSeq: proposal.seq } : { brief: "latest" })
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
     }
@@ -2850,21 +2859,21 @@ export function App(props: AppProps) {
 
   /** `Enter` on the proposal. True when there was one, so the composer knows. */
   const followHandoff = (): boolean => {
-    const file = handoff()
-    if (!file) return false
+    const proposal = handoff()
+    if (!proposal) return false
     setHandoff(null)
-    setHandoffsSeen(new Set([...handoffsSeen(), file.path]))
-    void followHandoffFile(file)
+    setHandoffsSeen(new Set([...handoffsSeen(), proposal.callId]))
+    void followProposal(proposal)
     return true
   }
 
-  /** `Esc` on the proposal: the file stays, this process stops offering it. */
+  /** `Esc` on the proposal: the call stays in the ledger, this process stops offering it. */
   const dismissHandoff = (): boolean => {
-    const file = handoff()
-    if (!file) return false
+    const proposal = handoff()
+    if (!proposal) return false
     setHandoff(null)
-    setHandoffsSeen(new Set([...handoffsSeen(), file.path]))
-    setNotice(`handoff dismissed · the brief is still at ${file.path}`)
+    setHandoffsSeen(new Set([...handoffsSeen(), proposal.callId]))
+    setNotice("handoff dismissed · the brief is still in the transcript, on the call that proposed it")
     return true
   }
 
@@ -4623,11 +4632,11 @@ export function App(props: AppProps) {
                 <box height={1} flexShrink={0} />
 
                 {/* The model's own proposal to hand over, between the
-                    transcript and the box you answer it in (tui.md §5.8). Not
-                    a transcript card: the brief is a file on disk, not a ledger
-                    event, and this front end shows only what the ledger holds. */}
+                    transcript and the box you answer it in (tui.md §5.8). The
+                    call it came from IS in the transcript above; this is the
+                    decision it is waiting on, which is not a ledger fact. */}
                 <Show when={handoff()}>
-                  <HandoffPanel file={handoff()!} />
+                  <HandoffPanel proposal={handoff()!} />
                 </Show>
                 {/* A directory this screen has just walked into, asking to be
                     trusted before anything in it takes part in a session
@@ -4834,20 +4843,19 @@ export function App(props: AppProps) {
  *
  * The brief is shown, not summarised: it is what the NEXT session will open
  * with, and agreeing to a fork without reading what carries over is agreeing to
- * lose the rest. Long briefs are cut here and stay whole in the file — the
- * decision needs the shape of it, not every line.
+ * lose the rest. Long briefs are cut here and stay whole on the call that
+ * proposed them — the decision needs the shape of it, not every line.
  */
-function HandoffPanel(props: { file: HandoffFile }) {
+function HandoffPanel(props: { proposal: HandoffProposal }) {
   const style = useStyle()
-  const lines = () => props.file.brief.split("\n").slice(0, 8)
+  const lines = () => briefPreview(props.proposal.brief).slice(0, 8)
   return (
     <box flexDirection="column" width="100%" paddingLeft={2} paddingRight={1} flexShrink={0}>
       <box flexDirection="row" width="100%">
-        <text fg={style.theme.accent.evolve}>{style.glyphs.subSession} handoff proposed · </text>
-        <text fg={style.theme.dim}>{props.file.path}</text>
+        <text fg={style.theme.accent.evolve}>{style.glyphs.subSession} handoff proposed</text>
       </box>
       <For each={lines()}>{(line) => <text fg={style.theme.muted}>{`  ${line}`}</text>}</For>
-      <text fg={style.theme.dim}>{"  Enter follow it into a new session · Esc dismiss · the file stays either way"}</text>
+      <text fg={style.theme.dim}>{"  Enter follow it into a new session · Esc dismiss · the call stays either way"}</text>
     </box>
   )
 }

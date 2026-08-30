@@ -10,21 +10,42 @@
 //! the `x86_64-linux` a native build on that machine writes.
 //!
 //! The abi half is therefore chosen here rather than asked for — one answer per
-//! os, picked for "runs on whatever machine is over there":
+//! os, for EVERY build of that os, cross or not:
 //!
 //!   linux   -> musl   statically linked; no glibc version to match
 //!   windows -> gnu    what a native zig build on Windows already uses
 //!   macos   -> none   zig's own libSystem stubs; no SDK needed
 //!
-//! **What the two words do not distinguish.** A version id names "these package
-//! bytes, built for this target, by this compiler" — not which HOST produced
-//! them. A native build on a Linux machine links glibc and a cross build from
-//! elsewhere links musl, and both record `x86_64-linux`. That is deliberate and
-//! it is safe in the one way that matters: every machine re-validates `.sealed`
+//! **The two words decide the compile, they do not merely describe it.** A
+//! version id names "these package bytes, built for this target, by this
+//! compiler", so two builds recording the same two words must issue the same
+//! compiler invocation. That is what `effectiveTriple` is for: a build that
+//! named no target is still given this host's own triple, so it is the same
+//! invocation a cross build for those words would be — same abi, same baseline
+//! cpu.
+//!
+//! It was not always so, and the reason the old arrangement had to go is worth
+//! keeping. A native build used to be left native: it detected the machine's own
+//! abi (glibc on Linux) while a cross build for the same two words picked musl,
+//! and both recorded `x86_64-linux`. Inside ONE store that never showed, because
+//! the reuse path (`build_ext.findMatchingVersion`) finds whichever copy is
+//! already there and builds nothing. But version ids leave a store: `ext push`
+//! asks the far machine "have you got this id" and it answers by id alone, and
+//! `exec_version` (DESIGN §3.4) names one id as the implementation that serves a
+//! call over there. Two stores could then hold one id over two builds that
+//! behave differently — one needing a glibc that machine may not have.
+//!
+//! **What the two words still do not distinguish.** Not the exact bytes: two
+//! machines running the same compiler for the same target can differ, and
+//! nothing here promises otherwise. What an id fixes is the invocation — one
+//! behavioural equivalence class — and every machine re-validates `.sealed`
 //! against the bytes IT holds (a donor copy, a pushed copy), so nothing ever
-//! runs bytes it did not verify — and where both could exist, the reuse path
-//! (`build_ext.findMatchingVersion`) finds the copy that is already there and
-//! builds nothing, so two byte sets never race for one id inside one store.
+//! runs bytes it did not verify.
+//!
+//! Nor the HOST, and that is the exception `effectiveTriple` keeps: a machine
+//! whose own pair is outside the vocabulary below (riscv64-linux, say) is left
+//! native, because `--target` cannot spell its words — so no cross build can
+//! collide with what it produces, and it must still be able to build for itself.
 //!
 //! The alternative — putting the abi, or the host, into the id — buys a
 //! distinction nobody asked a question about and costs the property the whole
@@ -87,6 +108,25 @@ pub const host: []const u8 = @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(built
 /// The accepted spellings, in the one place a refusal can quote them.
 pub const vocabulary = "<arch>-<os>, arch = x86_64 | aarch64, os = linux | windows | macos";
 
+/// What `zig build-exe -target` is given for a build that named `requested`, or
+/// null for "compile natively, pass no `-target` at all".
+///
+/// The one place a build's compiler invocation is decided, so that the two words
+/// a version id records determine it (module header). A named target answers
+/// with its own triple; an unnamed one answers with this host's, which is only
+/// spellable when the host's pair is in the vocabulary above — outside it, null.
+pub fn effectiveTriple(requested: ?Target) ?[]const u8 {
+    return tripleFor(requested, host);
+}
+
+/// `effectiveTriple` with the host's words handed in, so the branch that depends
+/// on which machine is running can be exercised for machines that are not.
+fn tripleFor(requested: ?Target, host_words: []const u8) ?[]const u8 {
+    if (requested) |t| return t.zigTriple();
+    const parsed = parse(host_words) catch return null;
+    return parsed.zigTriple();
+}
+
 /// Parse the two words. Unknown either half is a refusal, never a guess: a
 /// mistyped target that silently became something else would produce a version
 /// whose id says one machine and whose bytes are for another.
@@ -140,6 +180,34 @@ test "an unrecognized target is refused rather than guessed at" {
     // compares byte for byte.
     for ([_][]const u8{ "x86_64-linux-musl", "x86_64", "linux", "", "x86_64-plan9", "riscv64-linux", "X86_64-LINUX" }) |bad| {
         try std.testing.expectError(error.UnknownTarget, parse(bad));
+    }
+}
+
+// The property the version id rests on: the two words a build records decide
+// which compiler invocation produced it. So a build that named nothing must ask
+// for the same triple a build that named this host's words would.
+test "a build that names no target still compiles for this host's words, when they are words --target can spell" {
+    // Named: its own triple, whoever is asking.
+    try std.testing.expectEqualStrings(
+        "x86_64-linux-musl",
+        tripleFor(.{ .arch = .x86_64, .os = .linux }, "aarch64-macos").?,
+    );
+
+    // Unnamed, host inside the vocabulary: the host's triple, not native.
+    try std.testing.expectEqualStrings("aarch64-macos-none", tripleFor(null, "aarch64-macos").?);
+    try std.testing.expectEqualStrings("x86_64-windows-gnu", tripleFor(null, "x86_64-windows").?);
+
+    // Unnamed, host outside it: native, because `--target` could not spell this
+    // machine's words — nothing can cross-build for it, and it must still be
+    // able to build for itself.
+    try std.testing.expect(tripleFor(null, "riscv64-linux") == null);
+
+    // And whatever this machine is, the two answers agree with each other.
+    const parsed_host = parse(host) catch null;
+    if (parsed_host) |t| {
+        try std.testing.expectEqualStrings(t.zigTriple(), effectiveTriple(null).?);
+    } else {
+        try std.testing.expect(effectiveTriple(null) == null);
     }
 }
 

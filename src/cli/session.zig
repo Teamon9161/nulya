@@ -27,6 +27,10 @@ const launch = @import("../launch.zig");
 const remote = @import("../environment/remote/mod.zig");
 const common = @import("common.zig");
 const cli_ext = @import("ext.zig");
+/// Only for `sweepRemoteReports`: collecting a far task's report is the task
+/// surface's own business, and this file just gives it the channel it already
+/// has (the `printUntrustedStoreRefusal` precedent).
+const task_cli = @import("task.zig");
 const session_list = @import("session_list.zig");
 const StepStream = @import("step_stream.zig").StepStream;
 const StepGate = @import("step_stream.zig").StepGate;
@@ -1128,6 +1132,21 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // ID, which is true on whichever machine the child runs — see
     // `SessionEnvironment.publishSession`.
     try lenv.publishSession(spath, id);
+    // A background task on another machine cannot deposit its own report: the
+    // session file is here (DESIGN §8.2). So before this process steps, it asks
+    // that machine about this session's tasks over the channel it has just
+    // opened, and turns any finished report into the `task_finished` the inbox
+    // already understands — which `prepareStep` then drains at the step
+    // boundary, exactly as it drains one a local supervisor deposited.
+    //
+    // Over the OPEN channel on purpose: a driver polling `nulya task list`
+    // collects these too, and doing it here as well costs a few frames instead
+    // of a second connection, so a bare `session step` loop with no driver
+    // around it still receives its results.
+    if (lenv == .remote) {
+        var renv = &lenv.remote;
+        task_cli.sweepRemoteReports(alloc, io, &renv.ch, id, renv.remoteWorkspace());
+    }
 
     // Reconstruct the model frozen at creation, re-resolving only the credential.
     // No silent fallback: a real session whose key is gone fails loudly rather

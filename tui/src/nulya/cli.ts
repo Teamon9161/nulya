@@ -498,9 +498,19 @@ export interface TaskEntry {
   task: string
   /** The session that STARTED it; `notify` is where its report goes. */
   session: string
-  state: "starting" | "running" | "done" | "lost"
-  /** Workspace-relative path of the whole captured output. */
+  state: "starting" | "running" | "done" | "lost" | "unreachable"
+  /**
+   * Workspace-relative path of the whole captured output — on the machine the
+   * command runs on. When `machine` is set that is another machine, and this
+   * front end cannot open it.
+   */
   log: string
+  /**
+   * The `remote:` spec whose machine runs this task, or null/absent for a task
+   * on this one (older binaries omit the column entirely). It exists precisely
+   * because `log` is then a path on that machine (DESIGN §8.2).
+   */
+  machine?: string | null
   notify: string | null
   command: string
   cwd: string
@@ -516,8 +526,17 @@ export interface TaskEntry {
   elapsed_s: number | null
 }
 
+/**
+ * Whether anything here should keep waiting on this task. `unreachable` counts
+ * as done for the same reason the kernel's `task wait` refuses to hang on one
+ * (goals/remote-env.md §6.7): nothing is known and nothing will be learned by
+ * spinning — and for a remote session every poll is a fresh channel, so a
+ * status bar counting an unanswerable machine as "running" would pay a connect
+ * timeout every few seconds forever. The task itself may well still be running
+ * over there; the row says `unreachable`, not `done`.
+ */
 export function taskIsDone(task: TaskEntry): boolean {
-  return task.state === "done" || task.state === "lost"
+  return task.state === "done" || task.state === "lost" || task.state === "unreachable"
 }
 
 /**

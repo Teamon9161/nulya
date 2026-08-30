@@ -970,78 +970,24 @@ pub const LocalEnvironment = struct {
         const session_id = std.fs.path.stem(std.fs.path.basename(session_path));
         if (session_id.len == 0) return error.NoDurableSession;
 
-        const cwd = std.Io.Dir.cwd();
-        try cwd.createDirPath(self.io, tasks_dir);
+        var claimed = try claimTaskSlot(alloc, self.io, tasks_dir, session_id);
+        errdefer claimed.deinit(alloc);
 
-        var slot: usize = 1;
-        var task_dir: ?[]u8 = null;
-        errdefer if (task_dir) |d| alloc.free(d);
-        while (slot <= max_tasks_per_session) : (slot += 1) {
-            const name = try std.fmt.allocPrint(alloc, "t{d}", .{slot});
-            defer alloc.free(name);
-            // `/` on every OS: this path ends up in the model's receipt (`emit.joinRel`).
-            const candidate = try emit.joinRel(alloc, &.{ tasks_dir, name });
-            if (cwd.createDir(self.io, candidate, .default_dir)) |_| {
-                task_dir = candidate;
-                break;
-            } else |err| {
-                alloc.free(candidate);
-                if (err != error.PathAlreadyExists) return err;
-            }
-        }
-        const dir_rel = task_dir orelse return error.TooManyTasks;
-
-        const task_id = try std.fmt.allocPrint(alloc, "{s}/t{d}", .{ session_id, slot });
-        errdefer alloc.free(task_id);
-        const log_path = try emit.joinRel(alloc, &.{ dir_rel, task_log_name });
-        errdefer alloc.free(log_path);
-
-        var timeout_buf: [16]u8 = undefined;
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(alloc);
-        try argv.appendSlice(alloc, &.{ exe, "task", "supervise", "--dir", dir_rel, "--session", session_path, "--cwd", req.cwd });
-        // The supervisor is a HOST process either way (it holds the lease, drains
-        // the log, deposits the event); what it is told here is where the COMMAND
-        // it watches runs, so a background command lands on the same machine as
-        // the foreground ones of the same session (DESIGN §8).
-        if (self.exec_spec) |spec| try argv.appendSlice(alloc, &.{ "--env", spec });
-        if (req.timeout_ms) |ms| {
-            try argv.appendSlice(alloc, &.{ "--timeout-ms", try std.fmt.bufPrint(&timeout_buf, "{d}", .{ms}) });
-        }
-        try argv.appendSlice(alloc, &.{ "--", req.command });
-
-        // A PLAIN spawn, not a `Tree`: this call returns normally and kills
-        // nothing, and the supervisor must survive both this process and the
-        // terminal it was started from — hence its own process group on POSIX
-        // and no console on Windows. Its stdio is null because it inherits this
-        // process's pipes otherwise, and a step's drain would then wait for a
-        // process designed to outlive it (see `Tree`'s note on detaching).
-        var detached: DetachedStdio = .take();
-        defer detached.restore();
-        var child = try std.process.spawn(self.io, .{
-            .argv = argv.items,
-            // The workspace, NOT `req.cwd`: `--dir` and `--session` are
-            // workspace-relative, and where the COMMAND runs is `--cwd`'s job.
-            .cwd = .inherit,
-            .environ_map = &self.env,
-            .stdin = .ignore,
-            .stdout = .ignore,
-            .stderr = .ignore,
-            .create_no_window = true,
-            .pgid = if (builtin.os.tag == .windows) null else 0,
+        try spawnSupervisor(alloc, self.io, &self.env, .{
+            .exe = exe,
+            .dir_rel = claimed.dir_rel,
+            .session_path = session_path,
+            .cwd = req.cwd,
+            // The supervisor is a HOST process either way (it holds the lease,
+            // drains the log, deposits the event); what it is told here is where
+            // the COMMAND it watches runs, so a background command lands on the
+            // same machine as the foreground ones of the same session (§8).
+            .exec_spec = self.exec_spec,
+            .timeout_ms = req.timeout_ms,
+            .command = req.command,
         });
-        // Nothing is waited on: the supervisor outlives this call by design. On
-        // Windows the handle is ours to release; on POSIX the exiting step
-        // process hands the child to init.
-        if (builtin.os.tag == .windows) {
-            if (child.id) |handle| std.os.windows.CloseHandle(handle);
-            std.os.windows.CloseHandle(child.thread_handle);
-            child.id = null;
-        }
 
-        alloc.free(dir_rel);
-        task_dir = null;
-        return .{ .task_id = task_id, .log_path = log_path };
+        return claimed.intoStart(alloc);
     }
 
     /// The ONE place in this repository where a workspace file is written from
@@ -1074,6 +1020,150 @@ pub const LocalEnvironment = struct {
 /// Named here because both halves of the mechanism need it: the environment
 /// tells the caller where it is, and `nulya task supervise` writes it.
 pub const task_log_name = "output.log";
+
+/// One claimed `t<N>`: the directory, the full name, and the log the receipt
+/// points at. All three are workspace-relative and `/`-spelled, which is what
+/// makes the same three strings true on whichever machine that workspace lives
+/// on (DESIGN §8.2).
+pub const TaskSlot = struct {
+    dir_rel: []u8,
+    task_id: []u8,
+    log_path: []u8,
+
+    pub fn deinit(self: TaskSlot, alloc: std.mem.Allocator) void {
+        alloc.free(self.dir_rel);
+        alloc.free(self.task_id);
+        alloc.free(self.log_path);
+    }
+
+    /// The receipt half, consuming the rest. `dir_rel` has done its job by the
+    /// time a task is started.
+    pub fn intoStart(self: TaskSlot, alloc: std.mem.Allocator) TaskStart {
+        alloc.free(self.dir_rel);
+        return .{ .task_id = self.task_id, .log_path = self.log_path };
+    }
+};
+
+/// Claim the next free `t<N>` for `session_id` under `tasks_dir`, by exclusive
+/// `mkdir` (the handoff file's discipline, one directory up): the first free
+/// name wins, so two callers racing cannot be handed the same one, and names are
+/// monotonic within a session.
+///
+/// The claim always happens HERE, on the host, whichever machine the command
+/// will run on: the name is what the ledger, the receipt and every `task` verb
+/// speak, so the machine that owns the ledger is the one that hands it out.
+pub fn claimTaskSlot(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    tasks_dir: []const u8,
+    session_id: []const u8,
+) !TaskSlot {
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, tasks_dir);
+
+    var slot: usize = 1;
+    var task_dir: ?[]u8 = null;
+    errdefer if (task_dir) |d| alloc.free(d);
+    while (slot <= max_tasks_per_session) : (slot += 1) {
+        const name = try std.fmt.allocPrint(alloc, "t{d}", .{slot});
+        defer alloc.free(name);
+        // `/` on every OS: this path ends up in the model's receipt (`emit.joinRel`).
+        const candidate = try emit.joinRel(alloc, &.{ tasks_dir, name });
+        if (cwd.createDir(io, candidate, .default_dir)) |_| {
+            task_dir = candidate;
+            break;
+        } else |err| {
+            alloc.free(candidate);
+            if (err != error.PathAlreadyExists) return err;
+        }
+    }
+    const dir_rel = task_dir orelse return error.TooManyTasks;
+
+    const task_id = try std.fmt.allocPrint(alloc, "{s}/t{d}", .{ session_id, slot });
+    errdefer alloc.free(task_id);
+    const log_path = try emit.joinRel(alloc, &.{ dir_rel, task_log_name });
+    return .{ .dir_rel = dir_rel, .task_id = task_id, .log_path = log_path };
+}
+
+/// How `nulya task supervise` is started — the one shape, so the two machines
+/// that start one cannot drift.
+pub const SupervisorSpawn = struct {
+    /// This binary, on whichever machine is doing the spawning (`NULYA_EXE`).
+    exe: []const u8,
+    /// The task's directory, relative to `spawn_cwd`.
+    dir_rel: []const u8,
+    /// Exactly one of these two says who the task is and where its report goes:
+    /// `session_path` means "deposit it into that session file's inbox" (the
+    /// session is on this machine), `task_name` means "you are `<sid>/t<N>` and
+    /// there is no session file here — leave the report beside your log, for the
+    /// host to collect" (DESIGN §8.2).
+    session_path: ?[]const u8 = null,
+    task_name: ?[]const u8 = null,
+    /// Where the watched COMMAND runs.
+    cwd: []const u8,
+    /// The exec target the command is wrapped in, when there is one. Never a
+    /// `remote:` spec: a supervisor wraps commands, it does not open channels.
+    exec_spec: ?[]const u8 = null,
+    timeout_ms: ?u32 = null,
+    command: []const u8,
+    /// Where the SUPERVISOR process itself starts — the workspace, since
+    /// `--dir` is relative to it. Null inherits this process's directory, which
+    /// is what a host session wants; the far agent names the session's workspace
+    /// because it may not have been started in it.
+    spawn_cwd: ?[]const u8 = null,
+};
+
+/// Start a supervisor and return the moment it is launched (DESIGN §6.1, §8.2).
+///
+/// A PLAIN spawn, not a `Tree`: this call returns normally and kills nothing,
+/// and the supervisor must survive both this process and the terminal it was
+/// started from — hence its own process group on POSIX and no console on
+/// Windows. Its stdio is null because it inherits this process's pipes
+/// otherwise, and the caller's drain would then wait for a process designed to
+/// outlive it (see `Tree`'s note on detaching). On the far side that caller is
+/// the channel itself, so the same care keeps a background task from holding
+/// the host's reader open.
+pub fn spawnSupervisor(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    s: SupervisorSpawn,
+) !void {
+    var timeout_buf: [16]u8 = undefined;
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(alloc);
+    try argv.appendSlice(alloc, &.{ s.exe, "task", "supervise", "--dir", s.dir_rel, "--cwd", s.cwd });
+    if (s.session_path) |p| try argv.appendSlice(alloc, &.{ "--session", p });
+    if (s.task_name) |t| try argv.appendSlice(alloc, &.{ "--task", t });
+    if (s.exec_spec) |spec| try argv.appendSlice(alloc, &.{ "--env", spec });
+    if (s.timeout_ms) |ms| {
+        try argv.appendSlice(alloc, &.{ "--timeout-ms", try std.fmt.bufPrint(&timeout_buf, "{d}", .{ms}) });
+    }
+    try argv.appendSlice(alloc, &.{ "--", s.command });
+
+    var detached: DetachedStdio = .take();
+    defer detached.restore();
+    var child = try std.process.spawn(io, .{
+        .argv = argv.items,
+        // The workspace, NOT the command's cwd: `--dir` and `--session` are
+        // workspace-relative, and where the COMMAND runs is `--cwd`'s job.
+        .cwd = if (s.spawn_cwd) |p| .{ .path = p } else .inherit,
+        .environ_map = env,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+        .create_no_window = true,
+        .pgid = if (builtin.os.tag == .windows) null else 0,
+    });
+    // Nothing is waited on: the supervisor outlives this call by design. On
+    // Windows the handle is ours to release; on POSIX the exiting parent hands
+    // the child to init.
+    if (builtin.os.tag == .windows) {
+        if (child.id) |handle| std.os.windows.CloseHandle(handle);
+        std.os.windows.CloseHandle(child.thread_handle);
+        child.id = null;
+    }
+}
 
 /// The two kernel32 calls `DetachedStdio` needs, declared locally exactly as
 /// `environment/tree.zig` declares the job-object calls — std 0.16 ships

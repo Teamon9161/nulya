@@ -713,8 +713,9 @@ test "session cli: drivers/goal runs the bundled driver — the model hands off,
     defer alloc.free(child_file);
     try std.testing.expect(std.mem.indexOf(u8, child_file, lineage) != null);
 
-    // The child opened on the carried brief: the fold marker, the sentinel the
-    // scripted model put in its handoff, and the way back to the whole transcript.
+    // The child opened on the carried brief: the fold marker, the brief rendered
+    // from the handoff call's own arguments (sentinel and all), and the way back
+    // to the whole transcript.
     const first_event = blk: {
         var lines = std.mem.splitScalar(u8, child_file, '\n');
         _ = lines.next(); // header
@@ -722,16 +723,25 @@ test "session cli: drivers/goal runs the bundled driver — the model hands off,
     };
     const pointer = try std.fmt.allocPrint(alloc, "nulya session events {s}", .{parent_id});
     defer alloc.free(pointer);
-    for ([_][]const u8{ "\"kind\":\"user_text\"", "<nulya:context-summary>", support.launch.ScriptedProvider.handoff_sentinel, pointer }) |needle| {
+    const carried = [_][]const u8{
+        "\"kind\":\"user_text\"",
+        "<nulya:context-summary>",
+        "# Handoff",
+        "## Next task",
+        support.launch.ScriptedProvider.handoff_sentinel,
+        pointer,
+    };
+    for (carried) |needle| {
         try std.testing.expect(std.mem.indexOf(u8, first_event, needle) != null);
     }
 
-    // The proposal itself is still on disk, filed under the session that made it.
-    const proposal = try std.fmt.allocPrint(alloc, ".nulya/handoffs/{s}-1.md", .{parent_id});
-    defer alloc.free(proposal);
-    const written = try ws.readFileAlloc(io, proposal, alloc, .unlimited);
-    defer alloc.free(written);
-    try std.testing.expect(std.mem.indexOf(u8, written, support.launch.ScriptedProvider.handoff_sentinel) != null);
+    // The proposal itself is the CALL, and it is where the kernel put it: in the
+    // parent's ledger. Nothing was written beside it — the directory this used to
+    // need does not exist, which is what makes the same signal readable by a
+    // driver whose workspace is on another machine (goals/remote-env.md §3.2).
+    try std.testing.expect(std.mem.indexOf(u8, events.stdout, "\"tool\":\"handoff\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, events.stdout, support.launch.ScriptedProvider.handoff_sentinel) != null);
+    try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/handoffs", .{}));
 
     // Two files, one conversation — the kernel's own projection agrees.
     const listed = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" });

@@ -41,15 +41,33 @@
 //!   6. `session append` the summary into the new session;
 //!   7. report `{session, parent, summary_bytes}`.
 //!
-//! **The `brief_file` branch: fork only.** When the caller already HAS the brief
-//! — a `/goal` driver holding the handoff the model just wrote (PLAN §3.4.1) —
-//! steps 2-4 are skipped outright: no request is appended, the old session is not
-//! stepped, and its file is left byte-identical. The fork point is then the old
-//! ledger's current tail (`session events <old>`, last line's `seq`), which is
-//! the same place the summary path forks at — the difference is only who
-//! produced the brief. A parent with no events at all, an unreadable file, or an
-//! empty one is refused without forking: a fork that carries nothing forward is
-//! a conversation thrown away.
+//! **Two fork-only branches.** When the brief already EXISTS, steps 2-4 are
+//! skipped outright: no request is appended, the old session is not stepped, and
+//! its file is left byte-identical. The fork point is then the old ledger's
+//! current tail (`session events <old>`, last line's `seq`), which is the same
+//! place the summary path forks at — the difference is only who produced the
+//! brief. A parent with no events at all is refused without forking: a fork that
+//! carries nothing forward is a conversation thrown away.
+//!
+//!  - **`brief=latest` (or `brief_seq=<n>`): the brief is in the ledger.** The
+//!    model called `extensions/handoff`, and that call — its four sections and
+//!    all — is already a frozen event in the old session (DESIGN §11). So this
+//!    reads the last `handoff` call the kernel ACCEPTED out of
+//!    `session events <old>` and renders the markdown brief from its arguments.
+//!    Nothing was written to disk for it to find, which is the point: a driver
+//!    watching a directory is a convention every driver has to learn and no
+//!    machine enforces, and it stops working the moment the workspace lives
+//!    somewhere else (goals/remote-env.md §3.2). `brief_seq` names one specific
+//!    call instead of the newest, for a caller that is looking further back.
+//!  - **`brief_file=<path>`: the brief is a file the caller wrote.** For a
+//!    package that renders its own brief and hands over the path —
+//!    `extensions/plan`'s `approve` is the one consumer today.
+//!
+//! Rendering the handoff brief lives HERE rather than in `extensions/handoff`
+//! because these are two separate binaries: whoever turns the four sections into
+//! markdown must be whoever carries them, or the shape is implemented twice and
+//! the two copies drift. `handoff` is left with what only it can do — telling
+//! the model, at the moment of the call, that a section is missing.
 //!
 //! Both branches append the SAME parent-pointer footer to the carried text, in
 //! code rather than by asking the model to remember it (PLAN §3.4.1): the old
@@ -96,6 +114,17 @@ const max_child_output: usize = 4 << 20;
 /// How much of a failing child's stderr is quoted back to the caller.
 const max_detail_bytes: usize = 400;
 
+/// The tool whose call carries a handover brief (`extensions/handoff`). A NAME,
+/// because that is all a ledger event records about a call — there is no tool id
+/// on the wire — and it is the name that package has always put on the model's
+/// face.
+const handoff_tool = "handoff";
+
+/// Cap per rendered section. A brief this long is a transcript, not a handover.
+/// The ledger keeps the call whole either way; this bounds only what is carried
+/// into the next session.
+const max_section_bytes: usize = 64 << 10;
+
 const Done = struct {
     session: []const u8,
     parent_session: []const u8,
@@ -119,6 +148,26 @@ const Args = struct {
     /// absolute). Empty means "ask the old session for one" — the seven-step
     /// path. Non-empty means fork only: the old session is never touched.
     brief_file: []const u8 = "",
+    /// Take the brief from a `handoff` call already in the old session's ledger.
+    /// The only word this understands is `latest`; anything else is refused by
+    /// name rather than guessed at.
+    brief: []const u8 = "",
+    /// Which `handoff` call, by the seq of the assistant event that made it.
+    /// Selects instead of `brief=latest`; it does NOT move the fork point, which
+    /// is the ledger's tail either way (a child inherits no history, so the seq
+    /// in its lineage records where the conversation was left, not where it was
+    /// cut).
+    brief_seq: ?u64 = null,
+
+    /// Where this call wants its brief from. The three are exclusive: a caller
+    /// that names two sources has not decided, and picking one for it would be
+    /// forking on something it did not ask for.
+    const Source = enum { file, ledger, ask };
+    fn source(self: Args) ?Source {
+        const from_ledger = self.brief.len != 0 or self.brief_seq != null;
+        if (self.brief_file.len != 0) return if (from_ledger) null else .file;
+        return if (from_ledger) .ledger else .ask;
+    }
 };
 
 /// `std.process.Init` rather than a bare `main()`, and that is load-bearing:
@@ -149,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
                     .failed = try std.fmt.allocPrint(alloc, "compact could not run: {s}", .{@errorName(err)}),
                 };
             } else {
-                outcome = .{ .failed = "compact needs {\"session\":\"<id>\"} (optional: \"focus\", \"max_steps\")" };
+                outcome = .{ .failed = "compact needs {\"session\":\"<id>\"} (optional: \"focus\", \"max_steps\", \"brief\", \"brief_seq\", \"brief_file\")" };
             }
         }
     } else |_| {}
@@ -167,16 +216,19 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     const exe = env.get("NULYA_EXE") orelse
         return Outcome{ .failed = "compact needs NULYA_EXE (the nulya kernel sets it for its children)" };
 
-    // 1b. A caller holding the brief already (the `/goal` driver with a handoff
-    //     in hand) skips straight to the fork: steps 2-4 exist only to OBTAIN a
-    //     brief, and running them anyway would append two turns to a file this
-    //     branch promises not to touch.
-    const found = if (args.brief_file.len != 0)
-        switch (try briefFromFile(alloc, io, exe, args)) {
-            .failed => |f| return .{ .failed = f },
-            .harvested => |h| h,
-        }
-    else switch (try briefFromSession(alloc, io, exe, args)) {
+    // 1b. A caller whose brief already exists (the `/goal` driver after the
+    //     model handed off) skips straight to the fork: steps 2-4 exist only to
+    //     OBTAIN a brief, and running them anyway would append two turns to a
+    //     file those branches promise not to touch.
+    const source = args.source() orelse return Outcome{
+        .failed = "compact takes the brief from one place: `brief`/`brief_seq` (the ledger's own handoff call) or `brief_file` (a file you wrote), not both",
+    };
+    const brief = switch (source) {
+        .file => try briefFromFile(alloc, io, exe, args),
+        .ledger => try briefFromLedger(alloc, io, exe, args),
+        .ask => try briefFromSession(alloc, io, exe, args),
+    };
+    const found = switch (brief) {
         .failed => |f| return .{ .failed = f },
         .harvested => |h| h,
     };
@@ -305,6 +357,163 @@ fn briefFromFile(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Ar
         .failed = try fail(alloc, "{s} has no events yet; there is nothing to fork from", .{args.session}),
     };
     return .{ .harvested = .{ .summary = summary, .seq = seq } };
+}
+
+/// One `handoff` call as the old ledger recorded it.
+const HandoffCall = struct { seq: u64, call_id: []const u8, args_json: []const u8 };
+
+/// The ledger branch: the model already handed off, so the brief is the
+/// arguments of that call. Nothing is written to the old session.
+///
+/// **Only a call the kernel ACCEPTED counts.** A `handoff` whose result came
+/// back `ok=false` was refused — an incomplete brief the model was told to redo,
+/// or a call a gate denied — and forking on it would carry over the very brief
+/// somebody said no to. That check is the matching `tool_results` entry, not a
+/// re-validation of the sections here: the package that owns the rule already
+/// answered, and its answer is in the ledger.
+fn briefFromLedger(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !Brief {
+    if (args.brief.len != 0 and !std.mem.eql(u8, args.brief, "latest")) {
+        return .{ .failed = try fail(alloc, "brief '{s}' is not a word compact knows; the only one is `latest` (or name one call with brief_seq)", .{args.brief}) };
+    }
+
+    // `session events` is a read-only tail (DESIGN §14), so asking costs the old
+    // file nothing.
+    const listed = try runNulya(alloc, io, exe, &.{ "session", "events", args.session });
+    if (listed.code != 0) {
+        return .{ .failed = try fail(alloc, "cannot read the events of {s}: {s}", .{ args.session, detail(listed) }) };
+    }
+
+    var calls: std.ArrayList(HandoffCall) = .empty;
+    var accepted: std.ArrayList([]const u8) = .empty;
+    var tail: u64 = 0;
+
+    // Read the same forgiving way `harvest` does: these are the kernel's own
+    // lines, and a shape this build does not know is not a reason to lose a
+    // conversation.
+    var lines = std.mem.splitScalar(u8, listed.stdout, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, line, .{}) catch continue;
+        if (parsed.value != .object) continue;
+        const obj = parsed.value.object;
+        const seq: u64 = switch (obj.get("seq") orelse std.json.Value{ .null = {} }) {
+            .integer => |n| if (n > 0) @intCast(n) else 0,
+            else => 0,
+        };
+        if (seq > tail) tail = seq;
+        const kind = stringField(obj, "kind") orelse continue;
+
+        if (std.mem.eql(u8, kind, "assistant")) {
+            const list = switch (obj.get("calls") orelse continue) {
+                .array => |a| a,
+                else => continue,
+            };
+            for (list.items) |entry| {
+                if (entry != .object) continue;
+                const tool = stringField(entry.object, "tool") orelse continue;
+                if (!std.mem.eql(u8, tool, handoff_tool)) continue;
+                try calls.append(alloc, .{
+                    .seq = seq,
+                    .call_id = stringField(entry.object, "id") orelse "",
+                    .args_json = stringField(entry.object, "args") orelse "",
+                });
+            }
+            continue;
+        }
+        if (!std.mem.eql(u8, kind, "tool_results")) continue;
+        const results = switch (obj.get("results") orelse continue) {
+            .array => |a| a,
+            else => continue,
+        };
+        for (results.items) |entry| {
+            if (entry != .object) continue;
+            const ok = switch (entry.object.get("ok") orelse std.json.Value{ .null = {} }) {
+                .bool => |b| b,
+                else => false,
+            };
+            if (!ok) continue;
+            try accepted.append(alloc, stringField(entry.object, "call_id") orelse continue);
+        }
+    }
+
+    if (tail == 0) {
+        return .{ .failed = try fail(alloc, "{s} has no events yet; there is nothing to fork from", .{args.session}) };
+    }
+
+    var chosen: ?HandoffCall = null;
+    var seen_at_seq = false;
+    for (calls.items) |call| {
+        if (args.brief_seq) |want| {
+            if (call.seq != want) continue;
+            seen_at_seq = true;
+        }
+        if (!contains(accepted.items, call.call_id)) continue;
+        chosen = call; // the last one wins: `latest` means the most recent
+    }
+    const call = chosen orelse {
+        if (args.brief_seq) |want| return Brief{ .failed = if (seen_at_seq)
+            try fail(alloc, "the {s} call at seq {d} of {s} was not accepted — the brief was incomplete or the call was denied; nothing moved", .{ handoff_tool, want, args.session })
+        else
+            try fail(alloc, "seq {d} of {s} is not an accepted {s} call; nothing moved", .{ want, args.session, handoff_tool }) };
+        return Brief{ .failed = try fail(
+            alloc,
+            "{s} has no accepted {s} call to fork on; nothing moved. The brief is the call's own arguments, so there is one only after the model has handed off — compose the package with `session new --with handoff@<v>`, or pass brief_file if you wrote a brief yourself",
+            .{ args.session, handoff_tool },
+        ) };
+    };
+
+    const rendered = renderHandoff(alloc, args.session, call.args_json) catch |err| return Brief{
+        .failed = try fail(alloc, "the {s} call at seq {d} of {s} could not be read back: {s}; nothing moved", .{ handoff_tool, call.seq, args.session, @errorName(err) }),
+    };
+    const summary = rendered orelse return Brief{
+        .failed = try fail(alloc, "the {s} call at seq {d} of {s} carries no readable brief; nothing moved", .{ handoff_tool, call.seq, args.session }),
+    };
+    return .{ .harvested = .{ .summary = summary, .seq = tail } };
+}
+
+fn contains(haystack: []const []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return false;
+    for (haystack) |one| if (std.mem.eql(u8, one, needle)) return true;
+    return false;
+}
+
+/// The four sections of a `handoff` call as the markdown brief the next session
+/// opens with. Null when nothing readable is left after trimming — a brief that
+/// says nothing is not a brief, and forking on it would throw the conversation
+/// away for no continuation.
+///
+/// `args_json` is the ledger's copy of what the model sent, so it can be torn
+/// (a reply cut by `max_tokens` records the fragment verbatim, DESIGN §4): a
+/// parse failure here is a refusal, never a crash.
+fn renderHandoff(alloc: std.mem.Allocator, session_id: []const u8, args_json: []const u8) !?[]const u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, args_json, .{}) catch return null;
+    if (parsed.value != .object) return null;
+    const obj = parsed.value.object;
+
+    const done = handoffSection(obj, "done");
+    const next_task = handoffSection(obj, "next_task");
+    const keep = handoffSection(obj, "keep");
+    const drop = handoffSection(obj, "drop");
+    if (done.len == 0 and next_task.len == 0 and keep.len == 0) return null;
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    const w = &out.writer;
+    try w.print("# Handoff\n\nsession: {s}\n\n", .{session_id});
+    try w.print("## Done\n\n{s}\n\n", .{done});
+    try w.print("## Next task\n\n{s}\n\n", .{next_task});
+    try w.print("## Keep\n\n{s}\n", .{keep});
+    if (drop.len != 0) try w.print("\n## Dropped\n\n{s}\n", .{drop});
+    return try out.toOwnedSlice();
+}
+
+/// One section, trimmed and capped. Whitespace-only is empty, and the cut is on
+/// a byte boundary of the model's own text — this is a brief being carried, not
+/// bytes being stored, and the whole call stays in the parent ledger.
+fn handoffSection(obj: std.json.ObjectMap, key: []const u8) []const u8 {
+    const raw = stringField(obj, key) orelse return "";
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    return trimmed[0..@min(trimmed.len, max_section_bytes)];
 }
 
 /// The seven-step path: ask the OLD session to summarise itself (steps 2-4).
@@ -486,6 +695,13 @@ fn readArgs(arguments: std.json.ObjectMap) ?Args {
     var args: Args = .{ .session = session };
     if (stringField(arguments, "focus")) |focus| args.focus = std.mem.trim(u8, focus, " \t\r\n");
     if (stringField(arguments, "brief_file")) |path| args.brief_file = std.mem.trim(u8, path, " \t\r\n");
+    if (stringField(arguments, "brief")) |word| args.brief = std.mem.trim(u8, word, " \t\r\n");
+    if (arguments.get("brief_seq")) |value| switch (value) {
+        .integer => |n| if (n > 0) {
+            args.brief_seq = @intCast(n);
+        },
+        else => {},
+    };
     // A budget the caller cannot blow up with: the request says "answer, do not
     // call tools", so more than a few steps means the model is doing something
     // else entirely.

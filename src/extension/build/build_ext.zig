@@ -342,16 +342,22 @@ fn build(
     // from the frozen package, never the mutable draft tree. Source and output
     // are both inside the version directory, so the store root is the cwd.
     //
-    // `-target` appears only when one was named. A host build is left NATIVE
-    // rather than spelled out as this host's triple: those are not the same
-    // invocation (a native build detects the machine's own abi and libc
-    // version), and turning every existing build into a cross-shaped one would
-    // change the bytes — and therefore nothing about the id, which records only
-    // the two words. Bytes nobody asked to change are bytes nobody verified.
+    // `-target` is asked of `target_mod.effectiveTriple`, which answers for a
+    // host build too: the two words this build is about to record ARE the
+    // invocation, so a build that named nothing must compile the way a cross
+    // build for those same words would. Letting a host build stay native was the
+    // older arrangement, and it left one id able to name two different compiles
+    // — glibc here, musl from over there — which only stayed invisible while
+    // ids never left a store. They do now (`ext push` answers by id alone, and
+    // `exec_version` names one id as what runs on the far machine).
+    //
+    // Null for a host whose own pair is outside the `--target` vocabulary: it
+    // compiles natively, since nothing can cross-build for words that cannot be
+    // spelled, and that machine must still be able to build for itself.
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(alloc);
     try argv.appendSlice(alloc, &.{ zig.exe, "build-exe", frozen_source, "-O", "ReleaseSafe", emit_arg, "--name", std.fs.path.stem(declared_entry) });
-    if (opts.target) |t| try argv.appendSlice(alloc, &.{ "-target", t.zigTriple() });
+    if (target_mod.effectiveTriple(opts.target)) |triple| try argv.appendSlice(alloc, &.{ "-target", triple });
 
     const result = std.process.run(alloc, io, .{
         .argv = argv.items,

@@ -747,12 +747,6 @@ pub fn execTargetRefusal(exec: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The sentence a background-task or supervisor verb prints when it is handed a
-/// remote session. Written once because three call sites say it (DESIGN §8.1).
-pub const remote_background_refusal =
-    "background tasks run where the harness runs, and this session's commands run elsewhere; " ++
-    "run it in the foreground with `shell`, or start it on that machine yourself\n";
-
 /// The execution environment a session runs its tools behind: today's local
 /// backend, or the remote channel (DESIGN §8.1). A union rather than two call
 /// paths so every verb keeps one shape — build it, hand out the handle, deinit.
@@ -817,11 +811,17 @@ pub fn sessionEnvironment(
         // No store roots: a remote environment resolves nothing here. Which
         // version means which file is the far agent's answer, given against ITS
         // roots (goals/remote-env.md §3.1).
-        return .{ .remote = try remote.RemoteEnvironment.connect(alloc, io, .{
-            .spec = spec,
-            .workspace = workspace,
-            .version = version,
-        }) };
+        return .{
+            .remote = try remote.RemoteEnvironment.connect(alloc, io, .{
+                .spec = spec,
+                .workspace = workspace,
+                .version = version,
+                // The same two halves the local one gets, and for the same reason:
+                // a background task's NAME and its delivery belong to the machine
+                // holding the ledger, whichever machine runs the command (§8.2).
+                .session = session,
+            }),
+        };
     }
     return .{ .local = try localEnvironment(alloc, io, cfg, session, exec, ext_roots) };
 }

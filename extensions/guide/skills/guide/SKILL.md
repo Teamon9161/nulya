@@ -303,8 +303,15 @@ Store and scope:
   gated over there: if that machine's workspace holds a `.nulya/extensions` that
   arrived with a checkout and nobody has run `nulya ext trust` on THAT machine,
   every extension call is refused with a sentence naming the store, so a checkout
-  cannot shadow a version you pushed. Background tasks still refuse in such
-  a session rather than quietly running here. Two verbs answer the questions a
+  cannot shadow a version you pushed. A background task (`shell` with
+  `background: true`, or `nulya task run`) runs over there too: its supervisor,
+  its log and its status live in that workspace, so it keeps running when the
+  channel closes, and its report still arrives here as the same `task_finished`
+  turn a local one produces — collected by whichever `nulya task` verb or step
+  next asks that machine. `nulya task list|status|wait|kill` work on it
+  unchanged; a task whose machine will not answer reads `unreachable`, which is
+  neither `done` nor `lost` — nothing is known about it, and it is probably
+  still running. Two verbs answer the questions a
   driver has before offering a machine to someone: `nulya remote check --env
   <spec>` reports what answered, and `nulya remote ls --env <spec> [<dir>]`
   lists a directory over there exactly, names and kinds.

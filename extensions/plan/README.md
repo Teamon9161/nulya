@@ -12,7 +12,7 @@
 |---|---|---|
 | `propose{plan_md}` | 模型（`surface: "auto"`） | 把想好的计划**整篇**作为参数记下来，然后收尾。**不写盘、不 fork、不阻塞**——计划本身进 ledger，那就是唯一那份记录。 |
 | `todo{items}` | 模型（`surface: "auto"`） | 当前的清单（`ui: {render: "checklist", panel: true}`）。同样不写盘，调用本身就是记录。 |
-| `approve{session, plan_md}` | driver（`surface: "internal"`） | 把**已被批准**的计划渲染成 `.nulya/handoffs/<session>-<n>.md`（与 `extensions/handoff` 逐字节同形），返回路径。 |
+| `approve{session, plan_md}` | driver（`surface: "internal"`） | 把**已被批准**的计划渲染成 `.nulya/handoffs/<session>-<n>.md`，返回路径。这个目录今天只有它一个写者——`extensions/handoff` 从前也写、现在什么都不写（它的 brief 一直就是那次调用的参数，而调用在 ledger 里）。 |
 
 ## 装它
 

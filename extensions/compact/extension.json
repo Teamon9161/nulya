@@ -6,13 +6,15 @@
     "tools": [{
       "name": "compact",
       "surface": "internal",
-      "description": "Ask a session to summarise itself, then continue it in a new session file that points back at it. The old file is never changed except by the two turns this writes into it. With `brief_file` the brief is taken from that file instead, the old session is not asked and not written to at all, and the fork happens at its current tail — the path a driver takes when the model already handed off. Either way the carried text ends with a pointer back to the parent session. Returns the new session id.",
+      "description": "Ask a session to summarise itself, then continue it in a new session file that points back at it. The old file is never changed except by the two turns this writes into it. With `brief=latest` the brief is rendered from the last accepted `handoff` call already in that session's ledger — the path a driver takes when the model handed off; with `brief_file` it is read from a file the caller wrote. Both of those leave the old session byte-identical and fork at its current tail. Either way the carried text ends with a pointer back to the parent session. Returns the new session id.",
       "input": {
         "type": "object",
         "properties": {
           "session": { "type": "string", "description": "The session to compact; it must not be running a step." },
-          "focus": { "type": "string", "description": "Extra emphasis for the brief. Supplements the required sections, never replaces them. Ignored with brief_file." },
-          "max_steps": { "type": "integer", "description": "Steps the summarising run may take (1-3, default 1). Ignored with brief_file." },
+          "focus": { "type": "string", "description": "Extra emphasis for the brief. Supplements the required sections, never replaces them. Ignored when the brief already exists." },
+          "max_steps": { "type": "integer", "description": "Steps the summarising run may take (1-3, default 1). Ignored when the brief already exists." },
+          "brief": { "type": "string", "description": "`latest`: take the brief from the last `handoff` call this session's ledger recorded and the kernel accepted. The old session is left byte-identical." },
+          "brief_seq": { "type": "integer", "description": "Take the brief from the `handoff` call at this ledger seq instead of the newest one. The fork point is the ledger's tail either way." },
           "brief_file": { "type": "string", "description": "Path (workspace-relative or absolute) to a brief that already exists. Given, the old session is left byte-identical and only the fork happens." }
         },
         "required": ["session"]

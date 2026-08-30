@@ -116,8 +116,9 @@ pub const FrozenExtension = struct {
     /// Two columns rather than one collapsed identity (goals/remote-env.md §3.1):
     /// `version` is what the package IS here — its manifest, its prompts, its
     /// skills, its `ext run` — and `exec_version` is which build of it runs over
-    /// there. Merging them would dissolve "one version id names exactly one set
-    /// of executable bytes", which is what `.sealed` and the usage journal's
+    /// there. Merging them would dissolve "one version id names exactly one
+    /// compiled implementation" (one compiler, one target, one invocation —
+    /// `extension/target.zig`), which is what `.sealed` and the usage journal's
     /// version column both rest on.
     exec_version: ?[]const u8 = null,
 };

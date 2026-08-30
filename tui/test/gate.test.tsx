@@ -7,7 +7,7 @@
  * told when the answer is no.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { testRender } from "@opentui/solid"
@@ -17,7 +17,7 @@ import { createSessionState } from "../src/state/session.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { sessionEvents, sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { parseApprovalNote } from "../src/approvalnote.ts"
-import { handoffsFor, headline, nextHandoff } from "../src/handoff.ts"
+import { briefPreview, handoffsIn, headline, nextHandoff } from "../src/handoff.ts"
 import { verdictLine } from "../src/nulya/cli.ts"
 import { loadTuiState } from "../src/state/tui_state.ts"
 import {
@@ -411,23 +411,41 @@ test("a verdict is one line, and a note keeps its words but not its newlines", (
   expect(verdictLine({ allow: false, note: "not\nhere" })).toBe("deny not here\n")
 })
 
-test("a handoff file is the proposal, found by name and read once", () => {
-  const id = "s-1787000000000-abcdef"
-  mkdirSync(join(ws.dir, ".nulya", "handoffs"), { recursive: true })
-  writeFileSync(join(ws.dir, ".nulya", "handoffs", `${id}-1.md`), "# Phase 1 done\n\nnext: write the note\n")
-  writeFileSync(join(ws.dir, ".nulya", "handoffs", `${id}-2.md`), "# Phase 2 done\n")
-  // Another session's proposals are not this session's.
-  writeFileSync(join(ws.dir, ".nulya", "handoffs", "s-9999999999999-ffffff-1.md"), "# Somebody else\n")
+/**
+ * The proposal is the CALL, not a file (DESIGN §11). Nothing is written when the
+ * model hands off — the four sections are the call's arguments and the kernel
+ * froze them into the ledger — so this front end finds a handover in the
+ * transcript it already holds.
+ */
+test("a handoff call is the proposal, read out of the transcript and only when it was accepted", () => {
+  const state = createSessionState("s-1787000000000-abcdef")
+  const brief = (next: string) =>
+    JSON.stringify({ done: "read the map", next_task: next, keep: "docs/base-tools.md" })
+  state.applyEvents([
+    { seq: 1, kind: "user_text", text: "reach the goal" },
+    { seq: 2, kind: "assistant", text: "", calls: [{ id: "h1", tool: "handoff", args: brief("write the note") }] },
+    { seq: 3, kind: "tool_results", results: [{ call_id: "h1", ok: true, output: "recorded", spill_path: null }] },
+    // A second one the tool REFUSED: an incomplete brief the model was told to
+    // redo. Forking on it would carry over the brief somebody said no to.
+    { seq: 4, kind: "assistant", text: "", calls: [{ id: "h2", tool: "handoff", args: '{"done":"x"}' }] },
+    { seq: 5, kind: "tool_results", results: [{ call_id: "h2", ok: false, output: "needs keep", spill_path: null }] },
+    { seq: 6, kind: "assistant", text: "", calls: [{ id: "h3", tool: "handoff", args: brief("ship it") }] },
+    { seq: 7, kind: "tool_results", results: [{ call_id: "h3", ok: true, output: "recorded", spill_path: null }] },
+  ])
 
-  const found = handoffsFor(ws, id)
-  expect(found.map((file) => file.index)).toEqual([1, 2])
-  expect(headline(found[0]!.brief)).toBe("Phase 1 done")
+  const found = handoffsIn(state.snapshot.items)
+  expect(found.map((one) => one.callId)).toEqual(["h1", "h3"])
+  // The seq is what `compact --arg brief_seq=` takes, so following the proposal
+  // that was SHOWN cannot silently fork on a different one.
+  expect(found[0]!.seq).toBe(2)
+  expect(headline(found[0]!.brief)).toBe("write the note")
+  expect(briefPreview(found[0]!.brief)).toContain("keep: docs/base-tools.md")
 
   // The newest un-answered one is what gets offered, and answering it (which is
-  // what `seen` records) leaves nothing to offer.
-  expect(nextHandoff(ws, id, new Set())?.index).toBe(2)
-  expect(nextHandoff(ws, id, new Set([`.nulya/handoffs/${id}-2.md`]))?.index).toBe(1)
-  expect(nextHandoff(ws, id, new Set(found.map((file) => file.path)))).toBeNull()
+  // what `seen` records) falls back to the older one, then to nothing.
+  expect(nextHandoff(state.snapshot.items, new Set())?.callId).toBe("h3")
+  expect(nextHandoff(state.snapshot.items, new Set(["h3"]))?.callId).toBe("h1")
+  expect(nextHandoff(state.snapshot.items, new Set(["h1", "h3"]))).toBeNull()
 })
 
 /**

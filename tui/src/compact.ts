@@ -71,16 +71,20 @@ export interface CompactResult {
 export async function runCompact(
   ws: Workspace,
   sessionId: string,
-  options: { focus?: string; briefFile?: string } = {},
+  options: { focus?: string; briefFile?: string; brief?: string; briefSeq?: number } = {},
 ): Promise<CompactResult> {
   const version = await extBuild(ws, await bundledDraftPath(ws, compact_id, compact_draft))
   const trimmed = options.focus?.trim()
   const call = await extRun(ws, `${compact_id}@${version}`, compact_id, {
     session: sessionId,
     ...(trimmed && trimmed.length > 0 ? { focus: trimmed } : {}),
-    // `brief_file` skips the asking: the summary already exists, written by the
-    // model's own `handoff` call, and the old session is left byte-identical
-    // (DESIGN §11). Same fork, one less round trip.
+    // Both of these skip the asking: the brief already exists, so the old
+    // session is left byte-identical and only the fork happens (DESIGN §11).
+    // `brief_seq` names the model's own `handoff` call in that session's
+    // ledger — where the brief has been all along; `brief_file` is for a
+    // package that wrote one itself (`extensions/plan`'s approve).
+    ...(options.briefSeq !== undefined ? { brief_seq: options.briefSeq } : {}),
+    ...(options.brief ? { brief: options.brief } : {}),
     ...(options.briefFile ? { brief_file: options.briefFile } : {}),
   })
   // A refusal is the interesting case: the tool says why on its stderr, which

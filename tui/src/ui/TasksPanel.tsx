@@ -37,6 +37,7 @@ function elapsed(task: TaskEntry): string {
 /** The word for a row that is not running any more. */
 function endedWord(task: TaskEntry): string {
   if (task.state === "lost") return "lost"
+  if (task.state === "unreachable") return "unreachable"
   if (task.exit_code !== null && task.exit_code !== 0) return `exit ${task.exit_code}`
   return "done"
 }

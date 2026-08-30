@@ -27,6 +27,7 @@ const environment = @import("../environment.zig");
 const journal = @import("../journals/journal.zig");
 const launch = @import("../launch.zig");
 const ledger = @import("../ledger.zig");
+const remote = @import("../environment/remote/mod.zig");
 const Tree = @import("../environment/tree.zig").Tree;
 const common = @import("common.zig");
 const cwdRealPath = common.cwdRealPath;
@@ -54,6 +55,21 @@ pub const kill_file = "kill";
 /// a status column: it is written by another process while the supervisor owns
 /// `status.json`.
 pub const notify_file = "notify";
+/// What a supervisor with no session file beside it leaves instead of a deposit
+/// — the report text, verbatim, next to the log it quotes (DESIGN §8.2). Only a
+/// task running on ANOTHER machine has one: the ledger it belongs in is on the
+/// host, so the report waits here until a host verb fetches it.
+pub const report_file = "report.txt";
+/// The host's own note that a far task's report has been turned into a
+/// `task_finished` already. It lives on the HOST side of a remote task, next to
+/// `notify`, because delivery is this machine's fact.
+///
+/// Without it every poll would re-deposit: the ledger would ignore the repeat
+/// (the `origin` column, DESIGN §3.4), but the inbox file would keep coming
+/// back, and `depositPending` reads exactly that file to answer "is there an
+/// unread result" — so `wait --any` would say yes about the same task forever
+/// and a driver's loop would never end.
+pub const delivered_file = "delivered";
 
 /// How often the supervisor looks at the kill marker while waiting.
 const poll_ms: u32 = 250;
@@ -92,7 +108,14 @@ pub const EndedBy = enum { exit, timeout, kill };
 /// status yet is `starting`, and a `running` status whose lease is free is
 /// `lost`. Neither is guessed on the writer's behalf — they are reported as
 /// what they are.
-pub const Projected = enum { starting, running, done, lost };
+///
+/// `unreachable` is the fourth thing that only a reader can see, and only for a
+/// task on another machine: this host could not get an answer about it — the
+/// channel did not open, or that machine refused the question. It is NOT `lost`
+/// (which says a supervisor died) and NOT `done` (which says the command ended):
+/// nothing at all is known, and saying so is the whole of it. A task is usually
+/// still running perfectly well behind an `unreachable`.
+pub const Projected = enum { starting, running, done, lost, @"unreachable" };
 
 pub fn dispatchTask(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len == 0) return common.usageSection(io, common.task_usage);
@@ -144,6 +167,24 @@ fn parseRef(alloc: std.mem.Allocator, name: []const u8, default_session: ?[]cons
     }
     if (!launch.isValidSessionId(session_part) or !isSlot(slot_part)) return null;
     return try makeRef(alloc, session_part, slot_part);
+}
+
+/// The directory a task's files live in, derived from its FULL name — the one
+/// rule, run on whichever machine is asking, against its own workspace. Null
+/// when the name is not a task name at all.
+///
+/// This is why no task PATH crosses the remote channel (protocol.zig): the host
+/// claims `<sid>/t<N>` and the far agent turns that same name into a directory
+/// with this same function, so neither machine ever spells the other's layout
+/// (goals/remote-env.md §3.3).
+pub fn taskDirRel(alloc: std.mem.Allocator, name: []const u8) !?[]u8 {
+    const ref = (try parseRef(alloc, name, null)) orelse return null;
+    defer {
+        alloc.free(ref.session);
+        alloc.free(ref.slot);
+        alloc.free(ref.full);
+    }
+    return ref.dir;
 }
 
 fn makeRef(alloc: std.mem.Allocator, session: []const u8, slot: []const u8) !Ref {
@@ -260,31 +301,41 @@ fn readNotify(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]u8 {
 ///   3. run the real command under a `Tree`, so a kill ends the whole subtree;
 ///   4. wait: the child's own exit racing a 250 ms poll of the kill marker and
 ///      the optional budget;
-///   5. DEPOSIT the report, then re-read `notify` and move the deposit if it
-///      changed under us (that window is what makes retarget safe, DESIGN §11);
+///   5. DELIVER the report — deposit it into the session's inbox, then re-read
+///      `notify` and move the deposit if it changed under us (that window is
+///      what makes retarget safe, DESIGN §11) — or, with no session file on this
+///      machine, leave it in `report.txt` for the host to collect (§8.2);
 ///   6. only THEN write `done`.
 ///
-/// 5 before 6 is the one that matters: a driver that sees `done` and steps the
-/// session must find the event already in the inbox, or it would step a session
-/// with nothing new to read (DESIGN §4's "a bare step replays the last reply as
-/// a prefill").
+/// 5 before 6 is the one that matters, on either machine: a driver that sees
+/// `done` and steps the session must find the event already in the inbox — or,
+/// for a far task, must find the report already there for the poll that saw
+/// `done` to pick up — or it would step a session with nothing new to read
+/// (DESIGN §4's "a bare step replays the last reply as a prefill").
 fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // ⓪ Before anything long-lived begins: this process must hold no pipe an
     // ancestor is still draining (see `closeInheritedStrayPipes`).
     closeInheritedStrayPipes();
     const dir = flagValue(args, "--dir") orelse return superviseUsage(io);
-    const session_path = flagValue(args, "--session") orelse return superviseUsage(io);
+    // Exactly one of these two, and which one decides where the report goes
+    // (`environment.SupervisorSpawn`): `--session` is a file on THIS machine, so
+    // the report is deposited into its inbox; `--task` is a name whose session
+    // lives on another machine, so the report is left beside the log.
+    const session_path = flagValue(args, "--session");
+    const task_name = flagValue(args, "--task");
+    if ((session_path == null) == (task_name == null)) return superviseUsage(io);
     const run_cwd = flagValue(args, "--cwd") orelse return superviseUsage(io);
     // Where the WATCHED command runs (DESIGN §8). The supervisor itself is
     // always a host process — it holds the lease, drains the log and deposits
     // the event into a file on this machine — so this only ever reaches
     // `shellArgv`.
     const exec = flagValue(args, "--env") orelse "";
-    // A supervisor wraps the command with `shellArgv`; a remote environment is
-    // a channel, not a wrapping, and it has no supervisor on the far side yet
-    // (goals/remote-env.md §4, Phase 4). Refused rather than run here.
+    // A supervisor WRAPS a command (`shellArgv`); a remote spec is a channel,
+    // not a wrapping. A remote session's task is not supervised from here at all
+    // — it is supervised on that machine, by a supervisor the agent over there
+    // started (DESIGN §8.2), which is why this can only be a mistake.
     if (launch.isRemoteSpec(exec)) {
-        try printErr(io, launch.remote_background_refusal);
+        try printErr(io, "--env takes an exec target; a remote session's background task is supervised on that machine, not wrapped from here\n");
         return 1;
     }
     if (launch.execTargetRefusal(exec)) |why| {
@@ -302,10 +353,16 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     const command = commandAfterDashDash(alloc, args) catch return superviseUsage(io);
     defer alloc.free(command);
 
-    const session_id = std.fs.path.stem(std.fs.path.basename(session_path));
+    // Who this task is. With a session file it is that file's stem plus this
+    // directory's name; with `--task` the host already said, and the name is
+    // what the directory was derived FROM over here (`taskDirRel`).
     const slot = std.fs.path.basename(dir);
-    const full = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ session_id, slot });
+    const full = if (session_path) |p|
+        try std.fmt.allocPrint(alloc, "{s}/{s}", .{ std.fs.path.stem(std.fs.path.basename(p)), slot })
+    else
+        try alloc.dupe(u8, task_name.?);
     defer alloc.free(full);
+    const session_id = full[0 .. std.mem.lastIndexOfScalar(u8, full, '/') orelse full.len];
 
     const cwd = std.Io.Dir.cwd();
 
@@ -350,7 +407,7 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 
     // ② A kill that arrived before we did: nothing is spawned, and the report
     // still happens — the caller asked for a task and gets an answer about it.
-    if (markerPresent(alloc, io, dir)) {
+    if (markerPresent(alloc, io, dir, kill_file)) {
         ended = .kill;
         exit_code = 1;
         try cwd.writeFile(io, .{ .sub_path = log_path, .data = "" });
@@ -392,17 +449,30 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     defer alloc.free(text);
 
     var deposit_failed = false;
-    depositReport(alloc, io, .{
-        .dir = dir,
-        .session_id = session_id,
-        .slot = slot,
-        .full = full,
-        .exit_code = exit_code,
-        .text = text,
-    }) catch |err| {
-        try printErrFmt(alloc, io, "task {s}: could not deliver its result: {s}\n", .{ full, @errorName(err) });
-        deposit_failed = true;
-    };
+    if (session_path) |_| {
+        depositReport(alloc, io, .{
+            .dir = dir,
+            .session_id = session_id,
+            .slot = slot,
+            .full = full,
+            .exit_code = exit_code,
+            .text = text,
+        }) catch |err| {
+            try printErrFmt(alloc, io, "task {s}: could not deliver its result: {s}\n", .{ full, @errorName(err) });
+            deposit_failed = true;
+        };
+    } else {
+        // No session on this machine to deposit into: the report waits here, and
+        // the exit code waits in `status.json` below — one poll from the host
+        // collects both. Written BEFORE `done` for the same load-bearing reason
+        // a deposit is: whoever sees `done` must already see the result.
+        const report_path = try std.fs.path.join(alloc, &.{ dir, report_file });
+        defer alloc.free(report_path);
+        cwd.writeFile(io, .{ .sub_path = report_path, .data = text }) catch |err| {
+            try printErrFmt(alloc, io, "task {s}: could not leave its report: {s}\n", .{ full, @errorName(err) });
+            deposit_failed = true;
+        };
+    }
 
     // ⑥ Only now is it done.
     const finished_at = try journal.rfc3339Now(alloc, io);
@@ -418,7 +488,7 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 }
 
 fn superviseUsage(io: std.Io) !u8 {
-    try printErr(io, "usage: nulya task supervise --dir <task-dir> --session <session-file> --cwd <dir> [--env <spec>] [--timeout-ms N] -- <command>\n");
+    try printErr(io, "usage: nulya task supervise --dir <task-dir> (--session <session-file> | --task <session>/t<N>) --cwd <dir> [--env <spec>] [--timeout-ms N] -- <command>\n");
     return 1;
 }
 
@@ -490,8 +560,12 @@ fn currentPid() i64 {
     };
 }
 
-fn markerPresent(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
-    const path = std.fs.path.join(alloc, &.{ dir, kill_file }) catch return false;
+/// Is one of a task directory's marker files there? Absence answers "no" for
+/// every reason — unreadable, missing, no directory at all — because a marker is
+/// only ever asked about as "has this happened", and the answer to a question
+/// nobody can read is not "yes".
+fn markerPresent(alloc: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8) bool {
+    const path = std.fs.path.join(alloc, &.{ dir, name }) catch return false;
     defer alloc.free(path);
     std.Io.Dir.cwd().access(io, path, .{}) catch return false;
     return true;
@@ -667,7 +741,7 @@ fn watchMarker(alloc: std.mem.Allocator, io: std.Io, dir: []const u8, timeout_ms
         }
         std.Io.sleep(io, .fromMilliseconds(@as(u32, @intCast(nap))), .awake) catch return .canceled;
         elapsed += nap;
-        if (markerPresent(alloc, io, dir)) return .killed;
+        if (markerPresent(alloc, io, dir, kill_file)) return .killed;
         if (timeout_ms) |t| {
             if (elapsed >= t) return .timed_out;
         }
@@ -843,6 +917,222 @@ fn moveDeposit(alloc: std.mem.Allocator, io: std.Io, from: []const u8, to: []con
     return true;
 }
 
+// ── Tasks on another machine ────────────────────────────────────────────────
+//
+// A remote session's tasks are split down one line: the far machine holds the
+// COMMAND — the supervisor, the log, the status, the lease — and this one holds
+// the NAME and the DELIVERY, because the name is what the ledger speaks and the
+// ledger is here (DESIGN §8.2). So every reading verb below asks that machine
+// about the tasks it started there, and turns any finished report it has not
+// delivered yet into the `task_finished` the session's inbox already
+// understands. There is no second thing for a driver to learn: the mechanism it
+// sees is still an inbox event at a step boundary.
+//
+// The delivery is done by whichever verb asks first — `task list`, `task wait`,
+// `task status`, or a `session step` over its own already-open channel. That is
+// deliberate rather than a fallback chain: on this machine the supervisor
+// deposits its own report the moment it finishes, and over there nobody can, so
+// the next question asked IS the moment. It is idempotent twice over (the
+// `delivered` marker here, the ledger's `origin` column behind it), so several
+// askers cost nothing.
+
+/// The machines this verb has had to ask, one channel each. Opened lazily —
+/// a `task list --session <local>` opens none — and closed when the verb ends.
+///
+/// A machine that does not answer costs ONE attempt, not one per task: the
+/// failure is remembered, and every task of that session then reads
+/// `unreachable`.
+const Far = struct {
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    /// Pointers, not values: a `Channel` holds a reader wound around its own
+    /// buffer, so it may not be moved — and an `ArrayList` of them would move
+    /// them all the first time a second machine turned up.
+    links: std.ArrayList(*Link),
+
+    const Link = struct {
+        session: []u8,
+        /// Empty when this session's commands run here: nothing to ask.
+        spec: []u8,
+        /// The far workspace, or "." — what the frames carry as `cwd`.
+        cwd: []u8,
+        ch: ?remote.Channel,
+        /// We tried to reach that machine and could not. Distinct from "this
+        /// session is not remote": one is silence, the other is local.
+        unreached: bool,
+    };
+
+    fn init(alloc: std.mem.Allocator, io: std.Io) Far {
+        return .{ .alloc = alloc, .io = io, .links = .empty };
+    }
+
+    fn deinit(self: *Far) void {
+        for (self.links.items) |l| {
+            if (l.ch) |*ch| ch.deinit();
+            self.alloc.free(l.session);
+            self.alloc.free(l.spec);
+            self.alloc.free(l.cwd);
+            self.alloc.destroy(l);
+        }
+        self.links.deinit(self.alloc);
+    }
+
+    /// What is known about where `session_id`'s tasks run. The answer comes from
+    /// that session's frozen HEADER — the one place "where does this run" is
+    /// recorded (DESIGN §8.1) — so a reading verb cannot disagree with the step
+    /// that started the task.
+    fn linkFor(self: *Far, session_id: []const u8) !*Link {
+        for (self.links.items) |l| {
+            if (std.mem.eql(u8, l.session, session_id)) return l;
+        }
+        const link = try self.alloc.create(Link);
+        errdefer self.alloc.destroy(link);
+        link.* = .{
+            .session = try self.alloc.dupe(u8, session_id),
+            .spec = try self.alloc.dupe(u8, ""),
+            .cwd = try self.alloc.dupe(u8, "."),
+            .ch = null,
+            .unreached = false,
+        };
+        errdefer {
+            self.alloc.free(link.session);
+            self.alloc.free(link.spec);
+            self.alloc.free(link.cwd);
+        }
+
+        const spath = try launch.sessionPath(self.alloc, session_id);
+        defer self.alloc.free(spath);
+        if (ledger.readHeader(self.alloc, self.io, std.Io.Dir.cwd(), spath)) |parsed| {
+            var hdr = parsed;
+            defer hdr.deinit();
+            if (launch.isRemoteSpec(hdr.value.environment)) {
+                self.alloc.free(link.spec);
+                link.spec = try self.alloc.dupe(u8, environment.normalizeExecSpec(hdr.value.environment));
+                if (hdr.value.remote_workspace.len != 0) {
+                    self.alloc.free(link.cwd);
+                    link.cwd = try self.alloc.dupe(u8, hdr.value.remote_workspace);
+                }
+            }
+        } else |_| {
+            // No readable header: the tasks of a session nobody can describe are
+            // read off this disk, which is where they would be if it were local.
+        }
+        try self.links.append(self.alloc, link);
+        return link;
+    }
+
+    /// The open channel to that session's machine, or null when there is nothing
+    /// to ask (local) or nothing answering (unreachable, already reported).
+    fn channelFor(self: *Far, session_id: []const u8) !?*remote.Channel {
+        const link = try self.linkFor(session_id);
+        if (link.spec.len == 0 or link.unreached) return null;
+        if (link.ch) |*ch| return ch;
+        const l = remote.parseSpec(link.spec) catch {
+            link.unreached = true;
+            return null;
+        };
+        link.ch = remote.Channel.connect(self.alloc, self.io, l, launch.version, .default) catch {
+            link.unreached = true;
+            return null;
+        };
+        return &link.ch.?;
+    }
+
+    fn isRemote(self: *Far, session_id: []const u8) !bool {
+        return (try self.linkFor(session_id)).spec.len != 0;
+    }
+
+    fn cwdFor(self: *Far, session_id: []const u8) ![]const u8 {
+        return (try self.linkFor(session_id)).cwd;
+    }
+};
+
+/// What one far task's own machine had to say. `status` is its `status.json`,
+/// verbatim, and empty means its supervisor has not written one yet — the same
+/// `starting` a local directory with no status reports.
+const FarAnswer = union(enum) {
+    status: []const u8,
+    /// This host could not get an answer: the machine did not answer, or
+    /// refused the question. Nothing is known about the task — not that it is
+    /// running, not that it died.
+    unreached,
+};
+
+/// Ask one machine about one task, and deliver its report if it left one that
+/// has not been delivered yet.
+///
+/// `host_dir` is the task's directory on THIS machine — where `notify` and
+/// `delivered` live. The returned bytes belong to `arena`.
+fn pollAndDeliver(
+    alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    ch: *remote.Channel,
+    cwd: []const u8,
+    session_id: []const u8,
+    slot: []const u8,
+    host_dir: []const u8,
+    full: []const u8,
+) !FarAnswer {
+    const snap = remote.pollTaskOn(ch, cwd, full) catch return .unreached;
+    const status_bytes = try arena.dupe(u8, snap.status);
+    if (snap.report.len == 0 or status_bytes.len == 0) return .{ .status = status_bytes };
+    if (markerPresent(alloc, io, host_dir, delivered_file)) return .{ .status = status_bytes };
+
+    // The far side writes its report BEFORE it says `done`, so a report present
+    // is a task finished; the exit code comes from the status it wrote with it.
+    const parsed = std.json.parseFromSlice(Status, alloc, std.mem.trim(u8, status_bytes, " \t\r\n"), json_opts) catch
+        return .{ .status = status_bytes };
+    defer parsed.deinit();
+
+    try depositReport(alloc, io, .{
+        .dir = host_dir,
+        .session_id = session_id,
+        .slot = slot,
+        .full = full,
+        .exit_code = parsed.value.exit_code orelse 1,
+        .text = snap.report,
+    });
+    // Only after the deposit landed: a marker written first would lose the
+    // report if this process died between the two.
+    const marker = try std.fs.path.join(alloc, &.{ host_dir, delivered_file });
+    defer alloc.free(marker);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = marker, .data = "" });
+    return .{ .status = status_bytes };
+}
+
+/// Collect every finished-but-undelivered report of `session_id` over a channel
+/// that is ALREADY open — what `session step` does before it steps, so a driver
+/// that never runs a `task` verb still gets its results, and pays no second
+/// connection for them.
+///
+/// Best effort by construction: a report that cannot be fetched now is fetched
+/// by the next asker, and a step must not fail because a task's machine hiccuped.
+pub fn sweepRemoteReports(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ch: *remote.Channel,
+    session_id: []const u8,
+    cwd: []const u8,
+) void {
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const tasks_dir = launch.sessionTasksDir(arena, session_id) catch return;
+    var tasks = std.Io.Dir.cwd().openDir(io, tasks_dir, .{ .iterate = true }) catch return;
+    defer tasks.close(io);
+
+    var it = tasks.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (entry.kind != .directory or !isSlot(entry.name)) continue;
+        const dir = emit.joinRel(arena, &.{ tasks_dir, entry.name }) catch continue;
+        if (markerPresent(alloc, io, dir, delivered_file)) continue;
+        const full = std.fmt.allocPrint(arena, "{s}/{s}", .{ session_id, entry.name }) catch continue;
+        _ = pollAndDeliver(alloc, arena, io, ch, cwd, session_id, entry.name, dir, full) catch continue;
+    }
+}
+
 // ── `nulya task run`: the CLI twin of `shell {background:true}` ─────────────
 
 fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -894,28 +1184,27 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
 
-    // Same answer as `shell {background:true}` gives in such a session, and for
-    // the same reason: the supervisor is a host process and the command belongs
-    // on the machine the session runs on. Checked before anything is allocated.
-    if (launch.isRemoteSpec(hdr.value.environment)) {
-        try printErr(io, launch.remote_background_refusal);
-        return 1;
-    }
-
     const tasks_dir = try launch.sessionTasksDir(alloc, session_id);
     defer alloc.free(tasks_dir);
-    // The SAME `startShellTask` the `shell` tool reaches: slot allocation and
-    // supervisor launch exist once, so the two entry points cannot drift.
-    var lenv = launch.localEnvironment(alloc, io, &cfg, .{
+    // The SAME `startShellTask` the `shell` tool reaches, through the SAME
+    // environment that session's steps run behind (`sessionEnvironment`, read
+    // from its header): slot allocation and supervisor launch exist once, so the
+    // two entry points cannot drift — including about which machine the command
+    // belongs on (DESIGN §8.1).
+    var lenv = launch.sessionEnvironment(alloc, io, &cfg, .{
         .session_path = spath,
         .tasks_dir = tasks_dir,
         // No store roots: a task supervisor runs a COMMAND, never an extension.
-    }, hdr.value.environment, &.{}) catch |err| switch (err) {
+    }, hdr.value.environment, hdr.value.remote_workspace, &.{}) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return 1;
         },
-        error.InvalidExecTarget, error.ExecTargetUnsupportedOnHost => {
+        error.RemoteChannelLost, error.RemoteChannelStalled, error.RemoteVersionMismatch => {
+            try printErrFmt(alloc, io, "session '{s}' runs its commands on '{s}', which did not answer; nothing was started here instead\n", .{ session_id, hdr.value.environment });
+            return 1;
+        },
+        error.InvalidExecTarget, error.ExecTargetUnsupportedOnHost, error.InvalidRemoteSpec, error.RemoteSpecUnsupportedOnHost => {
             // Same pointer `execTargetRefusal` gives a fresh `--env ssh:…`, for
             // a header frozen before the exec-target spelling was retired
             // (goals/remote-env.md §7.1) — never a silent re-interpretation.
@@ -930,7 +1219,7 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     };
     defer lenv.deinit();
 
-    const start = lenv.environment().startShellTask(alloc, .{
+    const start = lenv.handle().startShellTask(alloc, .{
         .command = command,
         .cwd = run_cwd,
         .timeout_ms = timeout_ms,
@@ -954,12 +1243,80 @@ const Row = struct {
     state: Projected,
     status: ?Status,
     notify: ?[]const u8,
+    /// The machine this task's command runs on, when it is not this one — the
+    /// session's frozen `--env` spec. Null is local, and it is worth a column
+    /// because `dir` and the log path under it are then paths on ANOTHER
+    /// machine: a reader that tries to open them here will not find them, and
+    /// this says why.
+    machine: ?[]const u8 = null,
 };
+
+/// The identity half of a row, known before anything is read.
+const RowRef = struct {
+    full: []const u8,
+    session: []const u8,
+    slot: []const u8,
+    dir: []const u8,
+    notify: ?[]const u8,
+};
+
+/// One task's state, from whichever machine holds it — this disk for a local
+/// session, the channel for a remote one, with any report it has left collected
+/// on the way past (`pollAndDeliver`).
+/// Null means the row is skipped: a status that exists but does not parse is a
+/// fault, and nothing here makes up a state on a supervisor's behalf — the same
+/// rule on either machine.
+fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef) !?Row {
+    if (try far.isRemote(ref.session)) {
+        var row: Row = .{
+            .full = ref.full,
+            .session = ref.session,
+            .dir = ref.dir,
+            .state = .@"unreachable",
+            .status = null,
+            .notify = ref.notify,
+            .machine = (try far.linkFor(ref.session)).spec,
+        };
+        const ch = (try far.channelFor(ref.session)) orelse return row;
+        const cwd = try far.cwdFor(ref.session);
+        const answer = pollAndDeliver(far.alloc, arena, io, ch, cwd, ref.session, ref.slot, ref.dir, ref.full) catch
+            FarAnswer.unreached;
+        const bytes = switch (answer) {
+            .unreached => return row,
+            .status => |b| b,
+        };
+        // Its supervisor has not written a status yet: the same `starting` a
+        // local directory with no status reports, for the same reason.
+        if (bytes.len == 0) {
+            row.state = .starting;
+            return row;
+        }
+        const status = std.json.parseFromSliceLeaky(Status, arena, std.mem.trim(u8, bytes, " \t\r\n"), json_opts) catch
+            return null;
+        row.status = status;
+        // `lost` is not available over there: the free lease that proves a
+        // supervisor died is a fact of that machine's file system, and asking
+        // for it would be a second question on every poll. A far task is what
+        // its own status says, or nothing is known.
+        row.state = if (status.state == .done) .done else .running;
+        return row;
+    }
+    const parsed = readStatus(arena, io, ref.dir) catch return null;
+    const status: ?Status = if (parsed) |p| p.value else null;
+    return .{
+        .full = ref.full,
+        .session = ref.session,
+        .dir = ref.dir,
+        .state = try projectState(arena, io, ref.dir, status),
+        .status = status,
+        .notify = ref.notify,
+    };
+}
 
 /// Every task directory under `.nulya/scratch/*/tasks/`, or just one session's
 /// when `only` names it — plus, in that case, the tasks OTHER sessions retargeted
 /// here, which is the whole point of `notify` being readable from outside.
-fn collectRows(arena: std.mem.Allocator, io: std.Io, only: ?[]const u8) ![]Row {
+fn collectRows(arena: std.mem.Allocator, io: std.Io, far: *Far, only: ?[]const u8) ![]Row {
     var rows: std.ArrayList(Row) = .empty;
     const cwd = std.Io.Dir.cwd();
 
@@ -996,16 +1353,15 @@ fn collectRows(arena: std.mem.Allocator, io: std.Io, only: ?[]const u8) ![]Row {
                 if (!sent_here and (!mine or notify != null)) continue;
             }
 
-            const parsed = readStatus(arena, io, dir) catch continue;
-            const status: ?Status = if (parsed) |p| p.value else null;
-            try rows.append(arena, .{
-                .full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ session_id, slot_entry.name }),
+            const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ session_id, slot_entry.name });
+            const row = (try readRow(arena, io, far, .{
+                .full = full,
                 .session = session_id,
+                .slot = try arena.dupe(u8, slot_entry.name),
                 .dir = dir,
-                .state = try projectState(arena, io, dir, status),
-                .status = status,
                 .notify = notify,
-            });
+            })) orelse continue;
+            try rows.append(arena, row);
         }
     }
     std.mem.sort(Row, rows.items, {}, lessByName);
@@ -1024,7 +1380,10 @@ fn taskList(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     const only = try scopeSession(alloc, args);
     defer if (only) |s| alloc.free(s);
 
-    const rows = try collectRows(arena, io, only);
+    var far: Far = .init(alloc, io);
+    defer far.deinit();
+
+    const rows = try collectRows(arena, io, &far, only);
     const running_only = sliceHasFlag(args, "--running");
     const as_json = sliceHasFlag(args, "--json");
 
@@ -1160,6 +1519,10 @@ fn writeRowJson(jw: *std.json.Stringify, io: std.Io, row: Row) !void {
     try jw.write(log);
     try jw.objectField("notify");
     if (row.notify) |n| try jw.write(n) else try jw.write(null);
+    // Which machine the log above is ON. Null is this one; anything else means a
+    // reader here cannot open that path, and this is what says why.
+    try jw.objectField("machine");
+    if (row.machine) |m| try jw.write(m) else try jw.write(null);
     inline for (.{ "command", "cwd", "started" }) |field| {
         try jw.objectField(field);
         try jw.write(if (row.status) |s| @field(s, field) else "");
@@ -1207,7 +1570,9 @@ fn taskStatus(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const row = (try lookupRow(arena, io, named)) orelse {
+    var far: Far = .init(alloc, io);
+    defer far.deinit();
+    const row = (try lookupRow(arena, io, &far, named)) orelse {
         try printErrFmt(alloc, io, "no such task '{s}'\n", .{named});
         return 1;
     };
@@ -1233,24 +1598,27 @@ fn taskStatus(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
         if (s.duration_ms) |d| try printOut(alloc, io, "duration_ms: {d}\n", .{d});
     }
     if (row.notify) |n| try printOut(alloc, io, "notify: {s}\n", .{n});
+    // Printed before the log, because it changes what the log line means: on a
+    // remote session that path is a path over THERE.
+    if (row.machine) |m| try printOut(alloc, io, "machine: {s}\n", .{m});
     try printOut(alloc, io, "log: {s}/{s}\n", .{ row.dir, environment.task_log_name });
     return 0;
 }
 
-fn lookupRow(arena: std.mem.Allocator, io: std.Io, name: []const u8) !?Row {
+fn lookupRow(arena: std.mem.Allocator, io: std.Io, far: *Far, name: []const u8) !?Row {
     const here = try envSessionId(arena);
     const ref = (try parseRef(arena, name, here)) orelse return null;
+    // The claim is always on THIS machine, whichever one runs the command
+    // (`environment.claimTaskSlot`), so a name nothing was claimed for is not a
+    // task here — no channel is opened to find that out.
     std.Io.Dir.cwd().access(io, ref.dir, .{}) catch return null;
-    const parsed = readStatus(arena, io, ref.dir) catch return null;
-    const status: ?Status = if (parsed) |p| p.value else null;
-    return .{
+    return readRow(arena, io, far, .{
         .full = ref.full,
         .session = ref.session,
+        .slot = ref.slot,
         .dir = ref.dir,
-        .state = try projectState(arena, io, ref.dir, status),
-        .status = status,
         .notify = try readNotify(arena, io, ref.dir),
-    };
+    });
 }
 
 /// `wait` has three answers on purpose, so one call can branch a driver three
@@ -1281,6 +1649,11 @@ fn taskWait(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     const scope = if (any) try scopeSession(alloc, args) else null;
     defer if (scope) |s| alloc.free(s);
 
+    // One `Far` for the whole wait, not one per pass: a poll every 250 ms must
+    // not be a connection every 250 ms.
+    var far: Far = .init(alloc, io);
+    defer far.deinit();
+
     const began = std.Io.Timestamp.now(io, .awake);
     var first_pass = true;
     while (true) {
@@ -1289,7 +1662,7 @@ fn taskWait(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         const arena = arena_state.allocator();
 
         if (any) {
-            const rows = try collectRows(arena, io, scope);
+            const rows = try collectRows(arena, io, &far, scope);
             var waitable: usize = 0;
             for (rows) |row| {
                 // A finished task counts only while its result is still
@@ -1304,7 +1677,7 @@ fn taskWait(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
             }
             if (waitable == 0) return 3;
         } else {
-            const row = (try lookupRow(arena, io, named.?)) orelse {
+            const row = (try lookupRow(arena, io, &far, named.?)) orelse {
                 if (first_pass) {
                     try printErrFmt(alloc, io, "no such task '{s}'\n", .{named.?});
                     return 1;
@@ -1318,6 +1691,14 @@ fn taskWait(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
                 },
                 .lost => {
                     try printErrFmt(alloc, io, "task {s}: its supervisor is gone; nothing will report it finished\n", .{row.full});
+                    return 1;
+                },
+                // Waiting on a machine that will not answer is waiting forever
+                // for a question nobody is asking — the same reason `lost` is
+                // not waited on, one machine further out. The task may well be
+                // running; what is gone is the way to find out.
+                .@"unreachable" => {
+                    try printErrFmt(alloc, io, "task {s}: '{s}' did not answer, so this host cannot tell when it finishes\n", .{ row.full, row.machine orelse "" });
                     return 1;
                 },
                 .running, .starting => {},
@@ -1363,7 +1744,9 @@ fn taskKill(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const row = (try lookupRow(arena, io, named)) orelse {
+    var far: Far = .init(alloc, io);
+    defer far.deinit();
+    const row = (try lookupRow(arena, io, &far, named)) orelse {
         try printErrFmt(alloc, io, "no such task '{s}'\n", .{named});
         return 1;
     };
@@ -1374,8 +1757,23 @@ fn taskKill(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     // A marker, not a signal: the supervisor owns the process tree and picks
     // this up at its next poll, exactly as `<id>.cancel` is consumed at a step
     // boundary. Writing it twice is writing it once.
-    const path = try std.fs.path.join(arena, &.{ row.dir, kill_file });
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "" });
+    if (row.machine) |spec| {
+        // The marker belongs beside the command, so it is put down on that
+        // machine — by name, never by path (protocol.zig). A channel that
+        // cannot be opened means the request did not arrive, and saying that is
+        // the answer: nothing here was killed either.
+        const ch = (try far.channelFor(row.session)) orelse {
+            try printErrFmt(alloc, io, "task {s}: '{s}' did not answer, so the kill was not delivered\n", .{ row.full, spec });
+            return 1;
+        };
+        remote.killTaskOn(ch, try far.cwdFor(row.session), row.full) catch |err| {
+            try printErrFmt(alloc, io, "task {s}: '{s}' did not take the kill ({s})\n", .{ row.full, spec, @errorName(err) });
+            return 1;
+        };
+    } else {
+        const path = try std.fs.path.join(arena, &.{ row.dir, kill_file });
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "" });
+    }
     try printOut(alloc, io, "{s}: kill requested\n", .{row.full});
     return 0;
 }
@@ -1398,7 +1796,9 @@ fn taskRetarget(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const row = (try lookupRow(arena, io, named)) orelse {
+    var far: Far = .init(alloc, io);
+    defer far.deinit();
+    const row = (try lookupRow(arena, io, &far, named)) orelse {
         try printErrFmt(alloc, io, "no such task '{s}'\n", .{named});
         return 1;
     };

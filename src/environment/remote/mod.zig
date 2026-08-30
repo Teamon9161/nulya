@@ -14,9 +14,13 @@
 //! `remote:ssh:me@box` moves the whole workspace, and the two are easy to
 //! confuse when only one of them still needs a machine reachable over ssh.
 //!
-//! **Three verbs move so far.** `runShell`, `runExtension` and
-//! `putWorkspaceFile` go over the channel; only `startShellTask` refuses, in a
-//! sentence that says where background tasks still run and why (Phase 4).
+//! **All four verbs move.** `runShell`, `runExtension`, `putWorkspaceFile` and
+//! `startShellTask` go over the channel. The last one starts a
+//! `nulya task supervise` on THAT machine — same binary, same role, same `Tree`
+//! — with the log and the status in the far workspace, so a background command
+//! runs where the foreground ones do and outlives this channel. Its report is
+//! carried back by whoever next asks (`cli/task.zig`), because the ledger it
+//! belongs in is here.
 //!
 //! `runExtension` is what ends the split brain this design exists to end: until
 //! it moved, `ext:std/read` was a process on the HOST reading the host's files
@@ -76,10 +80,12 @@ pub const Error = error{
     RemoteDialectUnknown,
     /// The agent refused the request and said why.
     RemoteRefused,
-    /// This session's commands run elsewhere, so a background task has no
-    /// supervisor to belong to yet (Phase 4). `tools/shell.zig` turns this into
-    /// the sentence the model reads.
-    RemoteBackgroundUnsupported,
+    /// The far machine would not start the background task (it could not create
+    /// the directory, or could not spawn a supervisor). Its own sentence does not
+    /// survive: `startShellTask` answers a `TaskStart` or an error, and there is
+    /// no failed-call shape to carry words in — the asymmetry with
+    /// `runExtension` is stated in goals/remote-env.md §6.1 deviation 5.
+    RemoteTaskRefused,
 };
 
 /// How to start the agent. The payload borrows the spec string, so a parsed
@@ -521,6 +527,38 @@ fn sleepMs(io: std.Io, ms: u32) void {
     std.Io.sleep(io, .fromMilliseconds(ms), .awake) catch {};
 }
 
+// ── background tasks over there, on a bare channel ──────────────────────────
+//
+// These take a `*Channel` rather than a `RemoteEnvironment` because their other
+// caller is `cli/task.zig`: `nulya task list` on this host has no session
+// environment, only a machine to ask. One implementation either way, so a
+// reading verb and a stepping one cannot disagree about what a task's state is.
+
+/// The two files that machine's supervisor writes, verbatim. The strings live in
+/// the channel arena — valid until the next round on it, which is exactly how
+/// long the caller wants them.
+pub fn pollTaskOn(ch: *Channel, cwd: []const u8, task_name: []const u8) anyerror!protocol.TaskSnapshot {
+    const rep = try ch.controlRound(.{
+        .op = protocol.Op.task_poll.wire(),
+        .task = task_name,
+        .cwd = cwd,
+    }, "");
+    if (!rep.ok) return error.RemoteRefused;
+    return protocol.parseTaskSnapshot(ch.arena.allocator(), ch.last_payload) catch error.RemoteChannelLost;
+}
+
+/// Put the kill marker down over there. A marker rather than a signal, exactly
+/// as it is here: the supervisor owns the process tree and picks it up at its
+/// next poll (DESIGN §6.1).
+pub fn killTaskOn(ch: *Channel, cwd: []const u8, task_name: []const u8) anyerror!void {
+    const rep = try ch.controlRound(.{
+        .op = protocol.Op.task_kill.wire(),
+        .task = task_name,
+        .cwd = cwd,
+    }, "");
+    if (!rep.ok) return error.RemoteRefused;
+}
+
 /// The `Environment` backed by a channel. Fixed shape, like `LocalEnvironment`:
 /// nothing here grows with the conversation.
 pub const RemoteEnvironment = struct {
@@ -539,6 +577,14 @@ pub const RemoteEnvironment = struct {
     /// Empty until a driver publishes one (`session step` does; `remote check`
     /// does not).
     session_id: []u8 = &.{},
+    /// The session background tasks belong to, copied. Both halves stay on the
+    /// HOST even though the command will not: `session_path` is the file a
+    /// report is eventually deposited into, and `tasks_dir` is where this host
+    /// keeps the claimed `t<N>` — the far machine holds the log and the status,
+    /// this one holds the name and the delivery. Null = no session, so
+    /// `startShellTask` refuses exactly as the local one does.
+    session_path: ?[]u8 = null,
+    tasks_dir: ?[]u8 = null,
     dialect_val: environment_mod.Dialect,
     bounds: Bounds = .default,
 
@@ -552,6 +598,10 @@ pub const RemoteEnvironment = struct {
         workspace: []const u8 = "",
         /// This build's version string, for the handshake's diagnostic half.
         version: []const u8 = "",
+        /// The durable session this environment's background tasks belong to,
+        /// as on the local one — the shell layer computes both halves
+        /// (`launch.sessionEnvironment`).
+        session: ?environment_mod.SessionRef = null,
         bounds: Bounds = .default,
     };
 
@@ -570,6 +620,15 @@ pub const RemoteEnvironment = struct {
         const ws = try alloc.dupe(u8, opts.workspace);
         errdefer alloc.free(ws);
 
+        var session_path: ?[]u8 = null;
+        errdefer if (session_path) |p| alloc.free(p);
+        var tasks_dir: ?[]u8 = null;
+        errdefer if (tasks_dir) |p| alloc.free(p);
+        if (opts.session) |s| {
+            session_path = try alloc.dupe(u8, s.session_path);
+            tasks_dir = try alloc.dupe(u8, s.tasks_dir);
+        }
+
         // The far side says which shell reads its commands; this host's config
         // and detection have nothing to say about another machine. A word this
         // build does not know is refused, never guessed (`hello` is the one
@@ -587,6 +646,8 @@ pub const RemoteEnvironment = struct {
             .ch = ch,
             .spec = spec_owned,
             .workspace = ws,
+            .session_path = session_path,
+            .tasks_dir = tasks_dir,
             .dialect_val = dialect_val,
             .bounds = opts.bounds,
         };
@@ -596,6 +657,8 @@ pub const RemoteEnvironment = struct {
         self.ch.deinit();
         self.alloc.free(self.spec);
         self.alloc.free(self.workspace);
+        if (self.session_path) |p| self.alloc.free(p);
+        if (self.tasks_dir) |p| self.alloc.free(p);
         if (self.session_id.len != 0) self.alloc.free(self.session_id);
         self.* = undefined;
     }
@@ -621,6 +684,12 @@ pub const RemoteEnvironment = struct {
     /// the path story (goals/remote-env.md §3.3).
     fn remoteCwd(self: *const RemoteEnvironment) []const u8 {
         return if (self.workspace.len != 0) self.workspace else ".";
+    }
+
+    /// The same string, for a shell-layer caller that talks to this channel
+    /// itself (`cli/task.zig` collecting a far task's report).
+    pub fn remoteWorkspace(self: *const RemoteEnvironment) []const u8 {
+        return self.remoteCwd();
     }
 
     fn dialectImpl(ptr: *anyopaque) environment_mod.Dialect {
@@ -742,11 +811,68 @@ pub const RemoteEnvironment = struct {
         };
     }
 
+    /// Start a background command on the far machine (Phase 4).
+    ///
+    /// The NAME is claimed here and the WORK happens there, and the split is not
+    /// arbitrary: the name is what the ledger, the receipt and every `task` verb
+    /// speak, and the ledger is on this machine; the log, the status file and
+    /// the lease belong beside the command, which is over there. Both sides
+    /// spell the directory from the same name with the same rule
+    /// (`launch.sessionTasksDir`), each against its own workspace — no path
+    /// crosses the channel (goals/remote-env.md §3.3).
+    ///
+    /// The host directory claimed here is not a copy of the far one: it is where
+    /// this machine keeps what only it can know — a retarget (`notify`) and the
+    /// fact that a report has already been delivered (`cli/task.zig`).
+    ///
+    /// The task outlives this channel by design. The far supervisor is detached
+    /// over there exactly as one here is, so closing the channel ends the agent
+    /// and not the task; the report is collected by whoever next asks.
     fn startShellTaskImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment_mod.TaskRequest) anyerror!environment_mod.TaskStart {
-        _ = ptr;
-        _ = alloc;
-        _ = req;
-        return error.RemoteBackgroundUnsupported;
+        const self: *RemoteEnvironment = @ptrCast(@alignCast(ptr));
+        const session_path = self.session_path orelse return error.NoDurableSession;
+        const tasks_dir = self.tasks_dir orelse return error.NoDurableSession;
+        const session_id = std.fs.path.stem(std.fs.path.basename(session_path));
+        if (session_id.len == 0) return error.NoDurableSession;
+
+        var claimed = try environment_mod.claimTaskSlot(alloc, self.io, tasks_dir, session_id);
+        errdefer claimed.deinit(alloc);
+
+        const rep = self.ch.controlRound(.{
+            .op = protocol.Op.start_task.wire(),
+            .task = claimed.task_id,
+            .cwd = self.remoteCwd(),
+            .session = self.session_id,
+            .timeout_ms = req.timeout_ms,
+            .bytes = req.command.len,
+        }, req.command) catch |err| {
+            // The claim STAYS. Whether that machine started the task before the
+            // channel broke is unknown, and releasing the name would make a task
+            // that did start invisible here forever — nothing to poll, nothing
+            // to kill. A name held for a task that never started reads
+            // `starting` until that machine answers again, which is the honest
+            // shape of "unknown" and resolves itself.
+            return err;
+        };
+        if (!rep.ok) {
+            // A refusal is definitive: that machine said it did not start it, so
+            // the name is released rather than left standing for nothing.
+            std.Io.Dir.cwd().deleteTree(self.io, claimed.dir_rel) catch {};
+            return error.RemoteTaskRefused;
+        }
+        return claimed.intoStart(alloc);
+    }
+
+    /// Ask the far machine about one of this session's tasks: the two files its
+    /// supervisor writes, verbatim. The returned strings live in the channel
+    /// arena — valid until the next round, which is exactly as long as the
+    /// caller needs them (`Channel.last_payload`'s reasoning).
+    pub fn pollTask(self: *RemoteEnvironment, task_name: []const u8) anyerror!protocol.TaskSnapshot {
+        return pollTaskOn(&self.ch, self.remoteCwd(), task_name);
+    }
+
+    pub fn killTask(self: *RemoteEnvironment, task_name: []const u8) anyerror!void {
+        return killTaskOn(&self.ch, self.remoteCwd(), task_name);
     }
 
     /// The bytes cross the channel and the far agent writes them, relative to

@@ -14,8 +14,7 @@
 //!   6. a spill lands on the machine whose files the model can open, at the very
 //!      path its footer names (Phase 2);
 //!   7. an extension tool runs on the far machine, against the far workspace —
-//!      so `read` and `shell` finally answer about the same repository — while
-//!      what is NOT moved yet (background tasks) still refuses in a sentence;
+//!      so `read` and `shell` finally answer about the same repository;
 //!   8. an extension version pushed over the channel is validated against its
 //!      own seal ON THAT MACHINE before it becomes a version anyone can use,
 //!      and pushing one that is already there does nothing (Phase 3);
@@ -24,7 +23,12 @@
 //!      instead of failing later (`exec_version`);
 //!  10. the workspace store on THAT machine is gated there the way one here is
 //!      gated here (DESIGN §9) — a checkout cannot shadow a pushed version, and
-//!      the refusal is one failed call, not a dead channel.
+//!      the refusal is one failed call, not a dead channel;
+//!  11. a background task runs on that machine and its report still arrives here
+//!      as the one thing a driver knows how to read — a `task_finished` drained
+//!      at a step boundary — delivered exactly once however often it is asked
+//!      for, killable across the channel, and honestly `unreachable` when that
+//!      machine will not answer (Phase 4).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -743,10 +747,11 @@ test "a version the far machine does not hold is a failed call pointing at push,
     try std.testing.expect(std.mem.indexOf(u8, ext.stderr, "ext push") != null);
     try std.testing.expect(std.mem.indexOf(u8, ext.stderr, "nowhere") != null);
 
-    // A background task has no supervisor over there yet, and says so as its
-    // own error so `tools/shell.zig` can turn it into the model's sentence.
+    // A background task needs a session to report INTO, and this environment was
+    // built without one — the same refusal a local environment gives, from the
+    // same missing thing rather than from a phase that has not landed.
     try std.testing.expectError(
-        error.RemoteBackgroundUnsupported,
+        error.NoDurableSession,
         renv.environment().startShellTask(alloc, .{ .command = "echo hi", .cwd = "." }),
     );
 }
@@ -1056,7 +1061,41 @@ test "a session whose header predates the exec-version column still steps" {
     try std.testing.expect(std.mem.indexOf(u8, results, "here") != null);
 }
 
-test "nulya task run refuses a remote session rather than running the command here" {
+// ── background tasks on the far machine (Phase 4) ───────────────────────────
+//
+// The split under test: the command, its log and its supervisor are over there;
+// the NAME and the DELIVERY are here. What a driver sees is unchanged — a
+// `task_finished` drained at a step boundary — and that is the point.
+
+/// A budget, not a delay: every wait below returns the instant the thing it
+/// waits for happens (`e2e/background.zig`'s reasoning, same number).
+const wait_budget_ms = "180000";
+
+fn relTaskPath(alloc: std.mem.Allocator, id: []const u8, slot: []const u8, name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/{s}/{s}", .{ id, slot, name });
+}
+
+fn exists(io: std.Io, dir: std.Io.Dir, path: []const u8) bool {
+    dir.access(io, path, .{}) catch return false;
+    return true;
+}
+
+/// Which shell reads a command over there — asked of that machine, the way the
+/// product asks (`hello`), rather than assumed from this one.
+fn farDialect(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    exe: []const u8,
+    spec: []const u8,
+) !environment.Dialect {
+    const checked = try runCli(alloc, io, ws, &.{ exe, "remote", "check", "--env", spec, "--json" });
+    defer alloc.free(checked.stdout);
+    if (checked.code != 0) return error.RemoteCheckFailed;
+    return if (std.mem.indexOf(u8, checked.stdout, "\"dialect\":\"powershell\"") != null) .powershell else .bash;
+}
+
+test "a remote session's background task runs over there and its report arrives here as a task_finished" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1068,15 +1107,237 @@ test "nulya task run refuses a remote session rather than running the command he
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const ws = tmp.dir;
+    // A workspace of its own for the far side, so "over there" is a directory
+    // this test can look in and "here" is a different one.
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
 
-    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec });
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // The MODEL's entry point, not the CLI twin: `shell {background:true}` in a
+    // session whose commands run elsewhere.
+    const step1 = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "background");
+    defer alloc.free(step1.stdout);
+    try std.testing.expectEqual(@as(u8, 0), step1.code);
+    const receipt = toolResultsLine(step1.stdout) orelse return error.NoToolResults;
+    const started = try std.fmt.allocPrint(alloc, "[background task {s}/t1 started]", .{id});
+    defer alloc.free(started);
+    try std.testing.expect(std.mem.indexOf(u8, receipt, started) != null);
+
+    const task_name = try std.fmt.allocPrint(alloc, "{s}/t1", .{id});
+    defer alloc.free(task_name);
+    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", task_name, "--timeout-ms", wait_budget_ms });
+    defer alloc.free(waited.stdout);
+    try std.testing.expectEqual(@as(u8, 0), waited.code);
+
+    // The command ran on the FAR machine: its log and its status are in that
+    // workspace, at the path the receipt names, and nothing of the sort is here.
+    const log_rel = try relTaskPath(alloc, id, "t1", "output.log");
+    defer alloc.free(log_rel);
+    const far_log = try far.dir.readFileAlloc(io, log_rel, alloc, .unlimited);
+    defer alloc.free(far_log);
+    try std.testing.expect(std.mem.indexOf(u8, far_log, launch.ScriptedProvider.background_marker) != null);
+    try std.testing.expect(!exists(io, ws, log_rel));
+
+    // …while the DELIVERY is here: the wait above collected the report that
+    // machine left and turned it into the event this session's inbox
+    // understands. Same name a local supervisor would have deposited under.
+    const deposit = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.inbox/task-{s}-t1.json", .{ id, id });
+    defer alloc.free(deposit);
+    const event = try ws.readFileAlloc(io, deposit, alloc, .unlimited);
+    defer alloc.free(event);
+    try std.testing.expect(std.mem.indexOf(u8, event, "\"kind\":\"task_finished\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, event, launch.ScriptedProvider.background_marker) != null);
+
+    // Asking again does not deliver it again — the whole reason the host records
+    // that it delivered one. Without that, the inbox file would come back after
+    // every drain and `wait --any` would answer "something finished" forever.
+    const listed = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--json" });
+    defer alloc.free(listed.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"state\":\"done\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"machine\":\"remote:exec:") != null);
+
+    // The step boundary drains it exactly as it drains a local one, and the
+    // model reads it: the mechanism a driver sees did not change.
+    const step2 = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "background");
+    defer alloc.free(step2.stdout);
+    try std.testing.expectEqual(@as(u8, 0), step2.code);
+    try std.testing.expect(std.mem.indexOf(u8, step2.stdout, "\"kind\":\"task_finished\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step2.stdout, "background done") != null);
+
+    // Drained, and it stays drained: one more poll must not put it back.
+    try std.testing.expect(!exists(io, ws, deposit));
+    const again = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--json" });
+    defer alloc.free(again.stdout);
+    try std.testing.expect(!exists(io, ws, deposit));
+}
+
+test "a step collects a far task's report even when no task verb ever asked" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const spec = try execSpec(alloc, exe, "");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs });
     defer alloc.free(new.stdout);
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
     defer alloc.free(id);
 
-    const err = try runCliStderr(alloc, io, ws, &.{ exe, "task", "run", "--session", id, "--", "echo nope" }, &.{});
+    const step1 = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "background");
+    defer alloc.free(step1.stdout);
+    try std.testing.expectEqual(@as(u8, 0), step1.code);
+
+    // Watch that machine's own file system rather than running a `task` verb:
+    // this test is about the loop that has NO driver polling it — a bare
+    // `session step` in a shell script — so nothing here may do the collecting
+    // on its behalf.
+    const report_rel = try relTaskPath(alloc, id, "t1", "report.txt");
+    defer alloc.free(report_rel);
+    var tries: usize = 0;
+    while (tries < 3600 and !exists(io, far.dir, report_rel)) : (tries += 1) {
+        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    }
+    try std.testing.expect(exists(io, far.dir, report_rel));
+
+    // Nothing has been deposited here yet: the far supervisor cannot reach this
+    // machine's inbox, which is the whole reason the collecting happens here.
+    const deposit = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.inbox/task-{s}-t1.json", .{ id, id });
+    defer alloc.free(deposit);
+    try std.testing.expect(!exists(io, ws, deposit));
+
+    // The step sweeps over the channel it opens anyway, and the drain at its own
+    // boundary does the rest — the model reads the report in this very step.
+    const step2 = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "background");
+    defer alloc.free(step2.stdout);
+    try std.testing.expectEqual(@as(u8, 0), step2.code);
+    try std.testing.expect(std.mem.indexOf(u8, step2.stdout, "\"kind\":\"task_finished\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step2.stdout, launch.ScriptedProvider.background_marker) != null);
+}
+
+test "killing a remote task ends the process tree on that machine" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const spec = try execSpec(alloc, exe, "");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs });
+    defer alloc.free(new.stdout);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // Held by a file in the FAR workspace, which is where the command runs. It
+    // would announce itself a second time if it ever got past the hold — that
+    // second marker never appearing is what makes this about the kill reaching
+    // the far process rather than the host giving up on it
+    // (`e2e/background.zig`'s hold discipline, one machine further out).
+    try far.dir.writeFile(io, .{ .sub_path = "hold", .data = "" });
+    const command = switch (try farDialect(alloc, io, ws, exe, spec)) {
+        .bash => "while [ -e hold ]; do sleep 0.05; done; touch escaped",
+        .powershell => "while (Test-Path 'hold') { Start-Sleep -Milliseconds 50 }; New-Item escaped -ItemType File -Force > $null",
+    };
+    const run = try runCli(alloc, io, ws, &.{ exe, "task", "run", "--session", id, "--", command });
+    defer alloc.free(run.stdout);
+    try std.testing.expectEqual(@as(u8, 0), run.code);
+
+    const task_name = try std.fmt.allocPrint(alloc, "{s}/t1", .{id});
+    defer alloc.free(task_name);
+
+    // Wait until that machine's supervisor really has it: `task run` returns as
+    // soon as the request is accepted, and killing a `starting` task would prove
+    // less.
+    var tries: usize = 0;
+    while (tries < 3600) : (tries += 1) {
+        const live = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--running" });
+        defer alloc.free(live.stdout);
+        if (std.mem.indexOf(u8, live.stdout, "running") != null) break;
+        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    }
+
+    const killed = try runCli(alloc, io, ws, &.{ exe, "task", "kill", task_name });
+    defer alloc.free(killed.stdout);
+    try std.testing.expectEqual(@as(u8, 0), killed.code);
+
+    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", task_name, "--timeout-ms", wait_budget_ms });
+    defer alloc.free(waited.stdout);
+    try std.testing.expectEqual(@as(u8, 0), waited.code);
+    try std.testing.expect(std.mem.indexOf(u8, waited.stdout, "killed") != null);
+
+    // The hold is still in place, so a process that survived would still be
+    // spinning — and it never reached its second step.
+    try std.testing.expect(!exists(io, far.dir, "escaped"));
+    const status_rel = try relTaskPath(alloc, id, "t1", "status.json");
+    defer alloc.free(status_rel);
+    const status = try far.dir.readFileAlloc(io, status_rel, alloc, .unlimited);
+    defer alloc.free(status);
+    try std.testing.expect(std.mem.indexOf(u8, status, "\"ended_by\":\"kill\"") != null);
+}
+
+test "a task whose machine will not answer reads as unreachable, not as lost or done" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const reachable = try execSpec(alloc, exe, "");
+    defer alloc.free(reachable);
+    const nowhere = try std.fmt.allocPrint(alloc, "{s}-does-not-exist", .{reachable});
+    defer alloc.free(nowhere);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", nowhere });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // The directory a claim leaves on this machine, and nothing else: the name
+    // is here, everything about the task is over there — and there is no there.
+    const dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{id});
+    defer alloc.free(dir);
+    try ws.createDirPath(io, dir);
+
+    const listed = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--json" });
+    defer alloc.free(listed.stdout);
+    // Three words that must not be confused: nothing is known about this task,
+    // which is not "its supervisor died" and not "it finished".
+    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"state\":\"unreachable\"") != null);
+
+    // And a wait on it ends instead of hanging: this host cannot be told when it
+    // finishes, so saying so is the answer (`lost`'s reasoning, one machine out).
+    const task_name = try std.fmt.allocPrint(alloc, "{s}/t1", .{id});
+    defer alloc.free(task_name);
+    const err = try runCliStderr(alloc, io, ws, &.{ exe, "task", "wait", task_name, "--timeout-ms", "5000" }, &.{});
     defer alloc.free(err);
-    try std.testing.expect(std.mem.indexOf(u8, err, "background tasks run where the harness runs") != null);
-    // Nothing was started: no task directory for this session.
-    try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/scratch", .{}));
+    try std.testing.expect(std.mem.indexOf(u8, err, "did not answer") != null);
 }

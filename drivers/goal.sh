@@ -2,9 +2,9 @@
 # `/goal` — the first nulya driver. It composes the bundled `handoff` package
 # into a new session — its one tool is `surface: auto`, so membership is the
 # whole of putting it in front of the model — and steps it one step at a time; when
-# the model proposes a handover (a file under .nulya/handoffs/<session>-*.md) it
-# forks through the bundled `compact` tool and carries on in the child: the model
-# proposes, the driver decides. Nothing here parses JSON.
+# the model proposes a handover (a `handoff` call in the step's own stream, whose
+# arguments ARE the brief) it forks through the bundled `compact` tool and carries
+# on in the child: the model proposes, the driver decides. Nothing here parses JSON.
 #
 # STDOUT is control and only control — `session`, `handoff`, `done`, `evaluate` —
 # so a front end can drive tabs off it; STDERR is the step's own `--stream` lines
@@ -46,14 +46,14 @@ while [ "$i" -lt "$max" ]; do
   # Step stdout goes to OUR stderr live and to the log so the checks below can read it back. A failing pipe left side is invisible to `set -e`, hence the explicit error check.
   "$N" session step "$id" --max-steps 1 --stream | tee "$log" >&2
   if grep -q '"stream":"run","event":"error"' "$log"; then exit 1; fi
-  # Disk before log: a handoff ends the turn too, and a proposal must win.
-  brief=$(ls ".nulya/handoffs/$id"-*.md 2>/dev/null | head -1)
-  if [ -n "$brief" ]; then
-    new=$("$N" ext run "$cref" compact --arg session="$id" --arg brief_file="$brief" |
-      grep -o '"session":"s-[^"]*' | head -1 | cut -d'"' -f4)
-    [ -n "$new" ] || { echo "the handoff was recorded but the fork produced no session" >&2; exit 4; }
-    echo "handoff $id -> $new"
-    id=$new
+  # A handoff call before the end_turn check: a handover ends the turn too, and a proposal must win.
+  # A fixed substring of the protocol, never parsed JSON — the same bytes inside any string field
+  # would be escaped, so only a real key/value matches. Deliberately loose: a REFUSED handoff call
+  # matches too, and then `compact` says why it did not fork and the loop simply steps again.
+  if grep -q '"tool":"handoff"' "$log"; then
+    out=$("$N" ext run "$cref" compact --arg session="$id" --arg brief=latest) || true
+    new=$(printf '%s' "$out" | grep -o '"session":"s-[^"]*' | head -1 | cut -d'"' -f4)
+    if [ -n "$new" ]; then echo "handoff $id -> $new"; id=$new; else printf '%s\n' "$out" >&2; fi
     continue
   fi
   if grep -q '"stopped":"end_turn"' "$log"; then

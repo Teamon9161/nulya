@@ -22,6 +22,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const config = @import("../config.zig");
+const emit = @import("../emit.zig");
 const environment = @import("../environment.zig");
 const remote = @import("../environment/remote/mod.zig");
 const protocol = @import("../environment/remote/protocol.zig");
@@ -31,6 +32,10 @@ const ext_store = @import("../extension/store.zig");
 const trust = @import("../journals/trust.zig");
 const launch = @import("../launch.zig");
 const common = @import("common.zig");
+/// The task layout and the supervisor's own flags, borrowed rather than
+/// re-derived: `cli/task.zig` owns what a task's directory is called and what
+/// files are in it, on whichever machine that directory happens to be.
+const task_cli = @import("task.zig");
 
 const flagValue = common.flagValue;
 const printErr = common.printErr;
@@ -340,8 +345,10 @@ fn serveOne(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
         .store_put => try serveStorePut(agent, req, payload),
         .store_commit => try serveStoreCommit(agent),
         .run_extension => try serveRunExtension(agent, req, payload),
-        .start_task => try agent.refuse("background tasks do not run over this channel yet; they still run on the machine the harness runs on"),
-        .unknown => try agent.refuse("unknown request; this build understands hello, run-shell, run-extension, put-file, list-dir, store-stat, store-put, store-commit and cancel"),
+        .start_task => try serveStartTask(agent, req, payload),
+        .task_poll => try serveTaskPoll(agent, req),
+        .task_kill => try serveTaskKill(agent, req),
+        .unknown => try agent.refuse("unknown request; this build understands hello, run-shell, run-extension, put-file, list-dir, start-task, task-poll, task-kill, store-stat, store-put, store-commit and cancel"),
     }
 }
 
@@ -647,6 +654,151 @@ fn servePutFile(agent: *Agent, req: protocol.Request, payload: []const u8) !void
         const msg = try std.fmt.allocPrint(agent.alloc, "could not write '{s}': {s}", .{ req.path, @errorName(err) });
         defer agent.alloc.free(msg);
         try agent.refuse(msg);
+        return;
+    };
+    try agent.reply(.{ .ok = true }, "", "");
+}
+
+// ── background tasks on this machine (goals/remote-env.md §4 Phase 4) ───────
+//
+// A remote session's background task is supervised HERE, by the same
+// `nulya task supervise` a local one is, with the log, the status and the lease
+// in the far — that is, this — workspace. The host keeps the NAME and the
+// delivery, because the ledger the report belongs in is over there.
+//
+// No path crosses: the frames name `<sid>/t<N>`, and each side turns that into a
+// directory with `task_cli.taskDirRel` against its own workspace.
+
+/// Where a task's files are on THIS machine, and the workspace they hang off.
+/// Null means the name is not a task name; the caller refuses.
+fn taskPaths(agent: *Agent, req: protocol.Request) !?struct { cwd: []const u8, dir: []u8 } {
+    const dir = (try task_cli.taskDirRel(agent.alloc, req.task)) orelse return null;
+    return .{ .cwd = if (req.cwd.len != 0) req.cwd else ".", .dir = dir };
+}
+
+/// Start a supervisor for one background task on this machine.
+///
+/// It is deliberately detached from this channel: a task outliving the
+/// connection that asked for it is the whole point of `background: true`, and
+/// the agent exiting must not take it with it (`environment.spawnSupervisor`
+/// gives it its own process group / no console, exactly as a host one gets).
+fn serveStartTask(agent: *Agent, req: protocol.Request, command: []const u8) !void {
+    if (command.len == 0) {
+        try agent.refuse("start-task needs a command");
+        return;
+    }
+    const paths = (try taskPaths(agent, req)) orelse {
+        try agent.refuse("start-task needs a task named <session>/t<N>");
+        return;
+    };
+    defer agent.alloc.free(paths.dir);
+
+    // The one thing this machine has to know about itself to start one: which
+    // binary it is (DESIGN §7.6).
+    const exe = agent.lenv.env.get("NULYA_EXE") orelse {
+        try agent.refuse("the nulya here does not know its own path, so it cannot start a supervisor");
+        return;
+    };
+
+    var ws = std.Io.Dir.cwd().openDir(agent.io, paths.cwd, .{}) catch |err| {
+        try agent.refuseFmt("could not open the workspace '{s}' here: {s}", .{ paths.cwd, @errorName(err) });
+        return;
+    };
+    defer ws.close(agent.io);
+    ws.createDirPath(agent.io, paths.dir) catch |err| {
+        try agent.refuseFmt("could not make room for the task here: {s}", .{@errorName(err)});
+        return;
+    };
+
+    environment.spawnSupervisor(agent.alloc, agent.io, &agent.lenv.env, .{
+        .exe = exe,
+        .dir_rel = paths.dir,
+        // No session file on this machine — the report is left beside the log
+        // and the host collects it (`cli/task.zig`).
+        .task_name = req.task,
+        .cwd = paths.cwd,
+        .timeout_ms = req.timeout_ms,
+        .command = command,
+        // The supervisor starts in the workspace, because `--dir` hangs off it.
+        .spawn_cwd = paths.cwd,
+    }) catch |err| {
+        try agent.refuseFmt("could not start a supervisor here: {s}", .{@errorName(err)});
+        return;
+    };
+    try agent.reply(.{ .ok = true }, "", "");
+}
+
+/// Everything the host needs to know about one task here, in one round: the
+/// status its supervisor wrote, and the report it left if it has finished.
+///
+/// A directory with nothing in it is answered as nothing, not as a refusal: that
+/// is the same `starting` a local task with no status yet reports, and a
+/// supervisor that has not written its first line is exactly that.
+fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
+    const paths = (try taskPaths(agent, req)) orelse {
+        try agent.refuse("task-poll needs a task named <session>/t<N>");
+        return;
+    };
+    defer agent.alloc.free(paths.dir);
+    const a = agent.arena.allocator();
+
+    var ws = std.Io.Dir.cwd().openDir(agent.io, paths.cwd, .{}) catch |err| {
+        try agent.refuseFmt("could not open the workspace '{s}' here: {s}", .{ paths.cwd, @errorName(err) });
+        return;
+    };
+    defer ws.close(agent.io);
+
+    const status = try readTaskFile(agent, ws, a, paths.dir, task_cli.status_file, 256 << 10);
+    const raw_report = try readTaskFile(agent, ws, a, paths.dir, task_cli.report_file, 4 << 20);
+    // The report is already valid UTF-8 when a supervisor writes it
+    // (`emit.utf8Lossy` runs over the log tail there), and this is what makes
+    // that a checked fact rather than an assumption: a JSON string cannot carry
+    // invalid bytes, and `std.json` writing them as an array of numbers is how a
+    // session file once stopped being a session file (BUGS #22).
+    const cleaned = try emit.utf8Lossy(a, raw_report);
+    const report = if (cleaned) |c| c.text else raw_report;
+
+    const body = try protocol.encodeTaskSnapshot(a, .{ .status = status, .report = report });
+    try agent.reply(.{ .ok = true, .bytes = body.len }, body, "");
+}
+
+fn readTaskFile(
+    agent: *Agent,
+    ws: std.Io.Dir,
+    arena: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    cap: usize,
+) ![]const u8 {
+    const path = try std.fs.path.join(agent.alloc, &.{ dir, name });
+    defer agent.alloc.free(path);
+    return ws.readFileAlloc(agent.io, path, arena, .limited(cap)) catch "";
+}
+
+/// Put the kill marker down beside the command, which is here. Refused when
+/// there is no such task on this machine: a marker written into nothing would
+/// be a request nobody will ever read, reported as success.
+fn serveTaskKill(agent: *Agent, req: protocol.Request) !void {
+    const paths = (try taskPaths(agent, req)) orelse {
+        try agent.refuse("task-kill needs a task named <session>/t<N>");
+        return;
+    };
+    defer agent.alloc.free(paths.dir);
+
+    var ws = std.Io.Dir.cwd().openDir(agent.io, paths.cwd, .{}) catch |err| {
+        try agent.refuseFmt("could not open the workspace '{s}' here: {s}", .{ paths.cwd, @errorName(err) });
+        return;
+    };
+    defer ws.close(agent.io);
+    ws.access(agent.io, paths.dir, .{}) catch {
+        try agent.refuseFmt("this machine has no task {s}", .{req.task});
+        return;
+    };
+
+    const path = try std.fs.path.join(agent.alloc, &.{ paths.dir, task_cli.kill_file });
+    defer agent.alloc.free(path);
+    ws.writeFile(agent.io, .{ .sub_path = path, .data = "" }) catch |err| {
+        try agent.refuseFmt("could not ask task {s} to stop: {s}", .{ req.task, @errorName(err) });
         return;
     };
     try agent.reply(.{ .ok = true }, "", "");

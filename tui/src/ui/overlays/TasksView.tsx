@@ -38,6 +38,7 @@ export function elapsed(task: TaskEntry): string {
 export function outcome(task: TaskEntry): string {
   if (!taskIsDone(task)) return ""
   if (task.state === "lost") return "no supervisor"
+  if (task.state === "unreachable") return "machine unreachable"
   const how = task.ended_by === "kill" ? "killed" : task.ended_by === "timeout" ? "timed out" : ""
   const code = task.exit_code !== null && task.exit_code !== 0 ? `exit ${task.exit_code}` : ""
   return [code, how].filter((part) => part.length > 0).join(" · ")
@@ -76,6 +77,13 @@ export function TasksView(props: {
   const readLog = async () => {
     const task = current()
     if (!task || !showLog()) return
+    // A remote task's `log` is a path on the machine that runs it (DESIGN
+    // §8.2) — reading it with this machine's io would show an empty panel and
+    // call it the log. Say where it is instead.
+    if (task.machine) {
+      setLog(`the log lives on ${task.machine}:\n  ${task.log}\n\nopen it on that machine — this one cannot read it.`)
+      return
+    }
     setLog(await readTaskLog(props.ws, task.log))
   }
 

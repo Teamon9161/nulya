@@ -24,11 +24,12 @@
 //!                        Also writes nothing: the call is the record.
 //!   `approve {…}`        `surface: "internal"`. The one tool here that touches
 //!                        the disk: it renders an approved plan into
-//!                        `.nulya/handoffs/<session>-<n>.md` — byte-shaped like
-//!                        what `extensions/handoff` writes — and returns the
+//!                        `.nulya/handoffs/<session>-<n>.md` and returns the
 //!                        path, which the front end hands to `compact --arg
 //!                        brief_file=…` to fork into a session that carries the
-//!                        plan and NOT this persona.
+//!                        plan and NOT this persona. It is the only writer of
+//!                        that directory now — `extensions/handoff` used to
+//!                        share it and no longer writes anything at all.
 //!
 //! **Why `approve` writes a file rather than forking.** The same division
 //! `handoff` keeps (DESIGN §11): `session new --parent` is called from exactly
@@ -51,11 +52,16 @@
 const std = @import("std");
 const rpc = @import("rpc.zig");
 
-/// Where an approved plan lands. The same directory `extensions/handoff` writes
-/// to, and for the same reason: what is written there is a brief a new session
-/// can start from, and `compact --arg brief_file=` is what starts it. One shape,
-/// two producers — a driver that already watches this directory needs to learn
-/// nothing new.
+/// Where an approved plan lands: a brief a new session can start from, which is
+/// what `compact --arg brief_file=` starts.
+///
+/// The name is historical — `extensions/handoff` used to write here too, and
+/// stopped, because its brief was always the arguments of its own call and the
+/// ledger already had them. This one is different in the way that matters: the
+/// plan a person approved is not byte-for-byte any single call's arguments (it
+/// is the revision they said yes to, after a review), so there is something to
+/// render and somewhere to put it. Whether that stays true is an open question
+/// — a `plan_seq` branch in `compact` would fold this one in too.
 const handoff_dir = ".nulya/handoffs";
 
 /// What `propose` answers with. The model has just been told the plan is on the

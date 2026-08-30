@@ -1,9 +1,9 @@
 # `/goal` — the first nulya driver. It composes the bundled `handoff` package
 # into a new session — its one tool is `surface: auto`, so membership is the
 # whole of putting it in front of the model — and steps it one step at a time; when
-# the model proposes a handover (a file under .nulya/handoffs/<session>-*.md) it
-# forks through the bundled `compact` tool and carries on in the child: the model
-# proposes, the driver decides. Nothing here parses JSON.
+# the model proposes a handover (a `handoff` call in the step's own stream, whose
+# arguments ARE the brief) it forks through the bundled `compact` tool and carries
+# on in the child: the model proposes, the driver decides. Nothing here parses JSON.
 #
 # STDOUT is control and only control — `session`, `handoff`, `done`, `evaluate` —
 # so a front end can drive tabs off it; STDERR is the step's own `--stream` lines
@@ -49,14 +49,14 @@ while ($i -lt $max) {
     & $N session step $id --max-steps 1 --stream | Tee-Object -FilePath $log | ForEach-Object { [Console]::Error.WriteLine($_) }
     $streamed = (Get-Content -Raw $log)
     if ($streamed -match '"stream":"run","event":"error"') { exit 1 }
-    # Disk before log: a handoff ends the turn too, and a proposal must win.
-    $brief = Get-ChildItem ".nulya/handoffs/$id-*.md" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($brief) {
-        $new = [regex]::Match(((& $N ext run $cref compact --arg "session=$id" --arg "brief_file=$($brief.FullName)") -join "`n"),
-            '"session":"(s-[^"]+)"').Groups[1].Value
-        if (-not $new) { [Console]::Error.WriteLine('the handoff was recorded but the fork produced no session'); exit 4 }
-        Write-Output "handoff $id -> $new"
-        $id = $new
+    # A handoff call before the end_turn check: a handover ends the turn too, and a proposal must win.
+    # A fixed substring of the protocol, never parsed JSON — the same bytes inside any string field
+    # would be escaped, so only a real key/value matches. Deliberately loose: a REFUSED handoff call
+    # matches too, and then `compact` says why it did not fork and the loop simply steps again.
+    if ($streamed -match '"tool":"handoff"') {
+        $out = (& $N ext run $cref compact --arg "session=$id" --arg 'brief=latest') -join "`n"
+        $new = [regex]::Match($out, '"session":"(s-[^"]+)"').Groups[1].Value
+        if ($new) { Write-Output "handoff $id -> $new"; $id = $new } else { [Console]::Error.WriteLine($out) }
         continue
     }
     if ($streamed -match '"stopped":"end_turn"') {

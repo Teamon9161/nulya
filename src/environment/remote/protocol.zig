@@ -39,6 +39,10 @@
 //!     {"op":"store-put","path":"<version-relative>","exec":B,"bytes":L}
 //!                                                       payload: the file's bytes
 //!     {"op":"store-commit"}
+//!     {"op":"start-task","task":"<sid>/t<N>","cwd":…,"timeout_ms":N|null,"bytes":L}
+//!                                                       payload: the command
+//!     {"op":"task-poll","task":"<sid>/t<N>","cwd":…}
+//!     {"op":"task-kill","task":"<sid>/t<N>","cwd":…}
 //!
 //! agent → host
 //!     {"ok":true,"v":2,"nulya":…,"os":…,"arch":…,"home":…,"cwd":…,"dialect":…}
@@ -48,15 +52,35 @@
 //!     {"ok":true,"bytes":L,"message":"<note>"}
 //!                                     payload: [{"name":"…","dir":B},…] — the
 //!                                     directory listing, as JSON (`encodeEntries`)
-//!     {"ok":true}                     put-file wrote it
+//!     {"ok":true}                     put-file wrote it / the task was started
+//!                                     / the kill marker is down
 //!     {"ok":true,"held":B}            store-stat: whether that machine's user
 //!                                     store already holds that version, sealed
+//!     {"ok":true,"bytes":L}           task-poll: `TaskSnapshot`, as JSON
 //!     {"ok":false,"message":"…"}
 //!
-//! `start-task` is named in `Op` and answered `ok:false` with a sentence saying
-//! which phase implements it. It is in the vocabulary and not in this build on
-//! purpose: a host talking to a newer agent, or the reverse, gets a sentence
-//! rather than "unknown op".
+//! ── A background task over there (goals/remote-env.md §4 Phase 4) ───────────
+//!
+//! `start-task` asks the agent to start `nulya task supervise` on ITS machine —
+//! the same binary, the same role, the same `Tree` around the command — with the
+//! log, the status and the lease all in the far workspace, beside that session's
+//! spills. So a background command runs where the foreground ones do, and it
+//! outlives this channel: closing the channel ends the agent, not the task.
+//!
+//! **A task's PATH never crosses.** The frame names `task` — `<sid>/t<N>`, the
+//! full name the model already reads — and each side derives the directory from
+//! it with the same function (`launch.sessionTasksDir`), against its own
+//! workspace. That is why there are three task verbs rather than "write an empty
+//! file at this path": a task is a name here, and the host does not spell
+//! directories on another machine (goals/remote-env.md §3.3).
+//!
+//! **The report comes back by being FETCHED, not pushed.** There are no
+//! unsolicited frames (rule 1), and the far supervisor could not deposit anyway:
+//! the session file is on the host. So it leaves its report next to its log, and
+//! whichever host verb next asks (`task list`, `task wait`, a `session step`)
+//! turns it into the `task_finished` the session's inbox already understands.
+//! The mechanism a driver sees is unchanged — an inbox event, not a second kind
+//! of file to learn (CLAUDE.md's working rule).
 //!
 //! ── Running an extension over there (goals/remote-env.md §3.1) ──────────────
 //!
@@ -151,7 +175,8 @@ const std = @import("std");
 /// v2: `list-dir` answers its entries as a payload instead of a header field
 /// (rule 6), and `put-file` became a real verb instead of a refusal.
 ///
-/// The three `store-*` verbs arrived WITHOUT a bump, which is the rule working
+/// The three `store-*` verbs, and later the three task verbs, arrived WITHOUT a
+/// bump — the rule working
 /// rather than an exception to it: no existing frame changed meaning, and an
 /// older agent asked for one answers the `unknown` sentence naming what it does
 /// know. A push against such a machine therefore fails with a sentence about
@@ -197,6 +222,8 @@ pub const Op = enum {
     run_extension,
     put_file,
     start_task,
+    task_poll,
+    task_kill,
     store_stat,
     store_put,
     store_commit,
@@ -213,6 +240,8 @@ pub const Op = enum {
             .run_extension => "run-extension",
             .put_file => "put-file",
             .start_task => "start-task",
+            .task_poll => "task-poll",
+            .task_kill => "task-kill",
             .store_stat => "store-stat",
             .store_put => "store-put",
             .store_commit => "store-commit",
@@ -269,6 +298,11 @@ pub const Request = struct {
     /// host, and a package over there handed one would be told a lie. The id is
     /// true on any machine, which is exactly why the two were split.
     session: []const u8 = "",
+    /// The three task verbs: which background task, by its FULL name
+    /// `<sid>/t<N>` — the one the model reads in its receipt. Not a directory:
+    /// each side turns the name into a path with the same rule against its own
+    /// workspace, so no layout of one machine is ever spelled by the other.
+    task: []const u8 = "",
     /// `store-put`: these bytes are meant to be executed (the compiled entry
     /// under `bin/`). A file copy carries its mode; a payload does not.
     exec: bool = false,
@@ -302,6 +336,38 @@ pub fn encodeEntries(alloc: std.mem.Allocator, entries: []const Entry) ![]u8 {
 pub fn parseEntries(arena: std.mem.Allocator, payload: []const u8) Error![]const Entry {
     if (payload.len == 0) return &.{};
     return std.json.parseFromSliceLeaky([]const Entry, arena, payload, json_opts) catch return error.BadFrame;
+}
+
+/// What one `task-poll` answers about one background task over there: the two
+/// files that machine's supervisor writes, verbatim. The host owns the meaning
+/// of both — `status.json` is `cli/task.zig`'s own declaration, and the report
+/// is what becomes a `task_finished` — so nothing is re-parsed on the far side
+/// and there is no second definition of either.
+///
+/// It travels as PAYLOAD (rule 6): a report grows with the command's output.
+pub const TaskSnapshot = struct {
+    /// `status.json` as that supervisor wrote it, or empty when it has not
+    /// written one yet — which is exactly the `starting` projection, reported
+    /// rather than guessed at.
+    status: []const u8 = "",
+    /// The report that supervisor left when the command ended, or empty until
+    /// then. Its presence is what tells the host there is something to deliver.
+    report: []const u8 = "",
+};
+
+/// Encode one. Caller owns the result.
+pub fn encodeTaskSnapshot(alloc: std.mem.Allocator, snap: TaskSnapshot) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try std.json.Stringify.value(snap, .{}, &out.writer);
+    return out.toOwnedSlice();
+}
+
+/// Decode one. Borrows `arena`, like every other parsed frame. An empty payload
+/// is a task nothing is known about yet, not a malformed one.
+pub fn parseTaskSnapshot(arena: std.mem.Allocator, payload: []const u8) Error!TaskSnapshot {
+    if (payload.len == 0) return .{};
+    return std.json.parseFromSliceLeaky(TaskSnapshot, arena, payload, json_opts) catch return error.BadFrame;
 }
 
 /// One reply header. Same discipline as `Request`.
@@ -495,6 +561,32 @@ test "a big listing travels as payload, and the header it rides behind stays rea
 
     // An empty directory is an empty listing, not a broken frame.
     try std.testing.expectEqual(@as(usize, 0), (try parseEntries(arena, "")).len);
+}
+
+test "a task snapshot carries both of that supervisor's files, and an empty one is a task nothing is known about" {
+    const alloc = std.testing.allocator;
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The report is a multi-line text with the very characters that would end a
+    // header line early; it travels as payload, and JSON escaping is what keeps
+    // it whole either way.
+    const snap: TaskSnapshot = .{
+        .status = "{\"v\":1,\"state\":\"done\",\"exit_code\":0}",
+        .report = "[background task s-1/t3 finished] echo hi · exit 0 · 0.1s\n--- output ---\nhi\n",
+    };
+    const payload = try encodeTaskSnapshot(alloc, snap);
+    defer alloc.free(payload);
+    const back = try parseTaskSnapshot(arena, payload);
+    try std.testing.expectEqualStrings(snap.status, back.status);
+    try std.testing.expectEqualStrings(snap.report, back.report);
+
+    // A supervisor that has not written anything yet is not a broken frame: both
+    // halves absent is the `starting` projection.
+    const empty = try parseTaskSnapshot(arena, "");
+    try std.testing.expectEqual(@as(usize, 0), empty.status.len);
+    try std.testing.expectEqual(@as(usize, 0), empty.report.len);
 }
 
 test "a header that would outgrow the reader's buffer is refused instead of written" {

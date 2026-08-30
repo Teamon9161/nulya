@@ -349,12 +349,12 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 
 ### 5.8 模型自己提的 handoff `[T24]`
 
-`extensions/handoff` 的 tool 只做一件事：把 brief 渲染成 `.nulya/handoffs/<session>-<n>.md` 并叫模型收尾（DESIGN §11）。**那个文件就是提议**——没有 JSON 要解析，也还什么都没发生；fork 是**驱动者**的动作，`drivers/goal.*` 不问就 fork，这个前端在 `ask` 下先问（旁边就有个人）。
+`extensions/handoff` 的 tool 只做一件事：校验四个分节并叫模型收尾（DESIGN §11；T106 起**它什么都不写**——提议就是那次调用的参数，早已冻在 ledger 里）。**那次被接受的调用就是提议**；fork 是**驱动者**的动作，`drivers/goal.*` 不问就 fork，这个前端在 `ask` 下先问（旁边就有个人）。
 
 - **进 composition**：draft materialize 那一刻按 `[extensions] session_with`（默认 `["handoff", "agent"]`，T34；T52 起那两个老布尔键不再读）加 `--with handoff@<v>` + 它每个 `surface: "manual"` tool 的 `--pin`（两根轴，DESIGN §7.5：`--with` 是成员，`--pin` 才给它一个 native 槽）。**这张单子上的两个包今天都不需要 pin**（T52 / T53）：`handoff` 与 `agent` 的入口 tool 都声明 `surface: "auto"`，成员关系本身就是它们上台的路，而指着它们的 pin 会被整场拒绝（`PinToolNotPinnable`）。`SessionMember.pins` 那一半留着——它从**正在被组合的那个版本**的冻结 manifest 读，所以哪天某个包把一个 tool 挪回 `manual`，这里不用改一个字就跟上了。版本由 `extensions.sessionMember` 拿（`bundledDraftPath` → `ext build`，所以**不在 nulya checkout 里也能用**：二进制自带源码，seed 进 user store 再 build）；build 在开屏后台起、失败就这一场不带它并照常开场——**装不上不是开不了场的理由**。局限：第一次在一台机器上要付一次编译（compiled 包）。
-- **看盘的时机**：每个 step 结束（driver 回 idle）看一次 `.nulya/handoffs/<id>-*.md`，与 `drivers/goal.*` 同一个信号；已处理过的路径记在内存里，同一个提议不会问第二遍。
-- **`ask`** = brief 显示在 transcript 与输入框之间（**不是 transcript 卡片**：brief 是磁盘上的制品不是 ledger 事件，这个前端只画 ledger 有的东西），`Enter` 跟过去 / `Esc` 收起（文件留着）。**`unsafe`** = 直接跟，一行 notice。
-- **跟过去 = `/compact` 的 `brief_file` 分支**（DESIGN §11）：同一条 fork，只是摘要已经写好了，旧 session 逐字节不变，tab 换到子 session——与 `/compact` 完全同一段代码（`compact.ts` 多一个可选参数）。
+- **认出提议的时机**（T106 起）：每个 step 之后在**自己已经解析出来的 transcript** 里找一次被接受的 `handoff` 调用（`tui/src/handoff.ts` 的纯函数 `handoffsIn(items)` / `nextHandoff(items, seen)`，判据 = `kind === "tool" && tool === "handoff" && ok === true` 且参数解得出至少一个必填节）；`seen` 按 **call id** 记，同一个提议不会问第二遍。不再有任何盘面 watcher。
+- **`ask`** = brief 的分节 preview 显示在 transcript 与输入框之间（`HandoffPanel` 收 `proposal`，头行不再打路径；真正被 carry 过去的 markdown 由 `extensions/compact` 渲染，这里只是 preview 不是第二份实现），`Enter` 跟过去 / `Esc` 收起（提议留在 transcript 那张 tool 卡上）。**`unsafe`** = 直接跟，一行 notice。
+- **跟过去 = `/compact` 的 `brief_seq: <那次调用的 seq>` 分支**（DESIGN §11；`runCompact` 多 `brief?` / `briefSeq?` 两个 option）：传的是**屏幕上给他看的那一份**的 seq 而不是 `latest`——人把新的一次 dismiss 掉再去跟一个旧的，必须 fork 在他看过的那份上。同一条 fork，旧 session 逐字节不变，tab 换到子 session。**`plugin-api.d.ts` 一个字没改**：`api.actions.compact({briefFile})` 是插件面，`extensions/plan` 仍走 `brief_file`。
 
 ### 5.9 后台任务：内核给 supervisor 与事件，屏幕决定何时再 step `[T29]`
 
@@ -2971,3 +2971,13 @@ Alt 走的是 `option`。翻编译产物确认了两条解析路径（原始 ESC
 **改法**：不把 `submit` 改成 async（那会让"提交"这个动作本身变得不可预测）。`paste.ts` 新增 `hasPendingPaste(text)`——一个纯函数，检测文本里是否还留着形如 `pendingPlaceholder` 的 marker（与 `numbered_placeholder`/`placeholderRanges` 认已解决的两种占位符同一种"按形状识别"手法，但认的是未解决的那一种）。`Composer.tsx` 的 `submit()` 在读到 buffer 内容之后、清空 buffer 之前先问它：还留着 pending marker 就拒绝提交（不清空、不写历史、不调 `onSubmit`），走既有的 `props.onNotice` 通道说一句"still pasting · press Enter again once it lands"（`onNotice` 就是 `App.tsx` 的 `setNotice`，走已有的 `noticeHold` 淡出纪律，不是新造的通知形状）。这一刻起两条路径分开：**token 解决**（`settleToken` 换成真内容）或**token 被用户删除**（不管是不是通过 `backspaceAttachment` 那条整词删除的路），`hasPendingPaste` 都会翻回 `false`，下一次 `Enter` 照常放行——不需要重试计时器或者队列，因为 `submit` 每次都是重新问一次当下的 buffer。`triggerInterrupt`（ar-t1 的 Ctrl+J）与普通 `Enter` 走的是同一个 `submit()`，所以这条门也同时管住了它。T103 那段注释里"nothing here waits… a message sent mid-paste keeps the marker as literal text"已经改写成描述现在的行为。
 
 **测试**：`test/paste.test.ts` 新增一条纯函数测试（`hasPendingPaste` 认一个 marker、认它嵌在别的文字中间、不认已解决的两种占位符形状）。`test/composer.test.tsx` 新增两条端到端——`readImage` 用手动控制的 promise 钉住时序（不依赖 `setTimeout` 赌时间）：粘贴一张图片路径后立刻 `Enter`，断言什么都没提交、notice 说了原因、marker 原样留在框里；放行那个 promise 之后再按一次 `Enter`，这次照常提交（这条测试在修复前会红：`sent` 收到一条内容为字面 `[Pasting… #N]` 的消息）。另一条钉住删除路径：`Ctrl+V` 挂起后把整个 marker 逐字符 Backspace 掉，`Enter` 照常把剩下的文字提交出去，不需要等那个永远不会被放行的 clipboard 读。`bun test`、`bunx tsc --noEmit` 均干净。
+
+### T106 · handoff 的提议不再是一个文件（内核零改动）
+
+`extensions/handoff` 改成什么都不写（提议 = 那次调用的参数，已经在 ledger 里，DESIGN §11），`extensions/compact` 长出 `brief=latest` / `brief_seq=<n>` 的 ledger 分支，于是这个前端"每步之后看 `.nulya/handoffs/`"的整套 watcher 删除——它本来就在解析每一行 ledger 事件，handover 从此是它一直握着的那张 tool 卡里的一张。`tui/src/handoff.ts` 从 `readdirSync` 变成对 `TranscriptItem[]` 的纯函数（`handoffsIn` / `nextHandoff` / `headline` / `briefPreview`，判据 = `kind === "tool" && tool === "handoff" && ok === true`——**被接受的才是提议**，被拒的与被 gate 否掉的都带着 `ok=false` 躺在 ledger 里）；`seen` 从路径变 **call id**；跟随传 `brief_seq`（跟的必须是屏幕上给他看的那一份，不是"最新的那一份"——人把新的一次 dismiss 掉再去跟旧的，`latest` 会 fork 在他刚说过 no 的那份上）；`Esc` 的话改成"the brief is still in the transcript, on the call that proposed it"；`HandoffPanel` 收 `proposal`、正文是按分节标签的 preview（`next:` / `done:` / `keep:` / `drop:`，截 8 行——真正被 carry 的 markdown 由 `extensions/compact` 渲染，这里不必逐字节一致所以不是第二份实现）。`runCompact` 多 `brief?` / `briefSeq?` 两个 option；**`plugin-api.d.ts` 一个字没改**（`api.actions.compact({briefFile})` 是插件面，`extensions/plan` 仍走 `brief_file`）。`drivers/goal.*` 同期改成对 `--stream` 行做 `"tool":"handoff"` 的定长子串匹配，两个 driver 从此读**同一个来源**。起因与理由见 goals/remote-env.md §3.2 / §7.4 与 CLAUDE.md 那条工作约定。
+
+**测试**：`test/gate.test.tsx` 的 handoff 那条重写成"提议从 transcript 里读出来、且只认被接受的"——`createSessionState` + `applyEvents` 摆一条真实 ledger（accepted / refused / accepted 三次调用），断言只有被接受的两次被认出、`seq` 是 `brief_seq` 要的那个、`nextHandoff` 的 seen 按 call id 走；**先红验证过**（把 `ok !== true` 那半去掉当场红）。zig 侧见 goals 那两处 e2e（extension.zig 两条重写一条新增、session.zig 的 goal driver 按新契约改）。
+
+### T107 · 远端后台任务的三处跟随（内核零改动）
+
+Phase 4（goals/remote-env.md §6.7）之后 `task list --json` 多一个 `state` 值 `unreachable` 与一列 `machine`，前端有三处会说错话，都补上：① `TaskEntry.state` 加 `"unreachable"`，且 `taskIsDone` 把它算成"不再等"——与内核 `task wait` 拒绝挂在它上面同一条理由（什么都不知道、轮询也学不到新东西，而远端 session 的每次 `task list` 是一条短通道，把问不到的机器算成 running 就是每 1.5 s 付一次连接超时）；`/tasks` 的 outcome 列与 TasksPanel 的 ended 词都写 `unreachable` / `machine unreachable`，**不是** `done`——任务多半还在那台机器上好好跑着。② `state/tasks.ts` 的 `backgroundNote` 给它自己的分支（从前落进 `running Ns` 那个兜底——一句关于没人知道的事的钟）。③ `TaskEntry` 认 `machine` 列（老二进制没有这列 = 本机），`/tasks` 的 log 面板对远端任务不再用本机 io 读一个别的机器上的路径（那是 `FileNotFound` 画成空面板），改成一句"the log lives on `<spec>`"。

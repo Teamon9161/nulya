@@ -38,7 +38,7 @@ pub const def: tool.Tool = .{
 /// right now (base-tools.md §1).
 const no_session_text = "background needs a durable session (nulya session new); run it in the foreground here";
 const remote_lost_text = "the connection to the machine this session's commands run on ended while this command was in flight; whether it ran, is still running, or never started there is unknown - do not assume either, and do not simply run it again";
-const remote_background_text = "this session's commands run on another machine, and a background task is supervised by a process on the machine this harness runs on; run it in the foreground instead, or start it over there yourself and check on it with a later command";
+const remote_refused_text = "the machine this session's commands run on would not start a background task; check that it is answering (nulya remote check) and run it in the foreground here meanwhile";
 
 fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
     const parsed = try tool.parseArgs(alloc, req.args_json);
@@ -137,11 +137,10 @@ fn startBackground(
         // Nowhere to report a result TO. Not a failure of the command — it was
         // never started — so the model is told what is missing, and what works.
         error.NoDurableSession => return .{ .ok = false, .output = try alloc.dupe(u8, no_session_text) },
-        // This session's commands run on another machine, and a background
-        // task's supervisor is a process on THIS one (DESIGN §6.1, §8.1). Not a
-        // failure of the command — it was never started — so the model is told
-        // where the boundary is and what still works.
-        error.RemoteBackgroundUnsupported => return .{ .ok = false, .output = try alloc.dupe(u8, remote_background_text) },
+        // The machine this session's commands run on would not start it (DESIGN
+        // §8.2). Its own sentence cannot come back — a start either yields a
+        // receipt or an error — so this says which half failed and where to look.
+        error.RemoteTaskRefused => return .{ .ok = false, .output = try alloc.dupe(u8, remote_refused_text) },
         else => return .{
             .ok = false,
             .output = try std.fmt.allocPrint(alloc, "could not start a background task: {s}", .{@errorName(err)}),
