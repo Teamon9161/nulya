@@ -5,13 +5,31 @@
  * `/env` (T86, DESIGN §8.1) moves where a session's `shell` commands run, but
  * the screen's own composition choices — which packages ride along as
  * `--with`, which extra tools get `--pin`ned, which packages render this
- * session's opening prompt — do not automatically follow. `ext:std/read` reads
- * THIS machine's filesystem; on a `remote:` target that is a filesystem the
- * commands never touch, so pinning it there manufactures "not found" rather
- * than a working tool. `ground`'s opening facts (this cwd, this branch, this
- * git status) are wrong for the same reason. `local` and `wsl` do not have
- * this problem — WSL shares the host filesystem through `/mnt/`, so a `std`
- * pin or `ground`'s facts are exactly as true there as on the host.
+ * session's opening prompt — do not automatically follow, and the two halves
+ * of `remote:` have DIFFERENT reasons for not following (goals/ground-remote.md
+ * §5-§6).
+ *
+ * `ground` renders host facts — this cwd, this branch, this git status — and on
+ * a `remote:` target the workspace those describe is somewhere else. It is a
+ * driver-side `ext run` on THIS machine, before any session exists, so nothing
+ * moves it; a map of the wrong machine frozen into the header is worse than no
+ * map, because the model will not check it. Rendering it over there was costed
+ * out and deferred (`ground` is compiled, so it would mean a cross-build and a
+ * push per remote machine, for one consumer).
+ *
+ * `std` is a different story and the reason here used to be wrong. Since
+ * Phase 3 (goals/remote-env.md §6.4) a SESSION's extension calls run on the
+ * machine holding the workspace, so a pinned `ext:std/read` there would read
+ * the far filesystem, correctly — it is not pointed at the host any more. What
+ * actually keeps it off this list is that the far machine needs a build of
+ * `std` for ITS target pushed first, or `session new`'s `exec_version` lookup
+ * fails and the session does not open at all. Same default, honest reason: the
+ * old one read as "a remote session cannot have file tools in principle", and
+ * it is one `ext push` away.
+ *
+ * `local` and `wsl` have neither problem — WSL shares the host filesystem
+ * through `/mnt/`, so a `std` pin or `ground`'s facts are exactly as true there
+ * as on the host.
  *
  * (The exec-target `ssh:<dest>` spelling this file used to carry a third kind
  * for was retired 2026-08-30, goals/remote-env.md §7.1 — it wrapped the shell

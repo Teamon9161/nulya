@@ -110,4 +110,40 @@ renderer 自己的诊断原样显示、**照开 session**（那正是 T66 那轮
 - 没为对面 target build/push 过 `ground` → 一句指名两条命令的失败，session 照开。
 - local 路径逐字节不变（`{"text"}` 改的是谁写文件，不是写出什么）。
 
-## 5. 实施记录
+## 5. 裁决（2026-08-30）：**先不做**
+
+人拍板：**不能减少复杂度就先不做**。这里记下账，免得下次重新论一遍。
+
+`ground` 是 compiled 包（`"entry": "bin/ground"`），所以 §1.1 那条路的真实代价
+不是"多一个 flag"，是**每一台远端机器一次交叉编译 + push，且这个包每改一版就要
+重来**。连同另外两样：
+
+| 要加的 | 换来的 |
+|---|---|
+| `ext run --env`——**只有一个 consumer** | 远端场开场有地图而不是没有 |
+| renderer 约定从路径改成文本（破坏性） | 同上，且只为远端那一半 |
+| 人每台机器一次 `ext build --target` + `ext push` | 同上 |
+
+第一行自己就是判据：`compact` / `agent render` / `plan approve` 都是**驱动 harness**
+的 tool，留在 host 才对；`ground` 是唯一一个"渲染的事实属于工作区那台机器"的包。
+一个只有一个 consumer 的新 CLI 面，正是仓库那条"等第二个 consumer 再抽"说的东西。
+
+**什么时候值得重开**：出现**第二个**"事实属于工作区那台机器"的 renderer，或者远端
+场变成常用形态（那时 build+push 的一次性代价被摊薄，而"开场失明"每场都在付）。
+到那天 §1 三件事的形状不用重想，这份文档就是它。
+
+**同时决定**：§3 的 `std` 一并不动。但**那条旧注释要改准**——见下。
+
+## 6. 顺带修掉的一条旧话（2026-08-30）
+
+`tui/src/state/envprofile.ts` 说 `ext:std/read` "reads THIS machine's filesystem"，
+所以远端场不 pin 它。**这句从 Phase 3 后半（§6.4）起就不对了**：一场 session 的
+extension 调用已经跟着工作区走，pin 在远端场上的 `ext:std/read` 跑在对面、读的正是
+对面的文件。
+
+结论（不 pin）没变，**理由变了**：真正拦着它的是"得先为对面 target build + push，
+否则 `session new` 的 `exec_version` 反查失败、整场开不起来"。留着旧理由的代价是
+它会被当成设计约束读——下一个人会以为远端场**原理上**不能有文件工具，而其实只差
+一次 push。
+
+## 7. 实施记录
