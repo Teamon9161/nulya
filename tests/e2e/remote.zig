@@ -21,7 +21,10 @@
 //!      and pushing one that is already there does nothing (Phase 3);
 //!   9. which BUILD of a package serves a remote session is decided once, at
 //!      creation, and a package with no build for that machine stops creation
-//!      instead of failing later (`exec_version`).
+//!      instead of failing later (`exec_version`);
+//!  10. the workspace store on THAT machine is gated there the way one here is
+//!      gated here (DESIGN §9) — a checkout cannot shadow a pushed version, and
+//!      the refusal is one failed call, not a dead channel.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -710,7 +713,16 @@ test "a version the far machine does not hold is a failed call pointing at push,
     const spec = try execSpec(alloc, exe, "");
     defer alloc.free(spec);
 
-    var renv = try remote.RemoteEnvironment.connect(alloc, io, .{ .spec = spec, .version = "e2e" });
+    // A workspace of its own, empty. Not this process's cwd: that is the nulya
+    // checkout, whose `.nulya/extensions` is an untrusted store over there, and
+    // the agent refuses those before it looks for a version at all — a true
+    // answer, but a different one than this test is about.
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    var renv = try remote.RemoteEnvironment.connect(alloc, io, .{ .spec = spec, .workspace = far_abs, .version = "e2e" });
     defer renv.deinit();
 
     // Nothing was pushed, so the agent cannot run this. The answer is a FAILED
@@ -860,6 +872,111 @@ test "a package pushed nowhere fails its call and says which command delivers it
     const results = toolResultsLine(step.stdout) orelse return error.NoToolResults;
     try std.testing.expect(std.mem.indexOf(u8, results, "ext push") != null);
     try std.testing.expect(std.mem.indexOf(u8, results, "host-side sentinel") == null);
+}
+
+// ── the far machine's own workspace store ───────────────────────────────────
+
+test "a workspace store that arrived with a checkout over there is refused there, until it is trusted there" {
+    const alloc = std.testing.allocator;
+    var threaded = threadedIo(alloc);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // The far machine's workspace, already holding a built version nobody over
+    // there ever looked at — what cloning a repo with a `.nulya/extensions` in it
+    // produces. That store is the FIRST root over there, so without a gate on
+    // that side it would shadow whatever `ext push` delivered into the far user
+    // store, and the checkout would have composed itself in.
+    //
+    // A script package, so this costs no compiler: the gate is about resolving
+    // THROUGH that store, not about what kind of thing it holds. These two
+    // commands run under `runCli`'s own throwaway home, which is what leaves the
+    // home the agent will consult with no record of this store — the state a
+    // checkout arrives in.
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    const id = "checkedout";
+    const initialized = try runCli(alloc, io, far.dir, &.{ exe, "ext", "init", id, "greet" });
+    defer alloc.free(initialized.stdout);
+    try std.testing.expectEqual(@as(u8, 0), initialized.code);
+    const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ id;
+    const built = try runCli(alloc, io, far.dir, &.{ exe, "ext", "build", draft });
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try support.extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    // The store's path as the product resolves it, so the assertion below is
+    // about the sentence naming the right directory rather than about how this
+    // platform spells one.
+    var store_dir = try far.dir.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+    defer store_dir.close(io);
+    var store_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const store_abs = try absOf(io, store_dir, &store_buf);
+
+    // …and a home of its own, so "trusted over there" is a fact about a journal
+    // this test owns and not about the developer's.
+    var far_home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_home = try farHome(io, ws, &far_home_buf);
+    const spec = try homedSpec(alloc, exe, far_home);
+    defer alloc.free(spec);
+
+    const call: environment.ExtensionRequest = .{
+        .id = id,
+        .version = version,
+        .tool = "greet",
+        .cwd = ".",
+        .request_json = "{}",
+        .max_output_bytes = 1 << 20,
+    };
+
+    {
+        var renv = try remote.RemoteEnvironment.connect(alloc, io, .{ .spec = spec, .workspace = far_abs, .version = "e2e" });
+        defer renv.deinit();
+
+        const ext = try renv.environment().runExtension(alloc, call);
+        defer ext.deinit(alloc);
+        // A failed CALL that names the store and the gesture that opens it — and,
+        // above all, an extension that did not run.
+        try std.testing.expect(ext.exit_code != 0);
+        try std.testing.expect(std.mem.indexOf(u8, ext.stderr, "ext trust") != null);
+        try std.testing.expect(std.mem.indexOf(u8, ext.stderr, store_abs) != null);
+        try std.testing.expect(std.mem.indexOf(u8, ext.stdout, "hello from " ++ id) == null);
+
+        // The channel is not the casualty: the session goes on, exactly as it does
+        // when the far machine simply does not hold a version.
+        const command = switch (renv.environment().dialect()) {
+            .bash => "echo alive",
+            .powershell => "Write-Output alive",
+        };
+        const shell = try renv.environment().runShell(alloc, .{ .command = command, .cwd = ".", .max_output_bytes = 1 << 20, .timeout_ms = 30_000 });
+        defer shell.deinit(alloc);
+        try std.testing.expect(std.mem.indexOf(u8, shell.stdout, "alive") != null);
+    }
+
+    // Somebody over there looks at it and says yes, in that machine's own home —
+    // the same verb and the same journal a local session is gated on.
+    const trusted = try runCliEnv(alloc, io, far.dir, &.{ exe, "ext", "trust" }, "NULYA_HOME", far_home);
+    defer alloc.free(trusted.stdout);
+    try std.testing.expectEqual(@as(u8, 0), trusted.code);
+
+    // A fresh connection, because the answer is remembered for the life of one
+    // serve process — which is what makes the gesture above take effect.
+    var renv = try remote.RemoteEnvironment.connect(alloc, io, .{ .spec = spec, .workspace = far_abs, .version = "e2e" });
+    defer renv.deinit();
+    const ext = try renv.environment().runExtension(alloc, call);
+    defer ext.deinit(alloc);
+    try std.testing.expectEqual(@as(u8, 0), ext.exit_code);
+    try std.testing.expect(std.mem.indexOf(u8, ext.stdout, "hello from " ++ id) != null);
 }
 
 // ── which build serves the session ──────────────────────────────────────────

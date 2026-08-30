@@ -28,6 +28,7 @@ const protocol = @import("../environment/remote/protocol.zig");
 const integrity = @import("../extension/integrity.zig");
 const ext_manifest = @import("../extension/manifest.zig");
 const ext_store = @import("../extension/store.zig");
+const trust = @import("../journals/trust.zig");
 const launch = @import("../launch.zig");
 const common = @import("common.zig");
 
@@ -160,6 +161,12 @@ const Agent = struct {
     reader: std.Io.File.Reader,
     arena: std.heap.ArenaAllocator,
     lenv: *environment.LocalEnvironment,
+    /// THIS machine's environment, borrowed from `remoteServe`. Read for exactly
+    /// one question: which `<NULYA_HOME | ~/.nulya>` holds the trust journal that
+    /// answers for the workspace store here (`workspaceStoreRefusal`).
+    host: *const std.process.Environ.Map,
+    /// The workspace-store gate's answer, for the one `cwd` it was asked about.
+    gate: ?Gate = null,
     /// The one extension version currently being pushed into this machine's
     /// user store, if any (`store-stat` opens it, `store-commit` closes it).
     /// One, because the channel is one request at a time (protocol rule 1).
@@ -167,6 +174,28 @@ const Agent = struct {
     /// Set when the host closed the channel: the loop stops, and whatever was
     /// running has already been killed.
     stop: bool = false,
+
+    /// One decided workspace, remembered for the life of this process.
+    ///
+    /// A channel serves one session and a session has one workspace, so re-reading
+    /// the store and the journal on every call would answer the same question over
+    /// and over. Living no longer than the process is the other half: a person who
+    /// runs `nulya ext trust` over here is answered by the NEXT connection, without
+    /// any invalidation to get wrong.
+    const Gate = struct {
+        /// The `cwd` this answer is about, owned.
+        cwd: []u8,
+        /// Why that workspace may not be resolved through, owned — or null when
+        /// it may.
+        refusal: ?[]u8,
+    };
+
+    fn clearGate(self: *Agent) void {
+        const g = self.gate orelse return;
+        self.gate = null;
+        self.alloc.free(g.cwd);
+        if (g.refusal) |m| self.alloc.free(m);
+    }
 
     fn reply(self: *Agent, rep: protocol.Reply, first: []const u8, second: []const u8) !void {
         const line = try protocol.encodeReply(self.alloc, rep);
@@ -259,8 +288,10 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         .reader = std.Io.File.stdin().readerStreaming(io, read_buf),
         .arena = .init(alloc),
         .lenv = &lenv,
+        .host = &host,
     };
     defer agent.arena.deinit();
+    defer agent.clearGate();
     // A channel that ends mid-push leaves no half-installed version and no held
     // lease — the staging tree goes with the connection that was filling it.
     defer closePush(&agent);
@@ -436,21 +467,104 @@ fn serveShell(agent: *Agent, req: protocol.Request, command: []const u8) !void {
 /// `NULYA_TOOL` / `NULYA_ARG_<k>` from the arguments in the payload. There is no
 /// second implementation of any of it over here, because over here is nulya too.
 ///
+/// Which is also why the workspace-store trust gate is asked HERE, before any of
+/// that (`workspaceStoreRefusal`): the store that could shadow a pushed version is
+/// this machine's, so this machine's trust journal is the one that answers.
+///
 /// No presentation file: its reader is the front end, on the host.
 fn serveRunExtension(agent: *Agent, req: protocol.Request, arguments: []const u8) !void {
     if (req.id.len == 0 or req.version.len == 0 or req.tool.len == 0) {
         try agent.refuse("run-extension needs an extension id, a version and a tool");
         return;
     }
+    const cwd = if (req.cwd.len != 0) req.cwd else ".";
+    if (try workspaceStoreRefusal(agent, cwd)) |message| {
+        try agent.refuse(message);
+        return;
+    }
     return serveRun(agent, .{ .extension = .{
         .id = req.id,
         .version = req.version,
         .tool = req.tool,
-        .cwd = if (req.cwd.len != 0) req.cwd else ".",
+        .cwd = cwd,
         .request_json = if (arguments.len != 0) arguments else "{}",
         .max_output_bytes = if (req.max_output_bytes != 0) req.max_output_bytes else 1 << 20,
         .timeout_ms = req.timeout_ms,
     } });
+}
+
+/// The workspace-store trust gate (DESIGN §9), asked HERE, before this machine
+/// resolves anything through its own roots.
+///
+/// `.nulya/extensions` is checkout content AND the first store root over here
+/// exactly as it is on the host, so without this a store that arrived with a
+/// clone ON THIS MACHINE would shadow the very version the host delivered by
+/// `nulya ext push` into this machine's user store — and nobody would ever have
+/// looked at it. The judgement is made on this side, against this machine's trust
+/// journal, for the same reason the entry variant and the seal are: the machine
+/// holding the bytes is the only one that can answer for them.
+///
+/// The answer is a refusal of ONE CALL, never the end of the channel: the host
+/// turns it into an ordinary failed extension call (`environment/remote/mod.zig`),
+/// the model reads the sentence, the session goes on, and one `nulya ext trust`
+/// over here fixes it — the shape "this machine does not hold that version"
+/// already has.
+///
+/// Only the workspace root is gated, exactly as on the host: the user store and
+/// `extensions.paths` are out of a checkout's reach (DESIGN §7.2/§9.5), which is
+/// also why `ext push` lands in the user store.
+fn workspaceStoreRefusal(agent: *Agent, cwd: []const u8) !?[]const u8 {
+    if (agent.gate) |g| {
+        if (std.mem.eql(u8, g.cwd, cwd)) return g.refusal;
+        agent.clearGate();
+    }
+    const refusal = try decideWorkspaceStore(agent, cwd);
+    errdefer if (refusal) |m| agent.alloc.free(m);
+    agent.gate = .{ .cwd = try agent.alloc.dupe(u8, cwd), .refusal = refusal };
+    return refusal;
+}
+
+fn decideWorkspaceStore(agent: *Agent, cwd: []const u8) !?[]u8 {
+    const occupied = launch.occupiedWorkspaceStore(agent.alloc, agent.io, cwd) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        // Whether that store holds anything is unanswerable here, so this side
+        // refuses rather than resolves: an unreadable store must not be quieter
+        // than an untrusted one.
+        return try std.fmt.allocPrint(
+            agent.alloc,
+            "could not read {s} on this machine ({s}), so no extension may be resolved through it",
+            .{ ext_store.workspace_root_rel, @errorName(err) },
+        );
+    };
+    // Absent, or holding nothing a session could compose or a CLI could run:
+    // there is nothing here to shadow anything with.
+    const path = occupied orelse return null;
+    defer agent.alloc.free(path);
+
+    // No home at all means there is nowhere a trust could have been recorded —
+    // the same honest refusal `ensureWorkspaceStoreTrusted` gives on the host.
+    if (try launch.userHomeDir(agent.alloc, agent.host)) |home| {
+        defer agent.alloc.free(home);
+        const trusted = trust.isTrusted(agent.alloc, agent.io, home, path) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            // A corrupt journal answers neither question (`journals/trust.zig`),
+            // and the one thing it may not do is answer "trusted".
+            return try std.fmt.allocPrint(
+                agent.alloc,
+                "the trust journal in {s} on this machine could not be read ({s}), so {s} cannot be used here",
+                .{ home, @errorName(err), path },
+            );
+        };
+        if (trusted) return null;
+    }
+    return try std.fmt.allocPrint(
+        agent.alloc,
+        "the extension store {s} on this machine arrived with a checkout and is not trusted there, " ++
+            "so no extension may be resolved through it; on that machine review it " ++
+            "(`nulya ext list`, `nulya ext inspect <id>`) and run `nulya ext trust` in that workspace, " ++
+            "or delete the store",
+        .{path},
+    );
 }
 
 fn serveRun(agent: *Agent, request: @FieldType(RunTask, "req")) !void {

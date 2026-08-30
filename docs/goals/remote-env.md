@@ -552,3 +552,20 @@ e2e 里一条通道连跑三次并断言每次都答对（`one channel serves ma
 10. **`--target` 的反查不点名 compiler**：哪个 zig 建出了对面那份不是这一场该要求的，`findSealed` 内部的有序搜索保证多份合格时答案仍然确定。
 
 **测试**：`zig build test` **564 pass / 4 skip**。e2e 逐组：`e2e-ext` 49 · `e2e-core` 48 · `e2e-agent` 23 · `e2e-std` 8 · **`e2e-remote` 20**（+4：extension 读到的是**远端**的 sentinel 且 freshness journal 落在远端 · 没 push 过的包是一次点名 `ext push` 的失败调用而 session 照常继续 · 反查不到 target 时 `session new` exit 1 并点名 `--target` 与 `ext push`，且什么都没创建 · 无 `exec_version` 列的老 header 照常 step）。
+
+### 6.5 修补（2026-08-30）：远端的 workspace store 也要过 trust gate
+
+**外部 review 的 P1，已核实。** 6.4 把 extension 的解析整个搬到持有字节的那一侧，却漏掉了跟着这个决定一起搬的那道门：`remote serve` 直接 `launch.extensionRoots` 拿 roots 交给 `extension/exec.zig` 的 `Resolver`，而 root 顺序里**相对每个请求头 cwd 的 workspace store 排第一**——于是一个随 checkout 到达远端机器的 `.nulya/extensions` 可以 shadow 掉 host 明确 `ext push` 进那台机器 user store 的版本，而那个 checkout 从未经过任何信任手势（seal 无签名，checkout 可以连 `binary_digest` 一起改，`.sealed` 照过）。host 侧的 `launch.ensureWorkspaceStoreTrusted` 从第一天就在管这件事，远端这一侧只是没人问。
+
+**修法**（`src/cli/remote.zig` 一处，`src/` 其余零改动，协议不动、不 bump `v`）：`serveRunExtension` 在解析任何东西之前对这次调用的 cwd 跑**同一份判据**——`launch.occupiedWorkspaceStore` + `journals/trust.zig` 读**这台机器自己的** `<NULYA_HOME | ~/.nulya>/trusted-stores.jsonl`（没有第二份实现，也没有新的权限概念）。逐条：
+
+1. **拒绝的形状是一次失败的调用，不是通道的终结。** 这边没有一场 session 可以拒掉（那场 session 在 host 上），而杀掉通道会把一件 `nulya ext trust` 就能修的事变成整场对话的死亡。所以它走 `agent.refuse`，与"对面没有这个版本 → 指路 `ext push`"（§6.4 偏差 3）**逐位同形**：host 把它答成 `exit 1` + 那句话，模型读得到，usage journal 记一个真实的 `ok=false`，session 照常。
+2. **判据与记录都在持有字节的那一侧。** 与 entry 变体、`.sealed` 同一条理由（§3.1），也与 §3.3 一致：host 不为远端拼路径，更不该替远端保管"哪个 store 被信任过"。
+3. **只门 workspace root。** user store 与 `extensions.paths` 在对面同样够不着 checkout（DESIGN §7.2/§9.5）——这正是 `ext push` 落在 user store 的理由（§6.3 偏差 7），所以那条路不受影响。`run-shell` / `put-file` / `store-*` 一个都不门，与 host 上 `shell` 从不过门一致。
+4. **答案按 cwd 在一个 serve 进程内记一次**（`Agent.Gate`，`Resolver.opened_for` 同款单条缓存）：一条通道一个工作区，每次调用重读 store 与 journal 是在反复回答同一个问题。缓存**只活在进程内**是另一半：对面跑完 `ext trust` 之后由**下一条通道**回答，没有需要作废的缓存。
+5. **答不上来一律 fail closed**：store 读不动、trust journal 完整行 malformed（`journals/trust.zig` 的既有纪律：corrupt 不许悄悄变成 trusted），都是一句点名原因的拒绝而不是放行；`OutOfMemory` 照旧当资源故障传播。没有 home 也拒——与 host 的 `ensureWorkspaceStoreTrusted` 逐位一致。
+6. **一条既有 e2e 改了它的远端工作区**：`a version the far machine does not hold …` 从前不给 `--workspace`，于是远端的 cwd 就是**跑测试的这个 nulya checkout**——一个 occupied 且（在 CI 与本机都）未被信任的 store。它现在拿一个自己的 tmpdir 当远端工作区。这不是为了让新代码过，是那个测试本来就该有一个"别的机器的工作区"：拿 harness 自己的 checkout 当远端工作区，任何关于远端的断言都可能因为本机的样子而成立或不成立。
+
+**同一轮 review 的一条 P3 顺手收掉**：`RemoteEnvironment.connect` 从前把 `hello` 里认不出的 dialect 词静默读成 bash（`if powershell else bash`）——而 `hello` 的哲学是唯一一次协商、不猜（版本不匹配就是先例）。现在只认 `bash` / `powershell`，别的词拒绝连接（`error.RemoteDialectUnknown`），一个异常 agent 报的 `"fish"` 不再变成一句关于每条命令的错话。
+
+**测试**：`zig build test` 567 pass / 4 skip（这条修补不加单测——它锻炼的是两个进程之间的那件事）· `zig build e2e-remote` **21**（+1：远端工作区里有一个没人信任过的 built 版本 → 调用它得到一次点名 `ext trust` 与 store 路径的失败调用、extension 没跑、同一条通道的下一个 `shell` 照常应答；在那台机器的 home 下跑一次 `nulya ext trust` → 新通道上同一个调用正常服务）。用 `ext init` + `ext build` 造一个**脚本**包，所以这条测试不付编译时间。**先红验证过**：把门那一行短路掉之后，`ext.exit_code != 0` 当场失败——未被信任的 checkout 里的 extension 真的跑起来了。

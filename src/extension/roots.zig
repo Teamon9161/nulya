@@ -14,6 +14,8 @@ const manifest = @import("manifest.zig");
 // rather than being shadowed inside the struct body.
 const ext_store = @import("store.zig");
 const testkit = @import("testkit.zig");
+const integrity = @import("integrity.zig");
+const target_mod = @import("target.zig");
 
 /// The ordered set of store roots a process searches (DESIGN §7.2): the
 /// workspace's `.nulya/extensions`, then the user's `~/.nulya/extensions`, then
@@ -260,6 +262,19 @@ pub const Roots = struct {
     /// already the key a donor copy matches on — so this asks `Store.findSealed`,
     /// the same matcher a build asks about its own machine.
     ///
+    /// `source_root` names WHICH root's copy of `<id>@<version>` is the one to
+    /// trust for the starting digest — the caller's answer, not this function's
+    /// guess. Composition already ran `.sealed` resolution to pick a winning
+    /// root per DESIGN §7.2 (first active root wins); re-deriving that here by
+    /// scanning roots in order and taking whichever one's seal parses first
+    /// would let an unvalidated copy in an EARLIER root (a stale or tampered
+    /// `versions/<v>/` left in the workspace store, say) hand back a different
+    /// digest than the root composition actually resolved — silently searching
+    /// for the wrong sibling, or reporting `ExecVersionNotFound` for a session
+    /// that in fact has a good target build. The digest read from `source_root`
+    /// is not re-validated as `.sealed` here: composition already did that work
+    /// to arrive at `source_root` in the first place.
+    ///
     /// No compiler is named: which zig produced the copy for that machine is not
     /// something this session gets to require, and the sorted search inside
     /// `findSealed` keeps the answer deterministic when several qualify.
@@ -267,19 +282,12 @@ pub const Roots = struct {
         self: *const Roots,
         alloc: std.mem.Allocator,
         id: []const u8,
+        source_root: usize,
         version: []const u8,
         target_words: []const u8,
     ) !?[]u8 {
-        var digest: ?[]u8 = null;
-        defer if (digest) |d| alloc.free(d);
-        for (self.entries, 0..) |_, i| {
-            digest = self.store(i).readPackageDigest(alloc, id, version) catch |err| switch (err) {
-                error.Canceled, error.OutOfMemory => return err,
-                else => continue,
-            };
-            break;
-        }
-        const package_digest = digest orelse return null;
+        const package_digest = try self.store(source_root).readPackageDigest(alloc, id, version);
+        defer alloc.free(package_digest);
 
         for (self.entries, 0..) |_, i| {
             if (try self.store(i).findSealed(alloc, id, package_digest, target_words, null)) |found| return found;
@@ -423,4 +431,84 @@ test "roots search in order: the first root holding an id wins, a missing root i
     // caller hears — not a bare "not found".
     try ext_store.Store.init(io, ws_root).ensureVersionDir(alloc, "shared", "v-111111111111111111111111");
     try std.testing.expectError(error.VersionSealInvalid, roots.resolveVersion(alloc, "shared", "v-111111111111111111111111", .sealed));
+}
+
+test "resolveForTarget reads the digest from the caller's source root, not scan order" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "workspace");
+    try tmp.dir.createDirPath(io, "user");
+    var ws_root = try tmp.dir.openDir(io, "workspace", .{ .iterate = true });
+    defer ws_root.close(io);
+    var user_root = try tmp.dir.openDir(io, "user", .{ .iterate = true });
+    defer user_root.close(io);
+
+    // The GOOD copy of `pkg`@`good`, in the user root — this is the root
+    // composition would have resolved to after `.sealed` validation (say, the
+    // workspace copy is deactivated or was never active). Built for real
+    // through the shared fixture so its seal is genuinely valid.
+    const good = try testkit.writeSkillVersion(alloc, io, user_root, "pkg", "sibling body");
+    defer alloc.free(good);
+    const good_digest = try ext_store.Store.init(io, user_root).readPackageDigest(alloc, "pkg", good);
+    defer alloc.free(good_digest);
+
+    // A TAMPERED copy of the SAME id@version in the WORKSPACE root — the root
+    // `Roots.open` visits first. Content addressing promises identical bytes
+    // under identical names; this is the shape a stale or hand-edited
+    // `versions/<v>/seal.json` takes when that promise is broken. Only the
+    // seal matters here — `readPackageDigest` never reads the manifest.
+    try ext_store.Store.init(io, ws_root).ensureVersionDir(alloc, "pkg", good);
+    {
+        const seal = try integrity.sealJson(alloc, "bogus-digest-does-not-match-anything", "zig test", target_mod.host, null);
+        defer alloc.free(seal);
+        const version_rel = try ext_store.Store.init(io, ws_root).versionDir(alloc, "pkg", good);
+        defer alloc.free(version_rel);
+        const seal_dst = try std.fs.path.join(alloc, &.{ version_rel, integrity.seal_file });
+        defer alloc.free(seal_dst);
+        try ws_root.writeFile(io, .{ .sub_path = seal_dst, .data = seal });
+    }
+
+    // The genuine cross-compiled sibling: the SAME real package digest, built
+    // for a different machine (`ext build --target`, DESIGN §7.4). This is
+    // what a remote session's `exec_version` lookup is actually after.
+    const sibling = "v-" ++ ("a" ** 24);
+    {
+        try ext_store.Store.init(io, user_root).ensureVersionDir(alloc, "pkg", sibling);
+        const version_rel = try ext_store.Store.init(io, user_root).versionDir(alloc, "pkg", sibling);
+        defer alloc.free(version_rel);
+        const manifest_dst = try std.fs.path.join(alloc, &.{ version_rel, integrity.manifest_file });
+        defer alloc.free(manifest_dst);
+        try user_root.writeFile(io, .{ .sub_path = manifest_dst, .data =
+            \\{"schema":"nulya.extension/v2","id":"pkg","contributes":{"skills":["skills/demo"]}}
+        });
+        const skill_dst = try std.fs.path.join(alloc, &.{ version_rel, "package", "skills", "demo", "SKILL.md" });
+        defer alloc.free(skill_dst);
+        try user_root.createDirPath(io, std.fs.path.dirname(skill_dst).?);
+        try user_root.writeFile(io, .{ .sub_path = skill_dst, .data = "sibling body" });
+        const seal = try integrity.sealJson(alloc, good_digest, "zig test", "aarch64-linux", null);
+        defer alloc.free(seal);
+        const seal_dst = try std.fs.path.join(alloc, &.{ version_rel, integrity.seal_file });
+        defer alloc.free(seal_dst);
+        try user_root.writeFile(io, .{ .sub_path = seal_dst, .data = seal });
+    }
+
+    var tmp_real: [std.fs.max_path_bytes]u8 = undefined;
+    const base = tmp_real[0..try tmp.dir.realPath(io, &tmp_real)];
+    // Workspace first, user second — matching real search order, so a buggy
+    // scan-from-root-0 implementation would hit the tampered copy first.
+    var roots = try Roots.open(alloc, io, base, &.{ "workspace", "user" });
+    defer roots.deinit();
+
+    // Composition already decided "pkg"@good resolves to the USER root (index
+    // 1); that is the answer this call is handed, not asked to re-derive.
+    // Trusting it means the digest comes from the good copy, and the real
+    // cross-target sibling is found — a root-0-first scan would read the
+    // tampered digest instead and report no sibling at all.
+    const found = try roots.resolveForTarget(alloc, "pkg", 1, good, "aarch64-linux");
+    defer if (found) |f| alloc.free(f);
+    try std.testing.expect(found != null);
+    try std.testing.expectEqualStrings(sibling, found.?);
 }

@@ -70,6 +70,10 @@ pub const Error = error{
     RemoteChannelStalled,
     /// The far side speaks another protocol version (protocol.zig rule 4).
     RemoteVersionMismatch,
+    /// The agent named a shell dialect this build does not know. Refused, not
+    /// guessed: `hello` is the one negotiation, and reading "fish" as bash
+    /// would quietly hand the model a wrong fact about every command it runs.
+    RemoteDialectUnknown,
     /// The agent refused the request and said why.
     RemoteRefused,
     /// This session's commands run elsewhere, so a background task has no
@@ -567,9 +571,15 @@ pub const RemoteEnvironment = struct {
         errdefer alloc.free(ws);
 
         // The far side says which shell reads its commands; this host's config
-        // and detection have nothing to say about another machine.
-        const dialect_val: environment_mod.Dialect =
-            if (std.mem.eql(u8, ch.hello.dialect, "powershell")) .powershell else .bash;
+        // and detection have nothing to say about another machine. A word this
+        // build does not know is refused, never guessed (`hello` is the one
+        // negotiation, and it does not guess about versions either).
+        const dialect_val: environment_mod.Dialect = if (std.mem.eql(u8, ch.hello.dialect, "powershell"))
+            .powershell
+        else if (std.mem.eql(u8, ch.hello.dialect, "bash"))
+            .bash
+        else
+            return error.RemoteDialectUnknown; // errdefer above closes the channel
 
         return .{
             .alloc = alloc,

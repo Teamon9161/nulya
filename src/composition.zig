@@ -425,7 +425,7 @@ fn freshExecVersions(
         // `gpa` for the search's scratch (version listings, seal reads) and the
         // arena only for the answer: the composition arena lives as long as the
         // session, and a lookup's working set has no business in it.
-        const found = (try roots.resolveForTarget(gpa, r.id, r.version, target.?)) orelse {
+        const found = (try roots.resolveForTarget(gpa, r.id, r.root, r.version, target.?)) orelse {
             try reportMissingExecVersion(roots.io, gpa, r.id, r.version, target.?);
             return error.ExecVersionNotFound;
         };
