@@ -782,10 +782,19 @@ fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
     // unconditionally here would have removed that protection on this side
     // alone. Null is the honest answer meanwhile: `readRow` reads a statusless
     // task as `starting` and never looks at this column.
+    // A real fault reading `.lock` (permission denied, the lease being a
+    // directory, anything this machine's disk had to say) is refused rather
+    // than swallowed into "not held": `readRow` turns a refusal into
+    // `unreachable`, not `lost` — the same distinction `readTaskFile` above
+    // already draws for `status.json` and `report.txt`, and the reason
+    // `leaseHeldIn` propagates that fault instead of answering it here.
     const lease_held: ?bool = if (status.len == 0)
         null
     else
-        try task_cli.leaseHeldIn(ws, agent.io, agent.alloc, paths.dir);
+        task_cli.leaseHeldIn(ws, agent.io, agent.alloc, paths.dir) catch |err| {
+            try agent.refuseFmt("could not read {s}'s lease here: {s}", .{ req.task, @errorName(err) });
+            return;
+        };
 
     const body = try protocol.encodeTaskSnapshot(a, .{ .status = status, .report = report, .lease_held = lease_held });
     try agent.reply(.{ .ok = true, .bytes = body.len }, body, "");

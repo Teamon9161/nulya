@@ -207,7 +207,11 @@ fn openFence(w: *std.Io.Writer, len: usize) !void {
 }
 
 /// The largest cut at or before `limit` that does not split a UTF-8 sequence.
-fn boundaryAtOrBefore(text: []const u8, limit: usize) usize {
+///
+/// `pub` because `main.zig`'s final document-size backstop needs the same cut
+/// — one implementation of "clip UTF-8 safely" for both, not a second copy of
+/// this loop guessing it agrees.
+pub fn boundaryAtOrBefore(text: []const u8, limit: usize) usize {
     var end = @min(limit, text.len);
     while (end > 0 and end < text.len and (text[end] & 0xC0) == 0x80) end -= 1;
     return end;

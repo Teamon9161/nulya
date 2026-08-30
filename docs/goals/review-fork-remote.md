@@ -104,10 +104,18 @@ readdir 的 `entry.name` / `child.name` 原样写进文档，POSIX 文件名不�
 候选文件同一条纪律：一个坏文件名该少一行，不该少一场 session），`render` 返回前
 再 `utf8ValidateSlice` 兜底。
 
-**不成立的那条**：`facts.zig` 的 `%<(240,trunc)%s`。git 按显示列截，最坏
-4 字节/列 ≈ 960 字节，离 `prompt.max_system_prompt_bytes` 差三个数量级——注释说
-它防住了"a document past the limit"是**成立的**。只把注释里 "no bound of its own"
-改准（列上限，不是字节上限），不改代码。
+**这条后来被推翻**：`facts.zig` 的 `%<(240,trunc)%s` 曾被认为按显示列截、最坏
+4 字节/列 ≈ 960 字节。**实测证伪**（下一轮 review，2026-08-30 晚，真 git
+2.50.1）：一个由 U+0301 combining mark 堆出来的 commit subject——combining
+mark 占一列但零宽度，列数与字节数的比例因此没有上限——让同一句
+`%<(240,trunc)%s` 打出 2.2 MB，而不是预计的 960 字节。`git.zig` 的 `bounded()`
+允许 4 MiB 原样通过，于是 `render` 照样报成功、`session new --prompt`（2 MiB）
+拒绝——和 layout/UTF-8 那两条是**同一个形状**，只是换了一个字段。修法**不是**再
+在列数上找安全边界（git 的截断本身就没有字节上界这个属性），而是给
+`main.zig` 的 `render()` 加一个独立于任何单一 section 的**文档级 byte
+budget**（`max_document_bytes = 1 MiB`，UTF-8-safe 裁剪 + 说明性 marker，复用
+`instructions.zig` 已有的 `boundaryAtOrBefore`），`facts.zig` 里那段"960 字节"
+的推导注释一并改成如实记录这次测量与它证伪的结论。
 
 ## 7. 实施记录
 
@@ -340,3 +348,50 @@ supervisor 的 `open(O_CREAT)` 与它的 `flock` 之间的 poll，就能让那�
 这一侧把这层保护拆掉。所以远端也按同一顺序问：`status.len == 0` → `lease_held`
 答 `null`（诚实：`readRow` 对没有 status 的任务本来就读成 `starting`，根本不看
 这一列）。**两台机器同一个提问顺序**，这条才算真的只有一份实现。
+
+### 7.4 第三轮 review 的两条（2026-08-30）：⑤ 的"三个数量级"被证伪、`leaseHeldIn` 自己也在塌答案
+
+第三轮外部 review 用真 git（2.50.1）实测推翻了 §7.3 结尾那句"契约给出的三个
+数量级边际核实无误"——不是没做验证，是当时的验证本身就没跑对着 combining
+mark 构造过。
+
+**⑤（重开）：`%<(n,trunc)` 没有字节上界这个属性，不是"上界更宽"。**
+`git log -1 --format='%h %<(240,trunc)%s'` 对一个由 ~110 万个 U+0301 组成的
+subject 打出 2,200,249 字节；`%<(10,trunc)%s` 对 2000 个 U+0301 打出 4011
+字节。combining mark 占且仅占它依附的那个字符的显示列，本身零宽度，所以
+"列数"与"字节数"之间没有任何比例关系可言——240 列可以是 240 字节也可以是
+2.2 MB，`bounded()` 的 4 MiB `max_output` 才是它现在的真实上限。
+
+修法**不是**在列数上继续找更保守的安全边际（这条路本身就走不通），而是给
+`extensions/ground/src/main.zig` 的 `render()` 加一个与任何单一 section 无关的
+**文档级 byte budget**：新常量 `max_document_bytes = 1 MiB`，新函数
+`clipToBudget`（复用 `instructions.zig` 已有的 `boundaryAtOrBefore`，因此该函数
+改为 `pub`）在 `out.toOwnedSlice()` 之后、UTF-8 终验之前跑一次，超预算就 UTF-8
+安全裁剪并追加一行说明（"this document was N bytes; the render budget is M,
+so it was cut here"）。选 1 MiB 而不是等于内核的 2 MiB：这是 Ground 自己的
+渲染预算，不是把 kernel policy 抄一份，留出的余量正是给这类"某个上游工具的
+截断比想象中松"的情况。`facts.zig` 里那段推导注释整段重写，如实记录这次
+测量与它推翻的结论，不再声称任何字节上界。
+
+**新增的 leaseHeldIn 问题（不在原契约里，是这一轮新读出来的）：** 同一次
+review 顺带读出 `cli/task.zig` 的 `leaseHeldIn`——④a/④b 刚刚才把
+`readTaskFile` 与 `TaskSnapshot.lease_held` 修成"答不上来就说答不上来"——自己
+仍在犯同一个错：`catch |err| switch (err) { error.WouldBlock => true, else =>
+false }` 把权限拒绝、`.lock` 是目录、任何真实 I/O 故障，与"没有 lease 文件"
+一并读成"没人持有"。远端这一侧 `serveTaskPoll` 已经在用 `try` 调用它，只是
+`leaseHeldIn` 从不真的返回错误，所以这条路径此前从未被走到。
+
+修法对齐 ④a 已经立好的规矩：`leaseHeldIn` 只把 `error.FileNotFound` 折成
+`false`，其余错误 `return e`；`serveTaskPoll` 里 `try` 改成显式
+`catch |err| { refuseFmt(...); return; }`，让一次读锁故障从"这个任务的
+supervisor 已经死了"变成"这台机器现在答不上来"（host 侧因此读成
+`unreachable` 而不是 `lost`）；本机侧 `readRow` 里 `.state = try
+projectState(...)` 改成 `projectState(...) catch return null`——与紧邻的
+`readStatus(...) catch return null` 同一条纪律，一次真实的锁读故障跳过这一行
+而不是让整个 `task list` 崩掉。
+
+**测试**：`extensions/ground/src/main.zig` 新增三条单测（在预算内原样通过、
+3 MiB 全 ASCII 被裁到预算附近且带说明文字、裁切点恰好落在多字节字符中间时不
+产生非法 UTF-8）；`tests/e2e/remote.zig` 新增一条——远端 `status.json` 说
+`"running"` 但 `.lock` 是目录（真实 `error.IsDir`），断言 `task list --json`
+读出 `"state":"unreachable"` 而不是 `"state":"lost"`。

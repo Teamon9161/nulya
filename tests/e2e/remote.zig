@@ -1400,6 +1400,57 @@ test "a real read fault on that machine's status file is a refusal, not an empty
     try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"state\":\"starting\"") == null);
 }
 
+test "a real read fault on that machine's lease is a refusal, not a confident lost" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const spec = try execSpec(alloc, exe, "");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // A `status.json` that says "running" — so `serveTaskPoll` actually probes
+    // the lease instead of answering `null` for a statusless task — paired
+    // with a `.lock` that is a DIRECTORY over there, not a missing or held
+    // file. Before this fix, `leaseHeldIn`'s blanket `else => false` made an
+    // unreadable lease indistinguishable from an unheld one, and the task
+    // read as `lost` — a dead supervisor's shape — when what actually
+    // happened is that machine could not answer the question at all.
+    const dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{id});
+    defer alloc.free(dir);
+    try ws.createDirPath(io, dir);
+    try far.dir.createDirPath(io, dir);
+    const status_rel = try std.fmt.allocPrint(alloc, "{s}/status.json", .{dir});
+    defer alloc.free(status_rel);
+    try far.dir.writeFile(io, .{ .sub_path = status_rel, .data =
+        \\{"v":1,"task":"S/t1","session":"S","command":"sleep 30","cwd":".","started":"2026-08-19T10:00:00Z","state":"running"}
+        \\
+    });
+    const lock_rel = try std.fmt.allocPrint(alloc, "{s}/.lock", .{dir});
+    defer alloc.free(lock_rel);
+    try far.dir.createDirPath(io, lock_rel);
+
+    const listed = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--json" });
+    defer alloc.free(listed.stdout);
+    try std.testing.expectEqual(@as(u8, 0), listed.code);
+    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"state\":\"unreachable\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"state\":\"lost\"") == null);
+}
+
 test "a task whose machine will not answer reads as unreachable, not as lost or done" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

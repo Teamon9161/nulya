@@ -270,7 +270,17 @@ pub fn leaseHeldIn(base: std.Io.Dir, io: std.Io, alloc: std.mem.Allocator, dir: 
         .lock_nonblocking = true,
     }) catch |err| switch (err) {
         error.WouldBlock => return true,
-        else => return false,
+        // No lease file at all IS "nobody holds it" (the doc comment above),
+        // the same fact a `false` return already reports. Every other failure
+        // — permission denied, the lease being a directory, any other I/O
+        // fault this machine's disk had to say — is answered upward instead:
+        // an unreadable lease is not the same claim as an unheld one, and
+        // folding it into `false` is exactly what turned a `status.json` read
+        // fault into a confident "starting" before this file's `readTaskFile`
+        // was fixed to stop doing that. Callers decide what an unanswerable
+        // lease means, because they know which side of the wire they are on.
+        error.FileNotFound => return false,
+        else => |e| return e,
     };
     f.close(io);
     return false;
@@ -1307,9 +1317,9 @@ const RowRef = struct {
 /// One task's state, from whichever machine holds it — this disk for a local
 /// session, the channel for a remote one, with any report it has left collected
 /// on the way past (`pollAndDeliver`).
-/// Null means the row is skipped: a status that exists but does not parse is a
-/// fault, and nothing here makes up a state on a supervisor's behalf — the same
-/// rule on either machine.
+/// Null means the row is skipped: a status that exists but does not parse, or
+/// a lease that exists but cannot be read, is a fault, and nothing here makes
+/// up a state on a supervisor's behalf — the same rule on either machine.
 fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef) !?Row {
     if (try far.isRemote(ref.session)) {
         var row: Row = .{
@@ -1359,7 +1369,11 @@ fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef) !?Row {
         .full = ref.full,
         .session = ref.session,
         .dir = ref.dir,
-        .state = try projectState(arena, io, ref.dir, status),
+        // Same rule as the line above: a real fault reading `.lock` (not just
+        // its ordinary absence, which `leaseHeldIn` already answers as "not
+        // held") skips the row instead of guessing running or lost on a
+        // supervisor's behalf.
+        .state = projectState(arena, io, ref.dir, status) catch return null,
         .status = status,
         .notify = ref.notify,
     };

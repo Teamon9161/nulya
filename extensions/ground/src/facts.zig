@@ -76,18 +76,21 @@ pub fn renderGit(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, repo: 
     if (git.ask(alloc, io, &.{ "branch", "--show-current" })) |branch| {
         try w.print("branch: {s}\n", .{if (branch.len == 0) "(detached HEAD)" else branch});
     }
-    // The subject's bound does not come from this file's own `bounded()` byte
-    // cap — `bounded` allows four megabytes of raw git output, and this
-    // section writes what it gets. It comes from GIT, in the format string:
-    // `%<(n,trunc)` cuts at n DISPLAY COLUMNS, not n bytes, and says so with
-    // `..`. A column bound is not a byte bound, but it does not need to be one
-    // to do the job here — worst case is 4 bytes per column in UTF-8, so 240
-    // columns is at most ~960 bytes, three orders of magnitude under
-    // `prompt.max_system_prompt_bytes`. Without it a single absurd commit
-    // subject would still produce a document past that limit: `render`
-    // succeeds and `session new --prompt` then refuses, the same shape as the
-    // fence bug in `instructions.zig`. The padding it adds to shorter subjects
-    // is removed by `ask`.
+    // `%<(240,trunc)` is a courtesy, not a bound: it cuts at 240 DISPLAY
+    // COLUMNS, not 240 bytes, and a column is not a fixed number of bytes in
+    // UTF-8. It was once assumed to bound the subject to ~960 bytes worst
+    // case (4 bytes/column) — that is wrong, measured against real git
+    // (2.50.1): a subject built from zero-width combining marks (which occupy
+    // a column each without widening it — U+0301 repeated) printed 2.2 MB
+    // through this exact format string, not 960 bytes. Nothing here failed as
+    // a result only because `main.zig`'s `clipToBudget` is a second,
+    // byte-counted backstop over the WHOLE assembled document — that is where
+    // the actual guarantee against a document past
+    // `prompt.max_system_prompt_bytes` lives now. This format string still
+    // earns its place for the ordinary case: it keeps short subjects
+    // unpadded (`ask` trims what padding it does add) and long-but-honest
+    // ones from dominating the section, it is just not what makes the size
+    // invariant hold.
     if (git.ask(alloc, io, &.{ "log", "-1", "--format=%h %<(240,trunc)%s" })) |head| {
         if (head.len != 0) try w.print("last commit: {s}\n", .{head});
     }

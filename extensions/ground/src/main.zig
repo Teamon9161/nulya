@@ -54,6 +54,20 @@ const layout = @import("layout.zig");
 /// two front ends on it is a thing nulya supports, so this is not hypothetical.
 const out_root = ".nulya/scratch/ground";
 
+/// Hard ceiling on the ASSEMBLED document, independent of any one section's
+/// own budget (`instructions.zig`'s 16 KB per file, `git.zig`'s 4 MiB raw
+/// capture). A section budget only bounds what that section quotes, not what
+/// git itself hands back around the quote: `facts.zig`'s commit subject is
+/// clipped with git's own `%<(240,trunc)`, which cuts at DISPLAY COLUMNS, and
+/// a subject built from zero-width combining marks can make columns-to-bytes
+/// unbounded — measured against a real `git log` (2.50.1), 240 columns of
+/// combining marks alone printed 2.2 MB, not the ~960 bytes a byte-per-column
+/// estimate predicts. This is Ground's own render budget, not a copy of the
+/// kernel's `prompt.max_system_prompt_bytes` (2 MiB) — comfortably under it
+/// rather than equal to it, so this backstop trips before that one ever has
+/// a reason to.
+const max_document_bytes: usize = 1 << 20;
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     // One arena for the whole call: this process renders one document, writes
@@ -100,18 +114,32 @@ fn render(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
     try w.writeAll("\n");
     try facts.renderGit(alloc, io, w, repo);
 
-    const document = try out.toOwnedSlice();
-    // Final backstop, not a substitute for the sources that skip a bad name or
+    // Final backstops, not a substitute for the sources that skip a bad name or
     // a bad file instead of quoting it (`layout.zig`'s `skip`,
     // `instructions.zig`'s candidate check): every section funnels into this one
     // document, and this is the one place that can say the whole thing is fit
     // to freeze. `session new --prompt` refuses anything that is not valid
     // UTF-8 (BUGS #22 — `std.json.Stringify` writes it as an array of numbers,
-    // not a string, and the header stops being the shape §3 promises), so
-    // failing HERE means `render` reports the failure instead of reporting
-    // success and letting it land on the next command instead.
+    // not a string, and the header stops being the shape §3 promises) or over
+    // its 2 MiB size limit, so failing — or clipping — HERE means `render`
+    // reports the outcome instead of reporting success and letting it land on
+    // the next command instead.
+    const document = try clipToBudget(alloc, try out.toOwnedSlice());
     if (!std.unicode.utf8ValidateSlice(document)) return error.InvalidUtf8;
     return document;
+}
+
+/// Cut an assembled document down to `max_document_bytes`, UTF-8-safe, with a
+/// marker saying so. Pulled out of `render` so the invariant can be tested
+/// against a document git never had to be coaxed into producing.
+fn clipToBudget(alloc: std.mem.Allocator, document: []const u8) ![]const u8 {
+    if (document.len <= max_document_bytes) return document;
+    const end = instructions.boundaryAtOrBefore(document, max_document_bytes);
+    return std.fmt.allocPrint(
+        alloc,
+        "{s}\n\n[ground: this document was {d} bytes; the render budget is {d}, so it was cut here.]\n",
+        .{ document[0..end], document.len, max_document_bytes },
+    );
 }
 
 /// Write the document into a directory this invocation owns, and answer where.
@@ -162,4 +190,44 @@ test {
     _ = git;
     _ = instructions;
     _ = layout;
+}
+
+test "a document within budget passes through untouched" {
+    const alloc = std.testing.allocator;
+    const small = "hello world\n";
+    const out = try clipToBudget(alloc, small);
+    try std.testing.expectEqualStrings(small, out);
+}
+
+test "an oversized document is clipped to the budget, not merely UTF-8 validated" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Ported from a real measurement against git 2.50.1: a commit subject
+    // built from ~1.1M zero-width combining marks made `%<(240,trunc)` print
+    // 2.2 MB, not the ~960-byte worst case a bytes-per-column estimate
+    // predicts (`docs/goals/review-fork-remote.md`). This document-level
+    // budget is what stands between that and `render` reporting success on
+    // something `session new --prompt` (2 MiB) then refuses.
+    const huge = try alloc.alloc(u8, 3 << 20);
+    @memset(huge, 'x');
+    const clipped = try clipToBudget(alloc, huge);
+    try std.testing.expect(clipped.len < huge.len);
+    try std.testing.expect(clipped.len <= max_document_bytes + 200);
+    try std.testing.expect(std.mem.indexOf(u8, clipped, "cut here") != null);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(clipped));
+}
+
+test "the clip never splits a multi-byte character even when the cut lands inside one" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A multi-byte character straddling the exact budget boundary — the case
+    // `boundaryAtOrBefore` retreats for.
+    var huge: std.ArrayList(u8) = .empty;
+    while (huge.items.len < max_document_bytes + 100) try huge.appendSlice(alloc, "中文字符ab");
+    const clipped = try clipToBudget(alloc, huge.items);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(clipped));
 }
