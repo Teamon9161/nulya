@@ -167,14 +167,27 @@ export function nextAttachmentAfter(history: readonly string[]): number {
 /**
  * A fresh marker for a paste whose content is not known yet. Its own id
  * space, so it can never collide with `[Pasted text #N]` / `[Image #N]`
- * (`numbered_placeholder` above) and is never mistaken for a real attachment
- * on the rare path where it reaches a submitted message unresolved (nothing
- * here waits for a pending paste before letting Enter submit — a message
- * sent mid-paste keeps the marker as literal text, the same way an ordinary
- * typo would).
+ * (`numbered_placeholder` above).
+ *
+ * `Composer.tsx`'s `submit` refuses to send while `hasPendingPaste` below
+ * still sees one of these in the draft (an external review point, tui.md
+ * §11 T103) — a paste is a promise to put the real content there, and
+ * mailing the literal brackets because Enter landed a few dozen milliseconds
+ * early would break that promise for good: by the time the read answers the
+ * box has already been cleared and the token nowhere left to settle into.
+ * The block is momentary (the read is a clipboard hit or a local file, not a
+ * network round trip) and lifts itself the instant the marker resolves or is
+ * deleted — Enter just has to be pressed again.
  */
 export function pendingPlaceholder(id: number): string {
   return `[Pasting… #${id}]`
+}
+
+const pending_marker = /\[Pasting… #\d+\]/
+
+/** Whether `text` still names an unresolved `pendingPlaceholder` marker. */
+export function hasPendingPaste(text: string): boolean {
+  return pending_marker.test(text)
 }
 
 /** Where `token` sits in `text`, or -1 when it is no longer there (deleted before the paste resolved). */

@@ -15,6 +15,7 @@ import {
 import {
   describeAttachment,
   expandPastes,
+  hasPendingPaste,
   measure,
   nextAttachmentAfter,
   pasteShouldFold,
@@ -677,6 +678,15 @@ export function Composer(props: {
 
   const submit = (interrupt = false) => {
     const text = area?.plainText ?? ""
+    // A paste still in flight (tui.md §11 T103, an external review point):
+    // sending now would mail the literal `[Pasting… #N]` brackets, and by the
+    // time the read answers the box is already cleared with nowhere left for
+    // it to settle into. Refuse and say so; the block lifts itself the moment
+    // the marker resolves or is deleted, so Enter just needs pressing again.
+    if (hasPendingPaste(text)) {
+      props.onNotice?.("still pasting · press Enter again once it lands")
+      return
+    }
     clear()
     shown = null
     const sentImages = images().filter((image) => text.includes(imagePlaceholder(image.id)))

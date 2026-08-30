@@ -30,14 +30,17 @@
  * settings file that no longer parses would take the whole screen's
  * configuration with it, and a wrong guess must cost nothing but a message.
  *
- * TWO MORE GUARANTEES, ADDED WHEN AN EXTERNAL REVIEW ASKED FOR THEM (T103).
- * The edit is patched against the FRESHEST read of `path`, taken again right
- * before it is accepted (`patchAgainstFreshest`) — a person's own editor
- * saving the file in between never loses to this screen's copy, because the
- * later answer always wins. And the write itself is ATOMIC: the new text
- * lands in a sibling temp file and is renamed over `path`, so nobody watching
- * the file — this process's own next `loadSettings` included — ever sees it
- * half-written.
+ * TWO MORE PROPERTIES, ADDED WHEN AN EXTERNAL REVIEW ASKED FOR THEM (T103).
+ * The edit is patched against a FRESH re-read of `path`, taken immediately
+ * before the replacement is constructed (`patchAgainstFreshest`) — which
+ * shrinks, but does not close, the window in which a person's own editor
+ * saving the file loses that save: an external write landing between that
+ * re-read and the rename below is still overwritten. Concurrent external
+ * writes are not serialized (a lock no editor would honour is not worth its
+ * complexity); the re-read is a smaller window, not a guarantee. The write
+ * itself IS atomic: the new text lands in a sibling temp file and is renamed
+ * over `path`, so nobody watching the file — this process's own next
+ * `loadSettings` included — ever sees it half-written.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
@@ -245,9 +248,9 @@ export function layerSets(layer: Record<string, unknown> | null, dotted: string)
  * while committing against a copy that stopped being what is on disk would
  * silently drop whatever changed it — a person's own editor saving `tui.toml`
  * in the moment between the two, most concretely. The second answer always
- * wins when it differs, which is the same rule a compare-and-swap follows:
- * the freshest read is the only one that can still be true when the write
- * lands.
+ * wins when it differs. This is NOT a compare-and-swap: nothing re-checks at
+ * the moment the rename lands, so a save arriving after the second read is
+ * still lost. It narrows the window; the file-level comment says so.
  *
  * A seam rather than folded into `writeSetting` also because it is what
  * makes the race TESTABLE: a `read` that answers differently the second time

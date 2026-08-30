@@ -11,6 +11,7 @@ import { expect, test } from "bun:test"
 import {
   describeAttachment,
   expandPastes,
+  hasPendingPaste,
   measure,
   nextAttachmentAfter,
   paste_fold_chars,
@@ -150,6 +151,16 @@ test("text typed exactly where the marker was does not confuse the splice with a
   // A refused paste (vision not accepted, or the clipboard was empty):
   // settling with "" must leave the surrounding text untouched.
   expect(settle(text, token, "")).toBe("notes: ")
+})
+
+test("hasPendingPaste sees an unresolved marker wherever it sits, and nothing else", () => {
+  expect(hasPendingPaste(pendingPlaceholder(1))).toBe(true)
+  expect(hasPendingPaste(`before ${pendingPlaceholder(2)} after`)).toBe(true)
+  expect(hasPendingPaste("plain text")).toBe(false)
+  // A settled attachment or image placeholder is not this shape — only the
+  // literal "Pasting…" marker counts.
+  expect(hasPendingPaste(placeholderFor(1))).toBe(false)
+  expect(hasPendingPaste("[Image #1]")).toBe(false)
 })
 
 test("placeholders are accented by their shape, wherever they sit in the line", () => {

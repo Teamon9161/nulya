@@ -2961,3 +2961,13 @@ Alt 走的是 `option`。翻编译产物确认了两条解析路径（原始 ESC
 - **`state/tui_state.ts`**：`loadTuiState` 读到盘上记着的 `exec_env` 以 `ssh:` 开头时**丢弃**（读作"没记住" = local），不改写成 `remote:ssh:`——那是一个便利状态文件，不是 header，替人换语义比丢弃更糟。新测试直接写一份带 `ssh:box` 的 `tui-state.json` 验证被丢弃，另写一份 `remote:ssh:box` 验证它原样保留（两个词形状相似，行为必须不同）。
 
 **测试**：`zig build test`（`config.zig`/`launch.zig`/`environment.zig` 新增或改写的单测）、五组 e2e 全绿（`tests/e2e/exec_env.zig` 改用 Windows-only 的 `wsl:<不存在的发行版名>` 钉住"冻结在不可达目标上的场绝不悄悄在本机跑"这条性质——`execTargetSupportedOnHost` 对 `wsl:<任意名字>` 在 Windows 上恒真，不需要真的装了那个发行版；`ssh:` 相关的两条断言改成钉"被拒绝且带指路"而不是"被冻结"）、`cd tui && bun test`（726 pass）与 `bunx tsc --noEmit` 干净。
+
+### T105 · 一条外部 review P2：async paste 的 pending token 不再能被 Enter 抢跑（2026-08-30）
+
+**内核零改动。**
+
+**问题**：T103 ③ 那套 pending token 机制（`paste.ts` 的 `pendingPlaceholder`/`tokenAt`）解决了"结算到哪"，没解决"结算之前能不能提交"——注释当时明说了"nothing here waits for a pending paste before letting Enter submit"。`Ctrl+V` 之后手快按 `Enter`，发给模型的是字面 `[Pasting… #1]`；随后剪贴板或磁盘读回来时 composer 早已清空、`tokenAt` 找不到那个 token，`settleToken` 按既有规则什么都不做（这条规则本来是为"用户手动删掉了 token"设计的，这里被一次意外的时序借用了）——真正贴的内容就这样连一个字节都没有落进任何地方地消失了。paste 这个手势的语义是"把内容贴进去"，不该因为手快变成发送一个内部占位符。
+
+**改法**：不把 `submit` 改成 async（那会让"提交"这个动作本身变得不可预测）。`paste.ts` 新增 `hasPendingPaste(text)`——一个纯函数，检测文本里是否还留着形如 `pendingPlaceholder` 的 marker（与 `numbered_placeholder`/`placeholderRanges` 认已解决的两种占位符同一种"按形状识别"手法，但认的是未解决的那一种）。`Composer.tsx` 的 `submit()` 在读到 buffer 内容之后、清空 buffer 之前先问它：还留着 pending marker 就拒绝提交（不清空、不写历史、不调 `onSubmit`），走既有的 `props.onNotice` 通道说一句"still pasting · press Enter again once it lands"（`onNotice` 就是 `App.tsx` 的 `setNotice`，走已有的 `noticeHold` 淡出纪律，不是新造的通知形状）。这一刻起两条路径分开：**token 解决**（`settleToken` 换成真内容）或**token 被用户删除**（不管是不是通过 `backspaceAttachment` 那条整词删除的路），`hasPendingPaste` 都会翻回 `false`，下一次 `Enter` 照常放行——不需要重试计时器或者队列，因为 `submit` 每次都是重新问一次当下的 buffer。`triggerInterrupt`（ar-t1 的 Ctrl+J）与普通 `Enter` 走的是同一个 `submit()`，所以这条门也同时管住了它。T103 那段注释里"nothing here waits… a message sent mid-paste keeps the marker as literal text"已经改写成描述现在的行为。
+
+**测试**：`test/paste.test.ts` 新增一条纯函数测试（`hasPendingPaste` 认一个 marker、认它嵌在别的文字中间、不认已解决的两种占位符形状）。`test/composer.test.tsx` 新增两条端到端——`readImage` 用手动控制的 promise 钉住时序（不依赖 `setTimeout` 赌时间）：粘贴一张图片路径后立刻 `Enter`，断言什么都没提交、notice 说了原因、marker 原样留在框里；放行那个 promise 之后再按一次 `Enter`，这次照常提交（这条测试在修复前会红：`sent` 收到一条内容为字面 `[Pasting… #N]` 的消息）。另一条钉住删除路径：`Ctrl+V` 挂起后把整个 marker 逐字符 Backspace 掉，`Enter` 照常把剩下的文字提交出去，不需要等那个永远不会被放行的 clipboard 读。`bun test`、`bunx tsc --noEmit` 均干净。

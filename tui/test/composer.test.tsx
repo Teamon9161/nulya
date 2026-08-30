@@ -10,6 +10,7 @@ import { testRender } from "@opentui/solid"
 import { useKeyboard } from "@opentui/solid"
 import { MouseButtons } from "@opentui/core/testing"
 import { Composer, wrappedRows } from "../src/ui/Composer.tsx"
+import { pendingPlaceholder } from "../src/paste.ts"
 import { completions } from "../src/commands.ts"
 import { displayWidth } from "../src/ui/columns.ts"
 import { StyleContext, createStyle } from "../src/render/theme.ts"
@@ -636,6 +637,111 @@ test("an async paste settles at the spot it was pasted, not wherever the cursor 
     // test already pins, just with the marker in the middle this time.
     expect(sent[0]!.text).toBe("caption:  done")
     expect(sent[0]!.images[0]!.bytes).toEqual(png)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+/**
+ * The pending-token submit gate (tui.md §11 T105, an external review point
+ * on T103): the fix above claims a spot synchronously and settles it later,
+ * but nothing used to stop Enter from firing while the spot was still
+ * unclaimed — a fast `Ctrl+V` then Enter mailed the literal
+ * `[Pasting… #N]` brackets to the model, and by the time the read answered
+ * the box was already cleared with nowhere left for the marker to resolve
+ * into. `readImage` here is gated on a promise this test resolves by hand,
+ * so the race is exact rather than a hope pinned on a `setTimeout`.
+ */
+test("Enter is refused while a paste is still in flight, and goes through once it resolves", async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])
+  const dir = mkdtempSync(join(tmpdir(), "nulya-tui-pending-submit-"))
+  writeFileSync(join(dir, "shot.png"), png)
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const sent: string[] = []
+  const notices: string[] = []
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer
+          readImage={async (path) => {
+            await gate
+            return path.endsWith("shot.png") ? { kind: "image", image: { bytes: png, mediaType: "image/png" } } : { kind: "none" }
+          }}
+          onNotice={(text) => notices.push(text)}
+          onSubmit={(text) => sent.push(text)}
+        />
+      </StyleContext.Provider>
+    ),
+    { width: 70, height: 12 },
+  )
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.pasteBracketedText(`"${join(dir, "shot.png")}"`)
+    expect(await settle(setup, 1)).toContain("Pasting")
+
+    // Enter while the read is still in flight: refused, not queued and not
+    // silently dropped — a notice says why, and the marker (and everything
+    // else in the box) is untouched.
+    setup.mockInput.pressEnter()
+    await settle(setup, 2)
+    expect(sent).toHaveLength(0)
+    expect(notices.join(" ")).toContain("still pasting")
+    expect(await settle(setup, 1)).toContain("Pasting")
+
+    // Let the read answer. The marker resolves on its own; Enter now goes
+    // through with no further action needed from the notice.
+    release?.()
+    await settle(setup, 5)
+    expect(await settle(setup, 1)).toContain("[Image #1]")
+    setup.mockInput.pressEnter()
+    await settle(setup, 3)
+    expect(sent).toHaveLength(1)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("deleting a pending marker before it resolves lets Enter through with whatever is left", async () => {
+  // The clipboard read is left gated for the rest of the test on purpose: once
+  // the marker it would settle is gone, there is nothing left for it to do,
+  // and releasing it after the renderer is torn down would just run
+  // `settleText` against a destroyed buffer for no assertion's benefit.
+  const gate = new Promise<void>(() => {})
+  const sent: string[] = []
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer
+          readClipboard={async () => {
+            await gate
+            return { status: "read", representation: { mimeType: "text/plain", bytes: new TextEncoder().encode("late") } }
+          }}
+          onSubmit={(text) => sent.push(text)}
+        />
+      </StyleContext.Provider>
+    ),
+    { width: 70, height: 10 },
+  )
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.typeText("keep ")
+    setup.mockInput.pressKey("v", { ctrl: true })
+    expect(await settle(setup, 1)).toContain("Pasting")
+
+    // Backspace the whole marker away before the clipboard answers — the
+    // cursor sits right after it, so this is exactly the gesture that drops
+    // an attachment's own placeholder (`backspaceAttachment`'s rule, though
+    // that function does not reach this shape).
+    const token = pendingPlaceholder(1)
+    for (let i = 0; i < [...token].length; i++) setup.mockInput.pressBackspace()
+    expect(await settle(setup, 1)).not.toContain("Pasting")
+
+    // The marker is gone, so Enter is no longer refused — "keep " goes
+    // through as an ordinary submit.
+    setup.mockInput.pressEnter()
+    await settle(setup, 3)
+    expect(sent).toEqual(["keep "])
   } finally {
     setup.renderer.destroy()
   }
