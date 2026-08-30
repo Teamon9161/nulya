@@ -4,6 +4,7 @@
 //! the outcome journal.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const support = @import("support.zig");
 
 const composition = support.composition;
@@ -1478,6 +1479,40 @@ test "session cli: --prompt freezes a file's bytes into the header, blocks land 
         try std.testing.expectEqualStrings("persona", blocks[1].source);
         try std.testing.expectEqualStrings(persona_text, blocks[1].bytes);
     }
+}
+
+test "session cli: --prompt refuses a file whose name is not valid UTF-8, before a session exists (goals/review-fork-remote.md §2)" {
+    // The `.source` label is `std.fs.path.stem(path)`, computed from the argv
+    // path string itself and written into the same header JSON the prompt's
+    // text is — so it needs the same guarantee, for the same reason (BUGS #22:
+    // `std.json.Stringify` writes a non-UTF-8 `[]const u8` as an array of
+    // numbers, not a string). Constructing the case needs a real filesystem
+    // entry whose name is invalid UTF-8, which POSIX permits and Windows's
+    // UTF-16-backed paths cannot represent.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const bad_name = "bad-\xff\xfe.md";
+    try ws.writeFile(io, .{ .sub_path = bad_name, .data = "a system prompt\n" });
+
+    const before = try countSessions(io, ws);
+    const err = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--prompt", bad_name }, &.{});
+    defer alloc.free(err);
+    try std.testing.expect(std.mem.indexOf(u8, err, "UTF-8") != null);
+    // Refused before a session id exists — the same discipline a bad body gets.
+    try std.testing.expectEqual(before, try countSessions(io, ws));
 }
 
 // ── M5d: `ext build` lands under the store root, by manifest id ─────────────

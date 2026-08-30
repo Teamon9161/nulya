@@ -34,6 +34,126 @@ const runCliEnvs = support.runCliEnvs;
 const runCliStderr = support.runCliStderr;
 const readSessionFile = support.readSessionFile;
 
+test "session new --parent inherits environment and remote_workspace from the frozen header, and --env local forks back to nothing" {
+    // `remote:exec:` needs only a non-empty argv word to PARSE — it is never
+    // actually spawned here, because `--bare` composes no compiled extension
+    // member, and `composition.ExecTargetProbe` only connects when a compiled
+    // member is in play (DESIGN §8.2, the doc comment on `RemoteTargetProbe`
+    // above). So this pins the header-inheritance property without a real peer.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const parent = try runCli(alloc, io, ws, &.{
+        exe,     "session",          "new",         "--profile", "scripted",
+        "--env", "remote:exec:true", "--workspace", "/x",        "--bare",
+    });
+    defer alloc.free(parent.stdout);
+    try std.testing.expectEqual(@as(u8, 0), parent.code);
+    const parent_id = try alloc.dupe(u8, std.mem.trim(u8, parent.stdout, " \r\n"));
+    defer alloc.free(parent_id);
+
+    const parent_header = try readSessionFile(alloc, io, ws, parent_id);
+    defer alloc.free(parent_header);
+    try std.testing.expect(std.mem.indexOf(u8, parent_header, "\"environment\":\"remote:exec:true\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, parent_header, "\"remote_workspace\":\"/x\"") != null);
+
+    const parent_ref = try std.fmt.allocPrint(alloc, "{s}:0", .{parent_id});
+    defer alloc.free(parent_ref);
+
+    // ① No `--env` at all on the fork: both columns carry over from the
+    // parent's own frozen header, not from today's (absent) flags.
+    {
+        const fork = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--parent", parent_ref });
+        defer alloc.free(fork.stdout);
+        try std.testing.expectEqual(@as(u8, 0), fork.code);
+        const id = try alloc.dupe(u8, std.mem.trim(u8, fork.stdout, " \r\n"));
+        defer alloc.free(id);
+
+        const header = try readSessionFile(alloc, io, ws, id);
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"environment\":\"remote:exec:true\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"remote_workspace\":\"/x\"") != null);
+    }
+
+    // ② `--env local` IS naming `--env` (it just normalizes to `""`), so the
+    // parent's two columns play no part at all — a fork that explicitly asks
+    // for a local machine gets a local machine, with no workspace column.
+    {
+        const fork = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--parent", parent_ref, "--env", "local" });
+        defer alloc.free(fork.stdout);
+        try std.testing.expectEqual(@as(u8, 0), fork.code);
+        const id = try alloc.dupe(u8, std.mem.trim(u8, fork.stdout, " \r\n"));
+        defer alloc.free(id);
+
+        const header = try readSessionFile(alloc, io, ws, id);
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"environment\":\"\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"remote_workspace\":\"\"") != null);
+    }
+}
+
+/// How many session files exist right now — whether an inherited-`--env`
+/// refusal left a fork behind (`session.zig`'s own `countSessions` twin; not
+/// shared because it is three lines and the two files do not otherwise import
+/// each other).
+fn countSessions(io: std.Io, ws: std.Io.Dir) !usize {
+    var dir = ws.openDir(io, ".nulya/sessions", .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return err,
+    };
+    defer dir.close(io);
+    var n: usize = 0;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".jsonl")) n += 1;
+    }
+    return n;
+}
+
+test "session new --parent: an inherited legacy ssh: environment is refused with a pointer at remote:ssh:, and names the parent" {
+    // Today's `session new --env ssh:…` is refused outright, so the only way
+    // this spelling reaches `--parent` inheritance is a header already on disk
+    // from before the retirement (goals/remote-env.md §7.1) — built here
+    // directly rather than through the CLI, which is exactly the case.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    try ws.createDirPath(io, ".nulya/sessions");
+    const header = try support.ledger.encodeHeaderLine(alloc, .{
+        .session = "s-legacy",
+        .environment = "ssh:box.example",
+    });
+    defer alloc.free(header);
+    try ws.writeFile(io, .{ .sub_path = ".nulya/sessions/s-legacy.jsonl", .data = header });
+
+    const before = try countSessions(io, ws);
+    const err = try runCliStderr(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--parent", "s-legacy:0" }, &.{});
+    defer alloc.free(err);
+    // The specific pointer (not the generic "unrecognized" message), and the
+    // fact that this value came from the parent rather than an `--env` on this
+    // command line — the whole point of the contract's "拒绝文案要说清这个值
+    // 来自父场" requirement.
+    try std.testing.expect(std.mem.indexOf(u8, err, "remote:ssh:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err, "s-legacy") != null);
+    // Only the pre-existing parent file — the fork was refused, not created.
+    try std.testing.expectEqual(@as(usize, 1), before);
+    try std.testing.expectEqual(before, try countSessions(io, ws));
+}
+
 /// The text `NULYA_SCRIPTED_MODE=finish`'s one `shell` call prints when it runs
 /// on THIS host (`launch.ScriptedProvider`). Spelled out rather than imported
 /// for the same reason the stand-in spells out its own markers: the e2e binary

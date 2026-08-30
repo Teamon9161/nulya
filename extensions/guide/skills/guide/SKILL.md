@@ -262,7 +262,14 @@ Store and scope:
   another process is currently running.
 - `nulya session new --parent <id>:<seq>` forks: a new file continuing an
   existing one. Compaction and handover are both this. Composition is not
-  inherited — pass `--with` and `--pin` again if the fork needs them.
+  inherited — pass `--with` and `--pin` again if the fork needs them. `--env`
+  and `--workspace` ARE inherited, though: leave `--env` off and a fork picks
+  up the parent's `environment` and `remote_workspace` verbatim (they are
+  creation-time identity, like the model), so a fork of a session running on a
+  remote machine does not silently fall back to this host. Name `--env` at all
+  (even `local`) to opt out and take a fresh machine from argv instead; naming
+  only `--workspace` on an inherited `--env` just picks a different directory
+  on the same machine.
 - `nulya session new --env <spec>` chooses WHERE this session's `shell` commands
   run: `local` (the default), `wsl`, or `wsl:<distro>`. It is frozen in the
   header, so `step` takes no such flag and a resume that cannot reach the

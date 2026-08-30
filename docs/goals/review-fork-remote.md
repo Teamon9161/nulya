@@ -110,3 +110,22 @@ readdir 的 `entry.name` / `child.name` 原样写进文档，POSIX 文件名不�
 改准（列上限，不是字节上限），不改代码。
 
 ## 7. 实施记录
+
+**2026-08-30，①⑥ 落地（`src/cli/session.zig`，只此一个文件；②③④⑤ 由并行的其它 lane 负责，未动 `cli/task.zig` / `cli/remote.zig` / `extensions/compact/` / `extensions/ground/`）。**
+
+① `createSession` 新增 `env_named` / `inherit_env` 两个局部：`env_named = flagValue(args, "--env")`（不 `orelse ""`，"缺席"与显式 `local` 分得开）；`inherit_env = env_named == null and parent_header != null`。`exec` 三路合一——命名了就 `normalizeExecSpec(e)`，没命名但有父场就取 `normalizeExecSpec(parent_header.?.value.environment)`（header 里存的本来就是创建时归一过的值，所以这一次是**保证规范形**而不是修复——冻进 child 的值不该取决于它走的是哪个分支），否则 `normalizeExecSpec("")`。`execTargetRefusal` 走同一次调用，不分叉；只有报错文案分叉，`inherit_env` 时点名 `parent.?.session` 与继承来的值，并附一句"在这个 fork 上显式写 `--env` 换一台机器"。`remote_workspace` 同一形状：`flagValue(args, "--workspace") orelse (if (inherit_env) parent_header.?.value.remote_workspace else "")`；后面那条"只在 remote 族接受"的校验完全不变，因为它只关心最终的 `exec`/`remote_workspace` 组合，不关心来源。
+
+② `promptRefs` 里 `.source = std.fs.path.stem(path)` 挪出来做局部变量，`utf8ValidateSlice` 通不过就 `printErrFmt("--prompt {s}: file name is not valid UTF-8\n", …)` 并 `return null`（连 `bytes` 一起释放），在任何 `alloc.dupe` / `out.append` 之前——不留会话、不留半截分配。
+
+**契约核对**：两条要求逐句照办，没有发现契约本身写错的地方。唯一补充：contract 只举了"`--env` 缺席 + `--parent`"与"`--env` 给出"两支，没显式写"没有 `--parent`"这一支（原逻辑分支，未受影响：`inherit_env` 恒 `false`，`exec` 走 `normalizeExecSpec("")`，与改动前逐字节相同）——落地时确认过这一支被现有代码路径自然覆盖，不需要第三条规则。
+
+**测试**：
+- 单元测试仍在 `zig build test`（569/573，4 个既有 skip，改动前后一致）——`createSession` 需要真实文件系统/host env，历来没有独立于 e2e 的单元覆盖，这次也保持这个分工。
+- `tests/e2e/exec_env.zig` 新增两条（挂在 `e2e-core`）：
+  - `"session new --parent inherits environment and remote_workspace from the frozen header, and --env local forks back to nothing"`——用 `--env remote:exec:true --workspace /x --bare` 建父场（`remote:exec:` 只需要非空 argv 词就能 PARSE 通过 `execTargetRefusal`，`--bare` 保证没有 compiled 成员、`ExecTargetProbe` 不会真的去连——落地前专门读了 `composition.ExecTargetProbe` 的调用点确认这一点，不是假设），断言① 无 `--env` 的 fork 两列都跟着来，② `--env local` 的 fork 两列都清空。
+  - `"session new --parent: an inherited legacy ssh: environment is refused with a pointer at remote:ssh:, and names the parent"`——用 `ledger.encodeHeaderLine` 直接手搓一个带 `environment: "ssh:box.example"` 的父 header（今天的 CLI 已经拒绝 `--env ssh:…`，这是唯一还能构造出"老 header 里冻着退休拼法"这个场景的办法），断言 refusal 里同时有 `remote:ssh:`（`legacySshHint` 给出的具体建议）与 `s-legacy`（父场 id），且没有新建任何 session 文件。
+- `tests/e2e/session.zig` 新增一条（同挂 `e2e-core`，POSIX-only——Windows 的 NTFS/UTF-16 路径没有办法构造出一个"文件名本身不是合法 UTF-8"的真实磁盘条目，`if (builtin.os.tag == .windows) return error.SkipZigTest`）：`"session cli: --prompt refuses a file whose name is not valid UTF-8, before a session exists"`，真在磁盘上建一个 `"bad-\xff\xfe.md"` 文件，断言 refusal 里有 `UTF-8` 且 session 计数未变。
+
+**跑法与结果**（Windows，`.claude/worktrees/agent-acb6fa8d514e520bd`，基线 `0635ae9`）：`zig build test` → 569/573 pass（4 skip）；`zig build e2e-core` → 50/51 pass、1 skip（就是上面那条 POSIX-only 测试，在这台 Windows 机器上如预期跳过）；`zig build e2e`（全部五组）在改动落地、`zig fmt` 之前跑过一次，155/157 pass（2 skip），随后 `zig fmt` 只重排了新增代码的换行（多行 argv 字面量），语义零改动，重新单独确认 `zig build test` 与 `zig build e2e-core` 仍是同样的绿。三个新用例各自用 `-Dtest-filter` 单独跑过，逐一确认它们各自绿（而不只是整体计数对得上）。
+
+**DESIGN.md / CLAUDE.md / guide skill 同步**：DESIGN §8.1（`Header.environment` 段落后新增一段说 fork 继承）与 §14 命令表的 `session new --parent` 那一条都补了这条规则；CLAUDE.md 追加一条"也跑通"记录（`src/root.zig` 那条之后）；`extensions/guide/skills/guide/SKILL.md` 的 `--parent` 那条项目符号补了 `--env`/`--workspace` 继承说明——它是模型会读到的文本，不出现 `DESIGN §x`，只讲行为。

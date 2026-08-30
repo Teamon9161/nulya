@@ -303,8 +303,19 @@ fn promptRefs(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?
             return null;
         }
         // The label the block carries for the rest of the session's life. The
-        // kernel never reads it; whoever wrote the file decides what it means.
-        try out.append(alloc, .{ .source = try alloc.dupe(u8, std.fs.path.stem(path)), .text = bytes });
+        // kernel never reads it, but it goes into the same header JSON the text
+        // above does — so it needs the same UTF-8 guarantee for the same reason
+        // (goals/review-fork-remote.md §2): a path built from non-UTF-8 bytes
+        // (raw POSIX filenames do not promise UTF-8) would make `std.json.Stringify`
+        // write this column as an array of numbers instead of a string, same as
+        // an invalid-UTF-8 body would.
+        const source = std.fs.path.stem(path);
+        if (!std.unicode.utf8ValidateSlice(source)) {
+            alloc.free(bytes);
+            try printErrFmt(alloc, io, "--prompt {s}: file name is not valid UTF-8\n", .{path});
+            return null;
+        }
+        try out.append(alloc, .{ .source = try alloc.dupe(u8, source), .text = bytes });
     }
     return try out.toOwnedSlice(alloc);
 }
@@ -484,13 +495,49 @@ pub fn createSession(
         identity = launch.resolveDescriptor(alloc, io, cfg.provider, &host, profile, model_id);
     }
 
-    // Where this session's `shell` commands will run, for its whole life
-    // (DESIGN §8). Checked here, before a session id exists, for the same reason
-    // a bad `--prompt` is: a session frozen onto a machine it cannot reach would
-    // fail identically on every step it ever takes.
-    const exec = environment.normalizeExecSpec(flagValue(args, "--env") orelse "");
+    // Where this session's `shell` commands (and, per DESIGN §8.2, its compiled
+    // extension calls) will run, for its whole life (DESIGN §8). Checked here,
+    // before a session id exists, for the same reason a bad `--prompt` is: a
+    // session frozen onto a machine it cannot reach would fail identically on
+    // every step it ever takes.
+    //
+    // `--env` ABSENT with a `--parent` inherits `environment` AND
+    // `remote_workspace` from the parent's own frozen header, rather than
+    // silently falling back to local (goals/review-fork-remote.md §1):
+    // environment is a creation-time identity fact exactly like model identity
+    // (DESIGN §3), not composition a new session boundary is meant to
+    // re-resolve — a fork of a `remote:ssh:box` session that quietly ran local
+    // instead would move `shell`, extensions and spill back to this host
+    // without saying so. Naming `--env` at all (any value, including `local`,
+    // which normalizes to `""`) means "I want a specific machine here" and the
+    // parent's two columns play no part at all — guessing a machine to carry
+    // over when one was explicitly named would be the same silent substitution
+    // in the other direction. `--workspace` given on its own (no `--env`) only
+    // overrides the directory column: the same remote machine, a different
+    // checkout, is a real request rather than a guess.
+    const env_named = flagValue(args, "--env");
+    const inherit_env = env_named == null and parent_header != null;
+    const exec = if (env_named) |e|
+        environment.normalizeExecSpec(e)
+    else if (parent_header) |h|
+        // Normalized like every other path into this variable: today a header
+        // only ever holds an already-normalized spec, so this is canonical
+        // form rather than a repair — the value frozen into the child must not
+        // depend on which branch produced it.
+        environment.normalizeExecSpec(h.value.environment)
+    else
+        environment.normalizeExecSpec("");
     if (launch.execTargetRefusal(exec)) |why| {
-        try printErrFmt(alloc, io, "--env {s}: {s}\n", .{ exec, why });
+        if (inherit_env) {
+            try printErrFmt(
+                alloc,
+                io,
+                "--env: inherited from parent session '{s}', which runs in '{s}': {s} (name --env explicitly on this fork to pick a different machine)\n",
+                .{ parent.?.session, exec, why },
+            );
+        } else {
+            try printErrFmt(alloc, io, "--env {s}: {s}\n", .{ exec, why });
+        }
         return null;
     }
 
@@ -498,8 +545,11 @@ pub fn createSession(
     // environment has the question: a local session works where nulya was
     // started, and a `wsl` / `ssh` exec target does not move the workspace at
     // all (DESIGN §8.1). Accepting the flag anyway would freeze a fact nothing
-    // ever reads — the kind of field this repo keeps deleting.
-    const remote_workspace = flagValue(args, "--workspace") orelse "";
+    // ever reads — the kind of field this repo keeps deleting. On an inherited
+    // `--env` (see above), an unnamed `--workspace` inherits the parent's
+    // directory too — the same column, the same reasoning.
+    const remote_workspace = flagValue(args, "--workspace") orelse
+        (if (inherit_env) parent_header.?.value.remote_workspace else "");
     if (remote_workspace.len != 0 and !launch.isRemoteSpec(exec)) {
         try printErrFmt(
             alloc,
