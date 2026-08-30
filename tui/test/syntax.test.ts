@@ -12,8 +12,12 @@ import { createStyle } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { code_theme_names, paletteFor, syntaxStyleFor, themePalette } from "../src/render/syntax.ts"
 
-const dark = createStyle({ ...default_settings, ui: { ...default_settings.ui, theme: "nulya-dark" } }).theme
-const light = createStyle({ ...default_settings, ui: { ...default_settings.ui, theme: "nulya-light" } }).theme
+// An explicit empty env, not the ambient one: a shell that exports NO_COLOR
+// would collapse both themes to the monochrome palette (by design — see the
+// mouse test that asks for exactly that with `{ NO_COLOR: "1" }`), and these
+// tests are about what the REAL palettes do.
+const dark = createStyle({ ...default_settings, ui: { ...default_settings.ui, theme: "nulya-dark" } }, {}).theme
+const light = createStyle({ ...default_settings, ui: { ...default_settings.ui, theme: "nulya-light" } }, {}).theme
 
 test("auto is answered by the background, not by the interface theme's name", () => {
   // The whole reason the default is not a palette: a dark palette on a light
