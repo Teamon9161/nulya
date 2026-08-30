@@ -616,7 +616,7 @@ e2e 里一条通道连跑三次并断言每次都答对（`one channel serves ma
 5. **名字总在 host claim，即使命令在别处跑**。名字是 ledger、回执与每个 `task` 动词说的那个东西，而 ledger 在 host；log / status / lease 在命令旁边。`claimTaskSlot` 因此是共用的，两个 backend 走同一段独占 mkdir。
 6. **`start-task` 失败的两种形状分开处理**：对面**明说拒绝** → 删掉 host 那个目录（它确定没起来），`error.RemoteTaskRefused`；**通道故障** → **目录留着**，因为"起没起来"未知，而放掉名字会让一个真的起来了的任务在这台机器上永远看不见、也 kill 不掉。留着的代价是一个永远 `starting` 的行，且那台机器一回来就自己解决。
 7. **`startShellTask` 仍然没有失败调用的形状**（§6.1 偏差 5 的同一条）：`runExtension` 的拒绝能把对面的原话答成一次 `exit 1`，而 `startShellTask` 只有"回执或 error"。所以对面那句话到不了模型，`tools/shell.zig` 给的是一句点名 `nulya remote check` 的固定文案。没有为此改 `TaskStart` 的形状——一个只在这条路上用得到的 outcome 变体，换来的是一句更准的话。
-8. **远端不做 `lost` 投影**。`lost` = "status 说 running 而租约空闲"，判据是那台机器文件系统上的一把锁；每次 poll 多问一次不值。远端任务要么是它自己的 status 说的，要么是"问不到"（`unreachable`）。
+8. ~~**远端不做 `lost` 投影**。`lost` = "status 说 running 而租约空闲"，判据是那台机器文件系统上的一把锁；每次 poll 多问一次不值。远端任务要么是它自己的 status 说的，要么是"问不到"（`unreachable`）。~~ **这条判断错了对象，2026-08-30 review-fork-remote.md §5 修正，见 §6.8**：多问一次要避免的是**额外的 round trip**，不是**这个事实本身**——租约探针可以搭进已经在发生的那次 `task-poll`，代价是零。
 9. **`unreachable` 不参与等待**。`wait <task>` 撞上它是 exit 1 加一句点名那台机器的话，`wait --any` 不把它算成 waitable（于是没有别的任务时返回 3）。理由与 `lost` 逐字相同：挂死不是答案。**如实记录的代价**：一台临时抽风的机器会让 `wait --any` 提前收工，而那个任务其实还在跑。
 10. **`nulya task run` 改走 `launch.sessionEnvironment`**（原来是 `localEnvironment` + 一句对 `remote:` 的硬拒）：它现在与 `session step` 用同一个函数从同一个 header 建同一种 environment，所以"任务跑在它那场 session 跑的地方"这句话在两个入口上是**同一段代码**而不是两个答案。
 11. **`task supervise --env remote:…` 仍然拒绝，但换了文案**。原来那句 "background tasks run where the harness runs" 现在是假话；新的一句说的是真正的错误：supervisor **包**命令，而 remote spec 是一条通道——远端 session 的任务根本不由这里的 supervisor 看着。`launch.remote_background_refusal` 因此只剩一个调用点，**删掉了**。
@@ -636,3 +636,16 @@ e2e 里一条通道连跑三次并断言每次都答对（`one channel serves ma
 ③ `task kill` 杀得到远端进程树（hold 文件同步，被杀的命令永远走不到第二步）+ `ended_by kill`；
 ④ 连不上的机器上的任务读作 `unreachable`（不是 `lost` 不是 `done`），`wait` 当场结束并点名那台机器。
 **先红验证过四处**：去掉 `delivered` 标记（①的重复投递断言当场红）· supervisor 的 `spawn_cwd` 改成 null（任务跑进 host 工作区，①的"log 在远端、host 上没有"当场红）· `task-kill` 不写标记（③ 的 wait 超时，用缩短的预算验证）· `session step` 的扫描短路掉（②当场红）。
+
+### 6.8 修补（2026-08-30，review-fork-remote.md §5）：I/O 故障不塌成 `starting`，`lost` 搭便车回来
+
+**问题两半**（都在 `cli/remote.zig` 的 `serveTaskPoll` / `readTaskFile`）：
+
+1. **`readTaskFile` 曾经是 `catch ""`**——`error.FileNotFound`（supervisor 还没写）与权限错误、读越界、任何这台机器磁盘上真发生的故障，一律读成同一个"空"，host 侧因此把一次真实的读取失败当成 `starting` 永远显示下去。修法：只把 `error.FileNotFound` 折成空，其余传播上去，`serveTaskPoll` 捕获后逐个 `refuseFmt`（status 与 report 两次读各自说自己的话）——一次 refuse 令那次 `task-poll` 在 host 侧读成 `unreachable`（`pollTaskOn` 把 `!rep.ok` 变成 `error.RemoteRefused`，`pollAndDeliver` 把它折成 `.unreached`，`readRow` 本来就把 `.unreached` 映成 `.@"unreachable"`——**这条路径全部已经存在**，缺的只是让真故障走上它而不是被 `catch ""` 拦在半路）。
+2. **§6.7 point 8 判断错了对象**："远端不做 `lost` 投影" 的理由是"每次 poll 多问一次不值"，但 `lost` 探针（`leaseHeldIn`）与 `task-poll` 已经在做的两次文件读**同属一次调用**——真正要避免的是**额外的一次协议往返**，不是**多读一个文件**。`TaskSnapshot` 加一个可空列 `lease_held`（**不 bump 协议 `v`**：新字段 + `ignore_unknown_fields` + 默认值，老 peer answer 不了这一列，`null` 就是它诚实的答案），`serveTaskPoll` 在编码回复之前顺手调一次 `leaseHeldIn`。
+
+**`leaseHeldIn` 是从 `leaseHeld` 重构出来的**（`cli/task.zig`）：原来的实现写死 `std.Io.Dir.cwd()`，现在第一个参数换成 `base: std.Io.Dir`——本机读者（`projectState`）传 `std.Io.Dir.cwd()`，`serveTaskPoll` 传它已经打开的那个远端工作区句柄。**一处实现，两个 caller**，不是抄一份：这是 CLAUDE.md "一个决定一处实现" 那条规矩在这个具体缺口上的应用，也是任务书里显式点名的重构（保留了原注释解释的"探测用 `openFile` 不用 `createFile`"那条理由——探针创建 `.lock` 会在关闭的那一瞬间让真 supervisor 的非阻塞抢锁失败）。
+
+**`readRow` 的消费规则**（DESIGN §8.2 已同步）：`status.state == .done` → `.done`；否则 `lease_held == false` → `.lost`；`true` 或 `null`（老 peer）→ `.running`——"不知道"不许被读成"没人守着"。
+
+**测试**：`zig build test` 574（+2 `layout.zig` 的 UTF-8 跳过测试，见 §6 的 ground 部分）；`e2e-remote` **26**（+2）：一条钉住"远端 supervisor 死掉、租约空闲但 status 还写着 running"读作 `.lost` 而非 `.running`；一条钉住 `status.json` 是目录（真实 `error.IsDir`）读作 `.unreachable` 而非 `.starting`。**两条都先在旧代码上验证过会红**（把 `readRow` 的新分支临时改回 `if (status.state == .done) .done else .running`，把 `readTaskFile` 临时改回 `catch ""`，各自单独复现失败后再改回）。

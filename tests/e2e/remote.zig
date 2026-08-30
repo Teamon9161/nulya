@@ -1300,6 +1300,106 @@ test "killing a remote task ends the process tree on that machine" {
     try std.testing.expect(std.mem.indexOf(u8, status, "\"ended_by\":\"kill\"") != null);
 }
 
+test "a supervisor that dies over there reads here as lost, not running" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const spec = try execSpec(alloc, exe, "");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // A `status.json` left by a supervisor that is no longer there to hold the
+    // lease — written directly onto the FAR machine's disk, no `.lock` file
+    // beside it, the same shape `cli/task.zig`'s own "lost is a projection"
+    // unit test builds for the local case. Reached through `remote serve`'s
+    // `task-poll`, this is what `leaseHeldIn` answers `false` for.
+    //
+    // The row's NAME still has to exist on THIS machine (`readRow`'s callers
+    // discover which tasks exist by listing directories under the host's own
+    // `.nulya/scratch/`, the same way "a task whose machine will not answer"
+    // does above) — only its CONTENT lives over there.
+    const dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{id});
+    defer alloc.free(dir);
+    try ws.createDirPath(io, dir);
+    try far.dir.createDirPath(io, dir);
+    const status_rel = try std.fmt.allocPrint(alloc, "{s}/status.json", .{dir});
+    defer alloc.free(status_rel);
+    try far.dir.writeFile(io, .{ .sub_path = status_rel, .data =
+        \\{"v":1,"task":"S/t1","session":"S","command":"sleep 30","cwd":".","started":"2026-08-19T10:00:00Z","state":"running"}
+        \\
+    });
+
+    const listed = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--json" });
+    defer alloc.free(listed.stdout);
+    try std.testing.expectEqual(@as(u8, 0), listed.code);
+    // Not "running" — a status this old with no supervisor holding its lease
+    // used to read as running forever, so a `wait` on it could only ever end by
+    // timing out — and not "unreachable": the machine DID answer, it is just
+    // reporting a task nobody is watching any more. `lease_held` traveled in
+    // the SAME poll as `status`, at no extra cost in round trips.
+    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"state\":\"lost\"") != null);
+}
+
+test "a real read fault on that machine's status file is a refusal, not an empty starting task" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const spec = try execSpec(alloc, exe, "");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // `status.json` is a DIRECTORY over there rather than a file — a read fault
+    // (`error.IsDir`) that has nothing to do with "not written yet". Before this
+    // fix `readTaskFile`'s blanket `catch ""` made that indistinguishable from a
+    // fresh task, and the host read it as `starting` forever.
+    const dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{id});
+    defer alloc.free(dir);
+    try ws.createDirPath(io, dir);
+    const status_rel = try std.fmt.allocPrint(alloc, "{s}/status.json", .{dir});
+    defer alloc.free(status_rel);
+    try far.dir.createDirPath(io, status_rel);
+
+    const listed = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--json" });
+    defer alloc.free(listed.stdout);
+    try std.testing.expectEqual(@as(u8, 0), listed.code);
+    // Not "starting": that machine answered, and what it answered was a fault
+    // reading the file, not silence. `unreachable` is the honest word for "this
+    // host could not get an answer" — the same word a channel that never opened
+    // reports, for the same reason: nothing here may guess.
+    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"state\":\"unreachable\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"state\":\"starting\"") == null);
+}
+
 test "a task whose machine will not answer reads as unreachable, not as lost or done" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

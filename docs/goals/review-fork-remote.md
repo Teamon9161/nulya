@@ -269,3 +269,74 @@ host 在交付时把那份 status 留在自己这边（`delivered` 旁边），�
 副本、不再发帧。它同时修好轮询侧，并且让一个已完成的远端任务在机器够不着时仍能
 显示 `done` 而不是 `unreachable`——今天那种情况下 `task list` 会永远说
 `unreachable`，而那句话对一个早就交付过的任务是假的。等第一次真的嫌慢再做。
+### 7.3 ④⑤ 落地（2026-08-30）：远端 poll 的诚实与 lease 投影、ground 终验
+
+**④ a. `readTaskFile` 不再把真实 I/O 故障折成"还没写"**（`src/cli/remote.zig`）。
+只把 `error.FileNotFound` 读成空（= "supervisor 还没写"，与本机 `starting` 同一
+纪律）；别的错误（权限、`.limited(cap)` 读越界、任何这台机器磁盘上真发生的故障）
+一律传播给 `serveTaskPoll`，那里对 status / report 两次读各自 `refuseFmt`——两次
+读失败说的是不同的话，因为调用点知道是哪个文件。一次 refuse 落到 host 侧走的是
+**已经存在**的那条路：`pollTaskOn` 把 `!rep.ok` 变成 `error.RemoteRefused` →
+`pollAndDeliver` 折成 `.unreached` → `readRow` 本来就把它映成
+`.@"unreachable"`——缺的只是别让 `catch ""` 拦在半路。
+
+**④ b. `lease_held` 搭着同一轮 `task-poll`回来，`lost` 不再是要避开的"第二个
+问题"**。契约原文说"远端不做 lost 投影……每次 poll 多问一次不值"，判断错了对象：
+真正要省的是**一次协议往返**，不是**多读一个文件**——`leaseHeldIn` 与
+`status.json`/`report.txt` 那两次读同属一次 `task-poll`。`TaskSnapshot` 加一列
+`lease_held: ?bool = null`（`src/environment/remote/protocol.zig`，**不 bump 协议
+`v`**：新字段 + 已有的 `ignore_unknown_fields` + 默认值，对老 peer 天然兼容，
+`null` 就是它诚实的答案）。`src/cli/task.zig` 的 `leaseHeld` 按契约要求重构成
+**`pub fn leaseHeldIn(base: std.Io.Dir, io, alloc, dir)`**——第一个参数从写死的
+`std.Io.Dir.cwd()`换成调用者给的目录句柄，本机 `projectState` 传
+`std.Io.Dir.cwd()`，`serveTaskPoll` 传它已经打开的远端工作区句柄；**一处实现，
+两个 caller**，原注释解释的"探测用 `openFile` 不用 `createFile`"那条理由原样
+保留（探针创建 `.lock` 会在关闭的一瞬间让真 supervisor 的非阻塞抢锁失败）。
+`FarAnswer.status` 从裸 `[]const u8` 改成 `struct{bytes, lease_held}`（唯一两个
+调用点是 `readRow`——我的——与 `sweepRemoteReports`——按边界说明没有碰它的代码，
+它把返回值整体丢弃，字段增加对它零影响）。
+
+`readRow` 的消费规则（`lost is not available over there` 那段旧注释已改写成
+现在的事实）：`status.state == .done` → `.done`；否则 `lease_held == false`
+（对面明确说没人守着这个租约）→ `.lost`；`true` 或 `null`（老 peer 没这一列，
+答不上来）→ `.running`——不知道不许读成"没人守着"。
+
+**⑤ ground 的两层 UTF-8 终验**（`extensions/ground/src/{layout,main}.zig`）：
+`layout.zig` 的 `skip()` 对不是合法 UTF-8 的目录条目直接跳过（与
+`instructions.zig:175` 跳过非法候选文件同一条纪律，参照契约建议未在标题里加话——
+`instructions.zig` 对同类情况也没有，一个坏名字该少一行不该多一句解释）；
+`main.zig` 的 `render()` 在拼好整份文档、返回前再 `utf8ValidateSlice` 兜底一次，
+不合法就 `return error.InvalidUtf8`（一次失败的调用，`.status.json`/文档一个
+字节都不写）。`facts.zig` 的 `%<(240,trunc)%s` 按契约要求**只改了注释**（"no
+bound of its own" → 说清是列上限不是字节上限），代码未动——契约给出的三个数量级
+边际核实无误。
+
+**测试**：单测 `extensions/ground/src/layout.zig` 新增一条（`skip` 拒绝非法字节、
+放行普通非 ASCII UTF-8 名字）；e2e `tests/e2e/remote.zig` 新增两条：一条构造
+"远端 supervisor 死掉——status 还写着 running，没有 `.lock`"，断言 `task list
+--json` 读出 `"state":"lost"`；一条构造"`status.json` 在远端是目录而不是文件"
+（真实 `error.IsDir`），断言读出 `"state":"unreachable"` 而非 `"state":"starting"`。
+三条都在改回旧代码后单独复现过失败（`skip` 去掉 UTF-8 检查、`readRow` 的新分支
+改回 `if (done) .done else .running`、`readTaskFile` 改回 `catch ""`），改回来后
+全绿。`zig build test`：574（+2 ground）。`zig build e2e-remote`：26（+2）。
+`zig build e2e-core`：48（无回归）。
+
+**契约哪里说得不够精确**：④a 段"读同一个文件的两种失败要说不同的话"这句读起来
+容易理解成"同一个文件的两种不同错误码要分别措辞"，实际含义（结合上下文）是
+"status 文件与 report 文件各自读失败时的话不同"——两次 `readTaskFile` 调用各自
+`refuseFmt`，而不是在 `readTaskFile` 内部对错误类型分支措辞（`FileNotFound` 与
+其它错误的分野本身已经是"两种失败"）。照最合理的读法实现，未发现契约条目本身
+有错误。
+
+**审阅补一处（合并时）：远端的 lease 探针要等 status 出现。** ④b 落地时
+`serveTaskPoll` 是**无条件**探 lease 的，而这个探针会**自己短暂持有那把锁**
+（`openFile` 带 `lock=.exclusive, lock_nonblocking`）。supervisor 拿不到 lease 时
+的行为是打一句 `another supervisor already owns` 然后 **exit 1**——于是一次落在
+supervisor 的 `open(O_CREAT)` 与它的 `flock` 之间的 poll，就能让那个任务静默地
+永远不跑。
+
+本机撞不上这个窗口，**而且是碰巧撞不上**：`projectState` 只在"已经有 status"时
+才探，而 supervisor 是**先拿 lease 再写第一条 status** 的。无条件探等于只在远端
+这一侧把这层保护拆掉。所以远端也按同一顺序问：`status.len == 0` → `lease_held`
+答 `null`（诚实：`readRow` 对没有 status 的任务本来就读成 `starting`，根本不看
+这一列）。**两台机器同一个提问顺序**，这条才算真的只有一份实现。

@@ -100,7 +100,18 @@ fn render(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
     try w.writeAll("\n");
     try facts.renderGit(alloc, io, w, repo);
 
-    return out.toOwnedSlice();
+    const document = try out.toOwnedSlice();
+    // Final backstop, not a substitute for the sources that skip a bad name or
+    // a bad file instead of quoting it (`layout.zig`'s `skip`,
+    // `instructions.zig`'s candidate check): every section funnels into this one
+    // document, and this is the one place that can say the whole thing is fit
+    // to freeze. `session new --prompt` refuses anything that is not valid
+    // UTF-8 (BUGS #22 — `std.json.Stringify` writes it as an array of numbers,
+    // not a string, and the header stops being the shape §3 promises), so
+    // failing HERE means `render` reports the failure instead of reporting
+    // success and letting it land on the next command instead.
+    if (!std.unicode.utf8ValidateSlice(document)) return error.InvalidUtf8;
+    return document;
 }
 
 /// Write the document into a directory this invocation owns, and answer where.

@@ -152,6 +152,15 @@ fn readTwoLevels(alloc: std.mem.Allocator, io: std.Io, tree: *Tree) !void {
 
 fn skip(name: []const u8) bool {
     if (name.len == 0 or name[0] == '.') return true;
+    // POSIX file names are bytes, not text — nothing enforces that a directory
+    // entry is valid UTF-8. `render`'s document ends up in a header (BUGS #22:
+    // `std.json.Stringify` writes an invalid `[]const u8` as an array of
+    // numbers, not a string), so a bad name here would make `render` report
+    // success and push the failure onto `session new --prompt` instead. One
+    // unreadable name should cost this entry, not the section — the same
+    // "pass over, don't fail" rule `instructions.zig` applies to a candidate
+    // file that turns out not to be text.
+    if (!std.unicode.utf8ValidateSlice(name)) return true;
     for (uninformative) |bad| if (std.mem.eql(u8, name, bad)) return true;
     return false;
 }
@@ -240,4 +249,18 @@ test "one crowded directory cannot spend the whole budget" {
     // The sibling still appears, and the overflow says how much was left out.
     try std.testing.expect(std.mem.indexOf(u8, text, "README.md") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "more)") != null);
+}
+
+test "a directory entry that is not valid UTF-8 is skipped, not carried into the document" {
+    // POSIX file names are bytes, not text; nothing stops one from holding a
+    // sequence like this. `readTwoLevels` (the non-git fallback) hands `skip`
+    // exactly what `Io.Dir.iterate` gives it, so this is what that call site
+    // sees when a name is not text — proven directly because Windows will not
+    // let this test create such a name on disk to walk it end to end.
+    const not_utf8 = "caf\xE9"; // 0xE9 wants two continuation bytes; none follow.
+    try std.testing.expect(skip(not_utf8));
+
+    // An ordinary non-ASCII UTF-8 name is not what this guards against — only
+    // bytes that are not valid UTF-8 at all.
+    try std.testing.expect(!skip("café"));
 }

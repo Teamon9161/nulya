@@ -729,11 +729,15 @@ fn serveStartTask(agent: *Agent, req: protocol.Request, command: []const u8) !vo
 }
 
 /// Everything the host needs to know about one task here, in one round: the
-/// status its supervisor wrote, and the report it left if it has finished.
+/// status its supervisor wrote, the report it left if it has finished, and
+/// whether a supervisor still holds the lease (`cli/task.zig`'s `readRow` turns
+/// that into `lost` without a second question).
 ///
 /// A directory with nothing in it is answered as nothing, not as a refusal: that
 /// is the same `starting` a local task with no status yet reports, and a
-/// supervisor that has not written its first line is exactly that.
+/// supervisor that has not written its first line is exactly that. But a real
+/// I/O fault reading either file is refused rather than folded into that same
+/// silence — see `readTaskFile`.
 fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
     const paths = (try taskPaths(agent, req)) orelse {
         try agent.refuse("task-poll needs a task named <session>/t<N>");
@@ -748,8 +752,14 @@ fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
     };
     defer ws.close(agent.io);
 
-    const status = try readTaskFile(agent, ws, a, paths.dir, task_cli.status_file, 256 << 10);
-    const raw_report = try readTaskFile(agent, ws, a, paths.dir, task_cli.report_file, 4 << 20);
+    const status = readTaskFile(agent, ws, a, paths.dir, task_cli.status_file, 256 << 10) catch |err| {
+        try agent.refuseFmt("could not read {s}'s status here: {s}", .{ req.task, @errorName(err) });
+        return;
+    };
+    const raw_report = readTaskFile(agent, ws, a, paths.dir, task_cli.report_file, 4 << 20) catch |err| {
+        try agent.refuseFmt("could not read {s}'s report here: {s}", .{ req.task, @errorName(err) });
+        return;
+    };
     // The report is already valid UTF-8 when a supervisor writes it
     // (`emit.utf8Lossy` runs over the log tail there), and this is what makes
     // that a checked fact rather than an assumption: a JSON string cannot carry
@@ -758,10 +768,37 @@ fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
     const cleaned = try emit.utf8Lossy(a, raw_report);
     const report = if (cleaned) |c| c.text else raw_report;
 
-    const body = try protocol.encodeTaskSnapshot(a, .{ .status = status, .report = report });
+    // Same probe `task list` uses locally (`leaseHeldIn`), just pointed at this
+    // agent's already-open workspace handle instead of `std.Io.Dir.cwd()` — one
+    // implementation of "is anyone holding this lease" for both machines.
+    //
+    // ONLY once a status exists, and that guard is safety rather than thrift.
+    // The probe takes the lease itself, non-blocking, for the instant it is
+    // open; a supervisor whose own acquire lands in that instant is told
+    // "another supervisor already owns this" and EXITS, so the task silently
+    // never runs. Locally that window cannot be reached because `projectState`
+    // asks the same question in the same order — no status, no probe — and a
+    // supervisor writes its first status only after it holds the lease. Probing
+    // unconditionally here would have removed that protection on this side
+    // alone. Null is the honest answer meanwhile: `readRow` reads a statusless
+    // task as `starting` and never looks at this column.
+    const lease_held: ?bool = if (status.len == 0)
+        null
+    else
+        try task_cli.leaseHeldIn(ws, agent.io, agent.alloc, paths.dir);
+
+    const body = try protocol.encodeTaskSnapshot(a, .{ .status = status, .report = report, .lease_held = lease_held });
     try agent.reply(.{ .ok = true, .bytes = body.len }, body, "");
 }
 
+/// Read one task file here, `arena`-owned. `error.FileNotFound` answers empty —
+/// the same "nothing written yet" a directory with no status reports locally —
+/// but every other failure (permission denied, a read past `cap`, anything this
+/// machine's disk had to say) propagates: those are not "not written yet", they
+/// are this machine unable to answer, and folding them into the same empty
+/// string is exactly the shape this repo has fixed before (`Repo.unknown`,
+/// `Answer` as a union) — an I/O fault must not read as a confident "starting".
+/// The caller decides what to say about it, because it knows which file this was.
 fn readTaskFile(
     agent: *Agent,
     ws: std.Io.Dir,
@@ -772,7 +809,10 @@ fn readTaskFile(
 ) ![]const u8 {
     const path = try std.fs.path.join(agent.alloc, &.{ dir, name });
     defer agent.alloc.free(path);
-    return ws.readFileAlloc(agent.io, path, arena, .limited(cap)) catch "";
+    return ws.readFileAlloc(agent.io, path, arena, .limited(cap)) catch |err| switch (err) {
+        error.FileNotFound => "",
+        else => return err,
+    };
 }
 
 /// Put the kill marker down beside the command, which is here. Refused when

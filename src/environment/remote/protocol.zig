@@ -353,6 +353,13 @@ pub const TaskSnapshot = struct {
     /// The report that supervisor left when the command ended, or empty until
     /// then. Its presence is what tells the host there is something to deliver.
     report: []const u8 = "",
+    /// Is a supervisor still holding this task's lease, over there? Filled by
+    /// that machine's own `leaseHeldIn` (`cli/task.zig`), in the same round as
+    /// `status` — the only way `lost` (a supervisor that died) is knowable
+    /// without a second question per poll. Null when the peer predates this
+    /// column (`ignore_unknown_fields` + a default make that safe): "unknown"
+    /// is not "false", so a reader that gets null must not claim the task died.
+    lease_held: ?bool = null,
 };
 
 /// Encode one. Caller owns the result.

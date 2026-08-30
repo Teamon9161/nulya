@@ -256,10 +256,16 @@ fn readStatus(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !?std.json.
 /// closed again, make the real supervisor's own non-blocking acquire fail. A
 /// missing lease file therefore means "no supervisor has started yet", which is
 /// exactly what it means.
-fn leaseHeld(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
+///
+/// `base` is the directory `dir` is relative to. It is `std.Io.Dir.cwd()` for
+/// every reader on this machine (`projectState`, below) and a remote agent's
+/// already-open workspace handle for `cli/remote.zig`'s `serveTaskPoll` —
+/// one implementation of "is anyone holding this lease" for both, per
+/// CLAUDE.md's "一个决定一处实现".
+pub fn leaseHeldIn(base: std.Io.Dir, io: std.Io, alloc: std.mem.Allocator, dir: []const u8) !bool {
     const path = try std.fs.path.join(alloc, &.{ dir, lock_file });
     defer alloc.free(path);
-    var f = std.Io.Dir.cwd().openFile(io, path, .{
+    var f = base.openFile(io, path, .{
         .lock = .exclusive,
         .lock_nonblocking = true,
     }) catch |err| switch (err) {
@@ -268,6 +274,10 @@ fn leaseHeld(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
     };
     f.close(io);
     return false;
+}
+
+fn leaseHeld(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
+    return leaseHeldIn(std.Io.Dir.cwd(), io, alloc, dir);
 }
 
 fn projectState(alloc: std.mem.Allocator, io: std.Io, dir: []const u8, s: ?Status) !Projected {
@@ -1071,11 +1081,14 @@ const Far = struct {
     }
 };
 
-/// What one far task's own machine had to say. `status` is its `status.json`,
+/// What one far task's own machine had to say. `bytes` is its `status.json`,
 /// verbatim, and empty means its supervisor has not written one yet — the same
-/// `starting` a local directory with no status reports.
+/// `starting` a local directory with no status reports. `lease_held` is that
+/// machine's own answer to "is a supervisor still holding this task's lease",
+/// carried in the SAME poll (`TaskSnapshot.lease_held`) so a far `lost` costs no
+/// second question — null only when the far agent predates the column.
 const FarAnswer = union(enum) {
-    status: []const u8,
+    status: struct { bytes: []const u8, lease_held: ?bool },
     /// This host could not get an answer: the machine did not answer, or
     /// refused the question. Nothing is known about the task — not that it is
     /// running, not that it died.
@@ -1100,13 +1113,14 @@ fn pollAndDeliver(
 ) !FarAnswer {
     const snap = remote.pollTaskOn(ch, cwd, full) catch return .unreached;
     const status_bytes = try arena.dupe(u8, snap.status);
-    if (snap.report.len == 0 or status_bytes.len == 0) return .{ .status = status_bytes };
-    if (markerPresent(alloc, io, host_dir, delivered_file)) return .{ .status = status_bytes };
+    const answer: FarAnswer = .{ .status = .{ .bytes = status_bytes, .lease_held = snap.lease_held } };
+    if (snap.report.len == 0 or status_bytes.len == 0) return answer;
+    if (markerPresent(alloc, io, host_dir, delivered_file)) return answer;
 
     // The far side writes its report BEFORE it says `done`, so a report present
     // is a task finished; the exit code comes from the status it wrote with it.
     const parsed = std.json.parseFromSlice(Status, alloc, std.mem.trim(u8, status_bytes, " \t\r\n"), json_opts) catch
-        return .{ .status = status_bytes };
+        return answer;
     defer parsed.deinit();
 
     try depositReport(alloc, io, .{
@@ -1122,7 +1136,7 @@ fn pollAndDeliver(
     const marker = try std.fs.path.join(alloc, &.{ host_dir, delivered_file });
     defer alloc.free(marker);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = marker, .data = "" });
-    return .{ .status = status_bytes };
+    return answer;
 }
 
 /// Collect every finished-but-undelivered report of `session_id`'s tasks over a
@@ -1311,24 +1325,32 @@ fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef) !?Row {
         const cwd = try far.cwdFor(ref.session);
         const answer = pollAndDeliver(far.alloc, arena, io, ch, cwd, ref.session, ref.slot, ref.dir, ref.full) catch
             FarAnswer.unreached;
-        const bytes = switch (answer) {
+        const outcome = switch (answer) {
             .unreached => return row,
-            .status => |b| b,
+            .status => |s| s,
         };
         // Its supervisor has not written a status yet: the same `starting` a
         // local directory with no status reports, for the same reason.
-        if (bytes.len == 0) {
+        if (outcome.bytes.len == 0) {
             row.state = .starting;
             return row;
         }
-        const status = std.json.parseFromSliceLeaky(Status, arena, std.mem.trim(u8, bytes, " \t\r\n"), json_opts) catch
+        const status = std.json.parseFromSliceLeaky(Status, arena, std.mem.trim(u8, outcome.bytes, " \t\r\n"), json_opts) catch
             return null;
         row.status = status;
-        // `lost` is not available over there: the free lease that proves a
-        // supervisor died is a fact of that machine's file system, and asking
-        // for it would be a second question on every poll. A far task is what
-        // its own status says, or nothing is known.
-        row.state = if (status.state == .done) .done else .running;
+        // `lost` used to be unavailable over there — asking for it would have
+        // been a second question on every poll. It travels for free now, in the
+        // SAME `task-poll` round (`TaskSnapshot.lease_held`, filled by that
+        // machine's own `leaseHeldIn`): a done status wins outright, a free
+        // lease on a not-done status is `lost`, and a held or unknown (older
+        // peer, no such column) lease reports `running` — not knowing is not
+        // grounds to claim the task died.
+        row.state = if (status.state == .done)
+            .done
+        else if (outcome.lease_held == false)
+            .lost
+        else
+            .running;
         return row;
     }
     const parsed = readStatus(arena, io, ref.dir) catch return null;
