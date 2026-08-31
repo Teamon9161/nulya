@@ -42,11 +42,12 @@ test("two sends in quick succession start ONE step and both turns land", async (
     expect(attach.role()).toBe("driver")
     expect(state.snapshot.error).toBeNull()
     const users = state.snapshot.items.filter((item) => item.kind === "user")
-    expect(users.map((item) => (item.kind === "user" ? item.text : ""))).toEqual(["first", "second"])
+    expect(users.map((item) => (item.kind === "user" ? item.text : ""))).toEqual(["first\n\nsecond"])
     expect(users.every((item) => item.kind === "user" && !item.queued && item.seq !== null)).toBe(true)
-    // And the ledger agrees: both turns are there exactly once.
+    // The opening inbox batch is one model turn, in FIFO order.
     const events = await sessionEvents(ws, id)
-    expect(events.filter((event) => event.kind === "user_text").length).toBe(2)
+    const userEvents = events.filter((event) => event.kind === "user_text") as Array<{ kind: "user_text"; text: string }>
+    expect(userEvents.map((event) => event.text)).toEqual(["first\n\nsecond"])
   } finally {
     attach.dispose()
   }
@@ -55,7 +56,16 @@ test("two sends in quick succession start ONE step and both turns land", async (
 test("a send during a step in flight lands wrapped as mid-task; one at rest does not", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
-  const driver = createDriver(ws, id, state, { env: scripted_loop_env, maxSteps: 12 })
+  const pendingAtModelStart: number[] = []
+  const driver = createDriver(ws, id, state, {
+    env: scripted_loop_env,
+    maxSteps: 12,
+    onLine: (line) => {
+      if (line.kind === "stream" && line.line.stream === "model" && line.line.event === "started") {
+        pendingAtModelStart.push(state.pendingCount())
+      }
+    },
+  })
   try {
     void driver.send("keep going")
     // The run is demonstrably under way: a tool call has resolved and the
@@ -68,20 +78,18 @@ test("a send during a step in flight lands wrapped as mid-task; one at rest does
 
     const events = await sessionEvents(ws, id)
     const users = events.filter((event) => event.kind === "user_text") as Array<{ kind: "user_text"; text: string }>
-    expect(users.length).toBe(3)
-    // At rest: verbatim. Mid-task: the sentinel, with tcode's note once per
-    // run — the second message carries the tag alone. The transcript folds
-    // both back to the words alone.
+    expect(users.length).toBe(2)
+    // At rest: verbatim. Both mid-task messages drained at one boundary become
+    // one user turn; their frames and the once-per-run note stay in FIFO order.
     expect(users[0]!.text).toBe("keep going")
     expect(users[1]!.text.startsWith(mid_task_open)).toBe(true)
     expect(users[1]!.text).toContain(mid_task_note)
-    expect(users[2]!.text.startsWith(mid_task_open)).toBe(true)
-    expect(users[2]!.text).not.toContain(mid_task_note)
-    const folded = users.slice(1).map((user) => {
-      const item = state.snapshot.items.find((i) => i.kind === "user" && i.text === user.text)
-      return item !== undefined ? midTaskOf(item) : null
-    })
-    expect(folded).toEqual([{ text: "also check the docs" }, { text: "and the README" }])
+    const merged = state.snapshot.items.find((i) => i.kind === "user" && i.text === users[1]!.text)
+    expect(merged !== undefined ? midTaskOf(merged) : null).toEqual({ text: "also check the docs\n\nand the README" })
+    // The drained ledger event is emitted before every `model started`, so a
+    // message is never still labelled queued while the model answers it.
+    expect(pendingAtModelStart.length).toBeGreaterThan(0)
+    expect(pendingAtModelStart.every((count) => count === 0)).toBe(true)
     expect(state.pendingCount()).toBe(0)
   } finally {
     driver.dispose()

@@ -177,12 +177,12 @@ pub const Ledger = struct {
     /// test/in-process shape); `createDurable` / `openDurable` add the backend.
     durable: ?Durable = null,
     /// Delivery ids of inbox proposals already applied to this ledger (DESIGN
-    /// §3.4). Each drained event persists its inbox filename as `origin` on its
-    /// JSONL line; this set is that column, rebuilt on replay. It makes inbox
-    /// application EXACTLY-once: a crash between "append to ledger" and "delete
-    /// inbox file" leaves the file behind, and the next drain sees the origin
-    /// already here and skips it. Never projected into PromptIR — it is a
-    /// delivery-bookkeeping column, not model-visible state.
+    /// §3.4). A drained event persists its inbox filename(s) as `origin` or
+    /// `origins` on its JSONL line; this set is rebuilt from both on replay.
+    /// That makes inbox application EXACTLY-once: a crash between "append to
+    /// ledger" and "delete inbox file" leaves the file behind; the next drain
+    /// sees the origin already here and skips it. Never projected into PromptIR:
+    /// this is delivery bookkeeping, not model-visible state.
     origins: std.StringHashMapUnmanaged(void) = .empty,
 
     pub fn init(alloc: std.mem.Allocator) Ledger {
@@ -208,47 +208,41 @@ pub const Ledger = struct {
     /// returns; a persistence failure rewinds the in-memory append so memory and
     /// file never diverge.
     pub fn append(self: *Ledger, e: Event) !void {
-        return self.appendInternal(e, null);
+        return self.appendInternal(e, &.{});
     }
 
     /// Append `e` and record `origin` as its inbox delivery id (persisted on the
-    /// JSONL line so the exactly-once guarantee survives crash + reopen). Only
-    /// `drainInbox` uses this; ordinary appends carry no origin.
+    /// JSONL line so the exactly-once guarantee survives crash + reopen).
     pub fn appendWithOrigin(self: *Ledger, e: Event, origin: []const u8) !void {
-        return self.appendInternal(e, origin);
+        return self.appendWithOrigins(e, &.{origin});
     }
 
-    fn appendInternal(self: *Ledger, e: Event, origin: ?[]const u8) !void {
+    /// One drained user turn may represent several queued inbox proposals. All
+    /// delivery ids ride on the same line so merging never weakens exactly-once.
+    pub fn appendWithOrigins(self: *Ledger, e: Event, origins: []const []const u8) !void {
+        return self.appendInternal(e, origins);
+    }
+
+    fn appendInternal(self: *Ledger, e: Event, origins: []const []const u8) !void {
         const owner = self.arena.allocator();
-        // Prepare origin tracking up front — dupe the key and reserve the map
-        // slot — so that once the durable line is written nothing left can fail
-        // and desync the set from the file. A duplicate origin needs no slot.
-        var origin_key: ?[]u8 = null;
-        if (origin) |o| {
-            if (!self.origins.contains(o)) {
-                origin_key = try owner.dupe(u8, o);
-                try self.origins.ensureUnusedCapacity(self.alloc, 1);
-            }
+        var origin_keys: std.ArrayList([]u8) = .empty;
+        defer origin_keys.deinit(self.alloc);
+        for (origins) |origin| {
+            if (self.origins.contains(origin)) continue;
+            try origin_keys.append(self.alloc, try owner.dupe(u8, origin));
         }
+        try self.origins.ensureUnusedCapacity(self.alloc, @intCast(origin_keys.items.len));
 
         const owned = try cloneEvent(owner, e);
         try self.events.append(self.alloc, owned);
         if (self.durable) |*d| {
-            // seq is the 1-based file position; the just-appended event is at it.
             const seq: u64 = self.events.items.len;
-            d.persist(self.alloc, e, seq, origin) catch |err| {
-                // Undo the memory append so memory and file cannot diverge. The
-                // event's bytes stay in the arena until `deinit` — deliberate:
-                // an append-only ledger's memory grows with history anyway, and
-                // a failed append is a few bytes of that, not a leak to chase.
-                // The same holds for `origin_key` and for a clone abandoned by a
-                // failing `events.append` above.
+            d.persist(self.alloc, e, seq, origins) catch |err| {
                 _ = self.events.pop();
                 return err;
             };
         }
-        // Committed: record the origin (reserved above, so this cannot fail).
-        if (origin_key) |k| self.origins.putAssumeCapacity(k, {});
+        for (origin_keys.items) |key| self.origins.putAssumeCapacity(key, {});
     }
 
     /// True if an inbox proposal with delivery id `origin` was already applied.
@@ -556,8 +550,8 @@ const Durable = struct {
         self.lock_file.close(self.io);
     }
 
-    fn persist(self: *Durable, alloc: std.mem.Allocator, e: Event, seq: u64, origin: ?[]const u8) !void {
-        const line = try encodeEventLineOrigin(alloc, e, seq, origin);
+    fn persist(self: *Durable, alloc: std.mem.Allocator, e: Event, seq: u64, origins: []const []const u8) !void {
+        const line = try encodeEventLineOrigins(alloc, e, seq, origins);
         defer alloc.free(line);
         // No concurrency check here: the exclusive `<id>.lock` lease is the sole
         // single-writer primitive, so no other cooperating writer can be at this
@@ -690,9 +684,13 @@ fn replayEventLine(l: *Ledger, line: []const u8) !void {
     defer parsed.deinit();
     if (parsed.value.seq != l.events.items.len + 1) return error.CorruptLedger;
     const e = try toEvent(parsed.arena.allocator(), parsed.value);
-    // Rebuild the delivery-id set from the persisted `origin` column so inbox
-    // application stays exactly-once across a crash + reopen.
-    if (parsed.value.origin) |o| try l.appendWithOrigin(e, o) else try l.append(e);
+    // Rebuild every delivery id. `origin` is the v1 single-proposal shape;
+    // `origins` is used only when one drained user turn merged several files.
+    if (parsed.value.origins) |origins| {
+        try l.appendWithOrigins(e, origins);
+    } else if (parsed.value.origin) |origin| {
+        try l.appendWithOrigin(e, origin);
+    } else try l.append(e);
 }
 
 // ── Header / event codec ────────────────────────────────────────────────────
@@ -727,20 +725,24 @@ pub fn parseHeaderLine(gpa: std.mem.Allocator, line: []const u8) !OwnedHeader {
 }
 
 pub fn encodeEventLine(alloc: std.mem.Allocator, e: Event, seq: u64) ![]u8 {
-    return encodeEventLineOrigin(alloc, e, seq, null);
+    return encodeEventLineOrigins(alloc, e, seq, &.{});
 }
 
-/// Like `encodeEventLine`, but also writes an `origin` field (the inbox delivery
-/// id) when present. `origin` is a durable dedup column, never projected to the
-/// model — only `drainInbox`'d events carry it.
-pub fn encodeEventLineOrigin(alloc: std.mem.Allocator, e: Event, seq: u64, origin: ?[]const u8) ![]u8 {
+/// Persist one or more inbox delivery ids. Keep the old singular field for one
+/// proposal so existing session lines stay byte-for-byte stable.
+pub fn encodeEventLineOrigins(alloc: std.mem.Allocator, e: Event, seq: u64, origins: []const []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
     var jw: std.json.Stringify = .{ .writer = &out.writer };
     try jw.beginObject();
     try jw.objectField("seq");
     try jw.write(seq);
-    if (origin) |o| try writeField(&jw, "origin", o);
+    if (origins.len == 1) {
+        try writeField(&jw, "origin", origins[0]);
+    } else if (origins.len > 1) {
+        try jw.objectField("origins");
+        try jw.write(origins);
+    }
     try encodeEventBody(&jw, e);
     try jw.endObject();
     try out.writer.writeByte('\n');
@@ -838,8 +840,10 @@ fn writeField(jw: *std.json.Stringify, name: []const u8, value: []const u8) !voi
 /// checks the ones its kind requires.
 pub const WireEvent = struct {
     seq: u64 = 0,
-    /// Inbox delivery id, present only on drained events (see `Ledger.origins`).
+    /// Inbox delivery ids, present only on drained events (see `Ledger.origins`).
+    /// `origin` is the original one-file shape; `origins` is a merged user batch.
     origin: ?[]const u8 = null,
+    origins: ?[]const []const u8 = null,
     kind: []const u8,
     text: ?[]const u8 = null,
     /// Images inlined with a user turn (see `Event.user_text`); absent on lines
@@ -988,14 +992,14 @@ pub fn depositEvent(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, sess
     try base.rename(tmp_rel, base, final_rel, io);
 }
 
-/// Drain every deposited `.json` in the session inbox into `l`, in filename
-/// order, deleting each file once appended. A missing inbox is a no-op.
+/// Drain every deposited `.json` in filename order. Consecutive user messages
+/// are one delivery batch: the model receives one user turn with texts separated
+/// by a blank line and all images retained in FIFO order. Non-user facts remain
+/// separate events and delimit batches.
 ///
-/// Application is EXACTLY-once even though delivery is at-least-once: each event
-/// records its inbox filename as `origin` on the ledger line, so a crash between
-/// append and delete leaves the file behind and the next drain skips it (its
-/// origin is already in the ledger). Capability notes additionally dedupe on
-/// content (id+version), so re-announcing a version under any name is a no-op.
+/// Application remains EXACTLY-once: a merged line persists every source
+/// filename in `origins`, so a crash after append but before any delete makes a
+/// reopen skip every member of that batch.
 pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io.Dir, session_path: []const u8) !void {
     const inbox = try inboxPath(alloc, session_path);
     defer alloc.free(inbox);
@@ -1022,10 +1026,17 @@ pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io
         }
     }.lessThan);
 
+    var batch_arena: std.heap.ArenaAllocator = .init(alloc);
+    defer batch_arena.deinit();
+    const batch_alloc = batch_arena.allocator();
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(alloc);
+    var images: std.ArrayList(Image) = .empty;
+    defer images.deinit(alloc);
+    var batch_origins: std.ArrayList([]const u8) = .empty;
+    defer batch_origins.deinit(alloc);
+
     for (names.items) |name| {
-        // The inbox filename is the proposal's stable delivery id. If it was
-        // already applied (a crash left the file behind after the append), just
-        // delete it — never re-apply.
         if (l.containsOrigin(name)) {
             try dir.deleteFile(io, name);
             continue;
@@ -1035,8 +1046,22 @@ pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io
         const parsed = try parseEventLine(alloc, bytes);
         defer parsed.deinit();
         const e = try toEvent(parsed.arena.allocator(), parsed.value);
-        // Content dedup for notes: never announce the same version twice, even
-        // if re-proposed under a different filename.
+
+        if (e == .user_text) {
+            if (text.items.len > 0) try text.appendSlice(alloc, "\n\n");
+            try text.appendSlice(alloc, e.user_text.text);
+            for (e.user_text.images) |image| try images.append(alloc, .{
+                .media_type = try batch_alloc.dupe(u8, image.media_type),
+                .data = try batch_alloc.dupe(u8, image.data),
+            });
+            try batch_origins.append(alloc, name);
+            continue;
+        }
+
+        try flushInboxUsers(l, &text, &images, &batch_origins);
+        for (batch_origins.items) |origin| try dir.deleteFile(io, origin);
+        batch_origins.clearRetainingCapacity();
+
         const already_content = switch (e) {
             .capability_note => |n| l.containsNote(n.id, n.version),
             else => false,
@@ -1044,6 +1069,21 @@ pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io
         if (!already_content) try l.appendWithOrigin(e, name);
         try dir.deleteFile(io, name);
     }
+
+    try flushInboxUsers(l, &text, &images, &batch_origins);
+    for (batch_origins.items) |origin| try dir.deleteFile(io, origin);
+}
+
+fn flushInboxUsers(
+    l: *Ledger,
+    text: *std.ArrayList(u8),
+    images: *std.ArrayList(Image),
+    origins: *std.ArrayList([]const u8),
+) !void {
+    if (origins.items.len == 0) return;
+    try l.appendWithOrigins(.{ .user_text = .{ .text = text.items, .images = images.items } }, origins.items);
+    text.clearRetainingCapacity();
+    images.clearRetainingCapacity();
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1646,15 +1686,24 @@ test "inbox: deposits drain in name order, dedupe notes, and never touch the mai
 
     var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
 
-    // Two processes deposit: a driver's user text and a note, out of order.
+    // Deposits may arrive out of directory iteration order. Filename order is
+    // FIFO, and adjacent user proposals become one turn before the note.
     try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa", .{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "n" } });
-    try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{ .text = "hello" } });
-    // The main file is untouched by deposits.
+    try depositEvent(alloc, io, tmp.dir, spath, "msg-0002", .{ .user_text = .{
+        .text = "second",
+        .images = &.{.{ .media_type = "image/png", .data = "two" }},
+    } });
+    try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{
+        .text = "first",
+        .images = &.{.{ .media_type = "image/jpeg", .data = "one" }},
+    } });
     try std.testing.expectEqual(@as(usize, 0), l.len());
 
     try drainInbox(alloc, io, &l, tmp.dir, spath);
     try std.testing.expectEqual(@as(usize, 2), l.len());
-    try std.testing.expectEqualStrings("hello", l.view()[0].user_text.text); // "msg-…" < "note-…"
+    try std.testing.expectEqualStrings("first\n\nsecond", l.view()[0].user_text.text);
+    try std.testing.expectEqualStrings("image/jpeg", l.view()[0].user_text.images[0].media_type);
+    try std.testing.expectEqualStrings("image/png", l.view()[0].user_text.images[1].media_type);
     try std.testing.expect(l.view()[1] == .capability_note);
 
     // Draining an empty inbox adds nothing; a re-deposited note is skipped.
@@ -1670,7 +1719,9 @@ test "inbox: deposits drain in name order, dedupe notes, and never touch the mai
     var reopened = try openDurable(alloc, io, tmp.dir, spath);
     defer reopened.deinit();
     try std.testing.expectEqual(@as(usize, 2), reopened.len());
-    try std.testing.expectEqualStrings("hello", reopened.view()[0].user_text.text);
+    try std.testing.expectEqualStrings("first\n\nsecond", reopened.view()[0].user_text.text);
+    try std.testing.expect(reopened.containsOrigin("msg-0001.json"));
+    try std.testing.expect(reopened.containsOrigin("msg-0002.json"));
     try std.testing.expect(reopened.containsNote("demo", "v-aaaa"));
 }
 
@@ -1681,30 +1732,35 @@ test "inbox application is exactly-once across a crash between append and delete
     defer tmp.cleanup();
     const spath = "s.jsonl";
 
-    // Deposit a user turn, then simulate a drain that appended the event (with its
-    // inbox filename as origin) but CRASHED before deleting the inbox file.
+    // Simulate a merged drain that appended one turn but CRASHED before deleting
+    // either source file.
     {
         var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
         defer l.deinit();
-        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{ .text = "hello" } });
-        try l.appendWithOrigin(.{ .user_text = .{ .text = "hello" } }, "msg-0001.json");
+        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{ .text = "first" } });
+        try depositEvent(alloc, io, tmp.dir, spath, "msg-0002", .{ .user_text = .{ .text = "second" } });
+        try l.appendWithOrigins(
+            .{ .user_text = .{ .text = "first\n\nsecond" } },
+            &.{ "msg-0001.json", "msg-0002.json" },
+        );
         try std.testing.expectEqual(@as(usize, 1), l.len());
     }
+    // It managed to delete the first source before dying; the second remains.
+    try tmp.dir.deleteFile(io, "s.inbox" ++ std.fs.path.sep_str ++ "msg-0001.json");
 
-    // The persisted line carries the origin so a fresh writer can tell it was
-    // already applied.
     const raw = try tmp.dir.readFileAlloc(io, spath, alloc, .unlimited);
     defer alloc.free(raw);
-    try std.testing.expect(std.mem.indexOf(u8, raw, "\"origin\":\"msg-0001.json\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "\"origins\":[\"msg-0001.json\",\"msg-0002.json\"]") != null);
 
-    // Reopen (replay rebuilds the origin set) and drain: the leftover inbox file
-    // is recognized as already-applied — deleted, never re-appended.
+    // Replay rebuilds both ids. Draining the one leftover file only deletes it;
+    // it cannot recreate part or all of the already-committed turn.
     var reopened = try openDurable(alloc, io, tmp.dir, spath);
     defer reopened.deinit();
     try std.testing.expect(reopened.containsOrigin("msg-0001.json"));
+    try std.testing.expect(reopened.containsOrigin("msg-0002.json"));
     try drainInbox(alloc, io, &reopened, tmp.dir, spath);
     try std.testing.expectEqual(@as(usize, 1), reopened.len());
-    try std.testing.expectEqualStrings("hello", reopened.view()[0].user_text.text);
+    try std.testing.expectEqualStrings("first\n\nsecond", reopened.view()[0].user_text.text);
 }
 
 test "draining a missing inbox is a no-op" {

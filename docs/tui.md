@@ -198,14 +198,14 @@ tui/
 
 - 每次 `step --stream` 期间维护一个 **in-flight turn**：`text_delta` 追加到一个流式 AssistantTurn（只有这一块重排；已完成的 turn 是独立 renderable，不重解析）；`tool_use_start` 立刻建 tool 卡（`pending`）、`input_delta` 拼参数、`done` 后 parse；`tool begin/end` 切 `running → done`；`tool_results` 事件填输出。
 - ledger 事件行到达 → 以 `seq` 为键写入 items，**替换**对应 provisional 项（文本应相同；不同以 ledger 为准并 debug 日志）。
-- `user_text` 事件到达 → 与 pending appends 按顺序匹配转正。
+- `user_text` 事件到达 → 与 pending appends 按顺序匹配转正；内核会把同一次 drain 的多条 queued 消息以空行合成一个 turn，前端因此把对应的多张乐观卡折成这一张 committed 卡。事件行在 `model started` 之前到，所以模型一开始回答，卡片就已经不再标 `queued`。
 - `run done` → 状态回 idle；若 pending appends 仍有未转正的 → 自动再 spawn 一次 step（用户在跑的中途发了话、但 run 已 end_turn）。
 - 观测粒度就是 kernel 的粒度：TUI 不猜 "模型在想什么"，只显示流。
 
 ### 4.4 Composer / 按键 / slash
 
 - `Enter` 发送；`Shift+Enter` / `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
-- 发送时若 `stepping`：只 append（queued）；不打断。
+- 发送时若 `stepping`：只 append（queued）；不打断。queued 状态只画在 transcript 中那张用户卡上，不在 composer 上方再重复一份队列；要提前结束当前 step 并投递仍用 `Ctrl+J`。同一 TUI 的 append 子进程串行启动，保证快速连发取得 inbox 名时仍是 FIFO。
 - `/` 开头弹一个小补全：内建命令（`/model` `/mode [ask|unsafe]` `/effort <level|auto>` `/new [--profile p] [--model id]` `/clear [--profile p] [--model id]` `/sessions [<id>]` `/ext` `/tasks` `/usage` `/compact [focus]` `/outcome` `/with [<id>[@<v>]]` `/agent [<name> <task…>]`（§5.10）`/cancel` `/fold` `/settings` `/help` `/quit`；**`/mode` 从 T24 起是权限 mode**（T31 起裸 `/mode` 开一个 picker），带一个 extension 进这一场的那个 T36 起叫 **`/with`**——就是内核的 `session new --with`，一个概念一个词；中间叫过一阵 `/as`，那个名字仍然认（alias），理由与代价见 §11 T36；**`/new` 与 `/clear` 从 T84 起是两个命令而不是别名**——`/new` 另开一个 tab、前面那个原样留着，`/clear` 把**当前** tab 原地换成一张新草稿（同一个数组下标，`state/tabs.ts` 的 `TabStore.clear`）；两者都不删任何东西（ledger 只能 append，旧 session 的文件与其中的事件照样在盘上、`/sessions` 照样找得到），区别只在"新的那一场落在哪个 tab"。**`/resume` 仍是 `/sessions` 的 alias**，不上表——resume 不是一个内核动词，append-only 让「打开它再说下一句」本身就是继续。`/sessions` 从此收一个可选 id，两个名字**同一段代码**——alias 若走另一条路，它就不是 alias 而是第二个命令）在前，**activate 了的包自己声明的命令居中**（T39 的 `contributes.commands`；`/evolve` `/ask` `/plan` 都是这一档，T53），**activate 了的 skill 在后**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → 包命令 → skill → 原样发给模型。`/<skill> [args]` = `nulya skill load <ref>` 拿到 body、包一层 sentinel 后作为**普通 user turn** append（T15；旧文本写的"nulya 没有 skill slash"已翻案——它把"谁触发"误当成了"谁判断"，理由见 goals/tui-panel.md D8）。
 - `@` 开头（前一字符非字母数字下划线）弹文件补全：`↑↓` 选、`Tab` 上屏成 `@path`；已知引用在输入框里 accent。**上屏的是路径，不是文件内容**（T13）。
 - 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；`Backspace` 落在占位尾部整条删掉（T14）。

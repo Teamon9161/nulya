@@ -204,6 +204,14 @@ export function createDriver(
   // either spawn a second `session step` against the lease the dying one still
   // holds, or (worse) race `step()`'s own `status() !== "idle"` guard.
   let idleWaiters: Array<() => void> = []
+  // `session append` is a separate process. Serialize those processes so two
+  // Enter presses can never acquire timestamped inbox names in reverse order.
+  let appendTail: Promise<void> = Promise.resolve()
+  function appendInOrder(text: string, images: readonly ImageInput[]): Promise<void> {
+    const next = appendTail.then(() => sessionAppend(ws, id, text, images))
+    appendTail = next.catch(() => {})
+    return next
+  }
   function idleOnce(): Promise<void> {
     if (!driving) return Promise.resolve()
     return new Promise((resolve) => idleWaiters.push(resolve))
@@ -315,7 +323,7 @@ export function createDriver(
     const running = status() !== "idle"
     if (!running) setStatus("sending")
     try {
-      await sessionAppend(ws, id, wire, images)
+      await appendInOrder(wire, images)
     } catch (error) {
       reportFailure(state, "driver", error)
       if (!running) setStatus("idle")

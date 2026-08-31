@@ -31,8 +31,6 @@ import { pickTip } from "./Welcome.tsx"
 import { WorkingStatus, activityOf, type SyncProgress } from "./WorkingStatus.tsx"
 import { readImageFile } from "../image.ts"
 import { installCrashLog } from "../crashlog.ts"
-import { QueueLane } from "./QueueLane.tsx"
-import { parseMidTask } from "../midtask.ts"
 import { TabBar } from "./TabBar.tsx"
 import { SessionsView } from "./overlays/SessionsView.tsx"
 import { ExtView } from "./overlays/ExtView.tsx"
@@ -3768,7 +3766,7 @@ export function App(props: AppProps) {
 
   /**
    * "Flush the queue" — the interrupt-and-deliver gesture with nothing NEW to
-   * say: a click on the queue lane, or `ctrl+j` over an empty composer while
+   * say: `ctrl+j` over an empty composer while
    * something is already queued. There is no composer text to route through
    * `sendTurn`'s command/skill dispatch here, so this goes straight to the
    * attachment (agent-runner ar-t1).
@@ -3777,22 +3775,6 @@ export function App(props: AppProps) {
     const here = live()
     if (here) void here.attach.interruptAndDeliver("")
   }
-
-  /**
-   * The turns sitting in the inbox, not yet drained into the ledger — the
-   * queue lane's own content (`QueueLane.tsx`, ar-t1). Read straight off the
-   * transcript items `enqueueUser` pushes, which is the same source
-   * `pendingCount()` counts from; a draft tab has no session and therefore
-   * nothing queued.
-   */
-  const queuedMessages = (): { key: string; text: string }[] =>
-    snapshot().items.filter((item): item is Extract<TranscriptItem, { kind: "user" }> => item.kind === "user" && item.queued)
-      // A mid-run append rides inside the mid-task sentinel (midtask.ts); the
-      // lane shows the user's own words, the same fold the transcript card does.
-      .map((item) => ({
-        key: item.key,
-        text: (parseMidTask(item.text)?.text ?? item.text) || `${item.imageCount ?? 0} image${item.imageCount === 1 ? "" : "s"}`,
-      }))
 
   /**
    * Whether `ctrl+j` currently means anything (`keymap.ts` `interrupt`,
@@ -3811,7 +3793,7 @@ export function App(props: AppProps) {
   /**
    * `ctrl+j`: with something typed, submit it flagged as an interrupt (through
    * the composer's own path, so paste-expansion and history still apply);
-   * with nothing typed, it is the queue lane's own "flush" gesture (ar-t1).
+   * with nothing typed, it flushes anything already queued (ar-t1).
    */
   const handleInterruptAndDeliver = () => {
     if (composer?.isEmpty() ?? true) {
@@ -4727,12 +4709,6 @@ export function App(props: AppProps) {
                   usage={usageLabel(displayUsage())}
                   onOpenTasks={toggleTasksPanel}
                 />
-                {/* The inbox, drawn out (agent-runner ar-t1): turns waiting on
-                    a step boundary to drain them. Same region as the activity
-                    line above it — both are "what is happening right now",
-                    not a description of the session — and empty draws
-                    nothing, the same T35/T38 rule `WorkingStatus` follows. */}
-                <QueueLane messages={queuedMessages()} onSelect={flushQueue} />
                 {/* `panel: true`'s degraded progress display (DESIGN §7.2.1,
                     tui-plugin D12): the latest call of a declaring tool, so it
                     is visible whether or not its own card is still on screen.

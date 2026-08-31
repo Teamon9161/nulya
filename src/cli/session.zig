@@ -1437,11 +1437,22 @@ fn redactImages(alloc: std.mem.Allocator, line: []const u8, seq: u64) !?[]u8 {
         .media_type = img.media_type,
         .data = try std.fmt.allocPrint(parsed.arena.allocator(), "[image {s}, {d} base64 bytes]", .{ img.media_type, img.data.len }),
     };
-    return try ledger.encodeEventLineOrigin(
+    if (parsed.value.origins) |origins| return try ledger.encodeEventLineOrigins(
         alloc,
         .{ .user_text = .{ .text = event.user_text.text, .images = placeholders } },
         seq,
-        parsed.value.origin,
+        origins,
+    );
+    if (parsed.value.origin) |origin| return try ledger.encodeEventLineOrigins(
+        alloc,
+        .{ .user_text = .{ .text = event.user_text.text, .images = placeholders } },
+        seq,
+        &.{origin},
+    );
+    return try ledger.encodeEventLine(
+        alloc,
+        .{ .user_text = .{ .text = event.user_text.text, .images = placeholders } },
+        seq,
     );
 }
 

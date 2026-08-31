@@ -424,19 +424,26 @@ export function createSessionState(id: string): SessionState {
           const user = event as Extract<LedgerEvent, { kind: "user_text" }>
           const text = user.text
           const imageCount = user.images?.length ?? 0
-          const at = draft.items.findIndex(
-            (item) => item.kind === "user" && item.seq === null && item.queued && item.text === text,
-          )
-          if (at >= 0) {
-            const [promoted] = draft.items.splice(at, 1) as [UserItem]
-            promoted.seq = seq
-            promoted.key = `e${seq}`
-            promoted.queued = false
-            promoted.imageCount = imageCount
-            insertCommitted(draft, [promoted])
-          } else {
-            insertCommitted(draft, [{ key: `e${seq}`, seq, kind: "user", text, imageCount, queued: false }])
+          const queued = draft.items
+            .map((item, index) => ({ item, index }))
+            .filter((entry): entry is { item: UserItem; index: number } =>
+              entry.item.kind === "user" && entry.item.seq === null && entry.item.queued)
+          let matched: { item: UserItem; index: number }[] = []
+          for (let start = 0; start < queued.length && matched.length === 0; start++) {
+            let joined = ""
+            for (let end = start; end < queued.length; end++) {
+              joined += `${end === start ? "" : "\n\n"}${queued[end]!.item.text}`
+              if (joined === text) {
+                matched = queued.slice(start, end + 1)
+                break
+              }
+              if (!text.startsWith(joined)) break
+            }
           }
+          if (matched.length > 0) {
+            for (const entry of matched.toReversed()) draft.items.splice(entry.index, 1)
+          }
+          insertCommitted(draft, [{ key: `e${seq}`, seq, kind: "user", text, imageCount, queued: false }])
           break
         }
         case "assistant": {

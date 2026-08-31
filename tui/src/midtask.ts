@@ -58,13 +58,29 @@ export interface MidTask {
  * without stranding the turns already in ledgers.
  */
 export function parseMidTask(text: string): MidTask | null {
-  if (!text.startsWith(`${mid_task_open}\n`)) return null
-  const from = mid_task_open.length + 1
-  // The LAST close is the real one: the note never contains it, so a body that
-  // happens to quote the sentinel still round-trips.
-  const at = text.lastIndexOf(`\n${mid_task_close}`)
-  if (at < from) return null
-  return { text: text.slice(from, at) }
+  const opening = `${mid_task_open}\n`
+  if (!text.startsWith(opening)) return null
+  const close = `\n${mid_task_close}`
+  const nextOpening = `\n\n${opening}`
+  const messages: string[] = []
+  let from = opening.length
+
+  // One inbox drain may merge several framed messages into one user turn. The
+  // text between a close and the next opening is the once-per-batch contract;
+  // fold each frame independently and preserve their FIFO order for display.
+  for (;;) {
+    const next = text.indexOf(nextOpening, from)
+    if (next < 0) {
+      const at = text.lastIndexOf(close)
+      if (at < from) return null
+      messages.push(text.slice(from, at))
+      return { text: messages.join("\n\n") }
+    }
+    const at = text.lastIndexOf(close, next)
+    if (at < from) return null
+    messages.push(text.slice(from, at))
+    from = next + nextOpening.length
+  }
 }
 
 /** Whether an item is a mid-task message, for the card router. */

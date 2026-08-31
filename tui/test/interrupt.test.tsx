@@ -85,24 +85,19 @@ test("ctrl+j mid-run appends, kills the running step, and the redelivered turn s
   }
 }, 120_000)
 
-/**
- * The lane's resting state, at the App level (the visible content once
- * something IS queued is `queuelane.test.tsx`'s job — a pure, deterministic
- * render off a fabricated `messages` prop; racing a live scripted loop to
- * catch that same moment on screen here would only be flaky, since the loop
- * mode drains its own inbox again within a step or two).
- */
-test("the queue lane draws nothing before the first message — no resting-state row", async () => {
+test("a queued turn appears once in the transcript, with no duplicate lane above the composer", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  state.enqueueUser("already visible in the transcript")
   const setup = await testRender(
-    () => <App ws={ws} style={style} pick={{ profile: "scripted", model: "scripted-demo" }} driver={{ env: scripted_loop_env }} />,
+    () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_loop_env }} />,
     { width: 100, height: 30 },
   )
   try {
-    await settle(setup, 3)
-    // The lane's own glyph, not the word "queued": a randomly chosen welcome
-    // tip legitimately contains that word (it explains this very gesture), and
-    // what this test pins is that the LANE is not drawn at rest.
-    expect(setup.captureCharFrame()).not.toContain("⏸")
+    const frame = await settle(setup, 3)
+    expect(frame).toContain("already visible in the transcript")
+    expect(frame).toContain("· queued")
+    expect(frame).not.toContain("⏸")
   } finally {
     setup.renderer.destroy()
   }

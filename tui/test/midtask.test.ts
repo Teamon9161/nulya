@@ -45,3 +45,8 @@ test("multi-line words keep their newlines", () => {
   const body = "first line\n\nthird line"
   expect(parseMidTask(wrapMidTask(body))).toEqual({ text: body })
 })
+
+test("a merged batch of framed messages folds to the users' words in FIFO order", () => {
+  const merged = `${wrapMidTask("first queued")}\n\n${wrapMidTask("second queued", false)}`
+  expect(parseMidTask(merged)).toEqual({ text: "first queued\n\nsecond queued" })
+})
