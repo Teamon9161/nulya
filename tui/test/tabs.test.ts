@@ -105,7 +105,7 @@ test("clearing one of two session tabs leaves its sibling exactly where it was",
 })
 
 
-test("a compact continuation stays idle until an explicit turn drives it", async () => {
+test("an ordinary reopened session does not claim and drain a pending inbox", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, id, "<nulya:context-summary>\ncarry only this brief")
   const store = createTabStore(ws, { kind: "draft" }, { env: scripted_env, pollMs: 100 })
@@ -132,6 +132,33 @@ test("a compact continuation stays idle until an explicit turn drives it", async
       }, 50)
     })
     expect((await sessionEvents(ws, id)).length).toBeGreaterThan(0)
+  } finally {
+    store.disposeAll()
+  }
+}, 60_000)
+
+
+test("a continuation opened as its driver drains the carried summary without another click", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  await sessionAppend(ws, id, "<nulya:context-summary>\ncontinue from this brief")
+  const store = createTabStore(ws, { kind: "draft" }, { env: scripted_env, pollMs: 50 })
+  try {
+    const tab = store.open(id, { driven: true })
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 30_000
+      const timer = setInterval(async () => {
+        if (!inboxPending(ws, id) && tab.attach.status() === "idle") {
+          clearInterval(timer)
+          resolve()
+        } else if (Date.now() > deadline) {
+          clearInterval(timer)
+          reject(new Error("driven continuation did not drain"))
+        }
+      }, 50)
+    })
+    const events = await sessionEvents(ws, id)
+    expect(events.some((event) => event.kind === "user_text")).toBe(true)
+    expect(events.some((event) => event.kind === "assistant")).toBe(true)
   } finally {
     store.disposeAll()
   }

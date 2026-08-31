@@ -157,9 +157,9 @@ export interface OpenOptions {
   created?: boolean
   /**
    * This TUI may wake a pending inbox without a new user turn. Defaults to
-   * `created`, which is right for ordinary sessions materialized here; compact
-   * continuations override it because their summary is deliberately deposited
-   * for the user's next explicit turn.
+   * `created`, which is right for ordinary sessions materialized here. A
+   * continuation caller may opt in after deliberately depositing its summary;
+   * `wake()` still refuses an empty inbox.
    */
   driven?: boolean
   effort?: string

@@ -143,7 +143,7 @@ export interface PluginHostSeams {
   tasks: () => TaskView[]
   /** `session append`, wrapped in the plugin sentinel (`extnote.ts`). */
   appendNote: (pkg: string, kind: string, text: string) => Promise<void>
-  openTab: (sessionId: string) => void
+  openTab: (sessionId: string, options?: { wakePending?: boolean }) => void
   wearNext: (id: string) => void
   notice: (text: string) => void
   /**
@@ -176,6 +176,8 @@ export interface PluginHost {
   handleKey(key: PluginKey): boolean
   /** Every `--stream` line and ledger event of a step this front end drives. */
   observe(line: StepLine, session: string): void
+  /** Tell plugins that the front session or its explicit permission mode changed. */
+  observeSession(session: SessionView | null): void
   /** Bumped whenever a surface's answer may have changed; surfaces read it. */
   revision: Accessor<number>
 }
@@ -335,6 +337,8 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
     pkg: string
     cb: (event: LedgerEventView, session: string, source: "live" | "replay") => void
   }[] = []
+  const sessionObservers: { pkg: string; cb: (session: SessionView | null) => void }[] = []
+  let frontSessionKey: string | null | undefined
   const reportedMatcherFailures = new Set<string>()
   const reportedMatcherConflicts = new Set<string>()
 
@@ -350,6 +354,9 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
     setWidgets((all) => all.filter((row) => row.pkg !== pkg))
     for (const list of [streamObservers, eventObservers]) {
       for (let at = list.length - 1; at >= 0; at--) if (list[at]!.pkg === pkg) list.splice(at, 1)
+    }
+    for (let at = sessionObservers.length - 1; at >= 0; at--) {
+      if (sessionObservers[at]!.pkg === pkg) sessionObservers.splice(at, 1)
     }
     setWanted((open) => (open?.pkg === pkg ? null : open))
   }
@@ -457,6 +464,19 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
             if (at >= 0) eventObservers.splice(at, 1)
           }
         },
+        onSession(cb) {
+          const entry = { pkg, cb }
+          sessionObservers.push(entry)
+          try {
+            cb(seams.session())
+          } catch (error) {
+            warn(`${pkg}: onSession threw · ${message(error)}`)
+          }
+          return () => {
+            const at = sessionObservers.indexOf(entry)
+            if (at >= 0) sessionObservers.splice(at, 1)
+          }
+        },
         tasks: () => seams.tasks(),
         session: () => seams.session(),
       },
@@ -468,7 +488,7 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
           return await extRun(seams.ws, `${plugin.id}@${plugin.version}`, tool, args)
         },
         extRunPackage: (ref, tool, args) => runPackageTool(ref, tool, args),
-        openTab: (sessionId) => seams.openTab(sessionId),
+        openTab: (sessionId, options) => seams.openTab(sessionId, options),
         wearNext: (id) => seams.wearNext(id),
       },
 
@@ -707,6 +727,22 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
           observer.cb(line.event as unknown as LedgerEventView, session, "live")
         } catch (error) {
           warn(`${observer.pkg}: onEvent threw · ${message(error)}`)
+        }
+      }
+      bump()
+    },
+    observeSession(session) {
+      // Status/activity churn is delivered by stream observers. Session
+      // observers only need identity plus the explicit policy that changes
+      // whether a continuation waits or follows automatically.
+      const key = session ? `${session.id}\u0000${session.permissionMode ?? ""}` : null
+      if (frontSessionKey === key) return
+      frontSessionKey = key
+      for (const observer of [...sessionObservers]) {
+        try {
+          observer.cb(session)
+        } catch (error) {
+          warn(`${observer.pkg}: onSession threw · ${message(error)}`)
         }
       }
       bump()

@@ -184,6 +184,8 @@ export function Transcript(props: {
   onPickEnv?: () => void
   /** The model line of the composition card was clicked: open `/model`. */
   onPickModel?: () => void
+  /** Open a parent episode named by the frozen session header. */
+  onOpenSession?: (id: string) => void
   /** A `/command` on the welcome screen was clicked: run it as if typed. */
   onCommand?: (command: string) => void
   /** This launch's tip for the opening screen (T38), chosen once by `App`. */
@@ -260,6 +262,7 @@ export function Transcript(props: {
           header={props.header ?? null}
           contributions={props.contributions}
           onPickModel={props.onPickModel}
+          onOpenSession={props.onOpenSession}
         />
       </Show>
       <Show when={hidden() > 0}>

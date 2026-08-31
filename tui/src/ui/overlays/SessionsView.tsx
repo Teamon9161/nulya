@@ -128,7 +128,10 @@ export const double_click_ms = 350
 export type SessionKind = "own" | "delegated" | "empty"
 
 export function sessionKind(entry: SessionListEntry): SessionKind {
-  if (entry.events === 0) return "empty"
+  // A continuation may still have its carried summary in the inbox. It is a
+  // real conversation with lineage, not crash litter, even before a driver has
+  // drained its first event.
+  if (entry.events === 0 && entry.parent === null) return "empty"
   return personaOf(entry.composition.prompts) === null ? "own" : "delegated"
 }
 

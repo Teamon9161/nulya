@@ -384,6 +384,10 @@ pub fn runCliEnvs(
 ) !CliRun {
     var env = try std.testing.environ.createMap(alloc);
     defer env.deinit();
+    // E2E children are outside any agent session unless a test says otherwise.
+    // The runner itself may carry these identities when Nulya launched it.
+    _ = env.orderedRemove("NULYA_SESSION");
+    _ = env.orderedRemove("NULYA_SESSION_ID");
     const home = try defaultHome(alloc, io, ws);
     defer alloc.free(home);
     try env.put("NULYA_HOME", home);
@@ -423,6 +427,10 @@ pub fn runCliStdin(
 ) !CliRun {
     var env = try std.testing.environ.createMap(alloc);
     defer env.deinit();
+    // E2E children are outside any agent session unless a test says otherwise.
+    // The runner itself may carry these identities when Nulya launched it.
+    _ = env.orderedRemove("NULYA_SESSION");
+    _ = env.orderedRemove("NULYA_SESSION_ID");
     const home = try defaultHome(alloc, io, ws);
     defer alloc.free(home);
     try env.put("NULYA_HOME", home);
@@ -472,6 +480,10 @@ pub fn runCliStderr(
 ) ![]u8 {
     var env = try std.testing.environ.createMap(alloc);
     defer env.deinit();
+    // E2E children are outside any agent session unless a test says otherwise.
+    // The runner itself may carry these identities when Nulya launched it.
+    _ = env.orderedRemove("NULYA_SESSION");
+    _ = env.orderedRemove("NULYA_SESSION_ID");
     const home = try defaultHome(alloc, io, ws);
     defer alloc.free(home);
     try env.put("NULYA_HOME", home);

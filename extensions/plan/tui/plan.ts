@@ -410,7 +410,7 @@ export function activate(api: PluginApi): void {
         brief_file: brief,
       })
       const forked = compactResult(compact.stdout, compact.stderr, compact.code)
-      api.actions.openTab(forked.session)
+      api.actions.openTab(forked.session, { wakePending: true })
       panel.close()
       api.notice(`plan approved · carrying it out in ${forked.session}`)
     } catch (error) {

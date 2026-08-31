@@ -62,17 +62,15 @@ compact 完成后调用现有通用动作 `api.actions.openTab(child)`，不原�
 理由：
 
 - 旧 transcript 立即可见，不需要回 `/sessions` 找；
-- `openTab` 打开的 session 默认 `driven:false`，summary 留在 inbox，用户第一次明确输入时才排干；
-- host 不需要知道这个 child 是谁创建的，也不需要 `created/driven` 特判；
-- parent/child 关系仍由 kernel header 与 `/sessions` tree 表达。
+- compact 调 `openTab(child, {wakePending:true})`，建立普通 driver attachment；既有 `wake()` 只排干确实存在的 summary inbox，空 inbox 绝不 step；
+- host 只认识通用的 `wakePending`，不知道这个 child 是 compact 创建的；
+- parent/child 关系仍由 kernel header 与 `/sessions` tree 表达，child composition 卡常驻可点击 parent 行。
 
 代价是连续 compact 会增加 tab；这是可见、可关闭的真实 lineage，比把父场藏起来更诚实。本 goal 不做 episode 合并视图。
 
-### D4 · handoff 默认总是询问，不再借 permission `unsafe` 决定自动 follow
+### D4 · handoff follow 服从 driver 的明确 permission mode
 
-permission mode 回答“tool call 是否需要批准”，handoff follow 回答“是否切换 conversation episode”，不是同一政策。compact plugin 默认显示 panel：Enter follow，Esc dismiss。
-
-本 goal 不提供 auto-follow。将来若真实需要，由 compact package 自己增加显式偏好/命令并写入 `api.state`；不得重新读取宿主 permission mode。
+真实的 `/goal` consumer 证明 handoff 是让 driver 跨阶段持续运行的边界，不是第二道人工审批。TUI 的 `ask` 显示 panel：Enter follow，Esc dismiss；`unsafe` 在当前 step 回到 idle 后自动 follow。plugin 只读 `SessionView.permissionMode`，不能回答 gate、改变 mode或绕过 observer/writer lease。这样 mode 的影响范围仍然诚实：它决定当前 driver 是否允许模型在无人确认时继续，包括 continuation。
 
 ### D5 · host 不保留 `compact` 专用 action
 
@@ -266,7 +264,7 @@ rg -n 'compact|handoff|context-summary|compact-request' tui/src
 更新：
 
 - `docs/tui.md` §5.8：handoff/compact由 package plugin消费，host只提供通用原语；
-- `docs/tui.md` §11：新增实施记录，写清父 tab保留、child不自动 step、permission mode解耦；
+- `docs/tui.md` §11：新增实施记录，写清父 tab保留、child 只排干非空 summary inbox、ask/unsafe 的 follow policy；
 - `docs/goals/tui-plugin.md` §6：D5/API 的增量和新的第三个真实 consumer；
 - `CLAUDE.md` TUI 现状一句；
 - `plugin-api.d.ts` 顶部 minor-version changelog；
@@ -292,7 +290,7 @@ zig build e2e
 2. 不让 handoff tool 自己 fork；model tool call只产生信号，driver决定是否跟。
 3. 不复制父 ledger到child；父 tab与parent header已经表达 lineage。
 4. 不做 episode 合并 transcript。
-5. 不让 plugin回答 gate或读取/修改 permission mode。
+5. plugin 不能回答 gate或修改 permission mode；只允许读取宿主投影的当前 mode 来选择 ask 面板或 unsafe auto-follow。
 6. 不新增第二套 extension runtime协议；仍走现有 `ext run`。
 7. 不用持久 `seen` 修 replay问题；live/replay边界才是主不变量。
 8. 不允许 plugin renderer改写别的 package 的 tool card；`registerUserTurn` 只处理内容 sentinel，不放宽 D11。
@@ -341,7 +339,7 @@ observer follower也产生 `source:"live"`。compact plugin看到后可显示只
 - compact plugin单独关闭时，相关UI/自动行为一起消失，但ledger和headless流程仍正确；
 - resume历史handoff永不产生新session；
 - handoff follow与手工compact都由同一个package函数调用同一个internal tool；
-- parent tab保留，child不在无人输入时step；
+- parent tab保留，child 自动排干 carried summary，但空 inbox 永不 step；
 - plan approve继续能创建execution child；
 - 全量TypeScript、Bun测试、compiled TUI、Zig unit/e2e全绿。
 
@@ -360,3 +358,8 @@ observer follower也产生 `source:"live"`。compact plugin看到后可显示只
 - 验证：`bun run typecheck`、focused plugin/render/overlay tests 与真实 plan/compact consumer 已通过；全量结果见本次工作最终报告。
 
 - 最终验证：`bun run typecheck` 通过；`bun test` 736/736；`bun run compile` 通过。`zig build test` 为 581/582，唯一失败是未改动的 `cli.task` 目录锁平台假设；独立 `zig build e2e` 为 159/166（另 2 skip），失败均在未改动的 lease fault / outcome 环境来源 / std read freshness / activation-note 断言，compact/extension manifest 构建与本 goal 的 TUI consumer 均通过。
+
+
+### 2026-08-31 · BUGS #4 产品语义修正
+
+真实 `/goal` driver 的用途确认后，D3/D4 改为 continuation 语义：`ask` 才显示 follow/dismiss，`unsafe` 自动 follow；compact child 以通用 `openTab(..., {wakePending:true})` 排干 carried summary 并继续，底层 `Driver.wake()` 仍以非空 inbox 为硬条件。父 ledger 不复制；child composition 常驻可点击 parent 行，零 event continuation 不再被 `/sessions` 当 crash litter 隐藏。`extensions/handoff` 增加本包 card plugin，完整参数从 ledger live/replay 同形渲染。旧 M1–M5 记录保留为当时实现历史，本节与上方已修订 D3/D4 是当前答案。

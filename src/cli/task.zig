@@ -265,6 +265,14 @@ fn readStatus(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !?std.json.
 pub fn leaseHeldIn(base: std.Io.Dir, io: std.Io, alloc: std.mem.Allocator, dir: []const u8) !bool {
     const path = try std.fs.path.join(alloc, &.{ dir, lock_file });
     defer alloc.free(path);
+    // Reject a corrupt directory before asking Windows to open it with file
+    // locking flags. Zig's threaded Windows backend treats that combination's
+    // INVALID_PARAMETER as an internal panic rather than a catchable I/O error.
+    const before = base.statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    if (before.kind != .file) return error.InvalidLeaseFile;
     var f = base.openFile(io, path, .{
         .lock = .exclusive,
         .lock_nonblocking = true,

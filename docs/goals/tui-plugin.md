@@ -158,3 +158,8 @@
 **2026-08-31 · compact 成为第三个真实 plugin consumer。** API 2.1 新增 `onEvent(..., source)`、`SessionView.role/status`、通用 `extRunPackage`，以及 host-framed `registerUserTurn`/session title formatter。compact package 用这些原语独立拥有 `/compact`、handoff follow/dismiss、机器 user turn 与 continuation title；host 删除 `PluginActions.compact` 和所有 marker/workflow 特判。plan approve 改用 `extRunPackage("compact", "compact", …)`。
 
 **2026-08-31 · API 2.2 兼容增长。** `SessionView.activity?` 补上真实的 `sending`，而既有 `status: "idle" | "stepping" | "canceling"` 不扩 union；需要严格 idle 的新插件读 `activity ?? status`，旧插件的 exhaustive switch 不受影响。compact 是第一个 consumer：append 在途时拒绝 fork。
+
+
+**2026-08-31 · API 2.3 兼容增长。** `PluginObserve.onSession?` 让进程级 plugin 感知 front session identity 变化（注册时先收到当前值）；host 的 App seam 只在 session id 真正变化时投递，status/activity 更新不冒充 tab switch。compact 是第一个 consumer：后台 session 到达的 pending handoff 在切回时重新打开 panel，切走只收起、不 dismiss。actionable handoff 同时收成每 session 一个槽；新成功 proposal supersede 旧 proposal，call id 只保留作 assistant/result correlation 与异步结果归属。
+
+**2026-08-31 · API 2.4 兼容增长。** `SessionView.permissionMode?` 把当前 driver 的 `ask | unsafe` 只读投影给 plugin；`PluginActions.openTab` 增加可选 `wakePending`，只建立 driver attachment 并借既有 `wake()` 排干非空 inbox。compact 在 ask 下保留 follow/dismiss，在 unsafe 下等 idle 后自动 follow；所有 compact child 自动排干 carried summary。handoff 包成为第四个真实 consumer，以自己的 `registerCard("handoff")` 持久、可重放地展示四段参数。

@@ -1410,17 +1410,24 @@ export function sessionStep(ws: Workspace, id: string, options: StepOptions = {}
    * quiet, and this side must not be the reason it waits forever instead.
    */
   async function answer(request: GateRequest): Promise<void> {
-    let verdict: GateVerdict = { allow: false }
+    const denied: GateVerdict = { allow: false }
+    const decision = Promise.resolve(options.gate!(request)).then(
+      (verdict) => ({ kind: "verdict" as const, verdict }),
+      () => ({ kind: "verdict" as const, verdict: denied }),
+    )
+    // A stop may kill the step while its gate callback is still waiting on a
+    // person. Bun reports a write to that closed pipe outside the surrounding
+    // try/catch, so the correct operation is not to write at all once exit wins.
+    const outcome = await Promise.race([
+      decision,
+      proc.exited.then(() => ({ kind: "exited" as const })),
+    ])
+    if (outcome.kind === "exited") return
     try {
-      verdict = await options.gate!(request)
+      proc.stdin?.write(verdictLine(outcome.verdict))
+      await proc.stdin?.flush()
     } catch {
-      // Nothing said is not consent.
-    }
-    try {
-      proc.stdin?.write(verdictLine(verdict))
-      proc.stdin?.flush()
-    } catch {
-      // The child is gone; its own EOF path denies whatever is left.
+      // The child closed the pipe in the narrow interval after the race.
     }
   }
 

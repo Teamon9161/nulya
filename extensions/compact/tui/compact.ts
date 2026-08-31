@@ -22,16 +22,15 @@ interface Proposal {
 
 export function activate(api: PluginApi): void {
   const calls = new Map<string, Proposal>()
+  // A handoff is a session's latest continuation proposal, not a queue. A new
+  // successful call supersedes the older answer to "what should happen next".
   const pending = new Map<string, Proposal>()
 
   const currentProposal = (): Proposal | null => {
     const session = api.observe.session()?.id
     if (!session) return null
-    let found: Proposal | null = null
-    for (const proposal of pending.values()) {
-      if (proposal.session === session && proposal.state !== "done") found = proposal
-    }
-    return found
+    const proposal = pending.get(session)
+    return proposal?.state === "done" ? null : proposal ?? null
   }
 
   const panel = api.registerPanel({
@@ -82,6 +81,36 @@ export function activate(api: PluginApi): void {
     if (event.kind === "tool_results") acceptResults(event, session)
   })
 
+  api.observe.onSession?.(() => presentCurrent())
+
+  function presentCurrent(): void {
+    const proposal = currentProposal()
+    if (!proposal) {
+      panel.close()
+      return
+    }
+    const current = api.observe.session()
+    if (current?.permissionMode === "unsafe" && current.role === "driver") {
+      scheduleAutoFollow(proposal)
+      return
+    }
+    panel.open()
+  }
+
+  function scheduleAutoFollow(proposal: Proposal): void {
+    const wait = () => {
+      const current = api.observe.session()
+      const target = currentProposal()
+      if (!current || target?.key !== proposal.key || current.permissionMode !== "unsafe" || current.role !== "driver") return
+      if ((current.activity ?? current.status) !== "idle") {
+        setTimeout(wait, 50)
+        return
+      }
+      startFollow(proposal)
+    }
+    queueMicrotask(wait)
+  }
+
   function rememberCalls(event: LedgerEventView, session: string): void {
     const raw = event["calls"]
     if (!Array.isArray(raw)) return
@@ -107,11 +136,12 @@ export function activate(api: PluginApi): void {
       const found = calls.get(key)
       if (!found) continue
       calls.delete(key)
-      if (result.ok !== true || pending.has(key)) continue
+      const existing = pending.get(session)
+      if (result.ok !== true || existing?.key === key || (existing && existing.seq > found.seq)) continue
       found.state = "pending"
       found.note = ""
-      pending.set(key, found)
-      if (api.observe.session()?.id === session) panel.open()
+      pending.set(session, found)
+      if (api.observe.session()?.id === session) presentCurrent()
     }
   }
 
@@ -136,29 +166,35 @@ export function activate(api: PluginApi): void {
       proposal.note = "following…"
       return true
     }
-    const chosen = proposal
+    startFollow(proposal)
+    return true
+  }
+
+  function startFollow(chosen: Proposal): void {
+    if (chosen.state !== "pending") return
     chosen.state = "running"
     chosen.note = ""
     void run(chosen.session, { brief_seq: chosen.seq })
       .then((opened) => {
-        const target = pending.get(chosen.key)
-        if (!target) return
+        const target = pending.get(chosen.session)
+        if (target?.key !== chosen.key) return
         if (!opened) {
           target.state = "pending"
           target.note = "not followed · resolve the notice above, then press Enter again"
+          if (api.observe.session()?.id === target.session) panel.open()
           return
         }
         target.state = "done"
         if (currentProposal() === null) panel.close()
       })
       .catch((error: unknown) => {
-        const target = pending.get(chosen.key)
-        if (!target) return
+        const target = pending.get(chosen.session)
+        if (target?.key !== chosen.key) return
         target.state = "pending"
         target.note = messageOf(error)
+        if (api.observe.session()?.id === target.session) panel.open()
         api.notice(`compact: ${target.note}`)
       })
-    return true
   }
 
   async function run(sessionId: string, args: { focus?: string; brief_seq?: number }): Promise<boolean> {
@@ -182,7 +218,7 @@ export function activate(api: PluginApi): void {
     api.notice(args.brief_seq === undefined ? "compacting · asking for a continuation brief…" : "following handoff…")
     const result = await api.actions.extRun("compact", { session: sessionId, ...args })
     const child = compactResult(result.stdout, result.stderr, result.code)
-    api.actions.openTab(child.session)
+    api.actions.openTab(child.session, { wakePending: true })
     api.notice(`compact: opened ${child.session} · parent ${sessionId} remains open`)
     return true
   }

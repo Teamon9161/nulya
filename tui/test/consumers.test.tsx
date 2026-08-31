@@ -31,6 +31,7 @@ import { App } from "../src/ui/App.tsx"
 import { createStyle, type Style } from "../src/render/theme.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { createPluginHost, type PluginHost } from "../src/plugins/host.ts"
+import { sessionKind } from "../src/ui/overlays/SessionsView.tsx"
 import { parseExtNote, wrapExtNote } from "../src/extnote.ts"
 import { rememberModel } from "../src/state/tui_state.ts"
 import { bundledDraftPath, pinsOf } from "../src/extensions.ts"
@@ -60,6 +61,7 @@ let ws: TempWorkspace
 let plan_version = ""
 let ask_version = ""
 let compact_version = ""
+let handoff_version = ""
 
 /**
  * A home of this file's own: `bundledDraftPath` seeds a draft into the USER
@@ -84,6 +86,8 @@ beforeAll(async () => {
   await extSetCurrent(ws, "activate", "ask", ask_version)
   compact_version = await extBuild(ws, join(import.meta.dir, "..", "..", "extensions", "compact"))
   await extSetCurrent(ws, "activate", "compact", compact_version)
+  handoff_version = await extBuild(ws, join(import.meta.dir, "..", "..", "extensions", "handoff"))
+  await extSetCurrent(ws, "activate", "handoff", handoff_version)
 }, 300_000)
 
 afterAll(() => {
@@ -97,6 +101,7 @@ interface Bench {
   host: PluginHost
   notices: string[]
   opened: string | null
+  openedWake: boolean
   session: SessionView
 }
 
@@ -105,7 +110,8 @@ function benchFor(sessionId: string): Bench {
     host: null as unknown as PluginHost,
     notices: [],
     opened: null,
-    session: { id: sessionId, model: "scripted", members: [], role: "driver", status: "idle", activity: "idle" },
+    openedWake: false,
+    session: { id: sessionId, model: "scripted", members: [], role: "driver", status: "idle", activity: "idle", permissionMode: "ask" },
   }
   bench.host = createPluginHost({
     ws,
@@ -121,7 +127,10 @@ function benchFor(sessionId: string): Bench {
       await sessionAppend(ws, sessionId, wrapExtNote(pkg, kind, text))
       await stepOnce(sessionId)
     },
-    openTab: (id) => { bench.opened = id },
+    openTab: (id, options) => {
+      bench.opened = id
+      bench.openedWake = options?.wakePending ?? false
+    },
     wearNext: () => {},
     notice: (text) => bench.notices.push(text),
     zoneBusy: () => false,
@@ -185,6 +194,33 @@ function isExtNote(event: LedgerEvent): event is Extract<LedgerEvent, { kind: "u
 }
 
 
+test.skipIf(!has_zig)("handoff: its durable card shows every brief field on replay", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const bench = benchFor(id)
+  await bench.host.load()
+  const card = bench.host.cardFor("handoff")
+  expect(card?.pkg).toBe("handoff")
+  const rows = card!.renderer.render({
+    tool: "handoff",
+    args: JSON.stringify({
+      done: "implemented the continuation",
+      next_task: "run the complete verification suite",
+      keep: "src/plugins/host.ts and test/consumers.test.tsx",
+      drop: "discarded probe details",
+    }),
+    output: "recorded",
+    presentation: null,
+    ok: true,
+    state: "done",
+  }, 80)
+  const text = Array.isArray(rows) ? rows.map((line) => line.map((span) => span.text).join("")).join("\n") : ""
+  expect(text).toContain("next task · run the complete verification suite")
+  expect(text).toContain("done · implemented the continuation")
+  expect(text).toContain("keep · src/plugins/host.ts")
+  expect(text).toContain("drop · discarded probe details")
+}, 120_000)
+
+
 test.skipIf(!has_zig)("compact: /compact runs the package tool and opens a child without replacing its parent", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, id, "summarise this work")
@@ -196,9 +232,15 @@ test.skipIf(!has_zig)("compact: /compact runs the package tool and opens a child
   await command.run({ args: "keep the verification result", session: { id, model: "scripted", members: [], role: "driver", status: "idle" } })
   expect(bench.opened).toStartWith("s-")
   expect(bench.opened).not.toBe(id)
+  expect(bench.openedWake).toBe(true)
   const listed = await sessionList(ws)
   expect(listed.some((one) => one.id === id)).toBe(true)
-  expect(listed.find((one) => one.id === bench.opened)?.parent?.session).toBe(id)
+  const child = listed.find((one) => one.id === bench.opened)!
+  expect(child.parent?.session).toBe(id)
+  // Before the TUI attachment gets its first poll the summary is still in the
+  // inbox. The continuation must nevertheless remain reachable in /sessions.
+  expect(child.events).toBe(0)
+  expect(sessionKind(child)).toBe("own")
 }, 300_000)
 
 test.skipIf(!has_zig)("compact: only a live successful handoff opens its panel, and Esc never forks", async () => {
@@ -225,37 +267,96 @@ test.skipIf(!has_zig)("compact: only a live successful handoff opens its panel, 
   expect(bench.host.panel()).toBeNull()
 }, 120_000)
 
-test.skipIf(!has_zig)("compact: proposals stay keyed by session and a sending session can retry instead of losing its handoff", async () => {
+test.skipIf(!has_zig)("compact: unsafe follows an accepted handoff without opening the approval panel", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const bench = benchFor(id)
+  bench.session = { ...bench.session, permissionMode: "unsafe" }
+  await bench.host.load()
+  bench.host.observeSession(bench.session)
+
+  toolCall(bench.host, id, "handoff-auto", "handoff", {
+    done: "finished this phase",
+    next_task: "continue without waiting for a click",
+    keep: "the accepted brief",
+  }, 8)
+  expect(bench.host.panel()).toBeNull()
+  await until(() => bench.notices.includes("following handoff…"))
+  expect(bench.host.panel()).toBeNull()
+}, 120_000)
+
+test.skipIf(!has_zig)("compact: a background handoff resurfaces when its session returns to the front", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   const bench = benchFor(id)
   await bench.host.load()
+
+  // The proposal arrives for A while B is in front. Nothing is already open to
+  // hide a missing resurface notification.
+  bench.session = { ...bench.session, id: "s-other" }
+  bench.host.observeSession(bench.session)
+  toolCall(bench.host, id, "handoff-a", "handoff", {
+    done: "finished A",
+    next_task: "continue A",
+    keep: "A.md",
+  }, 8)
+  expect(bench.host.panel()).toBeNull()
+
+  bench.session = { ...bench.session, id }
+  bench.host.observeSession(bench.session)
+  expect(bench.host.panel()?.pkg).toBe("compact")
+  expect(panelText(bench.host)).toContain("next: continue A")
+}, 120_000)
+
+test.skipIf(!has_zig)("compact: a newer handoff supersedes the same session's older proposal", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const bench = benchFor(id)
+  await bench.host.load()
+
+  toolCall(bench.host, id, "handoff-a1", "handoff", {
+    done: "finished A1",
+    next_task: "continue A1",
+    keep: "A1.md",
+  }, 8)
+  toolCall(bench.host, id, "handoff-a2", "handoff", {
+    done: "finished A2",
+    next_task: "continue A2",
+    keep: "A2.md",
+  }, 10)
+  expect(panelText(bench.host)).toContain("next: continue A2")
+  expect(panelText(bench.host)).not.toContain("continue A1")
+
+  // A late duplicate delivery of the older event cannot roll the session back.
+  toolCall(bench.host, id, "handoff-a1", "handoff", {
+    done: "finished A1",
+    next_task: "continue A1",
+    keep: "A1.md",
+  }, 8)
+  expect(panelText(bench.host)).toContain("next: continue A2")
+
+  // Dismissing the latest answer leaves no older actionable queue behind.
+  bench.host.handleKey(key("escape"))
+  expect(bench.host.panel()).toBeNull()
+  bench.session = { ...bench.session, id: "s-other" }
+  bench.host.observeSession(bench.session)
+  bench.session = { ...bench.session, id }
+  bench.host.observeSession(bench.session)
+  expect(bench.host.panel()).toBeNull()
+}, 120_000)
+
+test.skipIf(!has_zig)("compact: a sending session can retry instead of losing its handoff", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const bench = benchFor(id)
+  await bench.host.load()
+  bench.session = { ...bench.session, activity: "sending" }
 
   toolCall(bench.host, id, "handoff-a", "handoff", {
     done: "finished A",
     next_task: "continue A",
     keep: "A.md",
   }, 8)
-  expect(panelText(bench.host)).toContain("next: continue A")
-
-  const other = "s-other"
-  bench.session = { ...bench.session, id: other }
-  toolCall(bench.host, other, "handoff-b", "handoff", {
-    done: "finished B",
-    next_task: "continue B",
-    keep: "B.md",
-  }, 10)
-  expect(panelText(bench.host)).toContain("next: continue B")
-  expect(panelText(bench.host)).not.toContain("continue A")
-
-  // Returning to A reads A's keyed proposal; B never overwrote it.
-  bench.session = { ...bench.session, id, activity: "sending" }
-  expect(panelText(bench.host)).toContain("next: continue A")
   bench.host.handleKey(key("return"))
   await Promise.resolve()
   expect(bench.opened).toBeNull()
   expect(bench.notices.at(-1)).toContain("message is still being sent")
-  // A transient refusal restores this proposal to pending, so Enter remains a
-  // real retry rather than an "already handled" dead end.
   expect(panelText(bench.host)).toContain("resolve the notice above, then press Enter again")
   expect(panelText(bench.host)).toContain("next: continue A")
 }, 120_000)
@@ -428,6 +529,7 @@ test.skipIf(!has_zig)(
     expect(bench.opened).not.toBeNull()
     const child = bench.opened!
     expect(child).toStartWith("s-")
+    expect(bench.openedWake).toBe(true)
 
     // The brief is on disk, in the shape `extensions/handoff` writes.
     const brief = join(ws.dir, ".nulya", "handoffs", `${id}-1.md`)

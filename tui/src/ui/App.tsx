@@ -2372,6 +2372,7 @@ export function App(props: AppProps) {
       role: here.attach.role(),
       status: pluginStatus,
       activity,
+      permissionMode: mode(),
     }
   }
 
@@ -2413,8 +2414,8 @@ export function App(props: AppProps) {
       // two sentinels on one turn is one card the transcript cannot fold.
       await here.attach.send(wrapExtNote(pkg, kind, text), true)
     },
-    openTab: (sessionId) => {
-      tabs.open(sessionId)
+    openTab: (sessionId, options) => {
+      tabs.open(sessionId, { driven: options?.wakePending ?? false })
       setNotice(`opened ${sessionId}`)
     },
     wearNext: (id) => startDraft(undefined, false, { id }),
@@ -2434,6 +2435,10 @@ export function App(props: AppProps) {
     const fresh = plugins.warnings().slice(before)
     if (fresh.length > 0) setNotice(fresh.join(" · "))
   }
+
+  // Plugins are process-wide while their view state is session-scoped. Tell
+  // them when the front tab's identity changes so a queued surface can return.
+  createEffect(() => plugins.observeSession(pluginSession()))
 
   /**
    * A tab's frozen composition arrived: a package this session is WEARING can
@@ -4347,6 +4352,7 @@ export function App(props: AppProps) {
           shell={runsIn() || "this machine"}
           onPickEnv={() => void openEnvPicker()}
           onPickModel={() => openOverlay("model")}
+          onOpenSession={(id) => openSession(id, ws())}
           onCommand={submit}
           tip={tip}
           ref={(box) => (scroll = box)}

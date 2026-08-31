@@ -49,13 +49,19 @@ export function CompositionCard(props: {
   header: SessionHeader | null
   contributions?: Contributions[]
   onPickModel?: () => void
+  onOpenSession?: (id: string) => void
 }) {
   const style = useStyle()
   const screen = useScreen()
   const folds = useFolds()
   const [overModel, setOverModel] = createSignal(false)
   const [overHead, setOverHead] = createSignal(false)
+  const [overParent, setOverParent] = createSignal(false)
   const modelClick = onClick(() => props.onPickModel?.(), true)
+  const parentClick = onClick(() => {
+    const parent = props.header?.parent
+    if (parent) props.onOpenSession?.(parent.session)
+  }, true)
 
   const foldKey = () => `composition:${props.header?.session ?? ""}`
   const defaultOpen = () => style.settings.transcript.composition === "expanded"
@@ -212,6 +218,27 @@ export function CompositionCard(props: {
         </Show>
       </box>
 
+      {/* A continuation must never look like a blank unrelated conversation.
+          Its parent stays one visible, clickable row even while provenance is
+          folded; no ancestor events are copied into this ledger. */}
+      <Show when={props.header?.parent}>
+        <box
+          flexDirection="row"
+          width="100%"
+          height={1}
+          onMouseDown={props.onOpenSession ? parentClick.onMouseDown : undefined}
+          onMouseUp={props.onOpenSession ? parentClick.onMouseUp : undefined}
+          onMouseOver={() => setOverParent(true)}
+          onMouseOut={() => setOverParent(false)}
+        >
+          <text fg={style.theme.accent.evolve}>{`${style.glyphs.bar} `}</text>
+          <box width={label_width} flexShrink={0}><text fg={style.theme.dim}>previous</text></box>
+          <text fg={lifted(style, Boolean(props.onOpenSession) && overParent(), style.theme.muted)}>
+            {fit(`from ${props.header!.parent!.session}:${props.header!.parent!.seq} · open previous conversation`, valueWidth())}
+          </text>
+        </box>
+      </Show>
+
       <Show when={open()}>
         <Fact label="tools" value={tools()} width={valueWidth()} labelWidth={label_width} gutter={gutter()} fg={style.theme.fg} />
         <Show when={skills().length > 0}>
@@ -229,15 +256,6 @@ export function CompositionCard(props: {
         </Show>
         <Show when={versions().length > 0}>
           <Fact label="ext" value={versions().join(" · ")} width={valueWidth()} labelWidth={label_width} gutter={gutter()} />
-        </Show>
-        <Show when={props.header?.parent}>
-          <Fact
-            label="parent"
-            value={`${props.header!.parent!.session}:${props.header!.parent!.seq}`}
-            width={valueWidth()}
-            labelWidth={label_width}
-            gutter={gutter()}
-          />
         </Show>
       </Show>
     </box>

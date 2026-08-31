@@ -354,12 +354,12 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 TUI 的便利流程现在全部属于 `extensions/compact/tui/compact.ts`，宿主不再认识 compact / handoff 的包名、tool 名或 marker：
 
 - compact package current + trusted 时，它的 plugin 注册 `/compact [focus]`、handoff preview panel、compact request/context summary user-turn renderer，以及 `/sessions` 的 summary title formatter；plugins 关闭或包加载失败时，ledger 原文照常可读，只是不再有这些便利 UI。
-- host 给每条 event 明确的 `live | replay` 来源。plugin 只关联 **live assistant handoff call + 同 call id 的成功 tool result**；replay 永远不弹 panel、不 fork。proposal 以 session + call id 隔离，进程内保存 `pending → running → done`：成功或明确 dismiss 才 done，临时失败回 pending 可重试；异步完成只更新自己的 key，不能覆盖另一场刚出现的 proposal。失败、deny、残缺参数都不形成 proposal。
-- handoff 默认总是问：`Enter` follow，`Esc` dismiss。它与 permission mode 完全解耦，`unsafe` 不再自动 follow。observer 可以看到 proposal，但执行前会因 `SessionView.role` 被明确拒绝，不能抢 writer lease。API 2.2 以可选 `SessionView.activity` 暴露真实 `sending | stepping | canceling | idle`；旧的三态 `status` 保持不变（sending 仍折成 idle），compact 用 `activity ?? status`，所以 append 尚未完成时绝不 fork。
-- 手工 `/compact` 与 follow 共用一个 `run`：driver + idle 预检 → 调本包冻结版本的 internal `compact` tool（手工传 `focus`，handoff 传那次 assistant event 的 `brief_seq`）→ 解析 child → `openTab(child)`。父 tab 保留；child summary 留在 inbox，不自动 step，下一次明确用户输入才继续。
-- `extensions/plan` 的 approve 不再调用宿主专用 compact 动词，而是经通用 `extRunPackage("compact", "compact", {session, brief_file})` 后 `openTab(child)`。compact 缺失、未 current、未 build 或 workspace store 未信任时，review panel 和已写 brief 都保留。
+- host 给每条 event 明确的 `live | replay` 来源。plugin 只关联 **live assistant handoff call + 同 call id 的成功 tool result**；replay 永远不弹 panel、不 fork。call correlation 仍以 session + call id 隔离，但 actionable proposal 是 **每 session 一个槽**：同场更新的成功 handoff supersede 旧 handoff，跨场互不覆盖；进程内保存 `pending → running → done`，成功或明确 dismiss 才 done，临时失败回 pending 可重试，异步完成只在自己仍是该场最新 proposal 时更新。失败、deny、残缺参数都不形成 proposal。前台 session 改变时 host 通知 plugin；切回有 pending proposal 的 session 会重新打开 panel，切走则收起但不 dismiss，所以 pending handoff 始终有重新 follow / dismiss 的入口。
+- handoff follow 服从当前 driver 的明确 permission mode：`ask` 显示 `Enter` follow / `Esc` dismiss 面板，`unsafe` 在 step 真正回到 idle 后自动 follow，让 TUI 与 goal driver 都能跨阶段持续运行。observer 可以看到 proposal，但执行前仍因 `SessionView.role` 被明确拒绝，不能抢 writer lease。API 2.4 以可选 `SessionView.permissionMode` 投影这项只读政策；plugin 不能回答 gate或修改 mode。API 2.2 的 `activity` 继续保证 append/step 在途时绝不 fork。
+- 手工 `/compact` 与 follow 共用一个 `run`：driver + idle 预检 → 调本包冻结版本的 internal `compact` tool（手工传 `focus`，handoff 传那次 assistant event 的 `brief_seq`）→ 解析 child → `openTab(child, {wakePending:true})`。父 tab 保留；child attachment 只在 inbox 确有 summary 时自动排干并继续，空 inbox 绝不裸 step。child composition 卡常驻一行可点击 parent lineage，`/sessions` 也保留尚为 0 event 的 continuation；父 ledger 不复制。
+- `extensions/plan` 的 approve 不再调用宿主专用 compact 动词，而是经通用 `extRunPackage("compact", "compact", {session, brief_file})` 后 `openTab(child, {wakePending:true})`。compact 缺失、未 current、未 build 或 workspace store 未信任时，review panel 和已写 brief 都保留。
 
-宿主因此只保留通用原语：插件注册/回滚与异常隔离、事件 provenance、只读 session role/status、同包 `extRun`、跨包 internal-tool `extRunPackage`、`openTab`、以及 user-turn renderer/title registry。marker 渲染、follow policy 与 fork 结果协议都由 package 自己版本化。
+宿主因此只保留通用原语：插件注册/回滚与异常隔离、事件 provenance、只读 session role/status/permissionMode、同包 `extRun`、跨包 internal-tool `extRunPackage`、`openTab(..., {wakePending})`、以及 user-turn renderer/title registry。marker 渲染、follow policy 与 fork 结果协议都由 package 自己版本化。
 
 ### 5.9 后台任务：内核给 supervisor 与事件，屏幕决定何时再 step `[T29]`
 
@@ -3004,3 +3004,21 @@ OpenTUI 0.5.9 的 `InputRenderable` 没有 password/mask 选项，因此这里�
 内核零改动。plugin API 2.2 只新增可选 `SessionView.activity`，保留既有三态 `status`，让 compact 能区分真实 idle 与 append 在途的 sending。compact proposal 改为 session + call id keyed 的 `pending → running → done`，失败回 pending、dismiss/success 才 done，异步结果只落自己的 key；仍只消费 live event。optimistic user card 现在有 local id，append 失败只 `rejectUser(id)`，FIFO `appendTail` 不动；send、显式 step 与 take over 清旧 transient error，timer wake/replay/切 tab 不清。QueueLane 只画计数与 Ctrl+J 动作，正文仍只在 transcript 出现。
 
 回归覆盖：快速双发保持 FIFO、合成一个 user turn 且不触发 `SessionBusy`；append 失败 pending 回 0；sending 时 handoff follow 被拒并可重试；两场 proposal 互不覆盖；compact continuation 在用户输入前保持 0 event/0 step。
+
+
+### T110 · pending handoff 一定有回到屏幕的路（外部 review P1，2026-08-31）
+
+**内核零改动。** T109 把 proposal 从一个全局槽改成 `(session, call)` Map，只解决了跨场覆盖，没解决重新呈现：handoff 在后台 tab 到达时只进 Map，切回该 tab 没有事件再 `panel.open()`；同场 A1/A2 都 pending 时 panel 只画 A2，Esc dismiss A2 后 A1 仍 pending 却没有入口再出现。
+
+语义收成两层：`calls[(session, call)]` 只负责 assistant call 与 tool result correlation；`pending[session]` 才是可操作状态，并且一个 session 最多一个有效 handoff——新的成功 handoff 是模型对“现在该怎么继续”的更新，会 supersede 旧 proposal。旧异步 follow 的完成只有在自己的 key 仍是该场最新值时才能落状态；较老 seq 的延迟重复投递也不能把较新的 proposal 换回去。
+
+plugin API 2.3 兼容增加可选 `observe.onSession`，注册时收到当前 front session，之后只在 front session id 改变时收到通知。App 把 tab 身份变化交给 host；compact 切到有 pending handoff 的 session 时 `panel.open()`，切到没有 pending 的 session 时只关闭自己的 panel。关闭发生在新 session 已成为 current 之后，因此不会把刚离开的 session 误记为 dismissed；切回去仍会重新出现。回归测试从“panel 原本一直开着”改成真正的后台场景，并另钉住同场 supersede、旧事件延迟重投与 dismiss 后没有旧队列复活。`bun run typecheck` 与 `bun test test/consumers.test.tsx`（11 pass）通过。
+
+
+### T111 · BUGS #4：handoff 恢复 continuation driver 语义（2026-08-31）
+
+**内核零改动。** `/goal` 已经把 accepted handoff 当阶段边界自动 compact 并继续；TUI 对同一信号却总弹第二道确认，且只 `openTab` 一个 `driven:false` child，summary 停在 inbox，于是新 tab 看起来全空。产品语义统一为：`ask` 保留 follow/dismiss，`unsafe` 等原 step 真正 idle 后自动 follow；observer 仍不可执行。plugin API 2.4 兼容增加 `SessionView.permissionMode?` 与 `openTab(session, {wakePending?})`，后者只建立既有 driver attachment，真正 step 仍由 `Driver.wake()` 的非空 inbox 硬条件决定。compact、handoff follow 和 plan approve 创建的 child 都用这条路，summary 自动落 ledger 并开始下一轮，空 inbox 永不 prefill。
+
+视觉上仍不复制父 ledger：父 tab 保留，child composition 卡在折叠状态也常驻 `previous … · open previous conversation`，点击回父场；有 parent 的 0-event continuation 不再被 `/sessions` 当空壳隐藏。`extensions/handoff` 增加自己的 TUI card plugin，展开后从 ledger 参数完整画 `next_task/done/keep/drop`，live/replay 同形；compact 临时面板不再是唯一入口。
+
+验证：`bun run typecheck`、`bun run compile` 通过；全量 `bun test` 749 pass / 1 skip / 0 fail。验证中发现并按根因修掉三处 harness 内测试问题：gate callback 与已退出 step 竞争时不再向死 pipe 写 verdict；e2e CLI 子进程默认清除测试 runner 继承的 `NULYA_SESSION(_ID)`；lease probe 在 Windows 带锁 open 前先拒绝非普通文件，避免 Zig I/O 把损坏目录变成 `INVALID_PARAMETER` panic。`zig build test` 与绝对 scratch 前缀下、正常继承 harness 环境的 `zig build e2e` 均 exit 0。

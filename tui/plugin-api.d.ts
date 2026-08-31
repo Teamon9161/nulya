@@ -52,6 +52,11 @@
  *        execution, and package-owned user-turn rendering.
  *   2.2  optional session `activity`, distinguishing an append in flight from
  *        true idle without changing the existing `status` union.
+ *   2.3  optional front-session change observation, so session-scoped panels
+ *        can be surfaced again when their tab returns to the front.
+ *   2.4  optional permission-mode projection and `openTab(..., {wakePending})`;
+ *        continuation plugins can match the active driver's explicit policy
+ *        and drain a child turn without ever stepping an empty inbox.
  *
  * ── WHAT IS DELIBERATELY NOT HERE ─────────────────────────────────────────
  *
@@ -276,6 +281,8 @@ export interface SessionView {
   status: "idle" | "stepping" | "canceling"
   /** Exact front-end activity. Added in API 2.2; absent on older hosts. */
   activity?: "idle" | "sending" | "stepping" | "canceling"
+  /** The active TUI driver's explicit permission policy. Added in API 2.4. */
+  permissionMode?: "ask" | "unsafe"
 }
 
 /**
@@ -336,6 +343,12 @@ export interface PluginObserve {
   onStream(cb: (line: StreamLineView, session: string) => void): Unsubscribe
   /** Every ledger event, with truthful provenance. Replay must never imply a driver action. */
   onEvent(cb: (event: LedgerEventView, session: string, source: "live" | "replay") => void): Unsubscribe
+  /**
+   * The front session changed (including to/from a draft), or its explicit
+   * permission mode changed. Registration also receives the current value once.
+   * Optional for API 2 hosts older than 2.3; mode updates require API 2.4.
+   */
+  onSession?(cb: (session: SessionView | null) => void): Unsubscribe
   /** The front tab's background tasks, right now. */
   tasks(): TaskView[]
   /** The front tab's session, or null while it is still a draft. */
@@ -406,8 +419,12 @@ export interface PluginActions {
    */
   extRunPackage(ref: string, tool: string, args: Record<string, unknown>): Promise<ExtRunResult>
 
-  /** Open a session in a tab of its own (what `Enter` on a sub-session card does). */
-  openTab(sessionId: string): void
+  /**
+   * Open a session in a tab of its own. `wakePending` establishes this TUI as
+   * the driver and drains an inbox turn if one exists; it never steps an empty
+   * inbox. Continuation drivers use it after depositing the child summary.
+   */
+  openTab(sessionId: string, options?: { wakePending?: boolean }): void
 
   /**
    * Put `id` on the NEXT session's `--with` list, in a new draft tab — the

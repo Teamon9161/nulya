@@ -292,11 +292,11 @@ exports[`a run of successful calls becomes one line, and a failure stays out of 
 "
 `;
 
-exports[`the composition card is two lines at rest: what this session is, and what it carries 1`] = `
+exports[`the composition card keeps continuation lineage visible while provenance is folded 1`] = `
 "                                                                            
 ▎ session · 2026-08-16 14:02 · frozen composition                          ▸
 ▎ model    anthropic/claude-sonnet-5 · tools 1+1 · skills 1 · prompts 1     
-                                                                            
+▎ previous from s-1786800870313-bf37ef:41 · open previous conversation      
                                                                             
                                                                             
                                                                             
@@ -316,11 +316,11 @@ exports[`opened, the composition card shows what this session froze 1`] = `
 "                                                                            
 ▎ session · 2026-08-16 14:02 · frozen composition                          ▾
 ▎ model    anthropic/claude-sonnet-5 · api.anthropic.com                    
+▎ previous from s-1786800870313-bf37ef:41 · open previous conversation      
 ▎ tools    shell ⚡lint_zig                                                 
 ▎ skills   zig-style                                                        
 ▎ prompts  evolution                                                        
 ▎ ext      lint@v-3f2a91                                                    
-▎ parent   s-1786800870313-bf37ef:41                                        
                                                                             
                                                                             
                                                                             

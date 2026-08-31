@@ -899,16 +899,16 @@ const expanded_card = createStyle(
   {},
 )
 
-test("the composition card is two lines at rest: what this session is, and what it carries", async () => {
+test("the composition card keeps continuation lineage visible while provenance is folded", async () => {
   const frame = await frameOfNode(() => (
     <CompositionCard header={header_fixture} contributions={card_contributions} />
   ))
   expect(frame).toContain("session · 2026-08-16 14:02 · frozen composition")
   expect(frame).toContain("model    anthropic/claude-sonnet-5 · tools 1+1 · skills 1 · prompts 1")
-  // Everything below the model row is provenance, and it is behind the fold.
+  // Lineage stays visible even while the rest of the provenance is folded.
   expect(frame).not.toContain("shell ⚡lint_zig")
   expect(frame).not.toContain("lint@v-3f2a91")
-  expect(frame).not.toContain("parent s-1786800870313-bf37ef:41")
+  expect(frame).toContain("previous from s-1786800870313-bf37ef:41 · open previous conversation")
   expect(frame).toMatchSnapshot()
 })
 
@@ -925,7 +925,7 @@ test("opened, the composition card shows what this session froze", async () => {
   expect(frame).toContain("prompts  evolution")
   expect(frame).toContain("anthropic/claude-sonnet-5 · api.anthropic.com")
   expect(frame).toContain("lint@v-3f2a91")
-  expect(frame).toContain("parent   s-1786800870313-bf37ef:41")
+  expect(frame).toContain("previous from s-1786800870313-bf37ef:41 · open previous conversation")
   expect(frame).toMatchSnapshot()
 })
 
@@ -982,6 +982,33 @@ test("the fold default is a setting, and a click on the head line overrides it",
     expect(await settle(setup, 2)).toContain("lint@v-3f2a91")
     await setup.mockMouse.click(10, head)
     expect(await settle(setup, 2)).not.toContain("lint@v-3f2a91")
+  } finally {
+    setup.renderer.destroy()
+  }
+})
+
+test("the continuation row opens the parent conversation", async () => {
+  let opened = ""
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <FoldContext.Provider value={createFoldStore()}>
+          <CompositionCard
+            header={header_fixture}
+            contributions={card_contributions}
+            onOpenSession={(id) => { opened = id }}
+          />
+        </FoldContext.Provider>
+      </StyleContext.Provider>
+    ),
+    { width: 76, height: 16 },
+  )
+  try {
+    const frame = await settle(setup)
+    const row = frame.split("\n").findIndex((line) => line.includes("open previous conversation"))
+    expect(row).toBeGreaterThanOrEqual(0)
+    await setup.mockMouse.click(30, row)
+    expect(opened).toBe(header_fixture.parent?.session ?? "")
   } finally {
     setup.renderer.destroy()
   }

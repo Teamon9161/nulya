@@ -161,11 +161,17 @@ test("a session nothing was ever said into is not a row, whichever way `a` is se
   // `events` is the whole test: a header with no ledger events behind it. They
   // exist because a process was killed before it could take its own empty
   // session back, and opening one shows an empty screen.
-  const row = (id: string, events: number, ...sources: string[]) =>
-    ({ id, events, composition: { prompts: sources.map((source) => ({ source, bytes: 1 })) } }) as never
-  const entries = [row("s-1", 12), row("s-2", 0), row("s-3", 8, "agent-explore"), row("s-4", 0, "agent-plan")]
+  const row = (id: string, events: number, sources: string[] = [], parent: object | null = null) =>
+    ({ id, events, parent, composition: { prompts: sources.map((source) => ({ source, bytes: 1 })) } }) as never
+  const entries = [
+    row("s-1", 12),
+    row("s-2", 0),
+    row("s-3", 8, ["agent-explore"]),
+    row("s-4", 0, ["agent-plan"]),
+    row("s-5", 0, [], { session: "s-1", seq: 12 }),
+  ]
   const { own, delegated, empty } = partitionSessions(entries)
-  expect(own.map((entry) => entry.id)).toEqual(["s-1"])
+  expect(own.map((entry) => entry.id)).toEqual(["s-1", "s-5"])
   expect(delegated.map((entry) => entry.id)).toEqual(["s-3"])
   // An empty delegated session is empty first: the count that means "there is
   // a conversation here you are not seeing" must not include rows with none.
@@ -176,10 +182,11 @@ test("a session nothing was ever said into is not a row, whichever way `a` is se
     groupedRows([{ ws, entries }], showAgents)
       .map((listed) => (listed.kind === "session" ? listed.entry.id : listed.kind))
       .join(",")
-  expect(ids(false)).toBe("s-1")
+  expect(ids(false)).toBe("s-1,s-5")
   // `a` switches between the two kinds of conversation; it does not uncover
-  // rows with nothing in them.
-  expect(ids(true)).toBe("s-1,s-3")
+  // rows with nothing in them. The zero-event continuation remains visible in
+  // both views because its parent pointer says it is a real episode.
+  expect(ids(true)).toBe("s-1,s-5,s-3")
 })
 
 test("the rail's one dim line is chosen for the width it has, and the count outlives the keys", () => {
