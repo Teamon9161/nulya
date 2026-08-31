@@ -1,7 +1,7 @@
-import { Match, Show, Switch } from "solid-js"
+import { Match, Show, Switch, createMemo } from "solid-js"
 import { UserTurn } from "./UserTurn.tsx"
-import { CompactionCard } from "./CompactionCard.tsx"
-import { compactionMarker } from "../../compact.ts"
+import { PluginUserTurnCard } from "./PluginUserTurnCard.tsx"
+import { usePlugins } from "../../plugins/context.ts"
 import { SkillEchoCard } from "./SkillEchoCard.tsx"
 import { skillEchoOf } from "../../skills.ts"
 import { midTaskOf } from "../../midtask.ts"
@@ -23,16 +23,12 @@ import type { Contributions } from "../../nulya/files.ts"
  * card can never depend on having seen the stream (tui.md §3).
  */
 export function Card(props: { item: TranscriptItem; contributions?: Contributions[]; capabilityPreviousVersion?: string | null; highlightedCallId?: string | null }) {
+  const plugins = usePlugins()
+  const pluginUserTurn = createMemo(() =>
+    props.item.kind === "user" ? plugins?.userTurnFor(props.item.text) ?? null : null,
+  )
   return (
     <Switch>
-      {/* Compaction's two turns are user turns as far as the ledger is
-          concerned; only their content says otherwise (`compact.ts`). */}
-      <Match when={props.item.kind === "user" && compactionMarker(props.item) !== null}>
-        <CompactionCard
-          item={props.item as Extract<TranscriptItem, { kind: "user" }>}
-          role={compactionMarker(props.item)!}
-        />
-      </Match>
       {/* A `/name` that loaded a skill: also an ordinary user turn, folded back
           down from its sentinel alone (`skills.ts`). */}
       <Match when={skillEchoOf(props.item) !== null}>
@@ -79,6 +75,13 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
           item={props.item as Extract<TranscriptItem, { kind: "user" }>}
           text={midTaskOf(props.item)!.text}
           badge="sent mid-task"
+        />
+      </Match>
+      <Match when={props.item.kind === "user" && pluginUserTurn() !== null}>
+        <PluginUserTurnCard
+          item={props.item as Extract<TranscriptItem, { kind: "user" }>}
+          registration={pluginUserTurn()!}
+          revision={plugins?.revision() ?? 0}
         />
       </Match>
       <Match when={props.item.kind === "user"}>

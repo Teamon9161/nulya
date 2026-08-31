@@ -153,3 +153,6 @@
 - **D2/D3 的 `policy`**：`{readonly?, deny?, ask?}` → **`{readonly?}`**。D3 的论证（包只能收窄，physics #6）不变，但它不再需要一条规则来守：一个可选 bool 说不出任何拓宽的话，于是 `allow` 只是未知键，`PolicyAllowNotPermitted` 与 `InvalidPolicyEntry` 都没有了检查对象。删两张表的另一半理由是它们没有 `readonly` 答不出的用例——包点名某几个 tool 塞进人的审批表，是同一个天花板更弱的写法。TUI 侧 `poolPolicy` 只剩 `readonlyBy`，`withPolicy` 删除（`decide` 拿到的就是人自己的三张表）。
 - **`contributes.commands` 对一个 mode 不再必要**：贡献 system prompt 的包自动得到 `/<id>` = with（`extensions.derivedCommand`）。所以 `extensions/plan` 的 `commands` 条目删了，`extensions/ask` 的留着——它不贡献 prompt，`/ask` 是它自己的主张。包自己声明的同名条目优先，内建名永不被夺走。
 - **`permissions` 整个字段删除**（不属本契约，但 §1 的表里提到过）：零读者，等沙箱定形状（DESIGN §7.2.1 / PLAN §3.8）。
+
+
+**2026-08-31 · compact 成为第三个真实 plugin consumer。** API 2.1 新增 `onEvent(..., source)`、`SessionView.role/status`、通用 `extRunPackage`，以及 host-framed `registerUserTurn`/session title formatter。compact package 用这些原语独立拥有 `/compact`、handoff follow/dismiss、机器 user turn 与 continuation title；host 删除 `PluginActions.compact` 和所有 marker/workflow 特判。plan approve 改用 `extRunPackage("compact", "compact", …)`。

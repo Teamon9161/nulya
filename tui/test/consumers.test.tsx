@@ -32,9 +32,9 @@ import { createStyle, type Style } from "../src/render/theme.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { createPluginHost, type PluginHost } from "../src/plugins/host.ts"
 import { parseExtNote, wrapExtNote } from "../src/extnote.ts"
-import { runCompact } from "../src/compact.ts"
 import { rememberModel } from "../src/state/tui_state.ts"
-import { builtContributions, bundledDraftPath, pinsOf } from "../src/extensions.ts"
+import { bundledDraftPath, pinsOf } from "../src/extensions.ts"
+import { readContributions } from "../src/nulya/files.ts"
 import {
   extBuild,
   extSetCurrent,
@@ -45,7 +45,7 @@ import {
   sessionStep,
 } from "../src/nulya/cli.ts"
 import type { LedgerEvent, ToolResultEntry } from "../src/nulya/ledger.ts"
-import type { CompactedView, PluginKey } from "nulya-tui/plugin-api"
+import type { PluginKey } from "nulya-tui/plugin-api"
 import { scripted_env, settle, tempWorkspace, unsafe_settings, until, type TempWorkspace } from "./support.ts"
 
 /**
@@ -59,6 +59,7 @@ const has_zig = Boolean(process.env["NULYA_ZIG"] ?? Bun.which("zig"))
 let ws: TempWorkspace
 let plan_version = ""
 let ask_version = ""
+let compact_version = ""
 
 /**
  * A home of this file's own: `bundledDraftPath` seeds a draft into the USER
@@ -77,10 +78,12 @@ beforeAll(async () => {
   // The binary carries its own drafts (DESIGN §7.8), so this works in a
   // throwaway directory that has never seen nulya's source tree — which is
   // also what a person installing these packages does.
-  plan_version = await extBuild(ws, await bundledDraftPath(ws, "plan", join("extensions", "plan")))
+  plan_version = await extBuild(ws, join(import.meta.dir, "..", "..", "extensions", "plan"))
   await extSetCurrent(ws, "activate", "plan", plan_version)
   ask_version = await extBuild(ws, await bundledDraftPath(ws, "ask", join("extensions", "ask")))
   await extSetCurrent(ws, "activate", "ask", ask_version)
+  compact_version = await extBuild(ws, join(import.meta.dir, "..", "..", "extensions", "compact"))
+  await extSetCurrent(ws, "activate", "compact", compact_version)
 }, 300_000)
 
 afterAll(() => {
@@ -93,16 +96,16 @@ afterAll(() => {
 interface Bench {
   host: PluginHost
   notices: string[]
-  forked: CompactedView | null
+  opened: string | null
 }
 
 function benchFor(sessionId: string): Bench {
-  const bench: Bench = { host: null as unknown as PluginHost, notices: [], forked: null }
+  const bench: Bench = { host: null as unknown as PluginHost, notices: [], opened: null }
   bench.host = createPluginHost({
     ws,
     enabled: true,
     statePath: join(ws.dir, `tui-state-${sessionId}.json`),
-    session: () => ({ id: sessionId, model: "scripted", members: [] }),
+    session: () => ({ id: sessionId, model: "scripted", members: [], role: "driver", status: "idle" }),
     tasks: () => [],
     // The real verb, and the whole of it: `session append` deposits into the
     // inbox, and only a STEP drains it into the ledger (DESIGN §3.4) — which is
@@ -112,12 +115,7 @@ function benchFor(sessionId: string): Bench {
       await sessionAppend(ws, sessionId, wrapExtNote(pkg, kind, text))
       await stepOnce(sessionId)
     },
-    compact: async (options) => {
-      const result = await runCompact(ws, sessionId, options)
-      bench.forked = result
-      return result
-    },
-    openTab: () => {},
+    openTab: (id) => { bench.opened = id },
     wearNext: () => {},
     notice: (text) => bench.notices.push(text),
     zoneBusy: () => false,
@@ -170,11 +168,56 @@ function toolCall(host: PluginHost, session: string, callId: string, tool: strin
   )
   host.observe({ kind: "stream", line: { stream: "tool", event: "begin", call_id: callId, tool } }, session)
   host.observe({ kind: "stream", line: { stream: "tool", event: "end", call_id: callId, ok: true } }, session)
+  host.observe({
+    kind: "event",
+    event: { seq: seq + 1, kind: "tool_results", results: [{ call_id: callId, ok: true, output: "recorded", spill_path: null }] } as LedgerEvent,
+  }, session)
 }
 
 function isExtNote(event: LedgerEvent): event is Extract<LedgerEvent, { kind: "user_text" }> {
   return event.kind === "user_text" && (event as Extract<LedgerEvent, { kind: "user_text" }>).text.includes("<ext-note ")
 }
+
+
+test.skipIf(!has_zig)("compact: /compact runs the package tool and opens a child without replacing its parent", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  await sessionAppend(ws, id, "summarise this work")
+  await stepOnce(id)
+  const bench = benchFor(id)
+  await bench.host.load()
+  expect(bench.host.loaded().some((one) => one.id === "compact")).toBe(true)
+  const command = bench.host.commands().find((one) => one.pkg === "compact" && one.name === "compact")!
+  await command.run({ args: "keep the verification result", session: { id, model: "scripted", members: [], role: "driver", status: "idle" } })
+  expect(bench.opened).toStartWith("s-")
+  expect(bench.opened).not.toBe(id)
+  const listed = await sessionList(ws)
+  expect(listed.some((one) => one.id === id)).toBe(true)
+  expect(listed.find((one) => one.id === bench.opened)?.parent?.session).toBe(id)
+}, 300_000)
+
+test.skipIf(!has_zig)("compact: only a live successful handoff opens its panel, and Esc never forks", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const bench = benchFor(id)
+  await bench.host.load()
+  toolCall(bench.host, id, "handoff-1", "handoff", {
+    done: "mapped the code",
+    next_task: "implement the change",
+    keep: "src/plugins/host.ts",
+  }, 8)
+  expect(bench.host.panel()?.pkg).toBe("compact")
+  expect(panelText(bench.host)).toContain("next: implement the change")
+  bench.host.handleKey(key("escape"))
+  expect(bench.host.panel()).toBeNull()
+  expect(bench.opened).toBeNull()
+
+  // Re-delivery in the same process is idempotent, as rerenders and task refreshes are.
+  toolCall(bench.host, id, "handoff-1", "handoff", {
+    done: "mapped the code",
+    next_task: "implement the change",
+    keep: "src/plugins/host.ts",
+  }, 8)
+  expect(bench.host.panel()).toBeNull()
+}, 120_000)
 
 // ── plan ───────────────────────────────────────────────────────────────────
 
@@ -206,9 +249,8 @@ const first_plan = [
  * manifests rather than described.
  */
 test.skipIf(!has_zig)("plan is a mode and ask is a capability, and neither asks to be in every session", async () => {
-  const root = join(process.env["NULYA_HOME"]!, "extensions")
-  const plan = (await builtContributions(ws, root, "plan", plan_version))!
-  const ask = (await builtContributions(ws, root, "ask", ask_version))!
+  const plan = await readContributions(ws, "plan", plan_version)
+  const ask = await readContributions(ws, "ask", ask_version)
 
   expect(plan.systemPrompts.length).toBeGreaterThan(0)
   expect(plan.apply).toBe("manual")
@@ -241,7 +283,9 @@ test.skipIf(!has_zig)("plan is a mode and ask is a capability, and neither asks 
  * and asks the kernel what it froze.
  */
 test.skipIf(!has_zig)("plan: /with puts the package AND its tools into the session it starts", async () => {
+  const known = new Set((await sessionList(ws)).map((row) => row.id))
   const before = await sessionNew(ws, { profile: "scripted" })
+  known.add(before)
   const state = createSessionState(before)
   // The draft has to know what to run on: a `/model` pick is remembered here,
   // and without one the next session is the config's default profile — which on
@@ -273,8 +317,8 @@ test.skipIf(!has_zig)("plan: /with puts the package AND its tools into the sessi
   // The first message is what makes a draft a session (T22).
   await setup.mockInput.typeText("probe")
   setup.mockInput.pressEnter()
-  await until(async () => (await sessionList(ws)).some((row) => row.id !== before))
-  const started = (await sessionList(ws)).find((row) => row.id !== before)!
+  await until(async () => (await sessionList(ws)).some((row) => !known.has(row.id)))
+  const started = (await sessionList(ws)).find((row) => !known.has(row.id))!
   setup.renderer.destroy()
 
   // Membership: the version is in the composition, frozen.
@@ -337,12 +381,12 @@ test.skipIf(!has_zig)(
     expect(panelText(bench.host)).toContain("of 11")
 
     // ⑤ Approve. Two real steps: this package's own `approve` tool writes the
-    // brief, then `/compact`'s `brief_file` branch forks on it.
+    // brief, then the generic cross-package action runs compact's internal tool.
     bench.host.handleKey(key("a"))
-    await until(() => bench.forked !== null, 180_000)
-    const child = bench.forked!.session
+    await until(() => bench.opened !== null || panelText(bench.host).includes("failed"), 180_000)
+    expect(bench.opened).not.toBeNull()
+    const child = bench.opened!
     expect(child).toStartWith("s-")
-    expect(bench.forked!.parent.session).toBe(id)
 
     // The brief is on disk, in the shape `extensions/handoff` writes.
     const brief = join(ws.dir, ".nulya", "handoffs", `${id}-1.md`)

@@ -405,7 +405,12 @@ export function activate(api: PluginApi): void {
         api.notice(status)
         return
       }
-      const forked = await api.actions.compact({ briefFile: brief })
+      const compact = await api.actions.extRunPackage("compact", "compact", {
+        session: session.id,
+        brief_file: brief,
+      })
+      const forked = compactResult(compact.stdout, compact.stderr, compact.code)
+      api.actions.openTab(forked.session)
       panel.close()
       api.notice(`plan approved · carrying it out in ${forked.session}`)
     } catch (error) {
@@ -424,6 +429,23 @@ export function activate(api: PluginApi): void {
  * are still streaming in (`CardView.args` grows during `pending`). The strict
  * parse is tried first, so a complete call never goes through the scanner.
  */
+export function compactResult(stdout: string, stderr: string, code: number): { session: string } {
+  if (code !== 0) {
+    throw new Error(firstLine(stdout) || firstLine(stderr) || "compact failed · build and activate the compact package, then approve again")
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(stdout.trim())
+  } catch {
+    throw new Error(`compact returned no result · ${firstLine(stdout) || firstLine(stderr)}`)
+  }
+  const session = (value as { session?: unknown } | null)?.session
+  if (typeof session !== "string" || !session.startsWith("s-")) {
+    throw new Error(`compact returned no session id · ${firstLine(stdout) || firstLine(stderr)}`)
+  }
+  return { session }
+}
+
 export function planOf(args: string): string | null {
   try {
     const value = JSON.parse(args) as { plan_md?: unknown }

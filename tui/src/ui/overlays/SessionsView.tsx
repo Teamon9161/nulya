@@ -35,7 +35,6 @@ import { personaOf } from "../../agents.ts"
 import { sessionList, type SessionListEntry, type Verdict } from "../../nulya/cli.ts"
 import { workspaceLabel } from "../../workspaces.ts"
 import { probeWriterLease, type LeaseState } from "../../nulya/files.ts"
-import { compact_summary_marker } from "../../compact.ts"
 import type { Workspace } from "../../nulya/bin.ts"
 
 interface Row {
@@ -200,15 +199,10 @@ export function railFooter(width: number, focused: boolean, hidden: number, empt
  * A session with nothing in it says so in words. It is the one row whose
  * emptiness the event count used to carry (`0 events`), and that count is gone.
  */
-export function title(entry: SessionListEntry): string {
+export function title(entry: SessionListEntry, format?: (text: string) => string | null): string {
+  const formatted = format?.(entry.first_user_text)
+  if (formatted !== null && formatted !== undefined) return formatted
   const text = entry.first_user_text.trim()
-  if (entry.parent && text.startsWith(compact_summary_marker)) {
-    const carried = text
-      .slice(compact_summary_marker.length)
-      .replace(/^\s*#+\s*/, "")
-      .trim()
-    return carried.length > 0 ? `continued · ${carried}` : "continued context"
-  }
   return text.length > 0 ? text : "nothing said yet"
 }
 
@@ -503,6 +497,8 @@ export function SessionsView(props: {
   focused?: boolean
   /** The pane's own width, for the sidebar; the overlay measures the screen. */
   width?: number
+  /** Package-owned display-only formatting for machine user turns. */
+  sessionTitle?: (text: string) => string | null
 }) {
   const style = useStyle()
   const screen = useScreen()
@@ -803,7 +799,7 @@ export function SessionsView(props: {
                         : style.theme.fg,
                     )}
                   >
-                    {fit(title(entry()), plan().said)}
+                    {fit(title(entry(), props.sessionTitle), plan().said)}
                   </text>
                 </box>
                 <Show when={plan().persona.length > 0}>
@@ -993,7 +989,7 @@ export function SessionsView(props: {
                         : style.theme.fg,
                     )}
                   >
-                    {fit(title(entry()), said())}
+                    {fit(title(entry(), props.sessionTitle), said())}
                   </text>
                 </box>
                 {/* Which persona this session was handed, when it is one an

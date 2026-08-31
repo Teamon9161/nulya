@@ -97,7 +97,6 @@ export const commands: Command[] = [
   { name: "/usage", what: "what this session cost, and the workspace's tool-usage journal" },
   { name: "/context", what: "how full the window is, and what is filling it" },
   { name: "/settings", what: "the effective tui.toml values and which file each came from" },
-  { name: "/compact", args: "[focus]", what: "summarise this session and continue in a new one; this file stays" },
   { name: "/outcome", args: "<verdict> [note]", what: "success | partial | failure — unjudged is not the same as failed" },
   {
     name: "/with",

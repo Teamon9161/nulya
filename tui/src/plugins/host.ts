@@ -42,10 +42,12 @@
  * plugin handled, an observed line delivered, `notice`, `state.set`, a panel
  * opening or closing, and a command finishing.
  */
+import { existsSync } from "node:fs"
+import { join } from "node:path"
 import { createSignal, type Accessor } from "solid-js"
-import { extRun, type StepLine, type StreamLine } from "../nulya/cli.ts"
+import { extList, extRun, type StepLine, type StreamLine } from "../nulya/cli.ts"
 import { listExtensions, packageDirOf, readContributions, storeRoots, type Contributions } from "../nulya/files.ts"
-import { storeTrusted, workspaceStorePath } from "../extensions.ts"
+import { samePath, storeTrusted, workspaceStorePath } from "../extensions.ts"
 import { pluginState, rememberPluginState } from "../state/tui_state.ts"
 import { builtin_names } from "../commands.ts"
 import type { Workspace } from "../nulya/bin.ts"
@@ -53,7 +55,6 @@ import type {
   CardRenderer,
   CommandContext,
   CommandSpec,
-  CompactedView,
   LedgerEventView,
   Line,
   LineRenderer,
@@ -64,6 +65,7 @@ import type {
   SessionView,
   StreamLineView,
   TaskView,
+  UserTurnRenderer,
 } from "nulya-tui/plugin-api"
 
 /**
@@ -107,6 +109,11 @@ export interface PluginWidget {
   renderer: LineRenderer
 }
 
+export interface PluginUserTurn {
+  pkg: string
+  renderer: UserTurnRenderer
+}
+
 /** The panel currently on screen: which package's, and how to draw it. */
 export interface OpenPanel {
   pkg: string
@@ -136,12 +143,6 @@ export interface PluginHostSeams {
   tasks: () => TaskView[]
   /** `session append`, wrapped in the plugin sentinel (`extnote.ts`). */
   appendNote: (pkg: string, kind: string, text: string) => Promise<void>
-  /**
-   * `/compact` on the front tab's session (`api.actions.compact`). The same
-   * verb, the same guards and the same tab move a person gets; what differs is
-   * only who asked for it.
-   */
-  compact: (options: { briefFile?: string; focus?: string }) => Promise<CompactedView>
   openTab: (sessionId: string) => void
   wearNext: (id: string) => void
   notice: (text: string) => void
@@ -161,6 +162,10 @@ export interface PluginHost {
   warnings: Accessor<readonly string[]>
   commands: Accessor<readonly PluginCommandRow[]>
   cardFor(tool: string): PluginCard | null
+  /** First package matcher in load order, or null. */
+  userTurnFor(text: string): PluginUserTurn | null
+  /** Display-only session title supplied by the matching package, or null. */
+  sessionTitle(text: string): string | null
   widgets: Accessor<readonly PluginWidget[]>
   /** Package ids that registered a code widget — their own `panel: true` rows stand down. */
   widgetPackages: Accessor<ReadonlySet<string>>
@@ -319,13 +324,19 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
   const [warnings, setWarnings] = createSignal<readonly string[]>([])
   const [commands, setCommands] = createSignal<readonly PluginCommandRow[]>([])
   const [cards, setCards] = createSignal<readonly PluginCard[]>([])
+  const [userTurns, setUserTurns] = createSignal<readonly PluginUserTurn[]>([])
   const [widgets, setWidgets] = createSignal<readonly PluginWidget[]>([])
   const [revision, setRevision] = createSignal(0)
   /** Which panel a plugin has asked to be on screen, before the zone is consulted. */
   const [wanted, setWanted] = createSignal<OpenPanel | null>(null)
 
   const streamObservers: { pkg: string; cb: (line: StreamLineView, session: string) => void }[] = []
-  const eventObservers: { pkg: string; cb: (event: LedgerEventView, session: string) => void }[] = []
+  const eventObservers: {
+    pkg: string
+    cb: (event: LedgerEventView, session: string, source: "live" | "replay") => void
+  }[] = []
+  const reportedMatcherFailures = new Set<string>()
+  const reportedMatcherConflicts = new Set<string>()
 
   const bump = () => setRevision((at) => at + 1)
 
@@ -335,6 +346,7 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
   const rollback = (pkg: string) => {
     setCommands((all) => all.filter((row) => row.pkg !== pkg))
     setCards((all) => all.filter((row) => row.pkg !== pkg))
+    setUserTurns((all) => all.filter((row) => row.pkg !== pkg))
     setWidgets((all) => all.filter((row) => row.pkg !== pkg))
     for (const list of [streamObservers, eventObservers]) {
       for (let at = list.length - 1; at >= 0; at--) if (list[at]!.pkg === pkg) list.splice(at, 1)
@@ -389,6 +401,15 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
         // activation is rolled back rather than half-honoured.
         guardTool(tool, "draw a card for")
         setCards((all) => [...all.filter((row) => !(row.pkg === pkg && row.tool === tool)), { pkg, tool, renderer }])
+      },
+
+      registerUserTurn(renderer: UserTurnRenderer) {
+        const id = renderer.id.trim()
+        if (id.length === 0) throw new Error(`${pkg} registered a user-turn renderer with no id`)
+        setUserTurns((all) => [
+          ...all.filter((row) => !(row.pkg === pkg && row.renderer.id === id)),
+          { pkg, renderer: { ...renderer, id } },
+        ])
       },
 
       registerPanel(spec: PanelSpec): PanelHandle {
@@ -446,7 +467,7 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
           guardTool(tool, "run")
           return await extRun(seams.ws, `${plugin.id}@${plugin.version}`, tool, args)
         },
-        compact: (options) => seams.compact(options ?? {}),
+        extRunPackage: (ref, tool, args) => runPackageTool(ref, tool, args),
         openTab: (sessionId) => seams.openTab(sessionId),
         wearNext: (id) => seams.wearNext(id),
       },
@@ -466,6 +487,35 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
         bump()
       },
     }
+  }
+
+  async function runPackageTool(ref: string, tool: string, args: Record<string, unknown>) {
+    const trimmed = ref.trim()
+    const split = trimmed.lastIndexOf("@")
+    const id = split > 0 ? trimmed.slice(0, split) : trimmed
+    let version = split > 0 ? trimmed.slice(split + 1) : ""
+    if (id.length === 0 || (split > 0 && version.length === 0)) throw new Error(`invalid package ref '${ref}'`)
+
+    if (version.length === 0) {
+      const effective = (await extList(seams.ws)).find((entry) => entry.id === id && !entry.shadowed)
+      if (!effective || effective.current === null) {
+        throw new Error(`${id} has no current version · build and activate it, then try again`)
+      }
+      version = effective.current
+    }
+
+    const roots = await storeRoots(seams.ws)
+    const dir = packageDirOf(roots, id, version)
+    if (dir === null) throw new Error(`${id}@${version} is not built in an effective extension store`)
+    const selectedRoot = roots.find((root) => existsSync(join(root, id, "versions", version, "package")))
+    if (selectedRoot && samePath(selectedRoot, workspaceStorePath(seams.ws)) && !storeTrusted(selectedRoot, seams.env)) {
+      throw new Error(`${id}@${version} is in an untrusted workspace store · trust the store, then try again`)
+    }
+    const contributions = await readContributions(seams.ws, id, version, roots)
+    if (!contributions.internalTools.includes(tool)) {
+      throw new Error(`${id}@${version} cannot run '${tool}' here: its frozen manifest does not declare it internal`)
+    }
+    return await extRun(seams.ws, `${id}@${version}`, tool, args)
   }
 
   /**
@@ -574,6 +624,42 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
     cardFor(tool) {
       return cards().find((row) => row.tool === tool) ?? null
     },
+    userTurnFor(text) {
+      const matches: PluginUserTurn[] = []
+      for (const row of userTurns()) {
+        try {
+          if (row.renderer.match(text)) matches.push(row)
+        } catch (error) {
+          const key = `${row.pkg}\0${row.renderer.id}`
+          if (!reportedMatcherFailures.has(key)) {
+            reportedMatcherFailures.add(key)
+            warn(`${row.pkg}: user-turn matcher '${row.renderer.id}' threw · ${message(error)}`)
+          }
+        }
+      }
+      if (matches.length > 1) {
+        const key = matches.map((row) => `${row.pkg}:${row.renderer.id}`).join("|")
+        if (!reportedMatcherConflicts.has(key)) {
+          reportedMatcherConflicts.add(key)
+          warn(`multiple user-turn renderers matched; using ${matches[0]!.pkg}:${matches[0]!.renderer.id} · ${key}`)
+        }
+      }
+      return matches[0] ?? null
+    },
+    sessionTitle(text) {
+      const row = this.userTurnFor(text)
+      if (!row?.renderer.sessionTitle) return null
+      try {
+        return row.renderer.sessionTitle(text)
+      } catch (error) {
+        const key = `${row.pkg}\0${row.renderer.id}\0title`
+        if (!reportedMatcherFailures.has(key)) {
+          reportedMatcherFailures.add(key)
+          warn(`${row.pkg}: session-title formatter '${row.renderer.id}' threw · ${message(error)}`)
+        }
+        return null
+      }
+    },
     widgets,
     widgetPackages: () => new Set(widgets().map((row) => row.pkg)),
     panel: () => (seams.zoneBusy() ? null : wanted()),
@@ -618,7 +704,7 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
       if (eventObservers.length === 0) return
       for (const observer of [...eventObservers]) {
         try {
-          observer.cb(line.event as unknown as LedgerEventView, session)
+          observer.cb(line.event as unknown as LedgerEventView, session, "live")
         } catch (error) {
           warn(`${observer.pkg}: onEvent threw · ${message(error)}`)
         }

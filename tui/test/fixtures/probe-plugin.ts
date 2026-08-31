@@ -24,12 +24,14 @@ export function activate(api: PluginApi): void {
   let streams = 0
   let events = 0
   let cursor = 0
+  let eventSource = "none"
 
   api.observe.onStream(() => {
     streams += 1
   })
-  api.observe.onEvent(() => {
+  api.observe.onEvent((_event, _session, source) => {
     events += 1
+    eventSource = source
   })
 
   // Two rows: the head (always on screen) and a body that folds under it.
@@ -37,10 +39,19 @@ export function activate(api: PluginApi): void {
     render: (width: number): Line[] => [
       [
         { text: "probe", token: "accent.evolve" },
-        { text: ` · streams ${streams} · events ${events}`, token: "dim" },
+        { text: ` · streams ${streams} · events ${events} · source ${eventSource}`, token: "dim" },
       ],
       [{ text: `width ${width} · session ${api.observe.session()?.id ?? "none"}`, token: "muted" }],
     ],
+  })
+
+  api.registerUserTurn({
+    id: "probe-turn",
+    match: (text) => text.startsWith("<probe>"),
+    head: () => "probe context",
+    defaultOpen: () => true,
+    render: (view) => [[{ text: view.text.slice("<probe>".length).trim(), token: "fg" }]],
+    sessionTitle: (text) => `probe · ${text.slice("<probe>".length).trim()}`,
   })
 
   // The package's OWN tool, which is the only kind it may draw (D11).
@@ -84,6 +95,39 @@ export function activate(api: PluginApi): void {
     description: "append what the probe found",
     run: async (ctx) => {
       await api.actions.appendNote("finding", ctx.args.length > 0 ? ctx.args : "nothing in particular")
+    },
+  })
+
+  api.registerCommand({
+    name: "probe-cross",
+    description: "run an internal tool through the generic package action",
+    run: async () => {
+      const result = await api.actions.extRunPackage("probe", "inside", {})
+      api.notice(`cross-package code ${result.code}`)
+    },
+  })
+
+  api.registerCommand({
+    name: "probe-cross-refuse",
+    description: "prove a model-facing tool is refused by the cross-package action",
+    run: async () => {
+      try {
+        await api.actions.extRunPackage("probe", "note", {})
+      } catch (error) {
+        api.notice(error instanceof Error ? error.message : String(error))
+      }
+    },
+  })
+
+  api.registerCommand({
+    name: "probe-cross-missing",
+    description: "prove an id without current is refused",
+    run: async () => {
+      try {
+        await api.actions.extRunPackage("missing-package", "inside", {})
+      } catch (error) {
+        api.notice(error instanceof Error ? error.message : String(error))
+      }
     },
   })
 

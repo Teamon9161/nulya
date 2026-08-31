@@ -113,6 +113,12 @@ beforeAll(async () => {
             description: "a tool the probe package draws its own card for",
             input: { type: "object", properties: { text: { type: "string" } } },
           },
+          {
+            name: "inside",
+            surface: "internal",
+            description: "an internal tool used to prove generic package execution",
+            input: { type: "object", properties: {} },
+          },
         ],
       },
     },
@@ -165,7 +171,6 @@ function hostWith(over: Partial<Parameters<typeof createPluginHost>[0]> = {}): P
     session: () => null,
     tasks: () => [],
     appendNote: async () => {},
-    compact: async () => ({ session: "s-child", parent: { session: "s-parent", seq: 1 } }),
     openTab: () => {},
     wearNext: () => {},
     notice: () => {},
@@ -212,6 +217,29 @@ describe("loading", () => {
     // `nosy` registered a widget BEFORE it threw, and the rollback took it
     // back: a half-activated plugin is not a plugin.
     expect(host.widgets().some((row) => row.pkg === "nosy")).toBe(false)
+  }, 60_000)
+
+  test("a package may own sentinel user turns and their display-only session titles", async () => {
+    const host = hostWith()
+    await host.load()
+    const registration = host.userTurnFor("<probe> carried state")
+    expect(registration?.pkg).toBe("probe")
+    expect(registration?.renderer.render({ text: "<probe> carried state", queued: false }, 80)[0]?.[0]?.text).toBe("carried state")
+    expect(host.sessionTitle("<probe> carried state")).toBe("probe · carried state")
+    expect(host.userTurnFor("ordinary words")).toBeNull()
+    expect(host.sessionTitle("ordinary words")).toBeNull()
+  }, 60_000)
+
+  test("cross-package execution resolves current and refuses non-internal tools", async () => {
+    const notices: string[] = []
+    const host = hostWith({ notice: (text) => notices.push(text) })
+    await host.load()
+    await host.commands().find((row) => row.name === "probe-cross")!.run({ args: "", session: null })
+    expect(notices.pop()).toBe("cross-package code 0")
+    await host.commands().find((row) => row.name === "probe-cross-refuse")!.run({ args: "", session: null })
+    expect(notices.pop()).toContain("does not declare it internal")
+    await host.commands().find((row) => row.name === "probe-cross-missing")!.run({ args: "", session: null })
+    expect(notices.pop()).toContain("has no current version")
   }, 60_000)
 
   test("a package may only draw its own tool's card", async () => {
@@ -309,6 +337,7 @@ describe("observe", () => {
     host.observe({ kind: "stream", line: { stream: "model", event: "started" } }, "s-1")
     host.observe({ kind: "event", event: { seq: 3, kind: "user_text", text: "hello" } as unknown as LedgerEvent }, "s-1")
     expect(rowText()).toContain("streams 2 · events 1")
+    expect(rowText()).toContain("source live")
   }, 60_000)
 })
 

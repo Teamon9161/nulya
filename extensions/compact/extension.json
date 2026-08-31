@@ -3,6 +3,7 @@
   "id": "compact",
   "runtime": { "entry": "bin/compact" },
   "contributes": {
+    "ui": { "tui": { "entry": "tui/compact.ts", "api": 2 } },
     "tools": [{
       "name": "compact",
       "surface": "internal",

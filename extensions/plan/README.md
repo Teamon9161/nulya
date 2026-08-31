@@ -42,8 +42,8 @@ sync 本来也会把它 activate——**activate 只是让 `plan` 这个名字�
 - 一次 `propose` 结束，**评审面板自己打开**（输入框上方，transcript 仍然看得见）：
   `j/k` 移动 · `u/d` 翻页 · `v` 起选区 · `c` 对当前行/选区写评论 · `r` 把全部评论
   作为**一条** user turn 送回去 · `a` 批准 · `Esc` 收起（`/plan-review` 重开）；
-- `a` = `approve` 写出 brief → `/compact` 的 `brief_file` 分支 fork。
-  **执行场不戴这个包**：`session new --parent` 不带 `--with`，所以计划过去了、persona 没过去。
+- `a` = `approve` 写出 brief → plugin host 用通用 `extRunPackage("compact", "compact", …)` 调 compact 包的 `brief_file` 分支 → `openTab(child)`。
+  compact 必须已经 build + activate；缺失、未激活或不受信任时，评审面板与已写出的 brief 都保留，修复后可再次批准。**执行场不戴这个包**：`session new --parent` 不带 `--with`，所以计划过去了、persona 没过去；父 tab 也保留。
 
 ## 没有插件时（降级）
 

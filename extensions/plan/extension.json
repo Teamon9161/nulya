@@ -52,7 +52,7 @@
       {
         "name": "approve",
         "surface": "internal",
-        "description": "Freeze an approved plan into a brief a new session can start from. For drivers: writes `.nulya/handoffs/<session>-<n>.md` — the file shape `ext run compact --arg brief_file=` takes — and returns its path. Never on a model's tool face; approval is a person's act.",
+        "description": "Freeze an approved plan into a brief a new session can start from. For drivers: writes `.nulya/handoffs/<session>-<n>.md` — the file shape compact package's internal `compact{brief_file}` tool takes — and returns its path. Never on a model's tool face; approval is a person's act.",
         "input": {
           "type": "object",
           "properties": {

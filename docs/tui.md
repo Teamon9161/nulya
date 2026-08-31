@@ -347,14 +347,19 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 - **等待中的请求是一个队列，不是一个槽**（T27）：这个进程可以同时 drive 多个 tab，两场 session 各停在一个 call 上是可能的；第二个请求覆盖第一个，会让那个 step 永远等一个没人能兑现的 promise、并一直攥着写者租约。状态栏活动区在等的时候只写 `waiting for your answer`（warn 色，压过其它所有活动——内核这会儿就停在这里）；键不在这一行重复，那正是它在窄屏上被挤成 `y allow · nasknstep` 的原因。
 - **这不是安全边界**（DESIGN §9）：extension 与 shell 同权，`readonly` 是包的主张不是强制。它管的是"这一次要不要发生"，真隔离等 sandbox（PLAN §3.8）。
 
-### 5.8 模型自己提的 handoff `[T24]`
+### 5.8 模型自己提的 handoff `[T24 · compact plugin 迁移]`
 
-`extensions/handoff` 的 tool 只做一件事：校验四个分节并叫模型收尾（DESIGN §11；T106 起**它什么都不写**——提议就是那次调用的参数，早已冻在 ledger 里）。**那次被接受的调用就是提议**；fork 是**驱动者**的动作，`drivers/goal.*` 不问就 fork，这个前端在 `ask` 下先问（旁边就有个人）。
+`extensions/handoff` 的 tool 只校验 `done` / `next_task` / `keep`（`drop` 可选）并返回；调用参数本身就是冻在 ledger 里的 durable 阶段结束信号。它不 fork、不写第二份 handoff 文件，也不持有任何 UI 状态。
 
-- **进 composition**：draft materialize 那一刻按 `[extensions] session_with`（默认 `["handoff", "agent"]`，T34；T52 起那两个老布尔键不再读）加 `--with handoff@<v>` + 它每个 `surface: "manual"` tool 的 `--pin`（两根轴，DESIGN §7.5：`--with` 是成员，`--pin` 才给它一个 native 槽）。**这张单子上的两个包今天都不需要 pin**（T52 / T53）：`handoff` 与 `agent` 的入口 tool 都声明 `surface: "auto"`，成员关系本身就是它们上台的路，而指着它们的 pin 会被整场拒绝（`PinToolNotPinnable`）。`SessionMember.pins` 那一半留着——它从**正在被组合的那个版本**的冻结 manifest 读，所以哪天某个包把一个 tool 挪回 `manual`，这里不用改一个字就跟上了。版本由 `extensions.sessionMember` 拿（`bundledDraftPath` → `ext build`，所以**不在 nulya checkout 里也能用**：二进制自带源码，seed 进 user store 再 build）；build 在开屏后台起、失败就这一场不带它并照常开场——**装不上不是开不了场的理由**。局限：第一次在一台机器上要付一次编译（compiled 包）。
-- **认出提议的时机**（T106 起）：只有这个 TUI 真正观察到一场从 running 回到 idle，才在**自己已经解析出来的 transcript** 里找一次被接受的 `handoff` 调用（`tui/src/handoff.ts` 的纯函数 `handoffsIn(items)` / `nextHandoff(items, seen)`，判据 = `kind === "tool" && tool === "handoff" && ok === true` 且参数解得出至少一个必填节）；初次 hydrate / resume 只是 replay，绝不重新弹旧提议、更不能在 `unsafe` 下执行 fork。`seen` 按 **session + call id** 记，同一个提议不会问第二遍，不同场碰巧相同的 provider call id 也不互相遮住。不再有任何盘面 watcher。
-- **`ask`** = brief 的分节 preview 显示在 transcript 与输入框之间（`HandoffPanel` 收 `proposal`，头行不再打路径；真正被 carry 过去的 markdown 由 `extensions/compact` 渲染，这里只是 preview 不是第二份实现），`Enter` 跟过去 / `Esc` 收起（提议留在 transcript 那张 tool 卡上）。**`unsafe`** = 直接跟，一行 notice。
-- **跟过去 = `/compact` 的 `brief_seq: <那次调用的 seq>` 分支**（DESIGN §11；`runCompact` 多 `brief?` / `briefSeq?` 两个 option）：传的是**屏幕上给他看的那一份**的 seq 而不是 `latest`——人把新的一次 dismiss 掉再去跟一个旧的，必须 fork 在他看过的那份上。同一条 fork，旧 session 逐字节不变，tab 换到子 session。子场虽是这个进程创建的，却以 `driven:false` attach：summary 留在 inbox，首次显式用户 turn 才一起排干；创建所有权不再暗含“无人输入也可 wake”。旧 transcript 从 `/sessions` 的 parent tree 打开，continuation 行把内部 `<nulya:context-summary>` marker 显示成 `continued · …`。**`plugin-api.d.ts` 一个字没改**：`api.actions.compact({briefFile})` 是插件面，`extensions/plan` 仍走 `brief_file`。
+TUI 的便利流程现在全部属于 `extensions/compact/tui/compact.ts`，宿主不再认识 compact / handoff 的包名、tool 名或 marker：
+
+- compact package current + trusted 时，它的 plugin 注册 `/compact [focus]`、handoff preview panel、compact request/context summary user-turn renderer，以及 `/sessions` 的 summary title formatter；plugins 关闭或包加载失败时，ledger 原文照常可读，只是不再有这些便利 UI。
+- host 给每条 event 明确的 `live | replay` 来源。plugin 只关联 **live assistant handoff call + 同 call id 的成功 tool result**；replay 永远不弹 panel、不 fork。proposal 以 session + call id 隔离，失败、deny、残缺参数都不形成 proposal。
+- handoff 默认总是问：`Enter` follow，`Esc` dismiss。它与 permission mode 完全解耦，`unsafe` 不再自动 follow。observer 可以看到 proposal，但执行前会因 `SessionView.role/status` 被明确拒绝，不能抢 writer lease。
+- 手工 `/compact` 与 follow 共用一个 `run`：driver + idle 预检 → 调本包冻结版本的 internal `compact` tool（手工传 `focus`，handoff 传那次 assistant event 的 `brief_seq`）→ 解析 child → `openTab(child)`。父 tab 保留；child summary 留在 inbox，不自动 step，下一次明确用户输入才继续。
+- `extensions/plan` 的 approve 不再调用宿主专用 compact 动词，而是经通用 `extRunPackage("compact", "compact", {session, brief_file})` 后 `openTab(child)`。compact 缺失、未 current、未 build 或 workspace store 未信任时，review panel 和已写 brief 都保留。
+
+宿主因此只保留通用原语：插件注册/回滚与异常隔离、事件 provenance、只读 session role/status、同包 `extRun`、跨包 internal-tool `extRunPackage`、`openTab`、以及 user-turn renderer/title registry。marker 渲染、follow policy 与 fork 结果协议都由 package 自己版本化。
 
 ### 5.9 后台任务：内核给 supervisor 与事件，屏幕决定何时再 step `[T29]`
 
@@ -2989,3 +2994,6 @@ OpenTUI 0.5.9 的 `InputRenderable` 没有 password/mask 选项，因此这里�
 第一次无密码 `remote check` 的完整 stderr 若是 SSH authentication refusal，主页照旧显示完整诊断，同时弹这个输入框；Enter 后用密码重试。成功的 bytes 每次按需复制给 `remote check`、`remote ls`、`session new` 和该 tab 随后的 `session step`，`nulya/cli.ts` 是唯一 spawn 层：写进 child stdin 后立即覆零副本，spawn 自己失败也覆零。内核的 one-shot askpass broker 见 DESIGN §8.2；StrictHostKeyChecking 没有前端例外。
 
 测试：`test/sshpassword.test.tsx` 用 fake binary 证明秘密只到 stdin、argv 没有、传入数组写后全零；遮罩组件的 render 只收到 byte count，因此组件 API 本身没有可以误画的明文。`bun run typecheck` 与该文件窄测通过。
+
+
+**2026-08-31 · compact / handoff policy 迁入 package plugin。** 内核零改动。plugin API 2.1 增加 event provenance、session role/status、`extRunPackage` 与 package-owned user-turn renderer；`extensions/compact` 接管 `/compact`、实时 handoff correlation、面板、marker turn 与 session title。App 的 handoff 状态机、built-in `/compact`、`PluginActions.compact`、`src/compact.ts`、`src/handoff.ts` 与 `CompactionCard` 已删除。compact 后父 tab 保留，child 不自动 step；handoff 总是询问且不读取 permission mode。`extensions/plan` 已迁到通用跨包 internal-tool 调用。

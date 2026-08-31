@@ -348,3 +348,15 @@ observer follower也产生 `source:"live"`。compact plugin看到后可显示只
 ## 7. 实施记录
 
 > 执行时只在这里追加：日期、里程碑、实际改动、偏离、测试结果、下一步提醒。不要改写上面的契约来伪装偏离不存在。
+
+
+### 2026-08-31 · M1–M5 完成
+
+- plugin API/host：加入 live/replay provenance、session role/status、`extRunPackage`、user-turn renderer/title registry；matcher/formatter 与 activation 失败隔离，注册随 activation rollback。
+- compact package：新增 API 2 TUI plugin 与 README；`/compact`、accepted live handoff correlation、follow/dismiss panel、request/summary rendering、session title 全部归包。父 tab 保留，child 不自动 step，handoff 总是询问。
+- plan：approve 改走通用跨包 internal tool，再 `openTab`；失败时 panel/brief 保留。
+- host 清理：删除 built-in `/compact`、App handoff/compact workflow、`PluginActions.compact`、`tui/src/compact.ts`、`tui/src/handoff.ts`、`CompactionCard` 与 core marker/title 特判。
+- 测试迁移：新增真实 compact consumer、live accepted handoff dismiss/idempotence、event source、user-turn/title registry 与 package parser/result tests；旧 host parser/boundary tests 删除。
+- 验证：`bun run typecheck`、focused plugin/render/overlay tests 与真实 plan/compact consumer 已通过；全量结果见本次工作最终报告。
+
+- 最终验证：`bun run typecheck` 通过；`bun test` 736/736；`bun run compile` 通过。`zig build test` 为 581/582，唯一失败是未改动的 `cli.task` 目录锁平台假设；独立 `zig build e2e` 为 159/166（另 2 skip），失败均在未改动的 lease fault / outcome 环境来源 / std read freshness / activation-note 断言，compact/extension manifest 构建与本 goal 的 TUI consumer 均通过。

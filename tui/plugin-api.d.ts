@@ -44,10 +44,12 @@
  * (`PluginKey.text`) or that method missing, which a plugin already has to
  * tolerate for any optional part of this file. What is here so far:
  *
- *   1.x  row-based surfaces, `PluginKey.text`, and `PluginActions.compact`.
+ *   1.x  row-based surfaces and `PluginKey.text`.
  *   2.0  transcript-card `DiffSurface`. Adding a union variant is a
  *        major-version change because an older host cannot silently ignore it
  *        correctly.
+ *   2.1  event provenance, session role/status, cross-package internal-tool
+ *        execution, and package-owned user-turn rendering.
  *
  * ── WHAT IS DELIBERATELY NOT HERE ─────────────────────────────────────────
  *
@@ -263,6 +265,10 @@ export interface SessionView {
   /** The model identity frozen at `session new`, or `""` when unknown. */
   model: string
   members: SessionMemberView[]
+  /** Whether this front end currently owns the writer side of the attachment. */
+  role: "driver" | "observer"
+  /** The front end's current activity; this is a projection, not writer authority. */
+  status: "idle" | "stepping" | "canceling"
 }
 
 /**
@@ -321,8 +327,8 @@ export type Unsubscribe = () => void
 export interface PluginObserve {
   /** Every `--stream` line of every step this front end drives, as it arrives. */
   onStream(cb: (line: StreamLineView, session: string) => void): Unsubscribe
-  /** Every ledger event, live and on replay. */
-  onEvent(cb: (event: LedgerEventView, session: string) => void): Unsubscribe
+  /** Every ledger event, with truthful provenance. Replay must never imply a driver action. */
+  onEvent(cb: (event: LedgerEventView, session: string, source: "live" | "replay") => void): Unsubscribe
   /** The front tab's background tasks, right now. */
   tasks(): TaskView[]
   /** The front tab's session, or null while it is still a draft. */
@@ -335,10 +341,27 @@ export interface ExtRunResult {
   stderr: string
 }
 
-/** Where a compaction landed: the session that continues, and from where. */
-export interface CompactedView {
-  session: string
-  parent: { session: string; seq: number }
+/** An ordinary user turn offered to a package renderer. */
+export interface UserTurnView {
+  text: string
+  queued: boolean
+}
+
+/**
+ * A package-owned reading of a machine-authored user turn. The host still owns
+ * the frame, fold state, colours, queued chip and error boundary.
+ */
+export interface UserTurnRenderer {
+  /** Stable within the package; registering the same id again replaces it. */
+  id: string
+  match(text: string): boolean
+  render(view: UserTurnView, width: number): Line[]
+  /** Host-frame caption. Defaults to the package id when absent. */
+  head?(view: UserTurnView): string
+  /** Whether the host frame starts expanded. Defaults to false. */
+  defaultOpen?(view: UserTurnView): boolean
+  /** Display-only title for `/sessions`; null declines this text. */
+  sessionTitle?(text: string): string | null
 }
 
 /**
@@ -370,27 +393,11 @@ export interface PluginActions {
   extRun(tool: string, args: Record<string, unknown>): Promise<ExtRunResult>
 
   /**
-   * `/compact` on the front tab's session — the person's own verb (tui.md
-   * §5.8, DESIGN §11).
-   *
-   * `briefFile` is a workspace-relative path to a brief that has already been
-   * written; giving one skips the summarising round trip and leaves the old
-   * session byte-identical, which is the branch `/compact` takes when the model
-   * writes a handoff. Without it, the session is asked to summarise itself
-   * first. Either way the fork is `session new --parent` with no `--with`, so
-   * the child carries the brief and NOT the packages this session was wearing —
-   * which is exactly what an approved plan wants: the plan travels, the
-   * planning persona does not.
-   *
-   * The tab moves to the child, as it does when a person runs `/compact`.
-   * Rejects when there is no session, when somebody else is driving it, or when
-   * a step is running.
-   *
-   * There is no fork primitive here beyond this one. A plugin cannot open a
-   * session, name a parent, or choose a composition: it can ask for the move a
-   * person could have made from the composer, and that is all (D5).
+   * Run another built package's internal tool. An unversioned ref resolves its
+   * effective current version; trust, build and manifest surface are checked by
+   * the host before the ordinary `ext run` is invoked.
    */
-  compact(options?: { briefFile?: string; focus?: string }): Promise<CompactedView>
+  extRunPackage(ref: string, tool: string, args: Record<string, unknown>): Promise<ExtRunResult>
 
   /** Open a session in a tab of its own (what `Enter` on a sub-session card does). */
   openTab(sessionId: string): void
@@ -449,6 +456,9 @@ export interface PluginApi {
    * spoofing (D11). The host supplies the card frame, glyph, chip and folding.
    */
   registerCard(tool: string, renderer: CardRenderer): void
+
+  /** Register a package-owned reading of sentinel-marked user turns. */
+  registerUserTurn(renderer: UserTurnRenderer): void
 
   /** A panel in the composer area. Registering returns the handle that opens it. */
   registerPanel(spec: PanelSpec): PanelHandle

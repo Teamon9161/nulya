@@ -11,6 +11,7 @@ import { join } from "node:path"
 import { createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { SessionsView, ago, title } from "../src/ui/overlays/SessionsView.tsx"
+import { sessionTitle } from "../../extensions/compact/tui/compact.ts"
 import {
   ExtView,
   driftLine,
@@ -995,6 +996,6 @@ test("/sessions names compact continuations without leaking the internal marker"
     first_user_text: "<nulya:context-summary> ## Next task ship the fix",
     parent: { session: "s-parent", seq: 4 },
   } as Parameters<typeof title>[0]
-  expect(title(entry)).toBe("continued · Next task ship the fix")
-  expect(title({ ...entry, parent: null })).toStartWith("<nulya:context-summary>")
+  expect(title(entry, sessionTitle)).toBe("continued · Next task ship the fix")
+  expect(title(entry)).toStartWith("<nulya:context-summary>")
 })

@@ -167,8 +167,6 @@ import { panelItemsOf, withoutSuperseded } from "../state/panels.ts"
 import { createPluginHost, pluginKeyOf } from "../plugins/host.ts"
 import { PluginContext } from "../plugins/context.ts"
 import { wrapExtNote } from "../extnote.ts"
-import { runCompact } from "../compact.ts"
-import { HandoffRunBoundary, briefPreview, headline, nextHandoff, type HandoffProposal } from "../handoff.ts"
 import { renderSessionPrompt } from "../sessionprompt.ts"
 import { formatWithRef, parseWithRef, type WithRef } from "../with.ts"
 import { builtin_tools, orphanPins, resolvableStandingPins, toolId } from "../pins.ts"
@@ -546,7 +544,7 @@ export function App(props: AppProps) {
    * screen said `Ctrl+C again to quit` long after the offer had lapsed, and
    * `opened s-…` for the rest of the session. Everything here is news by
    * default and goes stale; `holdNotice` is for the two things that are not
-   * news but a state the screen is IN (browse mode, a handoff awaiting an
+   * news but a state the screen is IN (browse mode, a plugin panel awaiting an
    * answer), which their own code path clears.
    */
   const [notice, setNoticeState] = createSignal<{ text: string; hold: boolean } | null>(null)
@@ -745,8 +743,8 @@ export function App(props: AppProps) {
    * which is why every caller goes through this instead of building again — and
    * why nothing here happens on mount.
    *
-   * One map where there used to be one `let` per package (T34): `handoff` and
-   * `agent` are two entries in `[extensions] session_with`, and `agentPackage`
+   * One map where there used to be one `let` per package (T34): configured
+   * entries come from `[extensions] session_with`, and `agentPackage`
    * below reads the same entry the composition does rather than building the
    * same draft a second time.
    *
@@ -874,18 +872,6 @@ export function App(props: AppProps) {
    */
   const [refusal, setRefusal] = createSignal<string | null>(null)
 
-  /** A handover the model proposed and nobody has answered yet (tui.md §5.8). */
-  const [handoff, setHandoff] = createSignal<HandoffProposal | null>(null)
-  /** Session-scoped call ids of handovers this process acted on or dismissed. */
-  const [handoffsSeen, setHandoffsSeen] = createSignal<ReadonlySet<string>>(new Set())
-  const handoffRuns = new HandoffRunBoundary()
-  const handoffKey = (session: string, call: string) => `${session}\u0000${call}`
-  const seenHandoffs = (session: string): ReadonlySet<string> => {
-    const prefix = `${session}\u0000`
-    return new Set([...handoffsSeen()].filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length)))
-  }
-  const markHandoffSeen = (session: string, call: string) =>
-    setHandoffsSeen(new Set([...handoffsSeen(), handoffKey(session, call)]))
   let composer: ComposerApi | null = null
   let scroll: ScrollBoxRenderable | null = null
 
@@ -1137,7 +1123,7 @@ export function App(props: AppProps) {
             // A bundled draft refreshed by `ext seed` is this binary's own old
             // copy, untouched locally. The build may still print `already
             // built` when that content-addressed version was produced earlier
-            // (for example by `/compact` or another TUI start), but the SOURCE
+            // (for example by another driver or TUI start), but the SOURCE
             // did move forward in this run and the active pointer should follow
             // it just as it does when the version was newly built here.
             if (line.state !== "built" && !(root.user && refreshed.includes(line.id))) continue
@@ -2251,8 +2237,8 @@ export function App(props: AppProps) {
    * package that did NOT ask, which is this front end's line to write.
    *
    * `surface:"auto"` tools do not appear here as pins: the kernel derives those
-   * native tool slots from the membership itself, which is how both packages on
-   * today's list (`handoff`, `agent`) reach the model — one flag each. A
+   * native tool slots from the membership itself, which is how configured
+   * session packages reach the model — one flag each. A
    * member's `surface:"manual"` tools DO need a pin in the same argv, since
    * membership is not a tool face; that is `SessionMember.pins`, read off the
    * version being composed, so a package that moves a tool between surfaces is
@@ -2378,10 +2364,15 @@ export function App(props: AppProps) {
     const here = live()
     if (!here) return null
     const header = here.state.snapshot.header
+    const activity = here.attach.status()
+    const pluginStatus: "idle" | "stepping" | "canceling" =
+      activity === "stepping" || activity === "canceling" ? activity : "idle"
     return {
       id: here.id,
       model: header?.model_identity.model || header?.model || "",
       members: here.contributions().map((c) => ({ id: c.id, version: c.version, tools: [...c.tools] })),
+      role: here.attach.role(),
+      status: pluginStatus,
     }
   }
 
@@ -2423,7 +2414,6 @@ export function App(props: AppProps) {
       // two sentinels on one turn is one card the transcript cannot fold.
       await here.attach.send(wrapExtNote(pkg, kind, text), true)
     },
-    compact: (options) => forkHere(options),
     openTab: (sessionId) => {
       tabs.open(sessionId)
       setNotice(`opened ${sessionId}`)
@@ -2808,37 +2798,9 @@ export function App(props: AppProps) {
     ]
   })
 
-  // ── The model's handover proposal (tui.md §5.8) ───────────────────────────
-
-  /**
-   * After every step, look at the transcript this front end already holds
-   * (DESIGN §11): an accepted `handoff` call is the model saying a phase is done
-   * and the rest does not need the transcript. Its arguments ARE the brief, so
-   * there is nothing to read off disk — exactly the signal `drivers/goal.*`
-   * watches for in the step's own stream, from the same source.
-   *
-   * `unsafe` follows it; `ask` puts it on screen, because a fork is the one move
-   * that changes which session the person is talking to.
-   */
-  const checkHandoff = () => {
-    const here = live()
-    if (!here || handoff()) return
-    const found = nextHandoff(here.state.snapshot.items, seenHandoffs(here.id))
-    if (!found) return
-    if (mode() === "unsafe") {
-      markHandoffSeen(here.id, found.callId)
-      void followProposal(found)
-      return
-    }
-    setHandoff(found)
-    holdNotice(`handoff proposed · ${headline(found.brief)} · Enter follow · Esc dismiss`)
-  }
-
-  /** A step just ended: that is when a handoff call can have landed. */
+  /** A step just ended: clean up any approval request that outlived it. */
   createEffect(() => {
-    const here = live()
     const now = status()
-    const handoffLandedLive = here ? handoffRuns.observe(here.id, now !== "idle") : false
     if (now !== "idle") return
     // …and the one case where a question outlives its step: Ctrl+C killed the
     // step that was waiting for it. Nobody is listening for the answer now, so
@@ -2863,83 +2825,7 @@ export function App(props: AppProps) {
     // its receipt is in the batch that just landed — so this is the moment the
     // list is worth re-reading. Its own poll takes over from here (§5.9).
     void live()?.tasks.refresh()
-    // Hydrating or replaying an idle ledger may render an old handoff, but it
-    // must never perform a new driver action. Only a run this TUI observed
-    // leaving idle and returning can offer or auto-follow the call.
-    if (handoffLandedLive) checkHandoff()
   })
-
-  /**
-   * Fork this tab's session and move the tab to the child — the one place that
-   * does it on a brief somebody already wrote.
-   *
-   * Two callers, and they differ only in who asked: the model's handoff
-   * proposal below (`/compact`'s ledger branch, DESIGN §11 — the brief is
-   * already a frozen call, so the old session is left byte-identical), and a
-   * plugin calling `api.actions.compact` (`extensions/plan`'s approve step,
-   * which wrote its own brief to a file).
-   * The guards, the tab move and the recovery when the lease was lost belong to
-   * the act, not to whoever requested it, so they live here once.
-   *
-   * Throws with a sentence: the handoff path shows it as a notice, the plugin
-   * path gets it as a rejected promise and says it in its own words.
-   */
-  const forkHere = async (options: { briefFile?: string; focus?: string; brief?: string; briefSeq?: number }) => {
-    const source = live()
-    if (!source) throw new Error("this tab has no session yet · nothing to fork")
-    if (source.attach.status() !== "idle") throw new Error("a step is running · fork when it stops")
-    const carrying = options.briefFile ?? (options.brief || options.briefSeq !== undefined ? "the handover it proposed" : null)
-    setNotice(carrying ? `forking on ${carrying}…` : "compacting…")
-    try {
-      const result = await runCompact(source.ws, source.id, options)
-      tabs.replace(source.id, result.session, { created: true, driven: false, effort: source.effort() })
-      setNotice(`continued in ${result.session} · previous transcript ${source.id} is in /sessions`)
-      return result
-    } catch (error) {
-      // The lease was the driver's while it ran, so this tab may have gone to
-      // observer on the way. Nothing is driving it now — take it back rather
-      // than leaving the user to reclaim their own session by hand.
-      if (source.attach.role() === "observer") source.attach.takeOver()
-      throw error
-    }
-  }
-
-  /**
-   * The model's handover proposal, followed.
-   *
-   * `brief_seq` names the very call that was offered rather than "the newest
-   * one": a person who dismissed a later handover and then follows an earlier
-   * one must fork on the brief they were shown, not on the one they said no to.
-   */
-  const followProposal = async (proposal: HandoffProposal) => {
-    try {
-      await forkHere(proposal.seq !== null ? { briefSeq: proposal.seq } : { brief: "latest" })
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error))
-    }
-  }
-
-  /** `Enter` on the proposal. True when there was one, so the composer knows. */
-  const followHandoff = (): boolean => {
-    const proposal = handoff()
-    if (!proposal) return false
-    setHandoff(null)
-    const here = live()
-    if (here) markHandoffSeen(here.id, proposal.callId)
-    void followProposal(proposal)
-    return true
-  }
-
-  /** `Esc` on the proposal: the call stays in the ledger, this process stops offering it. */
-  const dismissHandoff = (): boolean => {
-    const proposal = handoff()
-    if (!proposal) return false
-    setHandoff(null)
-    const here = live()
-    if (here) markHandoffSeen(here.id, proposal.callId)
-    setNotice("handoff dismissed · the brief is still in the transcript, on the call that proposed it")
-    return true
-  }
 
   // `/evolve` used to live here, as the one command this front end special-cased
   // into a build (T53): it rebuilt the shipped evolution draft and wore the
@@ -2985,7 +2871,7 @@ export function App(props: AppProps) {
   // package, which is a compiled build, and a compiled build on the way in is
   // the thing T11/T23 exist to keep off the critical path. It happens when
   // `/agent` is used, and — in the background, once — when the first session is
-  // composed, exactly as the handoff package's does.
+  // composed, exactly as any compiled session package does.
 
   /**
    * Start a delegation: build the persona, open a tab on a session wearing it,
@@ -3210,7 +3096,7 @@ export function App(props: AppProps) {
    * last read), and `skill <ref>` is T15's `skillTurn` with the ref standing
    * in for whatever the person would otherwise have typed after `/`.
    *
-   * `with` alone is like `/compact`: it does not stop at wearing. Text typed
+   * `with` alone is like a plugin command: it does not stop at wearing. Text typed
    * after the command name is a person's own words and wins; with none, the
    * package's own default (`action.prompt`, `manifest.Action.withPrompt`) is
    * sent instead, if it wrote one. Neither present is the original shape —
@@ -3535,53 +3421,6 @@ export function App(props: AppProps) {
     }
   }
 
-  /**
-   * `/compact [focus]` — spawn the compaction driver (`extensions/compact`) and
-   * follow it, then move this tab to the session it opened (PLAN §3.4).
-   *
-   * The procedure is the extension's; what belongs here is the three guards and
-   * the tab move. While the tool runs it holds this session's writer lease, so
-   * this tab flips itself to observer and its follower shows the request and the
-   * brief as they land — the observer mode that was already there, no new
-   * mechanism (tui.md §5.6).
-   *
-   * Every failure leaves the conversation exactly where it was: the summary is
-   * produced before anything moves, and if it does not arrive the old session is
-   * still the live one. A compaction that half-happened would be a conversation
-   * thrown away, so the driver refuses rather than approximates.
-   */
-  const compactNow = async (focus: string | undefined) => {
-    const source = live()
-    if (!source) {
-      setNotice("nothing to compact yet · this tab has no session")
-      return
-    }
-    if (source.attach.role() === "observer") {
-      setNotice("someone else drives this session · compaction has to run where its steps run")
-      return
-    }
-    if (source.attach.status() !== "idle") {
-      setNotice("a step is running · /compact when it stops")
-      return
-    }
-    if (source.state.snapshot.items.length === 0) {
-      setNotice("nothing to compact yet")
-      return
-    }
-    setNotice("compacting · asking this session for a continuation brief…")
-    try {
-      const result = await runCompact(source.ws, source.id, { ...(focus ? { focus } : {}) })
-      tabs.replace(source.id, result.session, { created: true, driven: false, effort: source.effort() })
-      setNotice(`compacted into ${result.session} · previous transcript ${source.id} is in /sessions`)
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error))
-      // The lease was the driver's while it ran, so this tab may have gone to
-      // observer on the way. Nothing is driving it now — take it back rather
-      // than leaving the user to reclaim their own session by hand.
-      if (source.attach.role() === "observer") source.attach.takeOver()
-    }
-  }
-
   /** `/effort <level|auto>`: this tab's next step runs with it; remembered with the pick. */
   const setEffort = (raw: string | undefined) => {
     const level = raw && raw !== "auto" ? raw : undefined
@@ -3721,10 +3560,6 @@ export function App(props: AppProps) {
       const here = live()
       if (here) void here.attach.step()
       else setNotice("nothing to continue · send a message to start this session")
-      return true
-    }
-    if (command === "/compact") {
-      void compactNow(rest)
       return true
     }
     if (command === "/context") {
@@ -4021,8 +3856,6 @@ export function App(props: AppProps) {
       setContextPanel(false)
       return
     }
-    // A proposal on screen is what Esc is about while it is there.
-    if (dismissHandoff()) return
     const here = live()
     if (here && here.attach.status() === "stepping") {
       void here.attach.cancel()
@@ -4545,6 +4378,7 @@ export function App(props: AppProps) {
         onOpenTab={(id, where) => openSession(id, where)}
         onNew={() => startDraft()}
         onClose={closeOverlay}
+        sessionTitle={(text) => plugins.sessionTitle(text)}
       />
     ),
     /**
@@ -4773,13 +4607,6 @@ export function App(props: AppProps) {
                     about what can happen next. */}
                 <box height={1} flexShrink={0} />
 
-                {/* The model's own proposal to hand over, between the
-                    transcript and the box you answer it in (tui.md §5.8). The
-                    call it came from IS in the transcript above; this is the
-                    decision it is waiting on, which is not a ledger fact. */}
-                <Show when={handoff()}>
-                  <HandoffPanel proposal={handoff()!} />
-                </Show>
                 {/* A directory this screen has just walked into, asking to be
                     trusted before anything in it takes part in a session
                     (DESIGN §9, §5.3b point 6). Outermost of the dialogs: it is
@@ -4927,7 +4754,7 @@ export function App(props: AppProps) {
                 <Composer
                   onSubmit={submit}
                   onNotice={setNotice}
-                  onEmptySubmit={() => followHandoff() || takeOverIfOffered()}
+                  onEmptySubmit={() => takeOverIfOffered()}
                   // Clicking the input box means "type here": browse mode holds
                   // the keyboard and the textarea cannot let itself out of it.
                   onActivate={() => {
@@ -4980,28 +4807,6 @@ export function App(props: AppProps) {
         </FrameContext.Provider>
       </ScreenContext.Provider>
     </StyleContext.Provider>
-  )
-}
-
-/**
- * The handover the model proposed, waiting for an answer (tui.md §5.8).
- *
- * The brief is shown, not summarised: it is what the NEXT session will open
- * with, and agreeing to a fork without reading what carries over is agreeing to
- * lose the rest. Long briefs are cut here and stay whole on the call that
- * proposed them — the decision needs the shape of it, not every line.
- */
-function HandoffPanel(props: { proposal: HandoffProposal }) {
-  const style = useStyle()
-  const lines = () => briefPreview(props.proposal.brief).slice(0, 8)
-  return (
-    <box flexDirection="column" width="100%" paddingLeft={2} paddingRight={1} flexShrink={0}>
-      <box flexDirection="row" width="100%">
-        <text fg={style.theme.accent.evolve}>{style.glyphs.subSession} handoff proposed</text>
-      </box>
-      <For each={lines()}>{(line) => <text fg={style.theme.muted}>{`  ${line}`}</text>}</For>
-      <text fg={style.theme.dim}>{"  Enter follow it into a new session · Esc dismiss · the call stays either way"}</text>
-    </box>
   )
 }
 
