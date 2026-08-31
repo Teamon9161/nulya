@@ -45,7 +45,7 @@ export interface Attachment {
   cancel(): Promise<void>
   kill(): void
   /**
-   * Ctrl+J (goals/agent-runner.md ar-t1). As a driver this is exactly
+   * Interrupt-and-deliver (goals/agent-runner.md ar-t1). As a driver this is exactly
    * `Driver.interruptAndDeliver` — append, kill the running step, re-step the
    * moment it has actually exited. As an OBSERVER there is no writer lease of
    * ours to kill, so the gesture degrades to the same queued `send` the

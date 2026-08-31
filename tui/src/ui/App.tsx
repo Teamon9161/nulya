@@ -3772,24 +3772,16 @@ export function App(props: AppProps) {
 
   /**
    * "Flush the queue" — the interrupt-and-deliver gesture with nothing NEW to
-   * say: `ctrl+j` over an empty composer while
-   * something is already queued. There is no composer text to route through
-   * `sendTurn`'s command/skill dispatch here, so this goes straight to the
-   * attachment (agent-runner ar-t1).
+   * say: `ctrl+g` over an empty composer while something is already queued.
+   * There is no composer text to route through `sendTurn`'s command/skill
+   * dispatch here, so this goes straight to the attachment (agent-runner ar-t1).
    */
   const flushQueue = () => {
     const here = live()
     if (here) void here.attach.interruptAndDeliver("")
   }
 
-  /**
-   * Whether `ctrl+j` currently means anything (`keymap.ts` `interrupt`,
-   * ar-t1): a step this tab is driving, or a turn already queued behind one
-   * that just ended. Everywhere else the key is left alone, so it still falls
-   * through to the composer's own Ctrl+J-makes-a-newline binding (the
-   * non-Kitty `Shift+Enter` fallback, `Composer.tsx`) — claiming it
-   * unconditionally would break that for every terminal that needs it.
-   */
+  /** Whether the interrupt key currently has a step or queued turn to act on. */
   const interruptRelevant = () => {
     const here = live()
     if (!here) return false
@@ -3797,7 +3789,7 @@ export function App(props: AppProps) {
   }
 
   /**
-   * `ctrl+j`: with something typed, submit it flagged as an interrupt (through
+   * `ctrl+g`: with something typed, submit it flagged as an interrupt (through
    * the composer's own path, so paste-expansion and history still apply);
    * with nothing typed, it flushes anything already queued (ar-t1).
    */
@@ -3983,11 +3975,9 @@ export function App(props: AppProps) {
     })
 
     // Same trick as `closeTab` above: this layer only claims its key while it
-    // actually means something (agent-runner ar-t1). Ctrl+J is also the
-    // composer's own non-Kitty newline fallback (`Composer.tsx`), so at rest —
-    // nothing running, nothing queued — this layer stays disabled and the key
-    // reaches the textarea unchanged, exactly as `closeTab` leaves Ctrl+W's
-    // delete-word binding alone on a single tab.
+    // actually means something (agent-runner ar-t1). At rest there is nothing
+    // to interrupt or flush, so a configured chord remains available to the
+    // focused control.
     const interruptBindings = bind("interrupt", handleInterruptAndDeliver)
     const offInterrupt = keymap.registerLayer({
       priority: 82,

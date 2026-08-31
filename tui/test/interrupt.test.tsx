@@ -3,14 +3,9 @@
  * against the real binary and the real key-decoding path — not a synthetic
  * `KeyEvent` object.
  *
- * `ctrl+j` is ambiguous on the wire: without a terminal extension that reports
- * real modifier state, the raw byte it sends is indistinguishable from a bare
- * linefeed, and the composer already binds that byte to "insert a newline"
- * (`Composer.tsx`, the non-Kitty `Shift+Enter` fallback). So this test asks
- * `testRender` for `otherModifiersMode`, the xterm `modifyOtherKeys` wire
- * shape that DOES carry a real ctrl bit — the same shape a real terminal with
- * that mode enabled would send, and the shape under which App's own
- * `interrupt` keymap layer can tell the two apart at all.
+ * Ctrl+G is deliberately distinct from the composer's Ctrl+J newline fallback:
+ * a terminal without a modifier protocol sends Ctrl+J as the same byte as a
+ * linefeed, so using it for interrupt made Shift+Enter send while a step ran.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { join } from "node:path"
@@ -33,7 +28,7 @@ afterAll(() => {
   ws.cleanup()
 })
 
-test("ctrl+j mid-run appends, kills the running step, and the redelivered turn shows up transcript-side without waiting for the run to end on its own", async () => {
+test("ctrl+g mid-run appends, kills the running step, and the redelivered turn shows up transcript-side without waiting for the run to end on its own", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
@@ -60,7 +55,7 @@ test("ctrl+j mid-run appends, kills the running step, and the redelivered turn s
     await setup.mockInput.typeText("please stop now")
     await settle(setup, 2)
 
-    setup.mockInput.pressKey("j", { ctrl: true })
+    setup.mockInput.pressKey("g", { ctrl: true })
 
     // The step this tab was driving got killed and a fresh one delivered the
     // queued turn — not a crash, and not left waiting on the loop's own

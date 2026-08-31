@@ -40,8 +40,8 @@
 
 **ar-t1 · TUI：主 agent 的 queue lane + interrupt-and-deliver（`tui/`，与 ar-a/b/c 无依赖、可并行）**
 
-- **queue lane**：`pendingCount > 0` 时输入框上方一行（WorkingStatus 同区）：`⏸ N queued — enter queues · ctrl+j interrupts & delivers`，逐条截一行列出排队消息；点击任一条 = 下述手势（inbox FIFO 排干，不假装能单条插队）。transcript 里的 `· queued` 行不动（那是真相所在）。
-- **手势 `ctrl+j`**（keymap 可覆盖，走 `tui.toml` 既有 keymap 机制）：输入框有字 → 先 append（queued）；然后 kill 当前 step（T27 既有 kill 路径）；step 进程退出后**立即** re-step（不等 idle 定时器）。idle 时该手势等价普通发送。
+- **queue lane**：`pendingCount > 0` 时输入框上方一行（WorkingStatus 同区）：`⏸ N queued — enter queues · ctrl+g interrupts & delivers`，逐条截一行列出排队消息；点击任一条 = 下述手势（inbox FIFO 排干，不假装能单条插队）。transcript 里的 `· queued` 行不动（那是真相所在）。
+- **手势 `ctrl+g`**（keymap 可覆盖，走 `tui.toml` 既有 keymap 机制）：输入框有字 → 先 append（queued）；然后 kill 当前 step（T27 既有 kill 路径）；step 进程退出后**立即** re-step（不等 idle 定时器）。App 只在"有步在跑或已有排队"时才抢这个键，其余时候原样放行给聚焦控件；idle 时有字退化成普通发送、空文本只 flush 已排队的消息。最初定的是 ctrl+j，但非 Kitty 终端上它与裸换行的字节相同，运行中会把手 Shift+Enter 的换行退路误当成发送——2026-08-31 改为与换行字节不冲突的 ctrl+g（记录见 §6）。
 - 全部是现有动词接线（append / kill / step），**内核零改动**；不新增状态机——判据复用 `driver` 的现有状态。
 
 **后续轮次（本轮不做，写在这里当尺子）：**
@@ -148,6 +148,8 @@
   - 一个刻意留下的边角：wrap-up 发出与下一轮之间恰好到达的真实追问，会落在这一轮受约束的边界里（一个 turn、无 tool）。它仍会被答，下一轮就是普通轮——比让"停下来汇报"变成一张空白支票便宜得多。
   - 测试：新 scripted 档 `wrapdefy`（每一步都调 tool，被要求汇报的那一步**也**调），两个 shell 命令各写一个以自己所在轮次命名的文件——于是断言的是**工具有没有跑**，而不是有没有被请求。e2e `tests/e2e/agent.zig` 断言 ordinary 轮那个文件在（约束没有变成永久 gate）、wrap-up 轮那个文件不在。**验证过它在旧代码上会红**（`expected error.FileNotFound, found void`）。
   - 第二轮补的那一半（同日）：`wrapdefy` 多一个分支——**看见有 tool result 是 `ok=false` 就用文字作答**（`hasFailedToolResult`；不去比对内核那句 deny 的措辞，这个模式下唯一失败的 tool result 就是被 gate 拒掉的那个）。于是测试从"没有文件被写"升级成**报告真的回到了父场**：wrap-up 之后**恰好两条** assistant turn（调用 + 读到拒绝之后的答复），且父场 step 一次拿到 `defiant_report` 而不是"ran out of its step budget"那句兜底。旧测试把"只有一个 turn"钉死成了预期，正是它让那半步缺口看起来像设计。**验证过它在 `--max-steps 1` 上会红**（`expected 2, found 1`）。
+
+- 2026-08-31 · **ar-t1 手势补丁：中断键 ctrl+j → ctrl+g**（`tui/`，内核 `src/` 零改动）。2026-08-26 那条 ar-t1 记录里"空闲才抢键"的守卫只解决了一半：抢键的窗口里，非 Kitty 终端把 ctrl+j 当成与裸换行同一个字节，运行中按 Shift+Enter（经 ctrl+j 的换行退路）会被误认成 interrupt 直接发送——BUGS.md #9 的原样症状。这次把 `keymap.ts` 的 `interrupt` 动作默认键改成与换行字节不冲突的 ctrl+g（`[keys]` 仍可覆盖），ctrl+j 从此永远归 composer 换行；queue lane 文案、`tui/README.md`、tui.md §4.4/§11 同步。测试仍走 `otherModifiersMode` 下的真二进制端到端（kill + redeliver 那条断言逐字没变），但手势的正确性从此不依赖协议能辨识修饰键——不带修饰协议的终端上 ctrl+g（0x07）与换行（0x0A）本来就是不同字节。`cd tui && bun test` 750 pass / 1 skip / 0 fail，`tsc --noEmit` 干净。
 
 ## 7. `agent_runner` 契约（ar-g 定稿）
 

@@ -77,7 +77,7 @@ export interface Driver {
   /** Ctrl+C twice: kill the step process; the kernel repairs the tail next open. */
   kill(): void
   /**
-   * Ctrl+J (goals/agent-runner.md ar-t1): append `text`, then — if a step is
+   * Interrupt-and-deliver (goals/agent-runner.md ar-t1): append `text`, then — if a step is
    * actually running — kill it and re-step the moment it has actually exited,
    * rather than waiting for it to reach its own next boundary or for some
    * idle-poll timer to notice the inbox is non-empty.

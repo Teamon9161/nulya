@@ -31,7 +31,7 @@ test("the lane names only queue state and the delivery gesture, never message bo
   const setup = await mount(() => <QueueLane messages={messages} />)
   try {
     const frame = await settle(setup, 2)
-    expect(frame).toContain("⏸ 2 queued · ctrl+j interrupts & delivers")
+    expect(frame).toContain("⏸ 2 queued · ctrl+g interrupts & delivers")
     expect(frame).not.toContain("also check the docs")
     expect(frame).not.toContain("and the README")
   } finally {

@@ -2,7 +2,7 @@
  * A single queue status/action row. The transcript is the only place queued
  * message bodies are shown; repeating them here made one turn look like two.
  * Clicking the row performs the same FIFO interrupt-and-deliver gesture as
- * Ctrl+J, and nothing is drawn when the queue is empty.
+ * Ctrl+G, and nothing is drawn when the queue is empty.
  */
 import { Show, createSignal } from "solid-js"
 import { useStyle } from "../render/theme.ts"
@@ -32,7 +32,7 @@ export function QueueLane(props: { messages: readonly QueuedMessage[]; onSelect?
         onMouseOut={() => setHovered(false)}
       >
         <text fg={lifted(style, hovered(), style.theme.warn)}>
-          {`⏸ ${props.messages.length} queued · ctrl+j interrupts & delivers`}
+          {`⏸ ${props.messages.length} queued · ctrl+g interrupts & delivers`}
         </text>
       </box>
     </Show>

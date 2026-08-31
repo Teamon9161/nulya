@@ -77,11 +77,10 @@ export const default_keys: Record<Action, string> = {
   scrollEnd: "shift+end",
   // Interrupt-and-deliver (agent-runner ar-t1, tui.md §4.4b/§5): kill the step
   // this tab is driving and re-step at once, instead of waiting for it to
-  // reach its own next boundary. This layer only claims the key while there is
-  // actually something to interrupt or already queued (`App.tsx`'s
-  // `interruptRelevant`) — at rest, plain Ctrl+J falls through untouched to the
-  // composer's own newline binding (the non-Kitty `Shift+Enter` fallback).
-  interrupt: "ctrl+j",
+  // reach its own next boundary. Ctrl+J cannot be used here: on terminals that
+  // do not report modifiers it is the same byte as the composer's newline
+  // fallback, so Shift+Enter would become Send whenever a step was running.
+  interrupt: "ctrl+g",
 }
 
 export type Keymap = Record<Action, string>

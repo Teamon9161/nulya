@@ -205,7 +205,7 @@ tui/
 ### 4.4 Composer / 按键 / slash
 
 - `Enter` 发送；`Shift+Enter` / `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
-- 发送时若 `stepping`：只 append（queued）；不打断。queued 状态只画在 transcript 中那张用户卡上，不在 composer 上方再重复一份队列；要提前结束当前 step 并投递仍用 `Ctrl+J`。同一 TUI 的 append 子进程串行启动，保证快速连发取得 inbox 名时仍是 FIFO。
+- 发送时若 `stepping`：只 append（queued）；不打断。queued 状态只画在 transcript 中那张用户卡上，不在 composer 上方再重复一份队列；要提前结束当前 step 并投递用 `Ctrl+G`。`Ctrl+J` 始终留给非 Kitty 终端的换行，避免运行中把 `Shift+Enter` 误当发送。同一 TUI 的 append 子进程串行启动，保证快速连发取得 inbox 名时仍是 FIFO。
 - `/` 开头弹一个小补全：内建命令（`/model` `/mode [ask|unsafe]` `/effort <level|auto>` `/new [--profile p] [--model id]` `/clear [--profile p] [--model id]` `/sessions [<id>]` `/ext` `/tasks` `/usage` `/compact [focus]` `/outcome` `/with [<id>[@<v>]]` `/agent [<name> <task…>]`（§5.10）`/cancel` `/fold` `/settings` `/help` `/quit`；**`/mode` 从 T24 起是权限 mode**（T31 起裸 `/mode` 开一个 picker），带一个 extension 进这一场的那个 T36 起叫 **`/with`**——就是内核的 `session new --with`，一个概念一个词；中间叫过一阵 `/as`，那个名字仍然认（alias），理由与代价见 §11 T36；**`/new` 与 `/clear` 从 T84 起是两个命令而不是别名**——`/new` 另开一个 tab、前面那个原样留着，`/clear` 把**当前** tab 原地换成一张新草稿（同一个数组下标，`state/tabs.ts` 的 `TabStore.clear`）；两者都不删任何东西（ledger 只能 append，旧 session 的文件与其中的事件照样在盘上、`/sessions` 照样找得到），区别只在"新的那一场落在哪个 tab"。**`/resume` 仍是 `/sessions` 的 alias**，不上表——resume 不是一个内核动词，append-only 让「打开它再说下一句」本身就是继续。`/sessions` 从此收一个可选 id，两个名字**同一段代码**——alias 若走另一条路，它就不是 alias 而是第二个命令）在前，**activate 了的包自己声明的命令居中**（T39 的 `contributes.commands`；`/evolve` `/ask` `/plan` 都是这一档，T53），**activate 了的 skill 在后**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → 包命令 → skill → 原样发给模型。`/<skill> [args]` = `nulya skill load <ref>` 拿到 body、包一层 sentinel 后作为**普通 user turn** append（T15；旧文本写的"nulya 没有 skill slash"已翻案——它把"谁触发"误当成了"谁判断"，理由见 goals/tui-panel.md D8）。
 - `@` 开头（前一字符非字母数字下划线）弹文件补全：`↑↓` 选、`Tab` 上屏成 `@path`；已知引用在输入框里 accent。**上屏的是路径，不是文件内容**（T13）。
 - 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；`Backspace` 落在占位尾部整条删掉（T14）。
@@ -2147,14 +2147,14 @@ T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool
 
 **测试**：`draftColumn(null, v)` / `draftColumn(null, null)` 两条（没有源码时的指针列）；别名补全一条（`/res` → `/resume`、那一行指向 `/sessions`、`/e` 的排序把列出的名字放前面）。`cd tui && bun test`：384 pass，`bunx tsc --noEmit` 干净。
 
-### T64 · queue lane 与 ctrl+j：排队的消息看得见，插队是一个手势（2026-08-26）
+### T64 · queue lane 与 ctrl+g：排队的消息看得见，插队是一个手势（2026-08-26）
 
 **内核零改动**（goals/agent-runner.md ar-t1）。substrate 早就齐了：`session append` 投 inbox、内核每个 step 边界排干（T27 把报告时机也修准了）、Esc kill 这一步、T29 的 wake 在 idle tick 时把非空 inbox 排掉——所以"中断并投递"事实上一直可达，只是要两个手势加一个定时器 tick，且没人知道这条路存在。这一轮全是把它包装成**一个**看得见的动作。
 
-1. **queue lane（`ui/QueueLane.tsx`）**：`pendingCount() > 0` 时在输入框上方（WorkingStatus 同区——都是"此刻正在发生什么"，不是 session 的描述）只画一行 `⏸ N queued · ctrl+j interrupts & delivers`；queued message 正文只在 transcript 的 optimistic user card 出现一次。静息时**不画**（T35/T38 那条规矩：没有 `0 queued` 这一行）。点击状态行 = 下面的手势——inbox 是内核整体 FIFO 排干的，不假装能单条插队。
+1. **queue lane（`ui/QueueLane.tsx`）**：`pendingCount() > 0` 时在输入框上方（WorkingStatus 同区——都是"此刻正在发生什么"，不是 session 的描述）只画一行 `⏸ N queued · ctrl+g interrupts & delivers`；queued message 正文只在 transcript 的 optimistic user card 出现一次。静息时**不画**（T35/T38 那条规矩：没有 `0 queued` 这一行）。点击状态行 = 下面的手势——inbox 是内核整体 FIFO 排干的，不假装能单条插队。
 2. **手势（`Driver.interruptAndDeliver`）= 三个现有动词按顺序接线**：append（原样走 `send` 的排队路径，所以 `queued` 标记行为不变）→ kill（T27 既有的杀这一步）→ 等 `drive()` 的 `finally` 真正跑完（新内部 `idleOnce()`——不是"kill 信号发出"那一刻，否则第二个 `session step` 会撞上还没放的写者租约）→ 立即 `step()`。零新状态机。idle + composer 有字退化成普通 `send`；**idle + 空文本（lane 的点击落在 step 刚结束之后）走 `wake()`**——inbox 非空立即 step、为空仍是 no-op，绝不裸 step 空 inbox（那会把上一条 assistant 当 prefill 重发，DESIGN §4）。observer 没有自己的写者租约可杀，`Attachment.interruptAndDeliver` 对它退化成既有的排队 append。
-3. **ctrl+j 是有条件抢的键（keymap `interrupt`，`[keys]` 可覆盖）**。裸 ctrl+j 在非 Kitty 终端与换行**字节相同**（`@opentui/core` mock-keys 实测），而它正是 composer 的 Shift+Enter 退路——无条件抢会吃掉那批终端的换行。所以 App 的 layer 只在 `interruptRelevant()`（有步在跑，或已有排队）时 enable，静息时按键原样落进 composer——`closeTab`/ctrl+w 在单 tab 时放行 delete-word 的同一条先例。composer 侧 `triggerInterrupt()` 复用 `submit()` 的清空/历史/粘贴展开路径，`onSubmit` 只多一个 flag。
-4. **契约的一处偏离，记在案**：ar-t1 写"idle 时该手势等价普通发送"，字面执行意味着任何时候都抢 ctrl+j（见上），改为仅在有意义时抢；静息 + composer 有字时 Enter 本来就够。
+3. **ctrl+g 是有条件抢的键（keymap `interrupt`，`[keys]` 可覆盖）**。最初用过 ctrl+j，但裸 ctrl+j 在非 Kitty 终端与换行**字节相同**（`@opentui/core` mock-keys 实测），运行中抢它会把 Shift+Enter 的退路误变成发送。因此中断改用不冲突的 ctrl+g，ctrl+j 始终归 composer；App 的 layer 仍只在 `interruptRelevant()`（有步在跑，或已有排队）时 enable。composer 侧 `triggerInterrupt()` 复用 `submit()` 的清空/历史/粘贴展开路径，`onSubmit` 只多一个 flag。
+4. **契约的一处偏离，记在案**：ar-t1 写"idle 时该手势等价普通发送"，字面执行意味着任何时候都抢中断键，改为仅在有意义时抢；静息 + composer 有字时 Enter 本来就够。
 
 **测试**：`bun test` 393 pass（新增 `queuelane.test.tsx` 纯渲染 + 点击、`interrupt.test.tsx` 真二进制端到端 kill+redeliver 与静息态不画，`driver`/`observer` 各加 interruptAndDeliver 的分支条目），`tsc` 干净。
 

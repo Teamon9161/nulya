@@ -85,12 +85,12 @@ export function wrappedRows(text: string, width: number): number {
  * queued and the kernel drains it at its next step boundary (tui.md §4.4).
  *
  * A step ALREADY running can also be interrupted (agent-runner ar-t1): `App`
- * claims Ctrl+J for that at the screen level, but only while there is
- * something to interrupt or already queued — otherwise the key is left alone
- * and reaches the textarea's own newline binding above unchanged. That gesture
- * calls `ComposerApi.triggerInterrupt()` rather than reading the buffer itself,
- * so it goes through the exact same clear/history/paste-expansion path Enter
- * does; `onSubmit`'s second argument is the only thing that tells them apart.
+ * claims Ctrl+G for that at the screen level while there is something to
+ * interrupt or already queued. Keeping that chord distinct from Ctrl+J is what
+ * lets the non-Kitty Shift+Enter fallback remain a newline during a step too.
+ * The gesture calls `ComposerApi.triggerInterrupt()` rather than reading the
+ * buffer itself, so it goes through the exact same clear/history/paste-expansion
+ * path Enter does; `onSubmit`'s second argument is the only distinction.
  *
 
  * Two menus can appear above the box, and neither ever changes what Enter
@@ -412,16 +412,13 @@ export function Composer(props: {
       void pastePath(path, text, plantPending())
       return
     }
-    if (!foldPaste(text)) {
-      // The textarea will insert it; the mirror has to follow, or the buffer and
-      // everything derived from it (the menus, the box's own height) go on
-      // describing what was there before the paste. Keystrokes sync through
-      // `onKeyDown`, and a paste is the one way in that is not a keystroke —
-      // which is also how an IME commits a phrase (T26).
-      queueMicrotask(sync)
-      return
-    }
+    // Claim every paste before changing the buffer and insert it through one
+    // path. Mixing the textarea's default insertion for short text with our own
+    // insertion for folded text made selection/cursor handling depend on which
+    // side of the threshold the clipboard happened to land, and could leave a
+    // second placeholder or replace the draft after the cursor.
     event.preventDefault()
+    insertPaste(text)
   }
 
   /**
