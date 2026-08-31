@@ -207,6 +207,13 @@ export function smoothUsageTotals(current: UsageTotals, target: UsageTotals): Us
   }
 }
 
+export interface RetryNotice {
+  error: string
+  attempt: number
+  maxRetries: number
+  retryAt: number
+}
+
 export interface SessionSnapshot {
   id: string
   header: SessionHeader | null
@@ -225,6 +232,8 @@ export interface SessionSnapshot {
    */
   highlightedToolCallId: string | null
   error: string | null
+  /** Structured retry timing for a live countdown; null for every ordinary error. */
+  retry: RetryNotice | null
 }
 
 export interface SessionState {
@@ -276,6 +285,7 @@ export const no_snapshot: SessionSnapshot = {
   activeTool: null,
   highlightedToolCallId: null,
   error: null,
+  retry: null,
 }
 
 /**
@@ -305,6 +315,7 @@ export function createSessionState(id: string): SessionState {
     activeTool: null,
     highlightedToolCallId: null,
     error: null,
+    retry: null,
   })
 
   // Bumped at every step boundary so provisional keys of one step never collide
@@ -579,6 +590,7 @@ export function createSessionState(id: string): SessionState {
             // us. Without this the status bar stays red for the rest of the
             // session, which is not a fact about the session.
             draft.error = null
+            draft.retry = null
             break
           case "text_delta": {
             const key = `p${turn}:assistant`
@@ -666,6 +678,12 @@ export function createSessionState(id: string): SessionState {
             draft.activeTool = null
             draft.highlightedToolCallId = null
             draft.error = `model request failed (${retry.error}); retry ${retry.attempt}/${retry.max_retries} in ${Math.round(retry.delay_ms / 1000)}s`
+            draft.retry = {
+              error: retry.error,
+              attempt: retry.attempt,
+              maxRetries: retry.max_retries,
+              retryAt: Date.now() + retry.delay_ms,
+            }
             break
           }
         }
@@ -714,6 +732,7 @@ export function createSessionState(id: string): SessionState {
           draft.highlightedToolCallId = null
         } else if (line.event === "error") {
           draft.error = (line as { message?: string }).message ?? "step failed"
+          draft.retry = null
           draft.activeTool = null
           draft.highlightedToolCallId = null
         }
@@ -760,6 +779,7 @@ export function createSessionState(id: string): SessionState {
     setError(message) {
       edit((draft) => {
         draft.error = message
+        draft.retry = null
       })
     },
     setAwaitingApproval(callId) {

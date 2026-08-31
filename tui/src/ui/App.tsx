@@ -4338,6 +4338,7 @@ export function App(props: AppProps) {
           // readable place. A remote refusal can happen before a draft starts
           // or while choosing the next environment from a live session.
           error={(remoteFailure()?.tab === tab().key ? remoteFailure()!.detail : null) ?? snapshot().error ?? refusal()}
+          retry={remoteFailure()?.tab === tab().key || !snapshot().error ? null : snapshot().retry}
           cwd={displayCwd()}
           onPickCwd={() => openOverlay("cwd")}
           // Always a value on this screen, `this machine` included: here it is

@@ -701,6 +701,35 @@ fn writeTools(jw: *std.json.Stringify, tools: []const tool.ToolDefinition) !void
 
 // ------------------------------------------------------------------ stream --
 
+/// Match tcode's Responses-stream classification: only an explicit rate-limit,
+/// overload, or "you can retry" failure is safe to resend. Other stream errors
+/// may describe a permanent model/request problem and must keep failing once.
+fn streamError(root: std.json.Value) error{ RateLimited, ServerError, CodexStreamError } {
+    const response = wire.field(root, "response") orelse root;
+    const response_error = wire.field(response, "error") orelse response;
+    const top_error = wire.field(root, "error") orelse root;
+    const code = wire.string(response_error, "code") orelse wire.string(top_error, "code") orelse "";
+    const message = wire.string(response_error, "message") orelse
+        wire.string(top_error, "message") orelse
+        wire.string(root, "message") orelse "";
+
+    if (containsIgnoreCase(code, "rate_limit")) return error.RateLimited;
+    if (containsIgnoreCase(code, "overload") or
+        containsIgnoreCase(message, "overloaded") or
+        containsIgnoreCase(message, "you can retry your request")) return error.ServerError;
+    return error.CodexStreamError;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
 pub const StreamState = struct {
     alloc: std.mem.Allocator,
     sink: provider.EventSink,
@@ -760,7 +789,7 @@ pub const StreamState = struct {
             return true;
         } else if (std.mem.eql(u8, kind, "response.failed") or std.mem.eql(u8, kind, "error")) {
             std.debug.print("codex stream error: {s}\n", .{data});
-            return error.CodexStreamError;
+            return streamError(root);
         }
         return false;
     }
@@ -891,6 +920,33 @@ test "history serializes to flat Responses items and effort off becomes none" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"include\":[\"reasoning.encrypted_content\"]") != null);
     // The endpoint 400s on this field at any value.
     try std.testing.expect(std.mem.indexOf(u8, body, "max_output_tokens") == null);
+}
+
+test "Codex stream errors retry only the transient shapes" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { json: []const u8, expected: anyerror }{
+        .{
+            .json = "{\"type\":\"error\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Try again later.\"}}",
+            .expected = error.RateLimited,
+        },
+        .{
+            .json = "{\"type\":\"error\",\"error\":{\"message\":\"Our servers are currently overloaded. Please try again later.\"}}",
+            .expected = error.ServerError,
+        },
+        .{
+            .json = "{\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"You can retry your request, or contact support.\"}}}",
+            .expected = error.ServerError,
+        },
+        .{
+            .json = "{\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"model_not_found\",\"message\":\"Unknown model.\"}}}",
+            .expected = error.CodexStreamError,
+        },
+    };
+    for (cases) |case| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, case.json, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(case.expected, streamError(parsed.value));
+    }
 }
 
 test "an encrypted reasoning item is kept whole and replayed ahead of its function_call" {

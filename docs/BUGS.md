@@ -1,8 +1,8 @@
-1. tui展示retry的时候秒数没有倒计时, 隔好久才更新一下.
-2. tui retry 5次报错后, 没有详细原因, 比如只显示了
-session step failed: RateLimited
-error · see transcript
-然后没看到transcript
-3. 长命令只看到第一行, 在运行的时候无法点击展开看命令,而且之前的命令展开也只能看到输出, 看不到命令.
-4. 粘贴长文本, 我如果composer框里面有些prompt, 尾部的prompt会被粘贴替换掉, 而且还出现了两处[paste text #n]什么的,具体忘记了.
-5. codex stream error不会重试吗.
+1. [已修复] tui 展示 retry 时按截止时间逐秒倒计时。
+2. [已修复] tui retry 用尽后保留结构化错误，并在 transcript 末尾追加 provider stderr 中的完整响应详情。
+3. [已修复] 长命令可在运行中点击展开，展开后显示按宽度换行的完整命令与输出。
+4. handoff我unsafe模式还要点击同意，并且点同意后出现了一个新tab, 底下也有session id啥的，但是没有任何对话记录， 新session也没开始工作。我更希望至少unsafe的handoff不用审批吧， 然后最好是原有之前的对话记录还在， 只是有个handoff的展示，最好compact也是这样的，他只是内部换了ledger， 但是展示的时候最好还是给用户能看到之前的对话。 实在要新session的话，至少侧边栏要能进新handoff对话吧， 现在是什么都没看到。还有就是handoff消息也是只显示一行， 看不到模型调用的参数，比如next_task什么的说明都看不到模型怎么写的。
+5. 粘贴长文本, 我如果composer框里面有些prompt, 尾部的prompt会被粘贴替换掉, 而且还出现了两处[paste text #n]什么的,具体忘记了.
+6. [已修复] Codex 流内错误按 tcode 的规则分类：rate limit、overload 和服务端明确提示可重试的错误走统一退避；model/request 等永久错误不盲目重试。
+7. [已修复] 单行 edit 过长时使用 OpenTUI diff 的字符换行，行尾保持可见。
+8. codex我看现在对话统计里面的模型的最大上下文窗口大小是1.1M了，不知道为啥选模型的那边还显示256k. 这块得统一一下吧。

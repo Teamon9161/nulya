@@ -196,6 +196,9 @@ export function PluginCardSurface(props: {
           syntaxStyle={style.syntax}
           fg={style.theme.fg}
           width="100%"
+          // Source lines are content, not table rows: keep every byte visible
+          // on narrow panes instead of clipping the right-hand side.
+          wrapMode="char"
         />
       ) : null}
       <Rows rows={drawn().rows} />

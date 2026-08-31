@@ -154,6 +154,13 @@ export function reportFailure(state: SessionState, source: string, error: unknow
   state.setError(error instanceof Error ? error.message : String(error))
 }
 
+/** Preserve the structured run error while adding the provider's stderr detail. */
+export function stepExitError(runError: string | null, code: number, stderr: string): string {
+  const detail = stderr.trim()
+  if (runError) return detail.length > 0 ? `${runError}\n${detail}` : runError
+  return detail.length > 0 ? `step exited ${code}: ${detail}` : `step exited ${code}`
+}
+
 /** The kernel's refusal to hand over the writer lease, on the `--stream` wire. */
 function isBusy(line: { kind: string; line?: { stream?: string; event?: string; message?: unknown } }): boolean {
   if (line.kind !== "stream") return false
@@ -277,13 +284,13 @@ export function createDriver(
           options.onBusy?.()
           return
         }
-        // The kernel reports every diagnostic it knows about as a `run error`
-        // line (DESIGN §14). Anything else that ends the process non-zero — an
-        // unexpected Zig error, a crash — only exists on stderr; a killed step
+        // The structured line names the failure class; provider diagnostics
+        // remain on stderr because they can contain the response body. Keep
+        // both in the transcript. A crash has only stderr, while a killed step
         // is the one non-zero exit the user asked for.
-        if (code !== 0 && !reported && !killed) {
-          const stderr = (await step.stderr).trim().split("\n")[0] ?? ""
-          state.setError(stderr.length > 0 ? `step exited ${code}: ${stderr}` : `step exited ${code}`)
+        if (code !== 0 && !killed) {
+          const stderr = await step.stderr
+          state.setError(stepExitError(reported ? state.snapshot.error : null, code, stderr))
         }
         if (disposed || killed) return
         const pendingAfter = state.pendingCount()
@@ -334,6 +341,11 @@ export function createDriver(
     // Mid-run appends are not interruptions: the kernel drains the inbox at
     // its next step boundary (DESIGN §3.4), so the turn joins the run itself.
     if (running) return
+    // Calls made back-to-back have all joined `appendTail` before this first
+    // append can resume. Let that already-queued batch land before opening the
+    // step, otherwise process scheduling decides whether two quick sends become
+    // one opening user turn (Linux often hid this race; Windows exposed it).
+    await appendTail
     await drive()
   }
 

@@ -178,17 +178,17 @@ tui/
 | `user_text` | UserTurn | `›` + 文本（markdown 关，保留换行） | — | queued 时头行加 `· queued` dim |
 | `assistant.text` | AssistantTurn | `●` + markdown（tree-sitter 高亮） | — | 展开 |
 | `assistant.reasoning` / `thinking_delta` | Thinking | `⋯ thinking  (N chars) ▸`（T26 起与所有卡片同一个 `CardFrame`，dim 一档） | 流式时显示滚动的最后一行 dim；结束后从 `reasoning` 尽力抽 `thinking` 字段（Anthropic 形状），抽不到显示 `reasoning (opaque)` | **默认 `hidden`**（T43）；设定 `thinking = hidden\|collapsed\|expanded`。hidden 时它**离开 item 列表**（`Transcript.visibleItems`）而不是画一张零高的卡——否则它前面那一行空行还留在屏幕上 |
-| call `shell` | ShellCard | `$ 命令  (N lines[· exit N]) ▸`（exit 0 不写） | stdout / stderr 分段 | **折叠**；设定 `tool_output` |
+| call `shell` | ShellCard | `$ 命令  (N lines[· exit N]) ▸`（exit 0 不写） | 完整命令（按宽度硬换行）+ stdout / stderr 分段；尚无输出的运行中调用也能展开 | **折叠**；设定 `tool_output` |
 | call `shell` `{background:true}` | ShellCard（后台变体） | `$ 命令  (background <sid>/t3 · running 12s) ▸`；报告到了换成 `(background <sid>/t3[ · exit N] · 41.8s)` | 回执原文（任务全名 + log 路径 + 三条命令） | **折叠**；**不加新 glyph**（还是那条命令，变的只有那一格 note） |
 | `task_finished` | TaskFinishedCard | `$ 命令  (background <sid>/t3[ · exit N][ · killed] · 41.8s) ▸`（`exit 0` 照 T26 省略） | 输出 tail + 尾行 `full log → <path>` | **折叠**；一条事件一张卡，不是回执那张卡的更新 |
 | 一串调用 | RunCard | `⋯ read ×3 · grep ×2 · shell ▸`（glyph 是 thinking 的三点、全程 dim、**没有 note**——一个 run 按构造就是"都成功了、没什么可给你看"，再写一格 `(6 calls)` 是同一句话说两遍，T26） | 展开就是原来那些卡，各自照旧折叠 | **折叠**；设定 `run_summary`。**进得去的**只有「跑完 + 成功 + 没有身体」的 `shell` / 扩展 tool，且至少两个；**进不去的**：还在跑的、失败的（含 `exit != 0`）、被取消的、回执型的（后台任务 / 子场）、`edit`、演化动作、`checklist`/`markdown`、包自己用代码画的卡，以及**任何声明了 `render` 的 tool**——那就是包说「我对这次调用长什么样有意见」，一个有画面要给的调用不该被概括（`render/runs.ts`） |
-| diff surface（`std.edit`、`git_apply`、migration 等任意插件卡片） | PluginToolCard + host diff surface | `⌘ tool · path  (+2 -1[· failed])` | `tool_results[].presentation` 里的 diff surface（OpenTUI `diff`，语法高亮）；无插件或无 presentation 时退回普通 ext 输出 | **展开**；设定 `diff = expanded\|collapsed` |
+| diff surface（`std.edit`、`git_apply`、migration 等任意插件卡片） | PluginToolCard + host diff surface | `⌘ tool · path  (+2 -1[· failed])` | `tool_results[].presentation` 里的 diff surface（OpenTUI `diff`，语法高亮，长行按字符换行）；无插件或无 presentation 时退回普通 ext 输出 | **展开**；设定 `diff = expanded\|collapsed` |
 | call `ext:*` | ExtToolCard | `⌘ tool_name · 参数摘要  (N lines) ▸`（**第一个参数不写键名**——工具的第一个参数就是它的主语：路径、模式、命令，T26） | 输出 | 折叠 |
 | shell 命令前缀 `nulya src` / `nulya ext init\|build\|activate\|rollback\|run` / `nulya skill load` / `nulya session new\|append\|step\|events` | EvolveCard / SubSessionCard | 见 §5.2 / §5.5 | 原始输出可展开 | 折叠但头行信息量大 |
 | `capability_note` | CapabilityBanner | `⚡ capability · id@version · tools: …` | note 全文 | 展开 |
 | canceled marker | CanceledCard | `⊘ tool · canceled (side effects unknown)` 三种文案对应三种 marker | — | 展开 |
 | `spill_path` | 卡片尾行 | `full output → .nulya/scratch/…` | — | — |
-| （不是事件）`snapshot.error` | ErrorNotice | `✗ ` + 驱动侧最近一次**显式操作**失败的原文（provider 的 retry、`run error`、`step exited N`、`session new` 被拒） | — | 永远展开，在 items **之后**；下一次 user send、显式 `/step`、take over 或真正的 `model started` 清掉；timer wake / replay / 切 tab 不清 |
+| （不是事件）`snapshot.error` | ErrorNotice | `✗ ` + 驱动侧最近一次**显式操作**失败的原文（provider 的 retry、`run error`、`step exited N`、`session new` 被拒）；step 非零退出时保留结构化 `run error`，并把 provider 留在 stderr 的响应详情接在下一行 | — | 永远展开，在 items **之后**；下一次 user send、显式 `/step`、take over 或真正的 `model started` 清掉；timer wake / replay / 切 tab 不清 |
 
 **`ErrorNotice` 不是 item**：它没有 ledger 事件、replay 也不会重现它，所以像 CompositionCard 一样待在 item 列表**外面**（一个在顶、一个在底），不必参与 `seq` 排序或 `dropInFlight`。它从状态栏搬下来，因为那一行只有一行、还要和 model / cost / chips 分：`error: model request failed (Transp` 就是所有人真正读到的错误的形状。换行由我们自己做（`wrapWords`，同 `ui/Fact` 的理由），状态栏只留 `error · see transcript`。
 
@@ -849,7 +849,7 @@ bun run src/main.tsx --session s-…           # 手工看一眼
 - **鼠标与 browse 只在 test renderer 里验证过。** 真实终端里鼠标上报由 OpenTUI 打开，但 Windows Terminal 的滚轮/点击、以及 `scrollbox` 里坐标随滚动偏移之后的点击命中，都还没人工确认。
 - **`nulya src` 的行数 chip 数的是 shell 结果的行数**（含 `--- stderr ---` / `[exit N]` 那几行），不是文件行数。真行数只有内核知道；宁可数得诚实也不发明一个数字。
 - **CompositionCard 的 skills 在 store 被删/改名后静默为空。** header 冻结的版本目录不在了，`readContributions` 返回空而不是报错——header 本身已经把版本号写在 `ext lint@v-…` 那一行，所以信息不会全丢。真正的"漂移提示"（冻结版本 vs store `current`）是 §5.3 的 `/ext` 视图，归 T3。
-- `EditCard` 的 diff 高度是补丁行数（上限 40 行）。一次超长 edit 会被截断显示，没有内部滚动——`scrollbox` 已经在外面，嵌套滚动区在终端里更难用。
+- diff surface 的长源代码行使用 OpenTUI `wrapMode="char"` 按可用宽度换行，行尾不会再被截掉；很大的补丁仍没有内部滚动——`scrollbox` 已经在外面，嵌套滚动区在终端里更难用。
 - T1 的 `settle()` 那条依然成立：新加需要 markdown/diff 的快照别用单次 `renderOnce()`。
 
 **给下一里程碑（T3 · nulya 视图）的提醒**
@@ -1048,7 +1048,7 @@ stdout 全是 JSON、退出码 0、stderr 空；行序与 DESIGN §14 完全一�
 
 **修了什么（按严重程度）**
 
-1. **两次快速发送会开两个 step 进程 → 第二个被内核 `SessionBusy` 拒 → 角色误切成 observer。** `driver.send` 只把 `stepping` 当"在跑"，第一条还在 `sending`（append 中）时第二条又走了一遍 `drive()`。现在 `drive()` 有 `driving` 门闩、`send/step` 把任何非 `idle` 都当在跑；同时 `nulya/cli.ts` 的 `sessionAppend` **按 session 串行**——两个并发的 `session append` 进程在 inbox 里没有定义的先后，实测过 "first, second" 落成 "second, first"。
+1. **两次快速发送会开两个 step 进程 → 第二个被内核 `SessionBusy` 拒 → 角色误切成 observer。** `driver.send` 只把 `stepping` 当"在跑"，第一条还在 `sending`（append 中）时第二条又走了一遍 `drive()`。现在 `drive()` 有 `driving` 门闩、`send/step` 把任何非 `idle` 都当在跑；同时 `nulya/cli.ts` 的 `sessionAppend` **按 session 串行**——两个并发的 `session append` 进程在 inbox 里没有定义的先后，实测过 "first, second" 落成 "second, first"。2026-08-31 在 Windows 进一步发现第一条 append 完成后可能抢在已经排队的第二条之前启动 step，导致同一开场 batch 被平台调度拆成两轮；首个 sender 现在等当时的 `appendTail` 全部落盘再 `drive()`，同一事件循环内的连续发送稳定合成一条 user turn。
 2. **`snapshot.error` 从不清除**：一次 spawn 失败 / `run error` 之后状态栏红到进程结束。现在 `model started` 清掉它（一步真的开始，就是上一次失败已经过去的事实）。
 3. **`Ctrl+C` 的"再按一下退出"永远待命**：`ctrlCArmed` 置真后不复位，之后任何时刻的第一下 Ctrl+C 都直接退出而不是先 kill 当前 step。现在新 step 开始时复位，且 3 秒后自动失效。
 4. **被消费的全局键也会打进 composer**：OpenTUI 先跑全局 `useKeyboard` 再跑焦点控件，App 从不 `preventDefault()`，于是 `Ctrl+W` 同时"关 tab"和"删一个词"（textarea 自带 readline 绑定），任何与 textarea 撞的 `[keys]` 覆盖都会双发。现在 App 消费的键一律 `preventDefault()`；`Ctrl+W` 只在 >1 个 tab 时归 App，单 tab 时保留 composer 的删词。

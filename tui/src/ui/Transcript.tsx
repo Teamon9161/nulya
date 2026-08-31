@@ -12,7 +12,7 @@ import { Welcome, type NextSession } from "./Welcome.tsx"
 import { useStyle, type Style } from "../render/theme.ts"
 import { renderHintOf, type Contributions } from "../nulya/files.ts"
 import type { SessionHeader } from "../nulya/ledger.ts"
-import type { ToolItem, TranscriptItem } from "../state/session.ts"
+import type { RetryNotice as RetryNoticeState, ToolItem, TranscriptItem } from "../state/session.ts"
 import type { ThinkingDefault } from "../state/settings.ts"
 
 /**
@@ -172,6 +172,8 @@ export function Transcript(props: {
    * (`ErrorNotice`).
    */
   error?: string | null
+  /** Live retry timing, kept structured so the notice can count down without parsing prose. */
+  retry?: RetryNoticeState | null
   /** The workspace this session's `.nulya/` lives in — the welcome screen says so. */
   cwd?: string
   /** Clicking the `cwd` row opens the directory browser (§5.3b). */
@@ -341,7 +343,7 @@ export function Transcript(props: {
         )}
       </Index>
       <Show when={props.error}>
-        <ErrorNotice text={props.error!} />
+        <ErrorNotice text={props.error!} retry={props.retry} />
       </Show>
     </scrollbox>
   )

@@ -15,6 +15,7 @@ import { testRender } from "@opentui/solid"
 import { Transcript, gapBefore } from "../src/ui/Transcript.tsx"
 import { CompositionCard } from "../src/render/cards/CompositionCard.tsx"
 import { PluginToolCard } from "../src/render/cards/PluginToolCard.tsx"
+import { retryNoticeText } from "../src/render/cards/ErrorNotice.tsx"
 import { diffStat } from "../src/plugins/surface.tsx"
 import { describeTool } from "../src/render/registry.ts"
 import type { PluginCard } from "../src/plugins/host.ts"
@@ -23,7 +24,7 @@ import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
 import { TasksContext } from "../src/state/tasks.ts"
 import { NavigateContext } from "../src/state/navigate.ts"
-import { createSessionState, type ToolItem, type TranscriptItem } from "../src/state/session.ts"
+import { createSessionState, type RetryNotice as RetryNoticeState, type ToolItem, type TranscriptItem } from "../src/state/session.ts"
 import { default_settings, loadSettings } from "../src/state/settings.ts"
 import type { SessionHeader } from "../src/nulya/ledger.ts"
 import { sessionAppend, sessionEvents, sessionNew, sessionStep, type TaskEntry } from "../src/nulya/cli.ts"
@@ -547,12 +548,19 @@ test("shell output is collapsed, with an exit chip", async () => {
   expect(frame).toMatchSnapshot()
 })
 
-test("an expanded shell card shows stdout and stderr", async () => {
+test("an expanded shell card shows the complete command, stdout and stderr", async () => {
   const expanded = createStyle(
     { ...default_settings, transcript: { ...default_settings.transcript, tool_output: "expanded" } },
     {},
   )
-  const frame = await frameOf([shell_item], 76, 24, expanded)
+  const command = "bun test test/render.test.tsx --filter this-is-the-part-that-the-folded-head-cannot-fit"
+  const frame = await frameOf(
+    [shellItem({ key: "long-shell", command, output: "running 12 tests\n--- stderr ---\ntest failure in emit.zig\n[exit 1]", ok: false })],
+    40,
+    24,
+    expanded,
+  )
+  expect(frame.replace(/\s/g, "")).toContain("this-is-the-part-that-the-folded-head-cannot-fit")
   expect(frame).toContain("running 12 tests")
   expect(frame).toContain("test failure in emit.zig")
 })
@@ -986,6 +994,35 @@ test("std edit plugin renders its diff expanded by default", async () => {
   expect(frame).toMatchSnapshot()
 })
 
+test("a long single-line edit wraps instead of clipping its tail", async () => {
+  const tail = "TAIL_MARKER"
+  const long = `const value = "${"x".repeat(72)}${tail}";`
+  const item: ToolItem = {
+    ...edit_item,
+    key: "long-edit",
+    presentation: {
+      kind: "diff",
+      path: "src/emit.zig",
+      patch: ["--- a/src/emit.zig", "+++ b/src/emit.zig", "@@ -1 +1 @@", `-${long.replace(tail, "OLD_MARKER")}`, `+${long}`].join("\n"),
+    },
+  }
+  const frame = await frameOfNode(
+    () => (
+      <PluginToolCard
+        item={item}
+        presentation={describeTool({ tool: item.tool, args: item.args, output: item.output }, narrow.glyphs)}
+        card={edit_plugin_card}
+        revision={0}
+      />
+    ),
+    40,
+    20,
+    narrow,
+  )
+  // The renderer may break inside an identifier; no bytes from the tail vanish.
+  expect(frame.replace(/\s/g, "")).toContain(tail)
+})
+
 test("diff = collapsed hides a plugin diff", async () => {
   const collapsed = createStyle(
     { ...default_settings, transcript: { ...default_settings.transcript, diff: "collapsed" } },
@@ -1099,6 +1136,26 @@ test("clicking a card's head line folds it", async () => {
   } finally {
     setup.renderer.destroy()
   }
+})
+
+test("a running shell card can reveal its complete command before output exists", async () => {
+  const command = "bun test --filter command-tail-visible-while-running"
+  const running = { ...shellItem({ key: "running-shell", command, output: "" }), state: "running" as const }
+  const setup = await testRender(() => <Harness items={[running]} />, { width: 36, height: 12 })
+  try {
+    expect((await settle(setup)).replace(/\s/g, "")).not.toContain("command-tail-visible-while-running")
+    await setup.mockMouse.click(4, 1)
+    expect((await settle(setup)).replace(/\s/g, "")).toContain("command-tail-visible-while-running")
+  } finally {
+    setup.renderer.destroy()
+  }
+})
+
+test("retry notice derives a live countdown from its deadline", () => {
+  const retry: RetryNoticeState = { error: "RateLimited", attempt: 2, maxRetries: 5, retryAt: 10_000 }
+  expect(retryNoticeText(retry, 5_000)).toEndWith("retry 2/5 in 5s")
+  expect(retryNoticeText(retry, 6_001)).toEndWith("retry 2/5 in 4s")
+  expect(retryNoticeText(retry, 10_500)).toEndWith("retry 2/5 in 0s")
 })
 
 test("a driver failure is written out in the transcript, in full, wrapped", async () => {
@@ -1403,8 +1460,8 @@ test("clicking a tool card's head line expands it, and clicking it again folds i
     const head = frame.split("\n").findIndex((row) => row.includes("hello-from-nulya"))
     expect(head).toBeGreaterThan(0)
     await setup.mockMouse.click(6, head)
-    // Expanded: the head line plus the captured stdout.
-    expect(occurrences(await settle(setup, 5))).toBe(2)
+    // Expanded: the cut head, the complete command body and captured stdout.
+    expect(occurrences(await settle(setup, 5))).toBe(3)
 
     await setup.mockMouse.click(6, head)
     expect(occurrences(await settle(setup, 5))).toBe(1)
@@ -1434,7 +1491,7 @@ test("Esc on an empty composer opens browse mode, where Enter folds a card", asy
     expect(await settle(setup, 3)).toContain("browse · j/k move")
 
     setup.mockInput.pressEnter()
-    expect(occurrences(await settle(setup, 5))).toBe(2)
+    expect(occurrences(await settle(setup, 5))).toBe(3)
 
     setup.mockInput.pressEscape()
     expect(await settle(setup, 3)).not.toContain("browse · j/k move")

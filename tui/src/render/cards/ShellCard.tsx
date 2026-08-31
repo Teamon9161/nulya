@@ -1,10 +1,11 @@
-import { Show, createMemo } from "solid-js"
-import { useStyle } from "../theme.ts"
+import { For, Show, createMemo } from "solid-js"
+import { useScreen, useStyle } from "../theme.ts"
 import { CardFrame, sizeNote } from "./CardFrame.tsx"
 import { backgroundStartOf, splitShellOutput } from "../../nulya/ledger.ts"
 import { backgroundNote, taskNamed, useTasks } from "../../state/tasks.ts"
+import { hardWrapLines } from "../../ui/columns.ts"
+import { shellCommandOf, type ToolPresentation } from "../registry.ts"
 import type { ToolItem } from "../../state/session.ts"
-import type { ToolPresentation } from "../registry.ts"
 
 /**
  * A `shell` call: the command on the head line, the captured output folded
@@ -22,6 +23,7 @@ import type { ToolPresentation } from "../registry.ts"
  */
 export function ShellCard(props: { item: ToolItem; presentation: ToolPresentation }) {
   const style = useStyle()
+  const command = createMemo(() => shellCommandOf(props.item.args) ?? props.presentation.head)
   const shell = createMemo(() => splitShellOutput(props.item.output))
   const started = createMemo(() => backgroundStartOf(props.item.output))
   const tasks = useTasks()
@@ -60,11 +62,35 @@ export function ShellCard(props: { item: ToolItem; presentation: ToolPresentatio
       chip={chip()}
       chipTone={tone()}
       defaultOpen={style.settings.transcript.tool_output === "expanded"}
-      foldable={props.item.output.length > 0}
+      // The command is body content too, so an in-flight call with no output is
+      // still openable and a cut or multi-line head is never the only copy.
+      foldable={command().length > 0 || props.item.output.length > 0}
       spillPath={props.item.spillPath}
     >
+      <ShellCommand command={command()} />
       <ShellOutput output={props.item.output} />
     </CardFrame>
+  )
+}
+
+/** The complete invocation, hard-wrapped so expanding never loses its tail. */
+function ShellCommand(props: { command: string }) {
+  const style = useStyle()
+  const screen = useScreen()
+  // CardFrame and its open body consume six columns before this text starts.
+  const room = () => Math.max(8, Math.min(screen().width, style.maxWidth) - 6)
+  const lines = createMemo(() => hardWrapLines(props.command, room()))
+  return (
+    <box flexDirection="column" width="100%">
+      <For each={lines()}>
+        {(line, index) => (
+          <box flexDirection="row" width="100%" height={1} flexShrink={0}>
+            <text fg={style.theme.accent.tool} flexShrink={0}>{index() === 0 ? "$ " : "  "}</text>
+            <text fg={style.theme.muted} flexShrink={0}>{line}</text>
+          </box>
+        )}
+      </For>
+    </box>
   )
 }
 

@@ -8,7 +8,7 @@
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { createAttachment } from "../src/state/attach.ts"
-import { createDriver } from "../src/state/driver.ts"
+import { createDriver, stepExitError } from "../src/state/driver.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { midTaskOf, mid_task_note, mid_task_open } from "../src/midtask.ts"
 import { sessionEvents, sessionNew } from "../src/nulya/cli.ts"
@@ -243,6 +243,16 @@ test("interruptAndDeliver with nothing typed and nothing running is a no-op, not
   }
 }, 30_000)
 
+test("a reported provider failure keeps its detailed stderr in the transcript", () => {
+  expect(stepExitError(
+    "session step failed: RateLimited",
+    1,
+    "provider API error 429: {\"error\":{\"message\":\"quota resets in 18 seconds\"}}\n",
+  )).toBe(
+    "session step failed: RateLimited\nprovider API error 429: {\"error\":{\"message\":\"quota resets in 18 seconds\"}}",
+  )
+})
+
 test("a step that dies without a `run error` line still surfaces its stderr", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
@@ -283,14 +293,23 @@ test("a retry line drops the failed attempt's cards and usage; the next started 
   expect(state.snapshot.items.length).toBe(2)
   expect(state.snapshot.usage.input).toBe(100)
 
+  const retryObservedAt = Date.now()
   state.applyStream({ stream: "model", event: "retry", attempt: 1, max_retries: 5, delay_ms: 1000, error: "Transport" })
   expect(state.snapshot.items.length).toBe(0)
   expect(state.snapshot.usage.input).toBe(0)
   expect(state.snapshot.error).toBe("model request failed (Transport); retry 1/5 in 1s")
+  expect(state.snapshot.retry).toEqual({
+    error: "Transport",
+    attempt: 1,
+    maxRetries: 5,
+    retryAt: expect.any(Number),
+  })
+  expect(state.snapshot.retry!.retryAt).toBeGreaterThanOrEqual(retryObservedAt + 1000)
 
-  // The re-sent attempt streams from scratch: no leftover prefix, notice gone.
+  // The re-sent attempt streams from scratch: no leftover prefix or countdown.
   state.applyStream({ stream: "model", event: "started" })
   expect(state.snapshot.error).toBeNull()
+  expect(state.snapshot.retry).toBeNull()
   state.applyStream({ stream: "model", event: "text_delta", text: "a whole reply" })
   expect(state.snapshot.items.length).toBe(1)
   expect((state.snapshot.items[0] as { text: string }).text).toBe("a whole reply")

@@ -185,6 +185,7 @@ export function SubAgentPane(props: {
             contributions={props.view.contributions()}
             highlightedCallId={props.view.state.snapshot.highlightedToolCallId}
             error={props.view.state.snapshot.error}
+            retry={props.view.state.snapshot.retry}
             ref={(box) => (scroll = box)}
           />
         </BodyWidthContext.Provider>

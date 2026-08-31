@@ -1,9 +1,15 @@
-import { For, createMemo } from "solid-js"
+import { For, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
+import type { RetryNotice as RetryNoticeState } from "../../state/session.ts"
 import { useScreen, useStyle } from "../theme.ts"
 import { wrapWords } from "../../ui/columns.ts"
 
 /** The glyph column every line hangs off, so continuations line up under the text. */
 const gutter = 2
+
+export function retryNoticeText(retry: RetryNoticeState, now: number): string {
+  const remaining = Math.max(0, Math.ceil((retry.retryAt - now) / 1000))
+  return `model request failed (${retry.error}); retry ${retry.attempt}/${retry.maxRetries} in ${remaining}s`
+}
 
 /**
  * The last thing that went wrong on the driver side: a request the provider
@@ -25,12 +31,24 @@ const gutter = 2
  * way it is: OpenTUI does not wrap an over-wide flex row, it SHRINKS it — which
  * ate the space after the glyph and cut words mid-way.
  */
-export function ErrorNotice(props: { text: string }) {
+export function ErrorNotice(props: { text: string; retry?: RetryNoticeState | null }) {
   const style = useStyle()
   const screen = useScreen()
+  const [now, setNow] = createSignal(Date.now())
+
+  // A retry notice is the only transient error whose words change while it is
+  // mounted. Stop paying for the clock as soon as `started` clears the retry.
+  createEffect(() => {
+    if (!props.retry) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 200)
+    onCleanup(() => clearInterval(timer))
+  })
+
   const room = () => Math.max(20, Math.min(screen().width, style.maxWidth) - gutter - 1)
+  const text = () => props.retry ? retryNoticeText(props.retry, now()) : props.text
   const lines = createMemo(() =>
-    props.text
+    text()
       .split("\n")
       .flatMap((line) => wrapWords(line, room()))
       .filter((line) => line.length > 0),
