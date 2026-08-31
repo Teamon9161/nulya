@@ -16,23 +16,32 @@ interface Proposal {
   call: string
   seq: number
   brief: HandoffBrief
+  state: "pending" | "running" | "done"
+  note: string
 }
 
 export function activate(api: PluginApi): void {
   const calls = new Map<string, Proposal>()
-  const handled = new Set<string>()
-  let proposal: Proposal | null = null
-  let status = ""
-  let running = false
+  const pending = new Map<string, Proposal>()
+
+  const currentProposal = (): Proposal | null => {
+    const session = api.observe.session()?.id
+    if (!session) return null
+    let found: Proposal | null = null
+    for (const proposal of pending.values()) {
+      if (proposal.session === session && proposal.state !== "done") found = proposal
+    }
+    return found
+  }
 
   const panel = api.registerPanel({
     render: renderPanel,
     onKey,
     onClose() {
-      if (proposal) handled.add(proposal.key)
-      proposal = null
-      status = ""
-      running = false
+      const proposal = currentProposal()
+      if (!proposal) return
+      proposal.state = "done"
+      proposal.note = ""
     },
   })
 
@@ -83,7 +92,7 @@ export function activate(api: PluginApi): void {
       const brief = briefOf(typeof call.args === "string" ? call.args : "")
       if (!brief) continue
       const key = proposalKey(session, call.id)
-      calls.set(key, { key, session, call: call.id, seq: event.seq, brief })
+      calls.set(key, { key, session, call: call.id, seq: event.seq, brief, state: "pending", note: "" })
     }
   }
 
@@ -98,53 +107,56 @@ export function activate(api: PluginApi): void {
       const found = calls.get(key)
       if (!found) continue
       calls.delete(key)
-      if (result.ok !== true || handled.has(key)) continue
-      proposal = found
-      status = ""
-      panel.open()
+      if (result.ok !== true || pending.has(key)) continue
+      found.state = "pending"
+      found.note = ""
+      pending.set(key, found)
+      if (api.observe.session()?.id === session) panel.open()
     }
   }
 
   function renderPanel(width: number): Line[] {
-    if (!proposal) return [[{ text: "no handoff is waiting", token: "dim" }]]
+    const proposal = currentProposal()
+    if (!proposal) return [[{ text: "no handoff is waiting for this session", token: "dim" }]]
     const out: Line[] = [[{ text: "handoff proposed", token: "accent.evolve" }]]
     for (const line of briefPreview(proposal.brief).slice(0, 8)) {
       out.push([{ text: clip(line, Math.max(12, width)), token: "muted" }])
     }
-    out.push([
-      {
-        text: status || "Enter follow into a new tab · Esc dismiss · the call stays either way",
-        token: status ? "warn" : "dim",
-      },
-    ])
+    const note = proposal.state === "running"
+      ? "following…"
+      : proposal.note || "Enter follow into a new tab · Esc dismiss · the call stays either way"
+    out.push([{ text: note, token: proposal.state === "pending" && !proposal.note ? "dim" : "warn" }])
     return out
   }
 
   function onKey(key: PluginKey): boolean {
+    const proposal = currentProposal()
     if (key.name !== "return" || !proposal) return false
-    if (running || handled.has(proposal.key)) {
-      status = running ? "following…" : "this handoff was already handled"
+    if (proposal.state === "running") {
+      proposal.note = "following…"
       return true
     }
     const chosen = proposal
-    handled.add(chosen.key)
-    running = true
-    status = "following…"
+    chosen.state = "running"
+    chosen.note = ""
     void run(chosen.session, { brief_seq: chosen.seq })
       .then((opened) => {
-        running = false
+        const target = pending.get(chosen.key)
+        if (!target) return
         if (!opened) {
-          handled.delete(chosen.key)
-          status = "not followed · resolve the notice above, then press Enter again"
+          target.state = "pending"
+          target.note = "not followed · resolve the notice above, then press Enter again"
           return
         }
-        proposal = null
-        panel.close()
+        target.state = "done"
+        if (currentProposal() === null) panel.close()
       })
       .catch((error: unknown) => {
-        running = false
-        status = messageOf(error)
-        api.notice(`compact: ${status}`)
+        const target = pending.get(chosen.key)
+        if (!target) return
+        target.state = "pending"
+        target.note = messageOf(error)
+        api.notice(`compact: ${target.note}`)
       })
     return true
   }
@@ -159,8 +171,11 @@ export function activate(api: PluginApi): void {
       api.notice("compact: this tab is observing · follow it from the TUI that is driving the session")
       return false
     }
-    if (current.status !== "idle") {
-      api.notice("compact: a step is running · try again when it stops")
+    const activity = current.activity ?? current.status
+    if (activity !== "idle") {
+      api.notice(activity === "sending"
+        ? "compact: a message is still being sent · try again after it lands"
+        : "compact: a step is running · try again when it stops")
       return false
     }
 

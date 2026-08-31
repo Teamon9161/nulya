@@ -156,3 +156,5 @@
 
 
 **2026-08-31 · compact 成为第三个真实 plugin consumer。** API 2.1 新增 `onEvent(..., source)`、`SessionView.role/status`、通用 `extRunPackage`，以及 host-framed `registerUserTurn`/session title formatter。compact package 用这些原语独立拥有 `/compact`、handoff follow/dismiss、机器 user turn 与 continuation title；host 删除 `PluginActions.compact` 和所有 marker/workflow 特判。plan approve 改用 `extRunPackage("compact", "compact", …)`。
+
+**2026-08-31 · API 2.2 兼容增长。** `SessionView.activity?` 补上真实的 `sending`，而既有 `status: "idle" | "stepping" | "canceling"` 不扩 union；需要严格 idle 的新插件读 `activity ?? status`，旧插件的 exhaustive switch 不受影响。compact 是第一个 consumer：append 在途时拒绝 fork。

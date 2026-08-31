@@ -315,7 +315,8 @@ export function createDriver(
     const midTask = !framed && (status() === "stepping" || status() === "canceling")
     const wire = midTask ? wrapMidTask(trimmed, !noted) : trimmed
     if (midTask) noted = true
-    state.enqueueUser(wire, images.length)
+    state.setError(null)
+    const localId = state.enqueueUser(wire, images.length)
     // Anything but idle means a step is running or about to: the turn is
     // appended and the run in flight (or the one the earlier send is about to
     // start) drains it at its next step boundary. Starting a second `drive()`
@@ -325,6 +326,7 @@ export function createDriver(
     try {
       await appendInOrder(wire, images)
     } catch (error) {
+      state.rejectUser(localId)
       reportFailure(state, "driver", error)
       if (!running) setStatus("idle")
       return
@@ -337,6 +339,7 @@ export function createDriver(
 
   async function step(): Promise<void> {
     if (status() !== "idle") return
+    state.setError(null)
     await drive()
   }
 

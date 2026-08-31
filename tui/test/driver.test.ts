@@ -53,6 +53,48 @@ test("two sends in quick succession start ONE step and both turns land", async (
   }
 }, 120_000)
 
+test("an append failure rolls back its optimistic user card and pending count", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  state.setError("older failure")
+  // Bun itself is executable but is not the nulya CLI. `session append` fails
+  // before any step can start, which isolates the optimistic rollback path.
+  const driver = createDriver({ dir: ws.dir, bin: process.execPath }, id, state, {})
+  try {
+    await driver.send("this append will fail")
+    expect(driver.status()).toBe("idle")
+    expect(state.pendingCount()).toBe(0)
+    expect(state.snapshot.items.some((item) => item.kind === "user" && item.text === "this append will fail")).toBe(false)
+    expect(state.snapshot.error).not.toBe("older failure")
+    expect(state.snapshot.error).toBeTruthy()
+  } finally {
+    driver.dispose()
+  }
+}, 60_000)
+
+test("explicit attempts clear an old error, while an empty timer wake does not", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  const driver = createDriver(ws, id, state, { env: scripted_env })
+  try {
+    state.setError("old")
+    await driver.wake()
+    expect(state.snapshot.error).toBe("old")
+
+    state.setError("old")
+    const sending = driver.send("try again")
+    expect(state.snapshot.error).toBeNull()
+    await sending
+
+    state.setError("old")
+    const stepping = driver.step()
+    expect(state.snapshot.error).toBeNull()
+    await stepping
+  } finally {
+    driver.dispose()
+  }
+}, 120_000)
+
 test("a send during a step in flight lands wrapped as mid-task; one at rest does not", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)

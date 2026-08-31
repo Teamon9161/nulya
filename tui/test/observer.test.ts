@@ -79,8 +79,11 @@ test("a session driven by somebody else is observed, appended to, and then taken
     await until(() => attach.takeoverReady(), 30_000)
     expect(attach.role()).toBe("observer")
 
-    // 5. Taking over means driving: our own step appends to the same ledger.
+    // 5. Taking over means driving: our own step appends to the same ledger,
+    // and the explicit attempt retires an older transient failure.
+    state.setError("old failure")
     attach.takeOver()
+    expect(state.snapshot.error).toBeNull()
     expect(attach.role()).toBe("driver")
     const beforeTakeover = state.lastSeq()
     await attach.send("and now I am driving")

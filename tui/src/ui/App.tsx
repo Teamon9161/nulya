@@ -2371,6 +2371,7 @@ export function App(props: AppProps) {
       members: here.contributions().map((c) => ({ id: c.id, version: c.version, tools: [...c.tools] })),
       role: here.attach.role(),
       status: pluginStatus,
+      activity,
     }
   }
 

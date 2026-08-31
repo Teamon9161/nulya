@@ -1,10 +1,4 @@
-/**
- * The queue lane (agent-runner ar-t1, tui.md §4.4b): the inbox drawn out above
- * the composer. Pure presentational component — no session, no driver — so
- * this only pins what T35/T38 already require of everything in that region
- * (nothing drawn at rest) and the one behaviour specific to this lane: every
- * row is the same click, because the inbox is a FIFO the kernel drains whole.
- */
+/** QueueLane is one status/action row; transcript cards own message bodies. */
 import { expect, test } from "bun:test"
 import type { JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
@@ -29,27 +23,23 @@ test("nothing queued draws nothing — no resting-state row, same rule as Workin
   }
 })
 
-test("the summary line names the count and the gesture; each message gets its own truncated row", async () => {
+test("the lane names only queue state and the delivery gesture, never message bodies", async () => {
   const messages: QueuedMessage[] = [
     { key: "q:1", text: "also check the docs" },
-    { key: "q:2", text: "and the README\nwith a second line folded away" },
+    { key: "q:2", text: "and the README\nwith a second line" },
   ]
   const setup = await mount(() => <QueueLane messages={messages} />)
   try {
     const frame = await settle(setup, 2)
-    expect(frame).toContain("2 queued")
-    expect(frame).toContain("enter queues")
-    expect(frame).toContain("ctrl+j interrupts & delivers")
-    expect(frame).toContain("also check the docs")
-    // A newline inside a queued message is flattened to one line, not a
-    // second row this lane never asked for.
-    expect(frame).toContain("and the README with a second line folded away")
+    expect(frame).toContain("⏸ 2 queued · ctrl+j interrupts & delivers")
+    expect(frame).not.toContain("also check the docs")
+    expect(frame).not.toContain("and the README")
   } finally {
     setup.renderer.destroy()
   }
 })
 
-test("clicking any row fires the same onSelect — the inbox is a FIFO, not something a row can jump ahead in", async () => {
+test("clicking the status row delivers the whole FIFO queue", async () => {
   const messages: QueuedMessage[] = [
     { key: "q:1", text: "first queued message" },
     { key: "q:2", text: "second queued message" },
@@ -59,16 +49,11 @@ test("clicking any row fires the same onSelect — the inbox is a FIFO, not some
   try {
     await settle(setup, 2)
     const lines = frameLines(setup.captureCharFrame())
-    const secondRow = lines.findIndex((line) => line.includes("second queued message"))
-    expect(secondRow).toBeGreaterThan(-1)
-    const x = lines[secondRow]!.indexOf("second") + 1
-    await setup.mockMouse.click(x, secondRow)
+    const row = lines.findIndex((line) => line.includes("2 queued"))
+    expect(row).toBeGreaterThan(-1)
+    const x = lines[row]!.indexOf("queued") + 1
+    await setup.mockMouse.click(x, row)
     expect(calls).toBe(1)
-
-    const firstRow = lines.findIndex((line) => line.includes("first queued message"))
-    const x2 = lines[firstRow]!.indexOf("first") + 1
-    await setup.mockMouse.click(x2, firstRow)
-    expect(calls).toBe(2)
   } finally {
     setup.renderer.destroy()
   }

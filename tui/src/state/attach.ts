@@ -198,12 +198,14 @@ export function createAttachment(
     // and the turn carries the mid-task framing (midtask.ts); "free" and
     // "unknown" claim nothing, so they wrap nothing.
     const wire = !framed && probeWriterLease(ws, id) === "held" ? wrapMidTask(trimmed) : trimmed
-    state.enqueueUser(wire, images.length)
+    state.setError(null)
+    const localId = state.enqueueUser(wire, images.length)
     setSending(true)
     setQueuedAt(Date.now())
     try {
       await sessionAppend(ws, id, wire, images)
     } catch (error) {
+      state.rejectUser(localId)
       reportFailure(state, "attach", error)
     } finally {
       setSending(false)
@@ -254,6 +256,7 @@ export function createAttachment(
   }
 
   function takeOver(): void {
+    state.setError(null)
     stopFollow()
     freeProbes = 0
     setTakeoverReady(false)

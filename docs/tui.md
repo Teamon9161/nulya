@@ -188,7 +188,7 @@ tui/
 | `capability_note` | CapabilityBanner | `⚡ capability · id@version · tools: …` | note 全文 | 展开 |
 | canceled marker | CanceledCard | `⊘ tool · canceled (side effects unknown)` 三种文案对应三种 marker | — | 展开 |
 | `spill_path` | 卡片尾行 | `full output → .nulya/scratch/…` | — | — |
-| （不是事件）`snapshot.error` | ErrorNotice | `✗ ` + 驱动侧最后一次失败的**原文**（provider 的 retry、`run error`、`step exited N`、`session new` 被拒） | — | 永远展开，在 items **之后**；下一个 `model started` 清掉 |
+| （不是事件）`snapshot.error` | ErrorNotice | `✗ ` + 驱动侧最近一次**显式操作**失败的原文（provider 的 retry、`run error`、`step exited N`、`session new` 被拒） | — | 永远展开，在 items **之后**；下一次 user send、显式 `/step`、take over 或真正的 `model started` 清掉；timer wake / replay / 切 tab 不清 |
 
 **`ErrorNotice` 不是 item**：它没有 ledger 事件、replay 也不会重现它，所以像 CompositionCard 一样待在 item 列表**外面**（一个在顶、一个在底），不必参与 `seq` 排序或 `dropInFlight`。它从状态栏搬下来，因为那一行只有一行、还要和 model / cost / chips 分：`error: model request failed (Transp` 就是所有人真正读到的错误的形状。换行由我们自己做（`wrapWords`，同 `ui/Fact` 的理由），状态栏只留 `error · see transcript`。
 
@@ -354,8 +354,8 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 TUI 的便利流程现在全部属于 `extensions/compact/tui/compact.ts`，宿主不再认识 compact / handoff 的包名、tool 名或 marker：
 
 - compact package current + trusted 时，它的 plugin 注册 `/compact [focus]`、handoff preview panel、compact request/context summary user-turn renderer，以及 `/sessions` 的 summary title formatter；plugins 关闭或包加载失败时，ledger 原文照常可读，只是不再有这些便利 UI。
-- host 给每条 event 明确的 `live | replay` 来源。plugin 只关联 **live assistant handoff call + 同 call id 的成功 tool result**；replay 永远不弹 panel、不 fork。proposal 以 session + call id 隔离，失败、deny、残缺参数都不形成 proposal。
-- handoff 默认总是问：`Enter` follow，`Esc` dismiss。它与 permission mode 完全解耦，`unsafe` 不再自动 follow。observer 可以看到 proposal，但执行前会因 `SessionView.role/status` 被明确拒绝，不能抢 writer lease。
+- host 给每条 event 明确的 `live | replay` 来源。plugin 只关联 **live assistant handoff call + 同 call id 的成功 tool result**；replay 永远不弹 panel、不 fork。proposal 以 session + call id 隔离，进程内保存 `pending → running → done`：成功或明确 dismiss 才 done，临时失败回 pending 可重试；异步完成只更新自己的 key，不能覆盖另一场刚出现的 proposal。失败、deny、残缺参数都不形成 proposal。
+- handoff 默认总是问：`Enter` follow，`Esc` dismiss。它与 permission mode 完全解耦，`unsafe` 不再自动 follow。observer 可以看到 proposal，但执行前会因 `SessionView.role` 被明确拒绝，不能抢 writer lease。API 2.2 以可选 `SessionView.activity` 暴露真实 `sending | stepping | canceling | idle`；旧的三态 `status` 保持不变（sending 仍折成 idle），compact 用 `activity ?? status`，所以 append 尚未完成时绝不 fork。
 - 手工 `/compact` 与 follow 共用一个 `run`：driver + idle 预检 → 调本包冻结版本的 internal `compact` tool（手工传 `focus`，handoff 传那次 assistant event 的 `brief_seq`）→ 解析 child → `openTab(child)`。父 tab 保留；child summary 留在 inbox，不自动 step，下一次明确用户输入才继续。
 - `extensions/plan` 的 approve 不再调用宿主专用 compact 动词，而是经通用 `extRunPackage("compact", "compact", {session, brief_file})` 后 `openTab(child)`。compact 缺失、未 current、未 build 或 workspace store 未信任时，review panel 和已写 brief 都保留。
 
@@ -2151,7 +2151,7 @@ T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool
 
 **内核零改动**（goals/agent-runner.md ar-t1）。substrate 早就齐了：`session append` 投 inbox、内核每个 step 边界排干（T27 把报告时机也修准了）、Esc kill 这一步、T29 的 wake 在 idle tick 时把非空 inbox 排掉——所以"中断并投递"事实上一直可达，只是要两个手势加一个定时器 tick，且没人知道这条路存在。这一轮全是把它包装成**一个**看得见的动作。
 
-1. **queue lane（`ui/QueueLane.tsx`）**：`pendingCount() > 0` 时在输入框上方（WorkingStatus 同区——都是"此刻正在发生什么"，不是 session 的描述）画一行 `⏸ N queued — enter queues · ctrl+j interrupts & delivers`，底下逐条截一行列出排队消息；静息时**不画**（T35/T38 那条规矩：没有 `0 queued` 这一行）。点击任一行 = 下面的手势——inbox 是内核整体 FIFO 排干的，不假装能单条插队。lane 显示的是用户原话：mid-run 排队的消息在 wire 上套着 mid-task sentinel（midtask.ts），lane 用与 transcript 卡**同一个** `parseMidTask` 折回来。
+1. **queue lane（`ui/QueueLane.tsx`）**：`pendingCount() > 0` 时在输入框上方（WorkingStatus 同区——都是"此刻正在发生什么"，不是 session 的描述）只画一行 `⏸ N queued · ctrl+j interrupts & delivers`；queued message 正文只在 transcript 的 optimistic user card 出现一次。静息时**不画**（T35/T38 那条规矩：没有 `0 queued` 这一行）。点击状态行 = 下面的手势——inbox 是内核整体 FIFO 排干的，不假装能单条插队。
 2. **手势（`Driver.interruptAndDeliver`）= 三个现有动词按顺序接线**：append（原样走 `send` 的排队路径，所以 `queued` 标记行为不变）→ kill（T27 既有的杀这一步）→ 等 `drive()` 的 `finally` 真正跑完（新内部 `idleOnce()`——不是"kill 信号发出"那一刻，否则第二个 `session step` 会撞上还没放的写者租约）→ 立即 `step()`。零新状态机。idle + composer 有字退化成普通 `send`；**idle + 空文本（lane 的点击落在 step 刚结束之后）走 `wake()`**——inbox 非空立即 step、为空仍是 no-op，绝不裸 step 空 inbox（那会把上一条 assistant 当 prefill 重发，DESIGN §4）。observer 没有自己的写者租约可杀，`Attachment.interruptAndDeliver` 对它退化成既有的排队 append。
 3. **ctrl+j 是有条件抢的键（keymap `interrupt`，`[keys]` 可覆盖）**。裸 ctrl+j 在非 Kitty 终端与换行**字节相同**（`@opentui/core` mock-keys 实测），而它正是 composer 的 Shift+Enter 退路——无条件抢会吃掉那批终端的换行。所以 App 的 layer 只在 `interruptRelevant()`（有步在跑，或已有排队）时 enable，静息时按键原样落进 composer——`closeTab`/ctrl+w 在单 tab 时放行 delete-word 的同一条先例。composer 侧 `triggerInterrupt()` 复用 `submit()` 的清空/历史/粘贴展开路径，`onSubmit` 只多一个 flag。
 4. **契约的一处偏离，记在案**：ar-t1 写"idle 时该手势等价普通发送"，字面执行意味着任何时候都抢 ctrl+j（见上），改为仅在有意义时抢；静息 + composer 有字时 Enter 本来就够。
@@ -2997,3 +2997,10 @@ OpenTUI 0.5.9 的 `InputRenderable` 没有 password/mask 选项，因此这里�
 
 
 **2026-08-31 · compact / handoff policy 迁入 package plugin。** 内核零改动。plugin API 2.1 增加 event provenance、session role/status、`extRunPackage` 与 package-owned user-turn renderer；`extensions/compact` 接管 `/compact`、实时 handoff correlation、面板、marker turn 与 session title。App 的 handoff 状态机、built-in `/compact`、`PluginActions.compact`、`src/compact.ts`、`src/handoff.ts` 与 `CompactionCard` 已删除。compact 后父 tab 保留，child 不自动 step；handoff 总是询问且不读取 permission mode。`extensions/plan` 已迁到通用跨包 internal-tool 调用。
+
+
+### T109 · compact 与发送队列的并发正确性（2026-08-31）
+
+内核零改动。plugin API 2.2 只新增可选 `SessionView.activity`，保留既有三态 `status`，让 compact 能区分真实 idle 与 append 在途的 sending。compact proposal 改为 session + call id keyed 的 `pending → running → done`，失败回 pending、dismiss/success 才 done，异步结果只落自己的 key；仍只消费 live event。optimistic user card 现在有 local id，append 失败只 `rejectUser(id)`，FIFO `appendTail` 不动；send、显式 step 与 take over 清旧 transient error，timer wake/replay/切 tab 不清。QueueLane 只画计数与 Ctrl+J 动作，正文仍只在 transcript 出现。
+
+回归覆盖：快速双发保持 FIFO、合成一个 user turn 且不触发 `SessionBusy`；append 失败 pending 回 0；sending 时 handoff follow 被拒并可重试；两场 proposal 互不覆盖；compact continuation 在用户输入前保持 0 event/0 step。

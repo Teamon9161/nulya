@@ -237,7 +237,9 @@ export interface SessionState {
   /** Highest ledger seq applied so far — where a follower must resume from. */
   lastSeq(): number
   /** Optimistic echo of a just-sent turn; promoted when its `user_text` lands. */
-  enqueueUser(text: string, imageCount?: number): void
+  enqueueUser(text: string, imageCount?: number): string
+  /** Remove one optimistic turn after its own append failed. Committed turns are never touched. */
+  rejectUser(localId: string): void
   pendingCount(): number
   setError(message: string | null): void
   /**
@@ -308,6 +310,9 @@ export function createSessionState(id: string): SessionState {
   // Bumped at every step boundary so provisional keys of one step never collide
   // with the next step's.
   let turn = 0
+  // Local optimistic ids must remain unique even when a failed append is
+  // removed and retried within the same millisecond.
+  let localUser = 0
 
   /**
    * Calls the gate waved through on its own (T65), by id rather than by item.
@@ -735,8 +740,18 @@ export function createSessionState(id: string): SessionState {
     applyStream,
     lastSeq: () => applied,
     enqueueUser(text, imageCount = 0) {
+      const localId = `q:${Date.now()}:${localUser++}`
       edit((draft) => {
-        draft.items.push({ key: `q:${Date.now()}:${draft.items.length}`, seq: null, kind: "user", text, imageCount, queued: true })
+        draft.items.push({ key: localId, seq: null, kind: "user", text, imageCount, queued: true })
+      })
+      return localId
+    },
+    rejectUser(localId) {
+      edit((draft) => {
+        const at = draft.items.findIndex(
+          (item) => item.key === localId && item.kind === "user" && item.seq === null && item.queued,
+        )
+        if (at >= 0) draft.items.splice(at, 1)
       })
     },
     pendingCount() {

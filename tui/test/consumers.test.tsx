@@ -45,7 +45,7 @@ import {
   sessionStep,
 } from "../src/nulya/cli.ts"
 import type { LedgerEvent, ToolResultEntry } from "../src/nulya/ledger.ts"
-import type { PluginKey } from "nulya-tui/plugin-api"
+import type { PluginKey, SessionView } from "nulya-tui/plugin-api"
 import { scripted_env, settle, tempWorkspace, unsafe_settings, until, type TempWorkspace } from "./support.ts"
 
 /**
@@ -97,15 +97,21 @@ interface Bench {
   host: PluginHost
   notices: string[]
   opened: string | null
+  session: SessionView
 }
 
 function benchFor(sessionId: string): Bench {
-  const bench: Bench = { host: null as unknown as PluginHost, notices: [], opened: null }
+  const bench: Bench = {
+    host: null as unknown as PluginHost,
+    notices: [],
+    opened: null,
+    session: { id: sessionId, model: "scripted", members: [], role: "driver", status: "idle", activity: "idle" },
+  }
   bench.host = createPluginHost({
     ws,
     enabled: true,
     statePath: join(ws.dir, `tui-state-${sessionId}.json`),
-    session: () => ({ id: sessionId, model: "scripted", members: [], role: "driver", status: "idle" }),
+    session: () => bench.session,
     tasks: () => [],
     // The real verb, and the whole of it: `session append` deposits into the
     // inbox, and only a STEP drains it into the ledger (DESIGN §3.4) — which is
@@ -217,6 +223,41 @@ test.skipIf(!has_zig)("compact: only a live successful handoff opens its panel, 
     keep: "src/plugins/host.ts",
   }, 8)
   expect(bench.host.panel()).toBeNull()
+}, 120_000)
+
+test.skipIf(!has_zig)("compact: proposals stay keyed by session and a sending session can retry instead of losing its handoff", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const bench = benchFor(id)
+  await bench.host.load()
+
+  toolCall(bench.host, id, "handoff-a", "handoff", {
+    done: "finished A",
+    next_task: "continue A",
+    keep: "A.md",
+  }, 8)
+  expect(panelText(bench.host)).toContain("next: continue A")
+
+  const other = "s-other"
+  bench.session = { ...bench.session, id: other }
+  toolCall(bench.host, other, "handoff-b", "handoff", {
+    done: "finished B",
+    next_task: "continue B",
+    keep: "B.md",
+  }, 10)
+  expect(panelText(bench.host)).toContain("next: continue B")
+  expect(panelText(bench.host)).not.toContain("continue A")
+
+  // Returning to A reads A's keyed proposal; B never overwrote it.
+  bench.session = { ...bench.session, id, activity: "sending" }
+  expect(panelText(bench.host)).toContain("next: continue A")
+  bench.host.handleKey(key("return"))
+  await Promise.resolve()
+  expect(bench.opened).toBeNull()
+  expect(bench.notices.at(-1)).toContain("message is still being sent")
+  // A transient refusal restores this proposal to pending, so Enter remains a
+  // real retry rather than an "already handled" dead end.
+  expect(panelText(bench.host)).toContain("resolve the notice above, then press Enter again")
+  expect(panelText(bench.host)).toContain("next: continue A")
 }, 120_000)
 
 // ── plan ───────────────────────────────────────────────────────────────────

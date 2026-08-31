@@ -50,6 +50,8 @@
  *        correctly.
  *   2.1  event provenance, session role/status, cross-package internal-tool
  *        execution, and package-owned user-turn rendering.
+ *   2.2  optional session `activity`, distinguishing an append in flight from
+ *        true idle without changing the existing `status` union.
  *
  * ── WHAT IS DELIBERATELY NOT HERE ─────────────────────────────────────────
  *
@@ -267,8 +269,13 @@ export interface SessionView {
   members: SessionMemberView[]
   /** Whether this front end currently owns the writer side of the attachment. */
   role: "driver" | "observer"
-  /** The front end's current activity; this is a projection, not writer authority. */
+  /**
+   * Backward-compatible coarse state. `sending` is projected as `idle`; new
+   * plugins that must distinguish the two should read `activity ?? status`.
+   */
   status: "idle" | "stepping" | "canceling"
+  /** Exact front-end activity. Added in API 2.2; absent on older hosts. */
+  activity?: "idle" | "sending" | "stepping" | "canceling"
 }
 
 /**
