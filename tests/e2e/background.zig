@@ -7,6 +7,7 @@
 //! model-facing half (`shell {background:true}`) is further down the file.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const support = @import("support.zig");
 const environment = support.environment;
 const ledger = support.ledger;
@@ -98,6 +99,21 @@ fn newSession(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, exe: []const
     defer alloc.free(new.stdout);
     try std.testing.expectEqual(@as(u8, 0), new.code);
     return alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+}
+
+/// Give a fresh session one real ledger event without invoking a model. Compact
+/// only needs a valid fork point in these transport tests; model behavior is not
+/// their subject.
+fn seedFreshSession(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8, text: []const u8) !void {
+    const header = try support.readSessionFile(alloc, io, ws, id);
+    defer alloc.free(header);
+    const event = try ledger.encodeEventLine(alloc, .{ .user_text = .{ .text = text } }, 1);
+    defer alloc.free(event);
+    const contents = try std.mem.concat(alloc, u8, &.{ header, event });
+    defer alloc.free(contents);
+    const path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+    defer alloc.free(path);
+    try ws.writeFile(io, .{ .sub_path = path, .data = contents });
 }
 
 /// A task's full name, `<session-id>/t<N>` — what everything model-facing uses.
@@ -724,6 +740,40 @@ test "background shell: cancelling a step does not touch a task it already start
     try std.testing.expect(std.mem.indexOf(u8, deposit, "CANCEL-SURVIVOR") != null);
 }
 
+test "background task: an unreadable owner header never turns kill into a local side effect" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    const exe = (try nulyaExe(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const id = try newSession(alloc, io, ws, exe);
+    defer alloc.free(id);
+    const task_dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{id});
+    defer alloc.free(task_dir);
+    try ws.createDirPath(io, task_dir);
+
+    // The claim exists, but its owner's only location record does not. This may
+    // be a remote task; guessing local would create a kill marker no supervisor
+    // reads and then falsely print "kill requested".
+    const session_path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+    defer alloc.free(session_path);
+    try ws.writeFile(io, .{ .sub_path = session_path, .data = "not a session header\n" });
+
+    const task = try taskName(alloc, id, "t1");
+    defer alloc.free(task);
+    const killed = try runCli(alloc, io, ws, &.{ exe, "task", "kill", task });
+    defer alloc.free(killed.stdout);
+    try std.testing.expect(killed.code != 0);
+
+    const kill_path = try std.fmt.allocPrint(alloc, "{s}/kill", .{task_dir});
+    defer alloc.free(kill_path);
+    try std.testing.expectError(error.FileNotFound, ws.access(io, kill_path, .{}));
+}
+
 // ── Compaction hands its running tasks to the child (DESIGN §11) ────────────
 
 test "background task: compact retargets the parent's running tasks and says so in the carried brief" {
@@ -840,6 +890,80 @@ fn soleInboxFile(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []con
         return dir.readFileAlloc(io, entry.name, alloc, .unlimited);
     }
     return error.NoInboxFile;
+}
+
+test "background task: compact carries a large brief by file on Windows" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    const exe = (try nulyaExe(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    const ref = try support.buildBundled(alloc, io, ws, exe, "compact");
+    defer alloc.free(ref);
+    const parent = try newSession(alloc, io, ws, exe);
+    defer alloc.free(parent);
+    try seedFreshSession(alloc, io, ws, parent, "transport fork point");
+
+    const sentinel = "WINDOWS-LARGE-BRIEF-SENTINEL";
+    const brief = try alloc.alloc(u8, 128 << 10);
+    defer alloc.free(brief);
+    @memset(brief, 'b');
+    @memcpy(brief[0..sentinel.len], sentinel);
+    brief[brief.len - 1] = '\n';
+    try ws.writeFile(io, .{ .sub_path = "large-brief.md", .data = brief });
+
+    const session_arg = try std.fmt.allocPrint(alloc, "session={s}", .{parent});
+    defer alloc.free(session_arg);
+    const forked = try runCli(alloc, io, ws, &.{ exe, "ext", "run", ref, "compact", "--arg", session_arg, "--arg", "brief_file=large-brief.md" });
+    defer alloc.free(forked.stdout);
+    try std.testing.expectEqual(@as(u8, 0), forked.code);
+    const result = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, forked.stdout, " \r\n"), .{});
+    defer result.deinit();
+    const child = result.value.object.get("session").?.string;
+    const deposited = try soleInboxFile(alloc, io, ws, child);
+    defer alloc.free(deposited);
+    try std.testing.expect(std.mem.indexOf(u8, deposited, sentinel) != null);
+}
+
+test "background task: compact scans a ledger beyond the ordinary child-output cap" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    const exe = (try nulyaExe(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    const ref = try support.buildBundled(alloc, io, ws, exe, "compact");
+    defer alloc.free(ref);
+    const parent = try newSession(alloc, io, ws, exe);
+    defer alloc.free(parent);
+
+    // `session events` must emit more than runNulya's ordinary 4 MiB capture.
+    // The old transport failed before the fork even though this is a valid
+    // ledger and exactly the kind of long-lived session compact exists for.
+    const history = try alloc.alloc(u8, (4 << 20) + (64 << 10));
+    defer alloc.free(history);
+    @memset(history, 'h');
+    try seedFreshSession(alloc, io, ws, parent, history);
+    try ws.writeFile(io, .{ .sub_path = "brief.md", .data = "LARGE-LEDGER-BRIEF-SENTINEL\n" });
+
+    const session_arg = try std.fmt.allocPrint(alloc, "session={s}", .{parent});
+    defer alloc.free(session_arg);
+    const forked = try runCli(alloc, io, ws, &.{ exe, "ext", "run", ref, "compact", "--arg", session_arg, "--arg", "brief_file=brief.md" });
+    defer alloc.free(forked.stdout);
+    try std.testing.expectEqual(@as(u8, 0), forked.code);
+    const result = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, forked.stdout, " \r\n"), .{});
+    defer result.deinit();
+    const child = result.value.object.get("session").?.string;
+    const deposited = try soleInboxFile(alloc, io, ws, child);
+    defer alloc.free(deposited);
+    try std.testing.expect(std.mem.indexOf(u8, deposited, "LARGE-LEDGER-BRIEF-SENTINEL") != null);
 }
 
 test "background task: compact retargets an unreachable-machine task without claiming it is still running" {

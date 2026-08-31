@@ -282,7 +282,12 @@ pub fn leaseHeldIn(base: std.Io.Dir, io: std.Io, alloc: std.mem.Allocator, dir: 
         error.FileNotFound => return false,
         else => |e| return e,
     };
-    f.close(io);
+    defer f.close(io);
+    // POSIX permits opening and flocking a directory, while Windows commonly
+    // rejects it during open. The lease format is a regular file on both: make
+    // that invariant explicit instead of letting OS behavior decide whether a
+    // corrupt `.lock` is mistaken for an ordinary unheld lease.
+    if ((try f.stat(io)).kind != .file) return error.InvalidLeaseFile;
     return false;
 }
 
@@ -1029,20 +1034,15 @@ const Far = struct {
 
         const spath = try launch.sessionPath(self.alloc, session_id);
         defer self.alloc.free(spath);
-        if (ledger.readHeader(self.alloc, self.io, std.Io.Dir.cwd(), spath)) |parsed| {
-            var hdr = parsed;
-            defer hdr.deinit();
-            if (launch.isRemoteSpec(hdr.value.environment)) {
-                self.alloc.free(link.spec);
-                link.spec = try self.alloc.dupe(u8, environment.normalizeExecSpec(hdr.value.environment));
-                if (hdr.value.remote_workspace.len != 0) {
-                    self.alloc.free(link.cwd);
-                    link.cwd = try self.alloc.dupe(u8, hdr.value.remote_workspace);
-                }
+        var hdr = try ledger.readHeader(self.alloc, self.io, std.Io.Dir.cwd(), spath);
+        defer hdr.deinit();
+        if (launch.isRemoteSpec(hdr.value.environment)) {
+            self.alloc.free(link.spec);
+            link.spec = try self.alloc.dupe(u8, environment.normalizeExecSpec(hdr.value.environment));
+            if (hdr.value.remote_workspace.len != 0) {
+                self.alloc.free(link.cwd);
+                link.cwd = try self.alloc.dupe(u8, hdr.value.remote_workspace);
             }
-        } else |_| {
-            // No readable header: the tasks of a session nobody can describe are
-            // read off this disk, which is where they would be if it were local.
         }
         try self.links.append(self.alloc, link);
         return link;
@@ -2055,18 +2055,19 @@ test "a real fault reading the lease propagates — it is not the same claim as 
         .cwd = ".",
         .started = "2026-08-19T10:00:00Z",
     };
-    // `.lock` is a DIRECTORY here, not a missing or held file — a real I/O
-    // fault, not "nobody holds it" (the test right above this one). Reading
-    // this as `lost` would say a supervisor died when the honest answer is
-    // this machine could not check; `readRow` relies on this propagating
-    // rather than folding into `null`, because a null row reads as "no such
-    // task" to `lookupRow`, a claim stronger than a skipped listing row.
+    // `.lock` is a DIRECTORY here, not a missing or held file — a corrupt
+    // lease, not "nobody holds it" (the test right above this one). POSIX may
+    // successfully open and flock that directory, while Windows commonly
+    // rejects it during open, so `leaseHeldIn` explicitly verifies the opened
+    // object is a regular file. Reading this as `lost` would say a supervisor
+    // died when the honest answer is that this machine could not check;
+    // `readRow` relies on the error propagating rather than folding into
+    // `null`, because a null row reads as "no such task" to `lookupRow`, a
+    // claim stronger than a skipped listing row.
     //
-    // Not `expectError(error.IsDir, ...)`: opening a directory with a
-    // nonblocking exclusive lock request surfaces as `error.Unexpected` on
-    // this platform (an NTSTATUS the Windows layer does not name), not the
-    // `error.IsDir` a plain read gets. The property under test is "an error
-    // propagates instead of a value", not which one.
+    // The exact error remains platform-dependent: it may come from opening the
+    // directory or from the explicit kind check. The property under test is
+    // "an error propagates instead of a value", not which error name it has.
     const lock_path = try std.fs.path.join(alloc, &.{ dir, lock_file });
     defer alloc.free(lock_path);
     try std.Io.Dir.cwd().createDirPath(io, lock_path);

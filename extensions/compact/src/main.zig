@@ -301,10 +301,10 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     try std.Io.Dir.cwd().createDirPath(io, scratch_dir);
     const brief_path = try std.fmt.allocPrint(alloc, "{s}/{s}.md", .{ scratch_dir, new_id });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = brief_path, .data = full_text });
+    // The file did its one job once this scope ends, including when spawning
+    // `session append` itself fails before it can return a `Run`.
+    defer std.Io.Dir.cwd().deleteFile(io, brief_path) catch {};
     const handed = try runNulya(alloc, io, exe, &.{ "session", "append", new_id, "--file", brief_path });
-    // The file did its one job the moment `session append` read it, win or
-    // lose; leaving it behind would be one more file per compaction, forever.
-    std.Io.Dir.cwd().deleteFile(io, brief_path) catch {};
     if (handed.code != 0) {
         return .{ .failed = try fail(alloc, "{s} was created but the summary could not be carried into it: {s}", .{ new_id, detail(handed) }) };
     }
@@ -346,9 +346,12 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
 /// parent's inbox, where it is findable — losing the whole compaction over it
 /// would be the worse trade.
 fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: []const u8, child: []const u8) ![]const u8 {
-    const listed = try runNulya(alloc, io, exe, &.{ "task", "list", "--session", parent, "--json" });
+    const listed = runNulya(alloc, io, exe, &.{ "task", "list", "--session", parent, "--json" }) catch |err| {
+        warn(alloc, io, "compact: could not list {s}'s background tasks: {s}\n", .{ parent, @errorName(err) }) catch {};
+        return "";
+    };
     if (listed.code != 0) {
-        try warn(alloc, io, "compact: could not list {s}'s background tasks: {s}\n", .{ parent, detail(listed) });
+        warn(alloc, io, "compact: could not list {s}'s background tasks: {s}\n", .{ parent, detail(listed) }) catch {};
         return "";
     }
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, listed.stdout, .{}) catch return "";
@@ -365,9 +368,12 @@ fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: 
     for (tasks.items) |entry| {
         if (entry != .object) continue;
         const name = stringField(entry.object, "task") orelse continue;
-        const done = try runNulya(alloc, io, exe, &.{ "task", "retarget", name, "--to", child });
+        const done = runNulya(alloc, io, exe, &.{ "task", "retarget", name, "--to", child }) catch |err| {
+            warn(alloc, io, "compact: {s} keeps reporting into {s}: {s}\n", .{ name, parent, @errorName(err) }) catch {};
+            continue;
+        };
         if (done.code != 0) {
-            try warn(alloc, io, "compact: {s} keeps reporting into {s}: {s}\n", .{ name, parent, detail(done) });
+            warn(alloc, io, "compact: {s} keeps reporting into {s}: {s}\n", .{ name, parent, detail(done) }) catch {};
             continue;
         }
         const command = stringField(entry.object, "command") orelse "";
@@ -434,6 +440,7 @@ fn isUnreachable(row: std.json.ObjectMap) bool {
 
 fn warn(alloc: std.mem.Allocator, io: std.Io, comptime fmt: []const u8, fmt_args: anytype) !void {
     const line = try std.fmt.allocPrint(alloc, fmt, fmt_args);
+    defer alloc.free(line);
     try std.Io.File.stderr().writeStreamingAll(io, line);
 }
 
@@ -805,6 +812,7 @@ fn runNulyaScan(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, tail: []c
 
 fn runNulyaLimited(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, tail: []const []const u8, stdout_limit: usize) !Run {
     const argv = try alloc.alloc([]const u8, tail.len + 1);
+    defer alloc.free(argv);
     argv[0] = exe;
     @memcpy(argv[1..], tail);
 
@@ -987,4 +995,15 @@ test "the footer describes the live tasks, and only those" {
     try std.testing.expect(!isLive(unknown));
     try unknown.put(arena, "state", .{ .integer = 3 });
     try std.testing.expect(!isLive(unknown));
+}
+
+test "task handoff treats a subprocess launch failure as best-effort" {
+    const footer = try handOverTasks(
+        std.testing.allocator,
+        std.testing.io,
+        "nulya-compact-test-executable-that-does-not-exist",
+        "s-parent",
+        "s-child",
+    );
+    try std.testing.expectEqualStrings("", footer);
 }
