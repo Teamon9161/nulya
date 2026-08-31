@@ -10,6 +10,7 @@
 const std = @import("std");
 const cli = @import("cli.zig");
 const environment = @import("environment.zig");
+const ssh_askpass = @import("environment/remote/ssh_askpass.zig");
 
 pub fn main(init: std.process.Init) !u8 {
     const alloc = init.gpa;
@@ -20,11 +21,22 @@ pub fn main(init: std.process.Init) !u8 {
     // sanitization) see the real environment (environment.hostEnvironMap).
     environment.registerHostEnviron(init.minimal.environ);
 
-    // `nulya <cmd> ...` -> CLI (DESIGN §14); bare `nulya` -> the usage screen,
-    // which `dispatch` prints for an empty argv.
+    // OpenSSH invokes SSH_ASKPASS with only its prompt as argv. A private
+    // marker selects this fixed helper before the ordinary CLI sees that argv.
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const argv = try init.arena.allocator().alloc([]const u8, args.len -| 1);
     for (args[1..], 0..) |a, i| argv[i] = a;
+
+    var host = try environment.hostEnvironMap(alloc);
+    defer host.deinit();
+    // OpenSSH supplies exactly one argv word: its prompt. Requiring that shape
+    // prevents a broad SendEnv rule from making the remote `nulya remote serve`
+    // mistake a forwarded marker for a helper invocation.
+    if (argv.len == 1) if (host.get(ssh_askpass.marker_env)) |marker|
+        return ssh_askpass.runHelper(io, marker);
+
+    // `nulya <cmd> ...` -> CLI (DESIGN §14); bare `nulya` -> the usage screen,
+    // which `dispatch` prints for an empty argv.
     return cli.dispatch(alloc, io, argv);
 }
 
@@ -52,6 +64,7 @@ test {
     _ = @import("environment/tree.zig");
     _ = @import("environment/remote/mod.zig");
     _ = @import("environment/remote/protocol.zig");
+    _ = @import("environment/remote/ssh_askpass.zig");
     _ = @import("config.zig");
     _ = @import("extension/protocol.zig");
     _ = @import("extension/invoke.zig");

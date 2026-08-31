@@ -108,14 +108,35 @@ export interface RunResult {
   stderr: string
 }
 
-async function run(ws: Workspace, args: string[], env?: Record<string, string>): Promise<RunResult> {
-  const proc = Bun.spawn({
-    cmd: [ws.bin, ...args],
-    cwd: ws.dir,
-    env: env ? { ...process.env, ...env } : process.env,
-    stdout: "pipe",
-    stderr: "pipe",
-  })
+async function run(ws: Workspace, args: string[], env?: Record<string, string>, secret?: Uint8Array): Promise<RunResult> {
+  const start = () =>
+    Bun.spawn({
+      cmd: [ws.bin, ...args],
+      cwd: ws.dir,
+      env: env ? { ...process.env, ...env } : process.env,
+      stdin: secret ? "pipe" : "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+  let proc: ReturnType<typeof start>
+  try {
+    proc = start()
+  } catch (error) {
+    secret?.fill(0)
+    throw error
+  }
+  if (secret) {
+    try {
+      proc.stdin?.write(secret)
+      proc.stdin?.write("\n")
+      proc.stdin?.end()
+    } catch (error) {
+      proc.kill()
+      throw error
+    } finally {
+      secret.fill(0)
+    }
+  }
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -209,6 +230,8 @@ export interface NewSessionOptions {
    * this is passed through rather than checked twice.
    */
   workspace?: string
+  /** Transient SSH password; copied by the workflow, written only to stdin. */
+  sshPassword?: Uint8Array
 }
 
 /** `nulya session new` — stdout is the session id. `env` is a test seam (`NULYA_HOME`). */
@@ -224,10 +247,11 @@ export async function sessionNew(
   if (options.bare) args.push("--bare")
   if (options.execEnv) args.push("--env", options.execEnv)
   if (options.workspace) args.push("--workspace", options.workspace)
+  if (options.sshPassword) args.push("--ssh-password-stdin")
   for (const ref of options.with ?? []) args.push("--with", ref)
   for (const pin of options.pin ?? []) args.push("--pin", pin)
   for (const file of options.prompt ?? []) args.push("--prompt", file)
-  const result = await run(ws, args, env)
+  const result = await run(ws, args, env, options.sshPassword)
   const id = result.stdout.trim()
   if (result.code !== 0 || !id.startsWith("s-")) fail("session new failed", result)
   return id
@@ -1184,8 +1208,10 @@ export interface RemoteHello {
  * — with the kernel's own sentence, which already names what to do about it
  * (`CliError`'s `detail`).
  */
-export async function remoteCheck(ws: Workspace, spec: string, env?: Record<string, string>): Promise<RemoteHello> {
-  const result = await run(ws, ["remote", "check", "--env", spec, "--json"], env)
+export async function remoteCheck(ws: Workspace, spec: string, env?: Record<string, string>, sshPassword?: Uint8Array): Promise<RemoteHello> {
+  const args = ["remote", "check", "--env", spec, "--json"]
+  if (sshPassword) args.push("--ssh-password-stdin")
+  const result = await run(ws, args, env, sshPassword)
   if (result.code !== 0) fail(`could not reach ${spec}`, result)
   try {
     return JSON.parse(result.stdout) as RemoteHello
@@ -1215,8 +1241,11 @@ export async function remoteLs(
   spec: string,
   path: string,
   env?: Record<string, string>,
+  sshPassword?: Uint8Array,
 ): Promise<RemoteEntry[]> {
-  const result = await run(ws, ["remote", "ls", "--env", spec, path, "--json"], env)
+  const args = ["remote", "ls", "--env", spec, path, "--json"]
+  if (sshPassword) args.push("--ssh-password-stdin")
+  const result = await run(ws, args, env, sshPassword)
   if (result.code !== 0) fail(`could not list ${path} on ${spec}`, result)
   try {
     return JSON.parse(result.stdout) as RemoteEntry[]
@@ -1272,6 +1301,8 @@ export interface StepOptions {
    * Absent, no `--gate` is passed and the step behaves as it always has.
    */
   gate?: (request: GateRequest) => Promise<GateVerdict>
+  /** Transient SSH password for this one step; consumed and wiped immediately. */
+  sshPassword?: Uint8Array
 }
 
 /**
@@ -1336,16 +1367,37 @@ export function sessionStep(ws: Workspace, id: string, options: StepOptions = {}
   if (options.maxSteps !== undefined) args.push("--max-steps", String(options.maxSteps))
   if (options.effort) args.push("--effort", options.effort)
   if (options.gate) args.push("--gate")
-  const proc = Bun.spawn({
-    cmd: [ws.bin, ...args],
-    cwd: ws.dir,
-    env: options.env ? { ...process.env, ...options.env } : process.env,
-    // A gated step reads its verdicts here. Without a gate the child is handed
-    // nothing to read, exactly as before.
-    stdin: options.gate ? "pipe" : "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  })
+  if (options.sshPassword) args.push("--ssh-password-stdin")
+  const start = () =>
+    Bun.spawn({
+      cmd: [ws.bin, ...args],
+      cwd: ws.dir,
+      env: options.env ? { ...process.env, ...options.env } : process.env,
+      // A gated step reads its verdicts here. Without a gate the child is handed
+      // nothing to read, exactly as before.
+      stdin: options.gate || options.sshPassword ? "pipe" : "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+  let proc: ReturnType<typeof start>
+  try {
+    proc = start()
+  } catch (error) {
+    options.sshPassword?.fill(0)
+    throw error
+  }
+  if (options.sshPassword) {
+    try {
+      proc.stdin?.write(options.sshPassword)
+      proc.stdin?.write("\n")
+      proc.stdin?.flush()
+    } catch (error) {
+      proc.kill()
+      throw error
+    } finally {
+      options.sshPassword.fill(0)
+    }
+  }
   const stderr = new Response(proc.stderr).text()
 
   /**

@@ -54,6 +54,7 @@ const environment = @import("../../environment.zig");
 /// sibling declaration shadows the file-scope import inside that struct's body.
 const environment_mod = environment;
 const protocol = @import("protocol.zig");
+const ssh_askpass = @import("ssh_askpass.zig");
 
 /// What marks a `--env` spec as naming this backend rather than the
 /// command-wrapping exec target. One prefix, checked in one place.
@@ -113,6 +114,11 @@ pub fn isSpec(spec: []const u8) bool {
     return std.mem.startsWith(u8, spec, spec_prefix);
 }
 
+pub fn isSshSpec(spec: []const u8) bool {
+    const parsed = parseSpec(spec) catch return false;
+    return parsed == .ssh;
+}
+
 /// Pure syntax. Whether THIS host can reach it is `supportedOnHost` — the two
 /// have different fixes, exactly as they do for the exec target.
 pub fn parseSpec(spec: []const u8) Error!Launch {
@@ -155,7 +161,7 @@ pub fn supportedOnHost(launch: Launch) bool {
 /// need it (a container runtime, a test pointing at this binary) do not have
 /// one, and inventing a quoting dialect here would be a second shell language
 /// nobody asked for.
-pub fn launcherArgv(alloc: std.mem.Allocator, launch: Launch) ![]const []const u8 {
+pub fn launcherArgv(alloc: std.mem.Allocator, launch: Launch, password: bool) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     errdefer argv.deinit(alloc);
     switch (launch) {
@@ -167,11 +173,12 @@ pub fn launcherArgv(alloc: std.mem.Allocator, launch: Launch) ![]const []const u
             try argv.appendSlice(alloc, &.{ "-e", default_remote_exe });
         },
         .ssh => |dest| {
-            // The destination is its own argv word, never interpolated into a
-            // command string (the `shellArgv` rule). `BatchMode` because this
-            // child's stdin is the channel: a password prompt would be read as
-            // a frame.
-            try argv.appendSlice(alloc, &.{ "ssh", "-o", "BatchMode=yes", dest, default_remote_exe });
+            // SSH stdin is always the framing channel. Explicit password mode
+            // therefore forces the fixed askpass helper and permits one prompt;
+            // the default remains non-interactive and byte-for-byte strict.
+            try argv.appendSlice(alloc, &.{ "ssh", "-o", if (password) "BatchMode=no" else "BatchMode=yes" });
+            if (password) try argv.appendSlice(alloc, &.{ "-o", "NumberOfPasswordPrompts=1" });
+            try argv.appendSlice(alloc, &.{ dest, default_remote_exe });
         },
         .exec => |words| {
             var it = std.mem.splitScalar(u8, words, ' ');
@@ -221,6 +228,20 @@ pub const Bounds = struct {
     pub const default: Bounds = .{};
 };
 
+/// Read exactly one password line from a CLI stdin stream. The caller owns the
+/// mutable result and must wipe it before freeing. Keeping the reader outside
+/// lets `session step --gate` continue consuming verdict lines afterwards.
+pub fn readSshPassword(alloc: std.mem.Allocator, reader: *std.Io.Reader) ![]u8 {
+    const line = reader.takeDelimiterExclusive('\n') catch |err| switch (err) {
+        error.EndOfStream => return error.SshPasswordMissing,
+        else => return err,
+    };
+    const password = std.mem.trimEnd(u8, line, "\r");
+    if (password.len == 0) return error.SshPasswordMissing;
+    if (password.len > ssh_askpass.max_password_bytes) return error.SshPasswordTooLong;
+    return alloc.dupe(u8, password);
+}
+
 /// One open channel to an agent: the transport child plus the framing.
 pub const Channel = struct {
     alloc: std.mem.Allocator,
@@ -247,9 +268,14 @@ pub const Channel = struct {
     /// "Permission denied (publickey)" is the most useful thing that can happen
     /// on a bad connection, and stderr is already where every refusal goes.
     pub fn connect(alloc: std.mem.Allocator, io: std.Io, launch: Launch, version: []const u8, bounds: Bounds) anyerror!Channel {
-        if (!supportedOnHost(launch)) return error.RemoteSpecUnsupportedOnHost;
+        return connectPassword(alloc, io, launch, version, bounds, null);
+    }
 
-        const argv = try launcherArgv(alloc, launch);
+    pub fn connectPassword(alloc: std.mem.Allocator, io: std.Io, launch: Launch, version: []const u8, bounds: Bounds, password: ?[]const u8) anyerror!Channel {
+        if (!supportedOnHost(launch)) return error.RemoteSpecUnsupportedOnHost;
+        if (password != null and launch != .ssh) return error.InvalidRemoteSpec;
+
+        const argv = try launcherArgv(alloc, launch, password != null);
         errdefer alloc.free(argv);
 
         // Physics #6 on the transport itself: whatever `ssh` / `wsl.exe` gets
@@ -257,6 +283,17 @@ pub const Channel = struct {
         // to forward even if someone configured them to.
         var env = try environment.sanitizedChildEnv(alloc, io);
         errdefer env.deinit();
+
+        var broker: ?ssh_askpass.Broker = null;
+        defer if (broker) |*one| one.deinit();
+        if (password) |secret| {
+            broker = try .init(io, secret);
+            const helper = env.get("NULYA_EXE") orelse return error.RemoteChannelLost;
+            try env.put("SSH_ASKPASS", helper);
+            try env.put("SSH_ASKPASS_REQUIRE", "force");
+            try env.put(ssh_askpass.marker_env, broker.?.marker());
+            broker.?.start();
+        }
 
         var child = std.process.spawn(io, .{
             .argv = argv,
@@ -602,6 +639,8 @@ pub const RemoteEnvironment = struct {
         /// as on the local one — the shell layer computes both halves
         /// (`launch.sessionEnvironment`).
         session: ?environment_mod.SessionRef = null,
+        /// Transient SSH password, owned and wiped by the caller.
+        ssh_password: ?[]const u8 = null,
         bounds: Bounds = .default,
     };
 
@@ -612,7 +651,7 @@ pub const RemoteEnvironment = struct {
     ) anyerror!RemoteEnvironment {
         const spec = opts.spec;
         const launch = try parseSpec(spec);
-        var ch = try Channel.connect(alloc, io, launch, opts.version, opts.bounds);
+        var ch = try Channel.connectPassword(alloc, io, launch, opts.version, opts.bounds, opts.ssh_password);
         errdefer ch.deinit();
 
         const spec_owned = try alloc.dupe(u8, spec);
@@ -929,7 +968,7 @@ test "the remote vocabulary parses into three launchers, and nothing else does" 
 test "each launcher argv starts an agent, and every form ends in `remote serve`" {
     const alloc = std.testing.allocator;
 
-    const ssh = try launcherArgv(alloc, .{ .ssh = "me@box" });
+    const ssh = try launcherArgv(alloc, .{ .ssh = "me@box" }, false);
     defer alloc.free(ssh);
     try std.testing.expectEqualStrings("ssh", ssh[0]);
     // The destination is its own word — never interpolated into a command.
@@ -937,17 +976,34 @@ test "each launcher argv starts an agent, and every form ends in `remote serve`"
     try std.testing.expectEqualStrings("remote", ssh[ssh.len - 2]);
     try std.testing.expectEqualStrings("serve", ssh[ssh.len - 1]);
 
-    const wsl = try launcherArgv(alloc, .{ .wsl = "Ubuntu" });
+    const password_ssh = try launcherArgv(alloc, .{ .ssh = "me@box" }, true);
+    defer alloc.free(password_ssh);
+    var has_batch_no = false;
+    var has_one_prompt = false;
+    var has_batch_yes = false;
+    for (password_ssh) |word| {
+        has_batch_no = has_batch_no or std.mem.eql(u8, word, "BatchMode=no");
+        has_one_prompt = has_one_prompt or std.mem.eql(u8, word, "NumberOfPasswordPrompts=1");
+        has_batch_yes = has_batch_yes or std.mem.eql(u8, word, "BatchMode=yes");
+    }
+    try std.testing.expect(has_batch_no);
+    try std.testing.expect(has_one_prompt);
+    try std.testing.expect(!has_batch_yes);
+    // The password has no argv slot at all; only fixed options and destination
+    // differ from the non-interactive launcher.
+    try std.testing.expectEqualStrings("me@box", password_ssh[5]);
+
+    const wsl = try launcherArgv(alloc, .{ .wsl = "Ubuntu" }, false);
     defer alloc.free(wsl);
     try std.testing.expectEqualStrings("-d", wsl[1]);
     try std.testing.expectEqualStrings("Ubuntu", wsl[2]);
-    const wsl_default = try launcherArgv(alloc, .{ .wsl = "" });
+    const wsl_default = try launcherArgv(alloc, .{ .wsl = "" }, false);
     defer alloc.free(wsl_default);
     // No distro named: two fewer words, and no empty one left behind.
     try std.testing.expectEqual(wsl.len - 2, wsl_default.len);
 
     // `exec:` is the general form: the words are the caller's, the suffix ours.
-    const exec = try launcherArgv(alloc, .{ .exec = "docker exec -i box /usr/bin/nulya" });
+    const exec = try launcherArgv(alloc, .{ .exec = "docker exec -i box /usr/bin/nulya" }, false);
     defer alloc.free(exec);
     try std.testing.expectEqualStrings("docker", exec[0]);
     try std.testing.expectEqualStrings("/usr/bin/nulya", exec[exec.len - 3]);

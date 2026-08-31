@@ -101,6 +101,8 @@ export interface DriverOptions {
   effort?: () => string | undefined
   /** Extra child environment (tests set NULYA_SCRIPTED_MODE here). */
   env?: Record<string, string>
+  /** A fresh copy of the transient SSH password for each spawned step. */
+  sshPassword?: (session: string) => Uint8Array | undefined
   /**
    * The session already has a writer: this process is not the driver after all.
    * The kernel is the authority on that (`SessionBusy`, DESIGN §3.4), so the
@@ -222,6 +224,7 @@ export function createDriver(
           maxSteps: options.maxSteps,
           effort: options.effort?.(),
           env: options.env,
+          sshPassword: options.sshPassword?.(id),
           ...(options.gate ? { gate: (request: GateRequest) => options.gate!(request, id) } : {}),
         })
         handle = step

@@ -352,9 +352,9 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 `extensions/handoff` 的 tool 只做一件事：校验四个分节并叫模型收尾（DESIGN §11；T106 起**它什么都不写**——提议就是那次调用的参数，早已冻在 ledger 里）。**那次被接受的调用就是提议**；fork 是**驱动者**的动作，`drivers/goal.*` 不问就 fork，这个前端在 `ask` 下先问（旁边就有个人）。
 
 - **进 composition**：draft materialize 那一刻按 `[extensions] session_with`（默认 `["handoff", "agent"]`，T34；T52 起那两个老布尔键不再读）加 `--with handoff@<v>` + 它每个 `surface: "manual"` tool 的 `--pin`（两根轴，DESIGN §7.5：`--with` 是成员，`--pin` 才给它一个 native 槽）。**这张单子上的两个包今天都不需要 pin**（T52 / T53）：`handoff` 与 `agent` 的入口 tool 都声明 `surface: "auto"`，成员关系本身就是它们上台的路，而指着它们的 pin 会被整场拒绝（`PinToolNotPinnable`）。`SessionMember.pins` 那一半留着——它从**正在被组合的那个版本**的冻结 manifest 读，所以哪天某个包把一个 tool 挪回 `manual`，这里不用改一个字就跟上了。版本由 `extensions.sessionMember` 拿（`bundledDraftPath` → `ext build`，所以**不在 nulya checkout 里也能用**：二进制自带源码，seed 进 user store 再 build）；build 在开屏后台起、失败就这一场不带它并照常开场——**装不上不是开不了场的理由**。局限：第一次在一台机器上要付一次编译（compiled 包）。
-- **认出提议的时机**（T106 起）：每个 step 之后在**自己已经解析出来的 transcript** 里找一次被接受的 `handoff` 调用（`tui/src/handoff.ts` 的纯函数 `handoffsIn(items)` / `nextHandoff(items, seen)`，判据 = `kind === "tool" && tool === "handoff" && ok === true` 且参数解得出至少一个必填节）；`seen` 按 **call id** 记，同一个提议不会问第二遍。不再有任何盘面 watcher。
+- **认出提议的时机**（T106 起）：只有这个 TUI 真正观察到一场从 running 回到 idle，才在**自己已经解析出来的 transcript** 里找一次被接受的 `handoff` 调用（`tui/src/handoff.ts` 的纯函数 `handoffsIn(items)` / `nextHandoff(items, seen)`，判据 = `kind === "tool" && tool === "handoff" && ok === true` 且参数解得出至少一个必填节）；初次 hydrate / resume 只是 replay，绝不重新弹旧提议、更不能在 `unsafe` 下执行 fork。`seen` 按 **session + call id** 记，同一个提议不会问第二遍，不同场碰巧相同的 provider call id 也不互相遮住。不再有任何盘面 watcher。
 - **`ask`** = brief 的分节 preview 显示在 transcript 与输入框之间（`HandoffPanel` 收 `proposal`，头行不再打路径；真正被 carry 过去的 markdown 由 `extensions/compact` 渲染，这里只是 preview 不是第二份实现），`Enter` 跟过去 / `Esc` 收起（提议留在 transcript 那张 tool 卡上）。**`unsafe`** = 直接跟，一行 notice。
-- **跟过去 = `/compact` 的 `brief_seq: <那次调用的 seq>` 分支**（DESIGN §11；`runCompact` 多 `brief?` / `briefSeq?` 两个 option）：传的是**屏幕上给他看的那一份**的 seq 而不是 `latest`——人把新的一次 dismiss 掉再去跟一个旧的，必须 fork 在他看过的那份上。同一条 fork，旧 session 逐字节不变，tab 换到子 session。**`plugin-api.d.ts` 一个字没改**：`api.actions.compact({briefFile})` 是插件面，`extensions/plan` 仍走 `brief_file`。
+- **跟过去 = `/compact` 的 `brief_seq: <那次调用的 seq>` 分支**（DESIGN §11；`runCompact` 多 `brief?` / `briefSeq?` 两个 option）：传的是**屏幕上给他看的那一份**的 seq 而不是 `latest`——人把新的一次 dismiss 掉再去跟一个旧的，必须 fork 在他看过的那份上。同一条 fork，旧 session 逐字节不变，tab 换到子 session。子场虽是这个进程创建的，却以 `driven:false` attach：summary 留在 inbox，首次显式用户 turn 才一起排干；创建所有权不再暗含“无人输入也可 wake”。旧 transcript 从 `/sessions` 的 parent tree 打开，continuation 行把内部 `<nulya:context-summary>` marker 显示成 `continued · …`。**`plugin-api.d.ts` 一个字没改**：`api.actions.compact({briefFile})` 是插件面，`extensions/plan` 仍走 `brief_file`。
 
 ### 5.9 后台任务：内核给 supervisor 与事件，屏幕决定何时再 step `[T29]`
 
@@ -1399,7 +1399,7 @@ cd tui && bun test test/compact.test.ts
 5. **overlay 打开时点不穿**：`App` 的 `<Switch>` 让 overlay 起来时 transcript **根本没挂载**，所以不是"盖住"而是"不存在"。一条测试钉住它（开 `/help` → 点原来卡片头行的位置 → 什么都没折）。
 6. **滚动之后的命中**：tui.md 一直记着这块没人确认过。现在有测试：十张卡片塞进 6 行的 scrollbox，读出屏幕第 N 行画的是哪张卡，点它，展开的正是那张。前端**没有任何**屏幕行 → item 的换算，命中是 OpenTUI 对真正画在那里的 renderable 做的 hit-test——这条测试说的就是这件事。
 7. **两个真 bug，都是这轮才看得见的**：① `<text>` 上挂鼠标 props **不生效**，得挂在 `<box>` 上（`[x]` 因此是一个 `width={4}` 的盒子）；② `<For each={tools()}>` 在每次 `refreshPins()` 之后重建**每一行**（`toolRows` 每次造新对象），而一个在按下与松开之间被销毁的 renderable 会把这次点击一起带走——连点两下 `[x]` 第二下丢失。两处列表（`/ext` tools、`/sessions`，后者每 8 秒重读一次）改成 `<Index>`：一个位置一个 renderable，只换它说的话。顺带 `applyPin` 写完就地更新 `tuiPins`（`config show` 是个子进程，等它回话期间屏幕不该落后于已经写下去的文件）。
-8. **文本选取做了**（契约里问过成本）：OpenTUI 0.5.3 的选区是现成的——按下 selectable 文本即 `startSelection`、拖拽 `updateSelection`、松开 `finishSelection` 并 emit `CliRenderEvents.SELECTION`，`Selection.getSelectedText()` 把选中的 renderable 拼回文本。`App` 只加了一个监听：非空就 `renderer.copyToClipboardOSC52(text)` 并在状态栏说复制了多少字符。选 **OSC 52** 而不是 host clipboard（`createHostClipboard` 也在库里）的理由是它只是一条发给已经连着本进程的终端的转义序列——过 ssh 也照样管用、不用装东西；终端不认就是没复制，所以那句提示只在真复制了才出现。空选区（每次普通点击都会产生一个）直接返回。
+8. **文本选取做了**（契约里问过成本）：OpenTUI 0.5.9 的选区是现成的——按下 selectable 文本即 `startSelection`、拖拽 `updateSelection`、松开 `finishSelection` 并 emit `CliRenderEvents.SELECTION`，`Selection.getSelectedText()` 把选中的 renderable 拼回文本。`App` 只加了一个监听：`behavior === "cell"` 的非空拖选就 `renderer.copyToClipboardOSC52(text)` 并在状态栏说复制了多少字符；双击/三击产生的 `word` / `line` 选区保持可见，但不会静默覆盖剪贴板。选 **OSC 52** 而不是 host clipboard（`createHostClipboard` 也在库里）的理由是它只是一条发给已经连着本进程的终端的转义序列——过 ssh 也照样管用、不用装东西；终端不认就是没复制，所以那句提示只在真复制了才出现。空选区（每次普通点击都会产生一个）直接返回。
 
 #### 层次与减法
 
@@ -2981,3 +2981,11 @@ Alt 走的是 `option`。翻编译产物确认了两条解析路径（原始 ESC
 ### T107 · 远端后台任务的三处跟随（内核零改动）
 
 Phase 4（goals/remote-env.md §6.7）之后 `task list --json` 多一个 `state` 值 `unreachable` 与一列 `machine`，前端有三处会说错话，都补上：① `TaskEntry.state` 加 `"unreachable"`，且 `taskIsDone` 把它算成"不再等"——与内核 `task wait` 拒绝挂在它上面同一条理由（什么都不知道、轮询也学不到新东西，而远端 session 的每次 `task list` 是一条短通道，把问不到的机器算成 running 就是每 1.5 s 付一次连接超时）；`/tasks` 的 outcome 列与 TasksPanel 的 ended 词都写 `unreachable` / `machine unreachable`，**不是** `done`——任务多半还在那台机器上好好跑着。② `state/tasks.ts` 的 `backgroundNote` 给它自己的分支（从前落进 `running Ns` 那个兜底——一句关于没人知道的事的钟）。③ `TaskEntry` 认 `machine` 列（老二进制没有这列 = 本机），`/tasks` 的 log 面板对远端任务不再用本机 io 读一个别的机器上的路径（那是 `FileNotFound` 画成空面板），改成一句"the log lives on `<spec>`"。
+
+### T108 · `remote:ssh:` 密码只活在本次工作流内存里（2026-08-31）
+
+OpenTUI 0.5.9 的 `InputRenderable` 没有 password/mask 选项，因此这里没有把明文塞进一个“颜色看不见”的 input：新的 host-owned `SshPasswordPrompt` 自己收按键与 paste 的 UTF-8 bytes，屏幕只画同长度的 `•`，插件 panel、composer 与其它 picker 都被同一 trusted-zone/focus 仲裁挡在下面。`Esc`、换 target、取消远端目录浏览与 App cleanup 都对持有的 `Uint8Array.fill(0)`；成功后只在当前 spec 的工作流内存里保留，`tui-state.json` 不长字段。
+
+第一次无密码 `remote check` 的完整 stderr 若是 SSH authentication refusal，主页照旧显示完整诊断，同时弹这个输入框；Enter 后用密码重试。成功的 bytes 每次按需复制给 `remote check`、`remote ls`、`session new` 和该 tab 随后的 `session step`，`nulya/cli.ts` 是唯一 spawn 层：写进 child stdin 后立即覆零副本，spawn 自己失败也覆零。内核的 one-shot askpass broker 见 DESIGN §8.2；StrictHostKeyChecking 没有前端例外。
+
+测试：`test/sshpassword.test.tsx` 用 fake binary 证明秘密只到 stdin、argv 没有、传入数组写后全零；遮罩组件的 render 只收到 byte count，因此组件 API 本身没有可以误画的明文。`bun run typecheck` 与该文件窄测通过。

@@ -61,12 +61,13 @@ const RemoteTargetProbe = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
     spec: []const u8,
+    ssh_password: ?[]const u8 = null,
     answer: ?[]u8 = null,
 
     fn ask(ptr: *anyopaque) anyerror![]const u8 {
         const self: *RemoteTargetProbe = @ptrCast(@alignCast(ptr));
         if (self.answer) |cached| return cached;
-        var ch = try remote.Channel.connect(self.alloc, self.io, try remote.parseSpec(self.spec), launch.version, .default);
+        var ch = try remote.Channel.connectPassword(self.alloc, self.io, try remote.parseSpec(self.spec), launch.version, .default, self.ssh_password);
         defer ch.deinit();
         const words = try std.fmt.allocPrint(self.alloc, "{s}-{s}", .{ ch.hello.arch, ch.hello.os });
         self.answer = words;
@@ -370,6 +371,20 @@ pub fn createSession(
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
 
+    var password_buf: [4097]u8 = undefined;
+    var password_stdin = std.Io.File.stdin().readerStreaming(io, &password_buf);
+    const ssh_password = if (sliceHasFlag(args, "--ssh-password-stdin"))
+        remote.readSshPassword(alloc, &password_stdin.interface) catch |err| {
+            try printErrFmt(alloc, io, "--ssh-password-stdin: {s}\n", .{@errorName(err)});
+            return null;
+        }
+    else
+        null;
+    defer if (ssh_password) |secret| {
+        std.crypto.secureZero(u8, secret);
+        alloc.free(secret);
+    };
+
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
     if (!try storeTrusted(alloc, io, &host, cwd_path)) {
@@ -527,6 +542,10 @@ pub fn createSession(
         environment.normalizeExecSpec(h.value.environment)
     else
         environment.normalizeExecSpec("");
+    if (ssh_password != null and !remote.isSshSpec(exec)) {
+        try printErr(io, "--ssh-password-stdin applies only with --env remote:ssh:<destination>\n");
+        return null;
+    }
     if (launch.execTargetRefusal(exec)) |why| {
         if (inherit_env) {
             try printErrFmt(
@@ -603,7 +622,7 @@ pub fn createSession(
     // REMOTE session has the question, and even then it is asked lazily — a
     // remote session that composes nothing compiled never connects here, which
     // is why this is a probe rather than an answer (DESIGN §8.2).
-    var target_probe: RemoteTargetProbe = .{ .alloc = alloc, .io = io, .spec = exec };
+    var target_probe: RemoteTargetProbe = .{ .alloc = alloc, .io = io, .spec = exec, .ssh_password = ssh_password };
     defer target_probe.deinit();
 
     // `--bare` composes from argv alone: the two standing config lists below are
@@ -1089,8 +1108,17 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     const stream: ?*StepStream = if (streaming) &stream_state else null;
     // One buffer for the whole run: a verdict line is short, and `deny <note>`
     // longer than this is a note nobody typed.
-    var in_buf: [4096]u8 = undefined;
+    var in_buf: [4097]u8 = undefined;
     var stdin = std.Io.File.stdin().readerStreaming(io, &in_buf);
+    const ssh_password = if (sliceHasFlag(args[1..], "--ssh-password-stdin"))
+        remote.readSshPassword(alloc, &stdin.interface) catch |err|
+            return stepFail(alloc, io, stream, "--ssh-password-stdin: {s}", .{@errorName(err)})
+    else
+        null;
+    defer if (ssh_password) |secret| {
+        std.crypto.secureZero(u8, secret);
+        alloc.free(secret);
+    };
     var gate_state: StepGate = .{ .io = io, .out = &stdout.interface, .in = &stdin.interface };
     const gate: ?*StepGate = if (gating) &gate_state else null;
     // The kernel clamps this to `session.max_steps_ceiling`: a driver can lower
@@ -1130,6 +1158,8 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     };
     defer hdr.deinit();
     try warnKernelDrift(alloc, io, id, hdr.value.nulya);
+    if (ssh_password != null and !remote.isSshSpec(hdr.value.environment))
+        return stepFail(alloc, io, stream, "--ssh-password-stdin applies only to a remote:ssh: session", .{});
 
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
@@ -1148,7 +1178,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var lenv = launch.sessionEnvironment(alloc, io, &cfg, .{
         .session_path = spath,
         .tasks_dir = tasks_dir,
-    }, hdr.value.environment, hdr.value.remote_workspace, ext_roots) catch |err| switch (err) {
+    }, hdr.value.environment, hdr.value.remote_workspace, ext_roots, ssh_password) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             return stepFail(alloc, io, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
         },

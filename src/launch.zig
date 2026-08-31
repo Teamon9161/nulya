@@ -804,6 +804,7 @@ pub fn sessionEnvironment(
     exec: []const u8,
     workspace: []const u8,
     ext_roots: []const []const u8,
+    ssh_password: ?[]const u8,
 ) !SessionEnvironment {
     const spec = environment.normalizeExecSpec(exec);
     if (remote.isSpec(spec)) {
@@ -820,6 +821,7 @@ pub fn sessionEnvironment(
                 // a background task's NAME and its delivery belong to the machine
                 // holding the ledger, whichever machine runs the command (§8.2).
                 .session = session,
+                .ssh_password = ssh_password,
             }),
         };
     }

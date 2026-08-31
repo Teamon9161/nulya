@@ -1257,7 +1257,7 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         .session_path = spath,
         .tasks_dir = tasks_dir,
         // No store roots: a task supervisor runs a COMMAND, never an extension.
-    }, hdr.value.environment, hdr.value.remote_workspace, &.{}) catch |err| switch (err) {
+    }, hdr.value.environment, hdr.value.remote_workspace, &.{}, null) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return 1;

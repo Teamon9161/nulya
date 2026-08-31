@@ -241,6 +241,7 @@ test("the keyboard is claimed in one order, outermost first", () => {
   // the assertion that says what it is.
   const all: FocusState = {
     ...nobody,
+    password: true,
     withPicker: true,
     agentPicker: true,
     envPicker: true,
@@ -250,10 +251,12 @@ test("the keyboard is claimed in one order, outermost first", () => {
     pluginPanel: true,
     browse: true,
   }
-  expect(resolveFocus(all)).toEqual({ kind: "dialog", dialog: "with" })
-  expect(resolveFocus({ ...all, withPicker: false })).toEqual({ kind: "dialog", dialog: "agent" })
-  expect(resolveFocus({ ...all, withPicker: false, agentPicker: false })).toEqual({ kind: "dialog", dialog: "env" })
-  const afterEnv = { ...all, withPicker: false, agentPicker: false, envPicker: false }
+  expect(resolveFocus(all)).toEqual({ kind: "dialog", dialog: "password" })
+  const afterPassword = { ...all, password: false }
+  expect(resolveFocus(afterPassword)).toEqual({ kind: "dialog", dialog: "with" })
+  expect(resolveFocus({ ...afterPassword, withPicker: false })).toEqual({ kind: "dialog", dialog: "agent" })
+  expect(resolveFocus({ ...afterPassword, withPicker: false, agentPicker: false })).toEqual({ kind: "dialog", dialog: "env" })
+  const afterEnv = { ...afterPassword, withPicker: false, agentPicker: false, envPicker: false }
   expect(resolveFocus(afterEnv)).toEqual({ kind: "dialog", dialog: "mode" })
   expect(resolveFocus({ ...afterEnv, modePicker: false })).toEqual({
     kind: "dialog",

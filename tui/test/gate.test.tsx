@@ -17,7 +17,7 @@ import { createSessionState } from "../src/state/session.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { sessionEvents, sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { parseApprovalNote } from "../src/approvalnote.ts"
-import { briefPreview, handoffsIn, headline, nextHandoff } from "../src/handoff.ts"
+import { HandoffRunBoundary, briefPreview, handoffsIn, headline, nextHandoff } from "../src/handoff.ts"
 import { verdictLine } from "../src/nulya/cli.ts"
 import { loadTuiState } from "../src/state/tui_state.ts"
 import {
@@ -492,3 +492,14 @@ test.skipIf(!Bun.which("zig"))("a session this TUI starts carries handoff, as a 
     else process.env["NULYA_HOME"] = home
   }
 }, 240_000)
+
+
+test("handoff side effects require a live run completion, never ledger replay", () => {
+  const boundary = new HandoffRunBoundary()
+  expect(boundary.observe("s-parent", false)).toBe(false)
+  expect(boundary.observe("s-parent", false)).toBe(false)
+  expect(boundary.observe("s-parent", true)).toBe(false)
+  expect(boundary.observe("s-parent", false)).toBe(true)
+  expect(boundary.observe("s-parent", false)).toBe(false)
+  expect(boundary.observe("s-other", false)).toBe(false)
+})

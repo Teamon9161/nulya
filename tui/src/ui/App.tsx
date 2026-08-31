@@ -11,7 +11,7 @@ import {
   untrack,
   type JSX,
 } from "solid-js"
-import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
+import { useKeyboard, usePaste, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import type { InputRenderable, KeyEvent, ScrollBoxRenderable, Selection } from "@opentui/core"
 import { Transcript, rowsBelow, transcriptRows } from "./Transcript.tsx"
@@ -22,6 +22,7 @@ import { ModePicker, initialChoice, modeAt, moveChoice } from "./ModePicker.tsx"
 import { AgentPicker } from "./AgentPicker.tsx"
 import { WithPicker, type Wearable } from "./WithPicker.tsx"
 import { EnvPicker } from "./EnvPicker.tsx"
+import { SshPasswordPrompt } from "./SshPasswordPrompt.tsx"
 import { execChoices, withCurrent, type ExecChoice } from "../state/targets.ts"
 import { StatusBar } from "./StatusBar.tsx"
 import { ContextPanel } from "./ContextPanel.tsx"
@@ -167,7 +168,7 @@ import { createPluginHost, pluginKeyOf } from "../plugins/host.ts"
 import { PluginContext } from "../plugins/context.ts"
 import { wrapExtNote } from "../extnote.ts"
 import { runCompact } from "../compact.ts"
-import { briefPreview, headline, nextHandoff, type HandoffProposal } from "../handoff.ts"
+import { HandoffRunBoundary, briefPreview, headline, nextHandoff, type HandoffProposal } from "../handoff.ts"
 import { renderSessionPrompt } from "../sessionprompt.ts"
 import { formatWithRef, parseWithRef, type WithRef } from "../with.ts"
 import { builtin_tools, orphanPins, resolvableStandingPins, toolId } from "../pins.ts"
@@ -464,6 +465,14 @@ export function App(props: AppProps) {
   const tabs = createTabStore(props.ws, first, {
     ...(props.driver ?? {}),
     statePath: props.statePath,
+    sshPassword: (session) => {
+      const held = sshPassword()
+      if (!held) return undefined
+      const target = tabs.tabs().find((tab) => tab.kind === "session" && tab.id === session)
+      return target?.kind === "session" && target.state.snapshot.header?.environment === held.spec
+        ? held.bytes.slice()
+        : undefined
+    },
     gate: (request, session) => approve(request, session),
     // Every line every step prints, to whatever plugins asked to watch
     // (tui-plugin U3, `api.observe`). A pure observer: it runs after the
@@ -682,6 +691,38 @@ export function App(props: AppProps) {
    */
   const [remoteBrowse, setRemoteBrowse] = createSignal<{ spec: string; start: string; home: string } | null>(null)
   /**
+   * A remote channel refusal belongs on the main screen, not in the one-row
+   * status hint below the composer. In particular, OpenSSH may write a warning
+   * before the actionable authentication failure; `CliError.message` keeps
+   * only that first line while `detail` keeps the complete diagnosis.
+   *
+   * This is separate from `refusal`: choosing an environment may happen on a
+   * live session too, and its failure says nothing about creating that session.
+   * A new attempt clears the old answer; success leaves no stale failure behind.
+   */
+  const [remoteFailure, setRemoteFailure] = createSignal<{ tab: string; detail: string } | null>(null)
+  /** Password bytes exist only for the current remote workflow. */
+  const [sshPassword, setSshPassword] = createSignal<{ spec: string; bytes: Uint8Array } | null>(null)
+  const [passwordRequest, setPasswordRequest] = createSignal<{ spec: string; bytes: Uint8Array } | null>(null)
+  const freshSshPassword = (spec = sshPassword()?.spec): Uint8Array | undefined => {
+    const held = sshPassword()
+    return held && spec === held.spec ? held.bytes.slice() : undefined
+  }
+  const replacePasswordRequest = (next: { spec: string; bytes: Uint8Array } | null) => {
+    const old = passwordRequest()
+    if (old) old.bytes.fill(0)
+    setPasswordRequest(next)
+  }
+  const clearSshPassword = () => {
+    const held = sshPassword()
+    if (held) held.bytes.fill(0)
+    setSshPassword(null)
+  }
+  const clearSshWorkflow = () => {
+    replacePasswordRequest(null)
+    clearSshPassword()
+  }
+  /**
    * Any of the composer's pickers is up. One accessor because every rule about
    * them is about ALL of them — who holds the keyboard, whether the composer
    * may blink, whether a shortcut layer answers — and a fifth picker should
@@ -835,8 +876,16 @@ export function App(props: AppProps) {
 
   /** A handover the model proposed and nobody has answered yet (tui.md §5.8). */
   const [handoff, setHandoff] = createSignal<HandoffProposal | null>(null)
-  /** Call ids of handovers this process has already acted on or dismissed. */
+  /** Session-scoped call ids of handovers this process acted on or dismissed. */
   const [handoffsSeen, setHandoffsSeen] = createSignal<ReadonlySet<string>>(new Set())
+  const handoffRuns = new HandoffRunBoundary()
+  const handoffKey = (session: string, call: string) => `${session}\u0000${call}`
+  const seenHandoffs = (session: string): ReadonlySet<string> => {
+    const prefix = `${session}\u0000`
+    return new Set([...handoffsSeen()].filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length)))
+  }
+  const markHandoffSeen = (session: string, call: string) =>
+    setHandoffsSeen(new Set([...handoffsSeen(), handoffKey(session, call)]))
   let composer: ComposerApi | null = null
   let scroll: ScrollBoxRenderable | null = null
 
@@ -1468,7 +1517,10 @@ export function App(props: AppProps) {
     onCleanup(() => renderer.off("selection", copy))
   })
 
-  onCleanup(() => tabs.disposeAll())
+  onCleanup(() => {
+    clearSshWorkflow()
+    tabs.disposeAll()
+  })
 
   /**
    * The tabs this screen had last time, read ONCE and before any effect writes
@@ -2225,6 +2277,7 @@ export function App(props: AppProps) {
     prompt?: string[]
     execEnv?: string
     workspace?: string
+    sshPassword?: Uint8Array
     bare?: boolean
   }> => {
     const where = execEnv(props.statePath)
@@ -2284,12 +2337,14 @@ export function App(props: AppProps) {
     // chosen, because the two are frozen in the SAME call to `rememberExecEnv`
     // and travel together in `tui-state.json` for exactly this reason.
     const workspace = where.startsWith("remote:") ? execWorkspace(props.statePath) : ""
+    const password = freshSshPassword(where)
     return {
       ...(withRefs.length > 0 ? { with: withRefs } : {}),
       ...(pins.length > 0 ? { pin: pins } : {}),
       ...(prompts.length > 0 ? { prompt: prompts } : {}),
       ...(where.length > 0 ? { execEnv: where } : {}),
       ...(workspace.length > 0 ? { workspace } : {}),
+      ...(password ? { sshPassword: password } : {}),
       ...(profile.bare ? { bare: true } : {}),
     }
   }
@@ -2312,6 +2367,7 @@ export function App(props: AppProps) {
    * once is just a mess. Nothing is being protected there.
    */
   const dialogUp = (): boolean =>
+    passwordRequest() !== null ||
     pending() !== null ||
     checkout() !== null ||
     pickerUp() ||
@@ -2767,10 +2823,10 @@ export function App(props: AppProps) {
   const checkHandoff = () => {
     const here = live()
     if (!here || handoff()) return
-    const found = nextHandoff(here.state.snapshot.items, handoffsSeen())
+    const found = nextHandoff(here.state.snapshot.items, seenHandoffs(here.id))
     if (!found) return
     if (mode() === "unsafe") {
-      setHandoffsSeen(new Set([...handoffsSeen(), found.callId]))
+      markHandoffSeen(here.id, found.callId)
       void followProposal(found)
       return
     }
@@ -2780,7 +2836,10 @@ export function App(props: AppProps) {
 
   /** A step just ended: that is when a handoff call can have landed. */
   createEffect(() => {
-    if (status() !== "idle") return
+    const here = live()
+    const now = status()
+    const handoffLandedLive = here ? handoffRuns.observe(here.id, now !== "idle") : false
+    if (now !== "idle") return
     // …and the one case where a question outlives its step: Ctrl+C killed the
     // step that was waiting for it. Nobody is listening for the answer now, so
     // the panel comes down rather than sitting there holding nothing. Only the
@@ -2804,7 +2863,10 @@ export function App(props: AppProps) {
     // its receipt is in the batch that just landed — so this is the moment the
     // list is worth re-reading. Its own poll takes over from here (§5.9).
     void live()?.tasks.refresh()
-    checkHandoff()
+    // Hydrating or replaying an idle ledger may render an old handoff, but it
+    // must never perform a new driver action. Only a run this TUI observed
+    // leaving idle and returning can offer or auto-follow the call.
+    if (handoffLandedLive) checkHandoff()
   })
 
   /**
@@ -2830,8 +2892,8 @@ export function App(props: AppProps) {
     setNotice(carrying ? `forking on ${carrying}…` : "compacting…")
     try {
       const result = await runCompact(source.ws, source.id, options)
-      tabs.replace(source.id, result.session, { created: true, effort: source.effort() })
-      setNotice(`continued in ${result.session} · ${source.id} kept on disk`)
+      tabs.replace(source.id, result.session, { created: true, driven: false, effort: source.effort() })
+      setNotice(`continued in ${result.session} · previous transcript ${source.id} is in /sessions`)
       return result
     } catch (error) {
       // The lease was the driver's while it ran, so this tab may have gone to
@@ -2862,7 +2924,8 @@ export function App(props: AppProps) {
     const proposal = handoff()
     if (!proposal) return false
     setHandoff(null)
-    setHandoffsSeen(new Set([...handoffsSeen(), proposal.callId]))
+    const here = live()
+    if (here) markHandoffSeen(here.id, proposal.callId)
     void followProposal(proposal)
     return true
   }
@@ -2872,7 +2935,8 @@ export function App(props: AppProps) {
     const proposal = handoff()
     if (!proposal) return false
     setHandoff(null)
-    setHandoffsSeen(new Set([...handoffsSeen(), proposal.callId]))
+    const here = live()
+    if (here) markHandoffSeen(here.id, proposal.callId)
     setNotice("handoff dismissed · the brief is still in the transcript, on the call that proposed it")
     return true
   }
@@ -3355,18 +3419,73 @@ export function App(props: AppProps) {
    * `cwd` when the far side has no `$HOME` to report.
    */
   const beginRemoteBrowse = async (spec: string) => {
+    const owner = tab().key
+    if (sshPassword()?.spec !== spec) clearSshWorkflow()
+    setRemoteFailure(null)
     setNotice(`reaching ${spec}…`)
     let hello: Awaited<ReturnType<typeof remoteCheck>>
     try {
-      hello = await remoteCheck(ws(), spec)
+      hello = await remoteCheck(ws(), spec, undefined, freshSshPassword(spec))
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error))
+      const detail = error instanceof CliError ? error.detail : error instanceof Error ? error.message : String(error)
+      setRemoteFailure({ tab: owner, detail })
+      if (spec.startsWith("remote:ssh:") && /Permission denied|authentication failed/i.test(detail)) {
+        clearSshPassword()
+        replacePasswordRequest({ spec, bytes: new Uint8Array() })
+        setNotice(`password required for ${spec}`)
+      } else {
+        setNotice(error instanceof Error ? error.message : String(error))
+      }
       return
     }
+    replacePasswordRequest(null)
     const home = hello.home.length > 0 ? hello.home : hello.cwd
     setRemoteBrowse({ spec, start: remoteCwd(spec, props.statePath) ?? home, home })
     setNotice(null)
     openOverlay("envdir")
+  }
+
+  const appendPasswordBytes = (incoming: Uint8Array) => {
+    try {
+      const request = passwordRequest()
+      if (!request || incoming.length === 0) return
+      const clean = incoming.filter((byte) => byte !== 10 && byte !== 13)
+      try {
+        if (clean.length === 0) return
+        const next = new Uint8Array(Math.min(4096, request.bytes.length + clean.length))
+        next.set(request.bytes.subarray(0, next.length))
+        next.set(clean.subarray(0, next.length - request.bytes.length), request.bytes.length)
+        replacePasswordRequest({ spec: request.spec, bytes: next })
+      } finally {
+        clean.fill(0)
+      }
+    } finally {
+      incoming.fill(0)
+    }
+  }
+
+  const deletePasswordByte = () => {
+    const request = passwordRequest()
+    if (!request || request.bytes.length === 0) return
+    let end = request.bytes.length - 1
+    while (end > 0 && (request.bytes[end]! & 0xc0) === 0x80) end--
+    replacePasswordRequest({ spec: request.spec, bytes: request.bytes.slice(0, end) })
+  }
+
+  const submitSshPassword = () => {
+    const request = passwordRequest()
+    if (!request || request.bytes.length === 0) return
+    const held = request.bytes.slice()
+    replacePasswordRequest(null)
+    clearSshPassword()
+    setSshPassword({ spec: request.spec, bytes: held })
+    void beginRemoteBrowse(request.spec)
+  }
+
+  const cancelSshPassword = () => {
+    clearSshWorkflow()
+    setRemoteFailure(null)
+    setNotice("SSH password entry canceled")
   }
 
   /**
@@ -3452,8 +3571,8 @@ export function App(props: AppProps) {
     setNotice("compacting · asking this session for a continuation brief…")
     try {
       const result = await runCompact(source.ws, source.id, { ...(focus ? { focus } : {}) })
-      tabs.replace(source.id, result.session, { created: true, effort: source.effort() })
-      setNotice(`compacted into ${result.session} · ${source.id} kept on disk`)
+      tabs.replace(source.id, result.session, { created: true, driven: false, effort: source.effort() })
+      setNotice(`compacted into ${result.session} · previous transcript ${source.id} is in /sessions`)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
       // The lease was the driver's while it ran, so this tab may have gone to
@@ -3494,10 +3613,12 @@ export function App(props: AppProps) {
    * (`ensureSession`) — checking twice would be two answers to one question.
    */
   const setExecEnv = (raw: string | undefined) => {
+    setRemoteFailure(null)
     if (raw === undefined) {
       void openEnvPicker()
       return
     }
+    clearSshWorkflow()
     rememberExecEnv(raw, props.statePath)
     const now = execEnv(props.statePath)
     setNotice(
@@ -3884,6 +4005,10 @@ export function App(props: AppProps) {
   }
 
   const handleGlobalCancel = () => {
+    if (passwordRequest()) {
+      cancelSshPassword()
+      return
+    }
     // Something opened on purpose a moment ago is what Esc is about, ahead of
     // the handover proposal that may have been sitting there for minutes and
     // ahead of the step — closing a panel of numbers or task rows costs
@@ -3946,7 +4071,8 @@ export function App(props: AppProps) {
 
   const shortcutLayerBlocked = () =>
     Boolean(
-      checkout() !== null ||
+      passwordRequest() !== null ||
+        checkout() !== null ||
         pickerUp() ||
         pending() ||
         browse.active() ||
@@ -4082,6 +4208,7 @@ export function App(props: AppProps) {
   const focusOwner = (key: KeyEvent) =>
     resolveFocus({
       modified: Boolean(key.ctrl || key.meta),
+      password: passwordRequest() !== null,
       checkout: checkout() !== null,
       withPicker: withPicker(),
       agentPicker: agentPicker(),
@@ -4092,6 +4219,13 @@ export function App(props: AppProps) {
       pluginPanel: Boolean(plugins.panel()),
       browse: browse.active(),
     })
+
+  usePaste((event) => {
+    if (!passwordRequest()) return
+    event.preventDefault()
+    event.stopPropagation()
+    appendPasswordBytes(event.bytes)
+  })
 
   useKeyboard((key) => {
     if (key.propagationStopped) return
@@ -4109,6 +4243,13 @@ export function App(props: AppProps) {
      * it does not accept changes nothing and is swallowed, so a stray keystroke
      * cannot answer a question about trust by accident.
      */
+    if (owner.kind === "dialog" && owner.dialog === "password") {
+      if (key.name === "return") return consume(key, submitSshPassword)
+      if (key.name === "backspace") return consume(key, deletePasswordByte)
+      const printable = !key.ctrl && !key.meta && Array.from(key.sequence).length === 1 && key.sequence >= " " && key.sequence !== "\x7f"
+      if (printable) return consume(key, () => appendPasswordBytes(new TextEncoder().encode(key.sequence)))
+      return consume(key, () => {})
+    }
     if (owner.kind === "dialog" && owner.dialog === "checkout") {
       const said = key.name === "return" ? "return" : matches(keys.cancel, key) ? "escape" : (key.name ?? "")
       return consume(key, () => void answerCheckout(said.toLowerCase()))
@@ -4377,10 +4518,10 @@ export function App(props: AppProps) {
           contributions={live()?.contributions() ?? []}
           highlightedCallId={snapshot().highlightedToolCallId}
           plan={plan()}
-          // A draft has no snapshot to carry one, so the refusal that kept it a
-          // draft rides the same channel a live session's driver failure does —
-          // one notice, one place to read a failure in full.
-          error={snapshot().error ?? refusal()}
+          // Failures that need more than the status bar's one row share one
+          // readable place. A remote refusal can happen before a draft starts
+          // or while choosing the next environment from a live session.
+          error={(remoteFailure()?.tab === tab().key ? remoteFailure()!.detail : null) ?? snapshot().error ?? refusal()}
           cwd={displayCwd()}
           onPickCwd={() => openOverlay("cwd")}
           // Always a value on this screen, `this machine` included: here it is
@@ -4542,13 +4683,14 @@ export function App(props: AppProps) {
           recents={[]}
           homeDir={at.home}
           label={(dir) => dir}
-          source={remoteDirSource(ws(), at.spec)}
+          source={remoteDirSource(ws(), at.spec, () => freshSshPassword(at.spec))}
           onChoose={applyRemoteWorkspace}
           onClose={() => {
             // Esc/cancel: no target was chosen, so nothing about `/env`
             // moves — but the pending target itself is cleared too, rather
             // than lingering as a stale value nothing on screen still means.
             setRemoteBrowse(null)
+            clearSshWorkflow()
             closeOverlay()
           }}
         />
@@ -4643,6 +4785,9 @@ export function App(props: AppProps) {
                     (DESIGN §9, §5.3b point 6). Outermost of the dialogs: it is
                     the only one that grants authority rather than choosing
                     something. */}
+                <Show when={passwordRequest()}>
+                  <SshPasswordPrompt spec={passwordRequest()!.spec} bytes={passwordRequest()!.bytes.length} />
+                </Show>
                 <Show when={checkout()}>
                   <CheckoutPrompt where={workspaceLabel(checkout()!.ws.dir)} plan={checkout()!.plan} />
                 </Show>

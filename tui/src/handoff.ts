@@ -38,6 +38,19 @@ export interface HandoffBrief {
   drop: string
 }
 
+export class HandoffRunBoundary {
+  private readonly running = new Set<string>()
+
+  /** True exactly once when a session observed running returns to idle. */
+  observe(session: string, active: boolean): boolean {
+    if (active) {
+      this.running.add(session)
+      return false
+    }
+    return this.running.delete(session)
+  }
+}
+
 export interface HandoffProposal {
   /** The call's id — the identity this process remembers having answered. */
   callId: string

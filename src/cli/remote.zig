@@ -48,6 +48,7 @@ const printRaw = common.printRaw;
 /// readable — it is what keeps one answer to "what is in this directory" a size
 /// a person or a browser can use. Truncation is SAID, never silent.
 const max_entries: usize = 1000;
+const remote_password_buffer_bytes = 4097;
 
 pub fn dispatchRemote(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len == 0) return common.usageSection(io, common.remote_usage);
@@ -73,7 +74,20 @@ fn open(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?remote
         try printErrFmt(alloc, io, "--env {s}: unrecognized (want {s})\n", .{ spec, remote.spec_syntax });
         return null;
     };
-    return remote.Channel.connect(alloc, io, l, launch.version, .default) catch |err| {
+    var in_buf: [remote_password_buffer_bytes]u8 = undefined;
+    var stdin = std.Io.File.stdin().readerStreaming(io, &in_buf);
+    const password = if (common.sliceHasFlag(args, "--ssh-password-stdin"))
+        remote.readSshPassword(alloc, &stdin.interface) catch |err| {
+            try printErrFmt(alloc, io, "--ssh-password-stdin: {s}\n", .{@errorName(err)});
+            return null;
+        }
+    else
+        null;
+    defer if (password) |secret| {
+        std.crypto.secureZero(u8, secret);
+        alloc.free(secret);
+    };
+    return remote.Channel.connectPassword(alloc, io, l, launch.version, .default, password) catch |err| {
         // The transport already wrote its own diagnostic to this process's
         // stderr (it inherits it), so this adds the one thing that is missing:
         // which spec produced it, and in the version case what to do.

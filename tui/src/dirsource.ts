@@ -71,12 +71,12 @@ export function localDirSource(): DirSource {
  * one per keystroke — a browser session is short-lived, so the cache is never
  * invalidated within it.
  */
-export function remoteDirSource(ws: Workspace, spec: string): DirSource {
+export function remoteDirSource(ws: Workspace, spec: string, sshPassword?: () => Uint8Array | undefined): DirSource {
   const cache = new Map<string, DirChild[] | null>()
   const load = async (dir: string): Promise<DirChild[] | null> => {
     const cached = cache.get(dir)
     if (cached !== undefined) return cached
-    const result = await remoteLs(ws, spec, dir)
+    const result = await remoteLs(ws, spec, dir, undefined, sshPassword?.())
       .then((entries) => entries.filter((entry) => entry.dir).map((entry) => ({ name: entry.name, workspace: false })))
       .catch(() => null)
     cache.set(dir, result)

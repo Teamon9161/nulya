@@ -35,6 +35,7 @@ import { personaOf } from "../../agents.ts"
 import { sessionList, type SessionListEntry, type Verdict } from "../../nulya/cli.ts"
 import { workspaceLabel } from "../../workspaces.ts"
 import { probeWriterLease, type LeaseState } from "../../nulya/files.ts"
+import { compact_summary_marker } from "../../compact.ts"
 import type { Workspace } from "../../nulya/bin.ts"
 
 interface Row {
@@ -200,7 +201,15 @@ export function railFooter(width: number, focused: boolean, hidden: number, empt
  * emptiness the event count used to carry (`0 events`), and that count is gone.
  */
 export function title(entry: SessionListEntry): string {
-  return entry.first_user_text.length > 0 ? entry.first_user_text : "nothing said yet"
+  const text = entry.first_user_text.trim()
+  if (entry.parent && text.startsWith(compact_summary_marker)) {
+    const carried = text
+      .slice(compact_summary_marker.length)
+      .replace(/^\s*#+\s*/, "")
+      .trim()
+    return carried.length > 0 ? `continued · ${carried}` : "continued context"
+  }
+  return text.length > 0 ? text : "nothing said yet"
 }
 
 /** One workspace's sessions, as the list holds them (§5.3b point 4). */

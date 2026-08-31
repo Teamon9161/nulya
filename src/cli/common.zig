@@ -210,7 +210,7 @@ pub const ext_usage =
 ;
 
 pub const session_usage =
-    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]… [--prompt <file>]… [--env <spec>] [--workspace <dir>] [--bare]
+    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]… [--prompt <file>]… [--env <spec>] [--workspace <dir>] [--ssh-password-stdin] [--bare]
     \\                                                    freeze composition + model, print a new session id; --with composes a built
     \\                                                    version in, --pin puts one of its tools on the model's tool face, --parent
     \\                                                    forks that session, --prompt freezes a file as this session's system prompt,
@@ -220,7 +220,7 @@ pub const session_usage =
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
     \\                                                    queue a user turn for the next step boundary; --image inlines a
     \\                                                    png/jpeg ≤5 MB, if the model's catalog entry says vision = true
-    \\  nulya session step <id> [--max-steps N] [--effort E] [--stream] [--gate]
+    \\  nulya session step <id> [--max-steps N] [--effort E] [--stream] [--gate] [--ssh-password-stdin]
     \\                                                    run to end of turn or budget; stdout = event JSONL, --stream adds
     \\                                                    live model/tool lines, --gate asks stdin to allow each tool call
     \\  nulya session events <id> [--since N] [--follow]  read-only tail of the event log
@@ -242,8 +242,8 @@ pub const task_usage =
 ;
 
 pub const remote_usage =
-    \\  nulya remote check --env <spec> [--json]          open a channel to that machine and report what answered
-    \\  nulya remote ls --env <spec> [<dir>] [--json]     list a directory on that machine, names and kinds exactly
+    \\  nulya remote check --env <spec> [--json] [--ssh-password-stdin]          open a channel to that machine and report what answered
+    \\  nulya remote ls --env <spec> [<dir>] [--json] [--ssh-password-stdin]     list a directory on that machine, names and kinds exactly
     \\  nulya remote serve                                BE that machine's end of a channel; stdin/stdout are the wire
     \\  <spec> is remote:wsl | remote:wsl:<distro> | remote:ssh:<destination> | remote:exec:<argv…>
     \\

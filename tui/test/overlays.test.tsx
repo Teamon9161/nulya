@@ -10,7 +10,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
-import { SessionsView, ago } from "../src/ui/overlays/SessionsView.tsx"
+import { SessionsView, ago, title } from "../src/ui/overlays/SessionsView.tsx"
 import {
   ExtView,
   driftLine,
@@ -988,3 +988,13 @@ test("/tasks on a tab with no session says so instead of drawing an empty list",
     setup.renderer.destroy()
   }
 }, 60_000)
+
+
+test("/sessions names compact continuations without leaking the internal marker", () => {
+  const entry = {
+    first_user_text: "<nulya:context-summary> ## Next task ship the fix",
+    parent: { session: "s-parent", seq: 4 },
+  } as Parameters<typeof title>[0]
+  expect(title(entry)).toBe("continued · Next task ship the fix")
+  expect(title({ ...entry, parent: null })).toStartWith("<nulya:context-summary>")
+})

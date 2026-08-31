@@ -36,7 +36,7 @@
  */
 import type { PaneId, SurfaceId } from "./tree.ts"
 
-export type DialogKind = "checkout" | "with" | "agent" | "env" | "mode" | "approval"
+export type DialogKind = "password" | "checkout" | "with" | "agent" | "env" | "mode" | "approval"
 
 export type FocusOwner =
   | { readonly kind: "dialog"; readonly dialog: DialogKind }
@@ -55,6 +55,7 @@ export interface FocusState {
    * something: it is put once per directory, and until it is answered the
    * things it is about take no part in any session.
    */
+  readonly password?: boolean
   readonly checkout: boolean
   readonly withPicker: boolean
   readonly agentPicker: boolean
@@ -74,6 +75,7 @@ export function resolveFocus(state: FocusState): FocusOwner {
     // are only ever opened on purpose, while the mode picker can be opened FROM
     // the approval dialog by clicking the chip — the one moment two of these are
     // on screen at once (tui.md §5.7, T31).
+    if (state.password) return { kind: "dialog", dialog: "password" }
     if (state.checkout) return { kind: "dialog", dialog: "checkout" }
     if (state.withPicker) return { kind: "dialog", dialog: "with" }
     if (state.agentPicker) return { kind: "dialog", dialog: "agent" }

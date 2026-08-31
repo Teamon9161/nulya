@@ -18,8 +18,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { createTabStore } from "../src/state/tabs.ts"
 import { createSessionState } from "../src/state/session.ts"
-import { sessionAppend, sessionNew } from "../src/nulya/cli.ts"
-import { sessionExists } from "../src/nulya/files.ts"
+import { sessionAppend, sessionEvents, sessionNew } from "../src/nulya/cli.ts"
+import { inboxPending, sessionExists } from "../src/nulya/files.ts"
 import { scripted_env, tempWorkspace, type TempWorkspace } from "./support.ts"
 
 let ws: TempWorkspace
@@ -103,3 +103,36 @@ test("clearing one of two session tabs leaves its sibling exactly where it was",
     store.disposeAll()
   }
 })
+
+
+test("a compact continuation stays idle until an explicit turn drives it", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  await sessionAppend(ws, id, "<nulya:context-summary>\ncarry only this brief")
+  const store = createTabStore(ws, { kind: "draft" }, { env: scripted_env, pollMs: 100 })
+  try {
+    store.replace(store.active().key, id, { created: true, driven: false })
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    expect(inboxPending(ws, id)).toBe(true)
+    expect(await sessionEvents(ws, id)).toEqual([])
+
+    const tab = store.active()
+    expect(tab.kind).toBe("session")
+    if (tab.kind !== "session") throw new Error("continuation did not replace the draft")
+    await tab.attach.send("continue now")
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 30_000
+      const timer = setInterval(async () => {
+        if (!inboxPending(ws, id) && tab.attach.status() === "idle") {
+          clearInterval(timer)
+          resolve()
+        } else if (Date.now() > deadline) {
+          clearInterval(timer)
+          reject(new Error("continuation did not drain"))
+        }
+      }, 50)
+    })
+    expect((await sessionEvents(ws, id)).length).toBeGreaterThan(0)
+  } finally {
+    store.disposeAll()
+  }
+}, 60_000)

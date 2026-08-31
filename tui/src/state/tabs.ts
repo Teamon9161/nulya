@@ -155,6 +155,13 @@ export type Tab = DraftTab | SessionTab
 
 export interface OpenOptions {
   created?: boolean
+  /**
+   * This TUI may wake a pending inbox without a new user turn. Defaults to
+   * `created`, which is right for ordinary sessions materialized here; compact
+   * continuations override it because their summary is deliberately deposited
+   * for the user's next explicit turn.
+   */
+  driven?: boolean
   effort?: string
   /** Which directory this session lives in; the store's default when absent. */
   ws?: Workspace
@@ -199,6 +206,8 @@ export interface SessionExtras {
    * meaningful beside a `remote:` `execEnv` (goals/remote-env.md §3.3, T101).
    */
   workspace?: string
+  /** Fresh transient bytes for the `session new` process only. */
+  sshPassword?: Uint8Array
   /** The step budget the resulting tab drives with (`OpenOptions.maxSteps`). */
   maxSteps?: number
 }
@@ -387,7 +396,7 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
         ...(opened.maxSteps !== undefined ? { maxSteps: opened.maxSteps } : {}),
         ready,
         effort,
-        driven: opened.created ?? false,
+        driven: opened.driven ?? opened.created ?? false,
       }),
       tasks: createTaskWatch(ws, id, { ...(attachOptions.env ? { env: attachOptions.env } : {}) }),
       contributions,
@@ -552,6 +561,7 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
         ...((extra.prompt?.length ?? 0) > 0 ? { prompt: extra.prompt } : {}),
         ...(extra.execEnv ? { execEnv: extra.execEnv } : {}),
         ...(extra.workspace ? { workspace: extra.workspace } : {}),
+        ...(extra.sshPassword ? { sshPassword: extra.sshPassword } : {}),
       })
       return replace(draft.key, id, {
         created: true,
