@@ -153,7 +153,7 @@ Zig 0.16（新 `std.Io` API）。发布版加 `-Dembed-toolchain -Dzig-archive=<
 
 ## 工作约定
 
-- 代码注释英文，docs 中文。测试与模块同文件（`test "..."`）。
+- **注释只写代码说不出来的东西**（契约：`docs/goals/comments.md`）。写：不变量与顺序、非显然的取舍、外部约束、格式契约。不写：复述代码、为什么没写成另一种样子、某段代码曾经是什么样、以及**任何文档指针**。**代码不引用文档，文档引用代码**——`nulya src` 的读者打不开 docs，`DESIGN §8.1` 对他是悬空指针；一条注释若离开那个 §x 就不成立，说明事实还没写出来，把事实写进去、指针删掉。模块头 **≤ 15 行**（例外只有 `extension/protocol.zig` 与 `environment/remote/protocol.zig`——它们的头就是被打印出去的规格）。一条规则只说一次，在它定义的地方；重复三遍说明该抽出一个有名字的东西。设计论证归 commit message 与 `docs/goals/`，不进源文件。代码注释英文，docs 中文；测试与模块同文件（`test "..."`）。
 - **不加第二个 builtin tool**（`shell` 是唯一那个；`edit` 已搬进 `extensions/std`）；**不在 session 中途改 `tools[]`**；**不给 tool ledger**（需要对话的东西是 subagent，不是 tool）。
 - 新增 kernel 概念前先问一句：**这是 substrate 还是 intelligence？** 是 intelligence 就放 kernel 之上。
 - **内核只长 substrate，不长便利。** 往 `src/` 加东西前问：把它删掉，八条 physics 哪一条会失效？一条都不会 → 它不是内核。落点优先级：extension / skill（agent 自己造）> `cli.zig` / `launch.zig` 这类外壳 > kernel 模块。std 能做的不手写（`std.json` 类型化编解码、`union(enum)`）；一个字段只写不读、一个动词没有语义、一个决定在多层各做一遍、一个读者拿着写句柄——都是该删或该收的信号。
@@ -161,5 +161,5 @@ Zig 0.16（新 `std.Io` API）。发布版加 `-Dembed-toolchain -Dzig-archive=<
 - **不做无意义的抽象。** 通常等第二个 consumer 出现再抽；但预期中的功能大概率会用到某个抽象时，可以提前做——尺子是"这个抽象有没有可信的用途"，不是机械数 consumer。
 - **测试守机制，不守细枝末节。** 测试是保障代码逻辑正确性的：测一个机制有没有生效、一条不变量有没有守住、一个边界条件对不对。不要断言无关紧要的具体数值与显然的细节（文案的措辞、界面的具体行数列宽、常量的字面值、同一机制的每一种排列组合）——这样的断言不增加正确性保障，只让每次无害改动多付一轮改测试的税。写测试前问一句：**这条断言失败时，是代码逻辑错了，还是只是某个无关紧要的细节变了？** 后者不值得写；review 时发现存量测试属于后者，删。
 - 改 `§15.1 frozen core`（见 DESIGN.md）的语义要有明确理由并同步文档；往外挂能力优先于改 kernel。
-- 引用设计条目用 `DESIGN §x` / `PLAN §x`，别引用 history/ 里的章节号。
+- docs 之间引用设计条目用 `DESIGN §x` / `PLAN §x`（别引用 history/ 里的章节号）；**源代码里一个都不写**（上一条）。
 - 改 extension / config / session 组成的**用户可见语法**时，同步检查 `extensions/guide/skills/guide/SKILL.md`：manifest 字段（如 `apply` / `surface` / `readonly` / `commands` / `ui`）、`[extensions] with` / `pinned_native_tools` / `session new --with|--pin`、`ext seed|sync|activate`、skill / system prompt / driver 的最短配方都在那份 skill 里。它是模型按需 `skill load guide` 读到的自描述入口；只改 DESIGN / CLAUDE / `ext api` 而漏掉 guide，会把下一轮 agent 带回旧语义。
