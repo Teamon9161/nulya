@@ -1,10 +1,10 @@
 /**
- * Sub-agents: a definition file, a prompt, a session (tui.md §5.10).
+ * Sub-agents: a definition file, a prompt, a session.
  *
- * The kernel has no `AgentDef` and is not getting one. PLAN §3.2 settled that in
- * one sentence — **an agent is a `session new` with a particular set of
- * arguments** — and a definition is a markdown file whose front matter is that
- * set of arguments and whose body is a system prompt.
+ * The kernel has no `AgentDef` and is not getting one: **an agent is a
+ * `session new` with a particular set of arguments** — and a definition is a
+ * markdown file whose front matter is that set of arguments and whose body is
+ * a system prompt.
  *
  * **Neither end of that is implemented here.** The bundled `agent` package owns
  * both: `list` reads every definition all three layers hold, `render` writes one
@@ -20,7 +20,7 @@
  * frozen into an `agent-<name>` data package and composed in with `--with`. That
  * turned per-session text into an installed artifact — visible in `/ext`, and
  * prunable out from under the resume of a session frozen on it. `session new
- * --prompt <file>` freezes the BYTES into the session header (DESIGN §3, §5),
+ * --prompt <file>` freezes the BYTES into the session header,
  * which is where text with one session's lifetime belongs; nothing is installed
  * and nothing is activated, so no persona can leak into the session next door.
  */
@@ -37,7 +37,7 @@ import type { Workspace } from "./nulya/bin.ts"
 /** Where a checkout's definitions live, relative to the workspace. */
 export const agents_dir = ".nulya/agents"
 
-/** Which layer a definition came from, in search order (DESIGN §7.8). */
+/** Which layer a definition came from, in search order. */
 export type AgentLayer = "workspace" | "user" | "builtin"
 
 /** One row of `ext run agent@<v> list` — the package's own reading of a definition. */
@@ -155,14 +155,14 @@ export type AgentTrustPlan =
  *
  *  1. a definition is a SYSTEM PROMPT. Delegating to one puts a persona written
  *     by whoever wrote the checkout in front of a model with this workspace's
- *     tools (T31, the same hazard one directory over).
+ *     tools — the same hazard `readonlyshell.ts` names for the approvals gate.
  *  2. delegating to one is what first BUILDS the bundled `agent` package into
  *     this workspace's extension store, and a local build into an empty store is
- *     how the kernel records trust for it (DESIGN §9). So the question must be
+ *     how the kernel records trust for it. So the question must be
  *     asked before the first build, or the act of using a checkout's persona
  *     would have signed for the checkout's store on the person's behalf.
  *
- * Asked once, whatever the answer, exactly as the store question is (T11): "not
+ * Asked once, whatever the answer, exactly as the store question is: "not
  * now" is a real answer and must not become a prompt every morning.
  */
 export function planProjectAgents(
@@ -198,10 +198,10 @@ export const agent_id = "agent"
 /** The draft in nulya's own tree; elsewhere the binary's embedded copy is used. */
 export const agent_draft = "extensions/agent"
 
-// There is no pin constant here any more. The `agent` tool is `surface: "auto"`
-// (DESIGN §5.1), so composing the package IS putting it on that session's tool
-// face — and a pin naming it would now be refused by `session new`
-// (`PinToolNotPinnable`). Membership is the whole decision, in one flag.
+// There is no pin constant here any more. The `agent` tool is `surface: "auto"`,
+// so composing the package IS putting it on that session's tool face — and a
+// pin naming it would now be refused by `session new` (`PinToolNotPinnable`).
+// Membership is the whole decision, in one flag.
 
 /**
  * Build the bundled `agent` package and name the version to compose in.
@@ -221,7 +221,7 @@ export async function buildAgentPackage(ws: Workspace): Promise<WithRef> {
  * The prefix the `agent` package labels a persona's system block with.
  *
  * It is that package's own convention — writer and reader are both inside it
- * (DESIGN §5.6: the kernel never interprets a prompt's `source`) — and this
+ * (the kernel never interprets a prompt's `source`) — and this
  * side reads it in exactly one place, below. The value is here rather than
  * spelled out at each use so that `renderAgent`'s fallback label and every
  * projection that asks "is this a delegated session" cannot come apart.
@@ -230,7 +230,7 @@ export const persona_prompt_prefix = "agent-"
 
 /**
  * Which persona a session is wearing, from the inline prompts frozen into its
- * header — null for an ordinary conversation (T70).
+ * header — null for an ordinary conversation.
  *
  * ONE implementation, because there is one convention. `session list --json`
  * projects `composition.prompts[].source` and so does a header read, so the
@@ -263,12 +263,12 @@ export interface RenderedAgent {
   /**
    * Who it may delegate to. Non-empty is what makes a delegated session carry
    * the `agent` package at all — one field, read in one place, deciding leaf or
-   * not (DESIGN §7.8).
+   * not.
    */
   agents: string[]
   /**
    * The pins this persona asks for. No member list beside them: a pin brings its
-   * own package into the session at `current` (DESIGN §5.1), so the `--with`
+   * own package into the session at `current`, so the `--with`
    * that used to be derived here was the same implication said twice.
    */
   pins: string[]
@@ -336,10 +336,9 @@ export function agentPick(m: RenderedAgent): ModelPick | undefined {
 // ── the read-only ceiling ───────────────────────────────────────────────────
 
 /**
- * What a `readonly: true` agent — or, since tui-plugin D3, a
- * `contributes.policy.readonly: true` package that is a member of this
- * session's frozen composition — may call, decided before any approval table
- * (tui.md §5.10, agents-and-review §1 invariant 1, goals/tui-plugin.md D3).
+ * What a `readonly: true` agent — or a `contributes.policy.readonly: true`
+ * package that is a member of this session's frozen composition — may call,
+ * decided before any approval table.
  *
  * A ceiling, not a rule: it is asked first and nothing can lift it, because the
  * alternative — a `[approvals] allow` entry quietly re-admitting `shell` to a
@@ -350,7 +349,7 @@ export function agentPick(m: RenderedAgent): ModelPick | undefined {
  *    `cat foo` from `rm foo` (agents-and-review §1 invariant 5), so a read-only
  *    agent does not get it, full stop.
  *  - an extension tool is admitted only where its own frozen manifest says
- *    `"readonly": true` (DESIGN §7.2.1). That is the package's claim about
+ *    `"readonly": true`. That is the package's claim about
  *    itself and the kernel enforces none of it — believing it is a choice this
  *    policy makes, and `[approvals] manifest_readonly = false` is where somebody
  *    who does not want to believe it says so for the ordinary path.

@@ -14,14 +14,14 @@ import type { ImageInput } from "./nulya/cli.ts"
  * depending on which key the terminal was willing to give up.
  *
  * The suffix decides only whether to LOOK; the bytes decide what it is. That is
- * the kernel's own rule for `session append --image` (DESIGN §9.5) — a file
+ * the kernel's own rule for `session append --image` — a file
  * named `.png` that is not one is not one — and it is why this never has to
  * trust a name.
  */
 
 /**
  * The kernel refuses anything larger, one image at a time, and deliberately
- * will not resize on your behalf (DESIGN §9.5). Said here so the refusal lands
+ * will not resize on your behalf. Said here so the refusal lands
  * on the gesture rather than on the turn a draft was built for.
  */
 export const max_image_bytes = 5 * 1024 * 1024

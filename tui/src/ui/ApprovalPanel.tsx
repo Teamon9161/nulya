@@ -19,14 +19,12 @@ export interface ApprovalChoice {
 
 /**
  * The call the kernel is holding open, asked as a DIALOG above the composer
- * (tui.md §5.7, rebuilt in T28 against tcode's `approval.rs`).
+ * (rebuilt against tcode's `approval.rs`).
  *
- * Two rewrites got it here. It began as one more line under the tool card — a
- * row of eight text nodes that the terminal wrapped into rubble below 78
- * columns, wedged between the other cards of the same batch, because a turn
- * draws its whole batch before the first call runs. T27 moved it above the
- * composer and gave every answer its own row. What that still had was the shape
- * of a shell prompt: a list of letters to press, `[y/n/a]` with more words.
+ * It sits above the composer, with its own row, rather than as one more line
+ * under the tool card: a turn draws its whole batch before the first call
+ * runs, so a row of per-answer text wedged between the other cards of the
+ * same batch wraps into rubble below 78 columns.
  *
  * This is the version tcode has: a LIST YOU CHOOSE FROM. The pointer moves the
  * cursor, a click answers, `↑↓` and the digits do the same from the keyboard,
@@ -89,7 +87,7 @@ export function ApprovalPanel(props: {
 
   return (
     <box flexDirection="column" width="100%" maxWidth={style.maxWidth} paddingLeft={1} paddingRight={1} flexShrink={0}>
-      {/* No glyph, deliberately (tui.md §6): `◈` is the mark of choosing what a
+      {/* No glyph, deliberately: `◈` is the mark of choosing what a
           session runs AS, and this is not that — it is one call being judged.
           The warn colour is what says so, the way an overlay's bare title says
           "this is a place". */}

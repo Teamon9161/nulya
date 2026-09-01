@@ -1,7 +1,7 @@
 /**
  * When a session comes into existence, and what a TUI process leaves behind.
  *
- * Since T22 a tab starts as a DRAFT: nothing on disk until the first message.
+ * A tab starts as a DRAFT: nothing on disk until the first message.
  * That is the load-bearing fact here — composition freezes at `session new`
  * (physics #2), so a session created before the first word would have decided
  * its tools, its pins and its model on nobody's behalf. The old guard
@@ -32,7 +32,7 @@ beforeAll(() => {
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", "lint"])
   // The template writes no `surface`, which now means `auto` — a tool that
-  // arrives with membership and that no pin may name (DESIGN §7.2.1, T52). The
+  // arrives with membership and that no pin may name. The
   // pin test below needs a pinnable one, so the fixture says `manual` out loud.
   const draft = join(ws.dir, ".nulya", "extensions", "lint", "extension.json")
   const manifest = JSON.parse(readFileSync(draft, "utf8")) as {
@@ -68,7 +68,7 @@ test("a draft creates nothing on disk; the screen says so and the store agrees",
     await settle(setup, 4)
     const frame = setup.captureCharFrame()
     // The welcome screen's facts, not a composition card: nothing is frozen
-    // yet, and the model is said once — under the composer (T24).
+    // yet, and the model is said once — under the composer.
     expect(frame).toContain("tools       shell")
     expect(frame).not.toContain("frozen composition")
     expect(frame).not.toContain("model       ")
@@ -136,7 +136,7 @@ test("a draft counts surface-auto tools from config-level extension membership",
 
 /**
  * Ctrl+C narrows from the nearest thing to stop to the furthest, and never
- * quits on the first press (tui.md §1.2 D6).
+ * quits on the first press.
  *
  * The third press is not exercised here for the obvious reason — it is
  * `process.exit(0)`, and this test runs in the process it would take with it.
@@ -258,8 +258,7 @@ test("a session merely opened by id is never a candidate, empty or not", async (
 /**
  * `/sessions <id>` — `/resume <id>` under its other name — is the only way to
  * reach a session by id from inside the screen; `/clear` replaces the FRONT
- * tab with a fresh draft, in place (T84; before that it was an alias for
- * `/new`, which opens a second tab instead).
+ * tab with a fresh draft, in place.
  *
  * Both are tested here because both are about the same claim: neither one
  * destroys anything. A resumed session is opened, not created — so the guard
@@ -311,8 +310,8 @@ test("/resume opens a past session by id; /clear steps away without touching it"
 
     await setup.mockInput.typeText(`/resume ${id}`)
     setup.mockInput.pressEnter()
-    // Named, it is the same action `Enter` in that list performs — which since
-    // T70 is "go there in this tab", not "open a second one". The action does
+    // Named, it is the same action `Enter` in that list performs — "go there
+    // in this tab", not "open a second one". The action does
     // not put a full-width reading notice below the composer.
     await settle(setup, 3)
     expect(setup.captureCharFrame()).not.toContain(`switched to ${id}`)

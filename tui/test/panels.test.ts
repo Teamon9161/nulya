@@ -1,5 +1,5 @@
 /**
- * The `ui.panel: true` projection (DESIGN §7.2.1, tui-plugin D12, U2 §3):
+ * The `ui.panel: true` projection (U2 §3):
  * which tool calls make it onto the strip above the composer, and in what
  * order. Pure — the rendering itself (`ui/PanelStrip.tsx`) is a snapshot in
  * `test/render.test.tsx`.

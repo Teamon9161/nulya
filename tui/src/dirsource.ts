@@ -2,8 +2,7 @@
  * Two implementations of `browsedir.ts`'s `DirSource` — one line of real I/O
  * each, everything else already lives in the pure functions the browser
  * drives (`browseAt`, `browserRows`). This is the whole of what makes local
- * and remote directory browsing the same component (tui.md §11 T101,
- * goals/remote-env.md §3.9).
+ * and remote directory browsing the same component.
  */
 import { readdirSync, statSync } from "node:fs"
 import { basename as basenameLocal, dirname as dirnameLocal, join as joinLocal } from "node:path"
@@ -51,8 +50,8 @@ export function localDirSource(): DirSource {
 }
 
 /**
- * The machine `spec` names, read over `nulya remote ls`
- * (goals/remote-env.md §3.9). Path arithmetic is always POSIX
+ * The machine `spec` names, read over `nulya remote ls`. Path arithmetic is
+ * always POSIX
  * (`node:path/posix`) — a `remote:` target is `wsl` or `ssh`, which means
  * Linux on the far side even when this host is Windows, and `node:path`'s
  * own `join` on a win32 host hands back backslashes no shell over there

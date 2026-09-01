@@ -1,11 +1,11 @@
 /**
- * The T4 performance bar (tui.md §9): a 5k-event session must OPEN in under a
+ * The performance bar: a 5k-event session must OPEN in under a
  * second, and drawing it must not fall over.
  *
  * "Open" is the whole real path a resume takes: spawn `nulya session events`,
  * parse every line, and fold them into transcript items. The fixture writes the
  * 5k events straight into the session file in wire format rather than paying for
- * 5000 model steps — the file IS the wire format (DESIGN §3.4), and what is
+ * 5000 model steps — the file IS the wire format, and what is
  * being measured here is the reader, not the kernel.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"

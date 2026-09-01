@@ -1,5 +1,5 @@
 /**
- * `/env`'s picker (tui.md §11, T93): what this machine is asked, and what the
+ * `/env`'s picker: what this machine is asked, and what the
  * dialog does with the answer.
  *
  * The colours and the wording are not asserted. What is: that a distribution
@@ -80,11 +80,11 @@ test("a target this host cannot reach is not offered", async () => {
 
 test("the remote: family rides the same two sources, one row each behind the shell-only wsl row", async () => {
   // Same data (`wsl -l`, `~/.ssh/config`), a second family of rows — not a
-  // second probe, and not the SAME spec doing double duty (T101,
-  // goals/remote-env.md §3.9). `local` never gets a `remote:local` twin: this
+  // second probe, and not the SAME spec doing double duty. `local` never gets
+  // a `remote:local` twin: this
   // machine's own workspace is not a target `--workspace` would move to. The
-  // ssh source only ever seeds the `remote:ssh:` row now — the bare `ssh:`
-  // exec target was retired 2026-08-30 (goals/remote-env.md §7.1).
+  // ssh source only seeds the `remote:ssh:` row: there is no bare `ssh:`
+  // exec target.
   const listed = await execChoices(probe({ wsl: async () => ["Ubuntu"], ssh: async () => ["box"] }))
   expect(listed.map((one) => one.spec)).toEqual([
     "local",
@@ -130,7 +130,7 @@ test("the last row is not a target: it hands the typing back", async () => {
     // The syntax for what the list could not enumerate is on the screen, so a
     // person who does not see their host knows the dialog is not the limit —
     // `remote:ssh:<dest>` now, since the bare `ssh:<dest>` exec target this
-    // used to point at was retired (goals/remote-env.md §7.1).
+    // used to point at was retired.
     expect(frame).toContain("remote:ssh:<destination>")
     setup.mockMouse.click(4, rowOf(frame, "somewhere else"))
     await settle(setup, 2)

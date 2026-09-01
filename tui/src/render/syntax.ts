@@ -1,5 +1,5 @@
 /**
- * What CODE is coloured with, as a choice of its own (tui.md §11, T91).
+ * What CODE is coloured with, as a choice of its own.
  *
  * The syntax style used to be derived from the interface's own tokens, on the
  * reasoning that highlighted code then could not drift from the theme. It could

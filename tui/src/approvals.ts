@@ -1,8 +1,8 @@
 /**
- * Who answers the kernel's gate, and how (tui.md §5.7).
+ * Who answers the kernel's gate, and how.
  *
  * `nulya session step --gate --stream` asks before every tool call and runs only
- * what it is allowed to (DESIGN §4/§14). The kernel has exactly one semantic
+ * what it is allowed to. The kernel has exactly one semantic
  * there — allow, or deny with a note — and nothing else: WHICH calls are worth
  * asking a person about is policy, and policy lives here, in the driver, where
  * it can be replaced without touching the kernel (physics #8).
@@ -23,13 +23,13 @@
  *      `shell` in `ask` mode only — whether the command itself only reads
  *      (`readonlyshell.ts`), and finally the mode.
  *
- * The `readonly` claim is a HINT, not a boundary (DESIGN §9): the package says
+ * The `readonly` claim is a HINT, not a boundary: the package says
  * its tool only reads, the kernel records that and enforces nothing, and a
  * driver that believes it is choosing to. `[approvals] manifest_readonly = false`
  * stops believing it — the key stays, because what it configures is belief, not
  * where the claim comes from.
  *
- * Where it comes from is the gate request itself (DESIGN §4): the kernel freezes
+ * Where it comes from is the gate request itself: the kernel freezes
  * the claim into the tool definition at composition time and puts it, with the
  * stable id, on the line it asks with. Nothing here opens a manifest.
  */
@@ -38,7 +38,7 @@ import type { Contributions } from "./nulya/files.ts"
 
 /**
  * What the kernel asks about: one call exactly as the model wrote it, plus the
- * two facts this session froze about the tool it names (DESIGN §4).
+ * two facts this session froze about the tool it names.
  *
  * Both frozen columns arrive on the wire. They used to be re-derived here from
  * the composition's manifests — which package is this name from, does that
@@ -100,7 +100,7 @@ export interface ApprovalRules {
   allow: string[]
   ask: string[]
   deny: string[]
-  /** Trust a tool's own `"readonly": true` (DESIGN §7.2.1). */
+  /** Trust a tool's own `"readonly": true`. */
   manifest_readonly: boolean
   /**
    * Extra simple commands the built-in read-only classifier should recognise
@@ -128,8 +128,7 @@ export interface ApprovalContext {
 }
 
 /**
- * A composition's `contributes.policy` narrowing, folded into one answer
- * (DESIGN §7.2.1, tui-plugin D2/D3).
+ * A composition's `contributes.policy` narrowing, folded into one answer.
  *
  * One question, because the manifest now asks one: which member(s) claimed
  * `readonly: true`. Naming them is what makes the gate's eventual deny note
@@ -214,7 +213,7 @@ function anyMatch(rules: readonly string[], request: GateRequest): boolean {
 /**
  * Which layer of the chain spoke. Only one of them is worth saying out loud on
  * screen — the classifier, because an answer nobody gave should say why it was
- * not asked (T65). The rest are `null`: a call that ran in `unsafe`, or under a
+ * not asked. The rest are `null`: a call that ran in `unsafe`, or under a
  * rule a person wrote, needs no explanation the mode chip and `tui.toml` do not
  * already give.
  */

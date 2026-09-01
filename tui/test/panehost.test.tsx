@@ -1,5 +1,5 @@
 /**
- * The pane tree, drawn and clicked (goals/tui-shell.md §5.1, tui.md §11 T68).
+ * The pane tree, drawn and clicked.
  *
  * `panes.test.ts` pins the model; this pins the two claims the model cannot
  * make on its own:
@@ -114,11 +114,10 @@ test("a click focuses the pane it landed in, and the row under it still acts on 
 })
 
 test("a row action that claims the click still lets the pane under it take the keyboard", async () => {
-  // The hole T68 left for S1b: `onClick(action, true)` — the `/ext` checkbox —
-  // used to stop propagation on the way DOWN as well, which is where a pane
-  // focuses itself. Ticking a box in an unfocused pane would then leave the
-  // keyboard behind, and the fix is that `stop` claims the RELEASE: nothing
-  // above has acted yet on the press.
+  // `onClick(action, true)` — the `/ext` checkbox — claims the RELEASE, not
+  // the press: a pane focuses itself on the way DOWN, so stopping
+  // propagation there too would leave a box ticked in an unfocused pane with
+  // the keyboard left behind.
   const ticks: string[] = []
   const registry = createSurfaceRegistry<JSX.Element>()
   for (const id of ["left", "right"]) {

@@ -1,5 +1,5 @@
 /**
- * The pane tree, drawn (goals/tui-shell.md §5.1).
+ * The pane tree, drawn.
  *
  * The host mounts the content area through this instead of a `<Switch>` over
  * overlay kinds. Two rules earn their place here:
@@ -60,7 +60,7 @@ export function PaneHost(props: {
     // A pane pointing at a surface nobody registered draws nothing. It is a
     // bug — a package that failed to load, a stale id — and the honest shape of
     // that bug is an empty pane the keyboard still works around, not a box of
-    // apology text (tui.md §6.1 rule 4).
+    // apology text.
     if (!definition) return null
     return definition.render(mountOf(node))
   }

@@ -49,7 +49,7 @@ for (const height of [30, 24, 16, 10]) {
       const frame = await settle(setup, 5)
       // The prompt is on screen…
       expect(frame).toContain("message nulya")
-      // …inside a box that still has both of its sides (T26): the border is the
+      // …inside a box that still has both of its sides: the border is the
       // affordance, and half a box would be a squeezed one.
       const rows = frame.split("\n")
       const at = rows.findIndex((row) => row.includes("message nulya"))
@@ -58,7 +58,7 @@ for (const height of [30, 24, 16, 10]) {
       expect(rows[at + 1]).toContain("╰")
       // And the row under the box still says something. What it says depends on
       // the moment — the model and the mode at rest, the news of the moment
-      // while a notice is up (T35) — so what is asserted is that it is there.
+      // while a notice is up — so what is asserted is that it is there.
       expect(rows[at + 2]?.trim().length ?? 0).toBeGreaterThan(0)
     } finally {
       setup.renderer.destroy()
@@ -139,7 +139,7 @@ test("the 'more below' marker is the one clickable thing on the status bar", asy
     await untilFrame(setup, (frame) => frame.includes("more below"))
 
     // Click the marker itself rather than pressing Shift+End: same scrollToEnd,
-    // reached the other way (tui.md §11, T18).
+    // reached the other way.
     const rows = setup.captureCharFrame().split("\n")
     const at = rows.findIndex((row) => row.includes("more below"))
     expect(at).toBeGreaterThanOrEqual(0)
@@ -180,22 +180,15 @@ function scrollBoxes(from: Renderable): ScrollBoxRenderable[] {
 
 /**
  * The transcript's content box is never wider than the viewport showing it —
- * the invariant a horizontal scrollbar under the transcript is the symptom of
- * (T96), asserted as the relation and never as a column count.
+ * the invariant a horizontal scrollbar under the transcript is the symptom of,
+ * asserted as the relation and never as a column count.
  *
- * **What this test is worth, exactly.** It does NOT reproduce the T96 bug, and
- * that was checked rather than assumed: with `contentOptions.maxWidth` put back
- * it still passes, at terminal widths 90/100/120/177/178, with
- * `transcript.max_width` at 100 and at 200, with the vertical scrollbar already
- * up and with it appearing only when `/` shortens the viewport — every one of
- * those measured content and viewport equal. Whatever made a real terminal
- * report 178 against 177 is not in reach of this renderer.
- *
- * So it is a guard, not a regression test, and the difference is written down
- * because the commit it comes from claimed a guard it did not have: the frame
- * snapshots were green while the bar was on screen, since a scrollbar the
- * layout grows is not a character any card wrote. If the bar ever comes back,
- * this is the place the real case goes — with the width that shows it.
+ * Holds across terminal widths 90/100/120/177/178, with
+ * `transcript.max_width` at 100 and at 200, with the vertical scrollbar
+ * already up and with it appearing only when `/` shortens the viewport —
+ * every one of those measures content and viewport equal. A frame snapshot
+ * would stay green through a regression here, since a scrollbar the layout
+ * grows is not a character any card wrote — this relation is what catches it.
  */
 test("the transcript's content never outgrows the viewport, scrollbar and all", async () => {
   const { setup } = await crowded(20)

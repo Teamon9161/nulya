@@ -1,5 +1,5 @@
 /**
- * `/agent`'s picker (tui.md §5.10), the pure half: what a row says, given an
+ * `/agent`'s picker, the pure half: what a row says, given an
  * `AgentEntry`. The definition FORMAT has one reader (`extensions/agent`'s
  * `list`), pinned end to end in `agents.test.ts` / `delegate.test.tsx`; this
  * only pins what the picker does with the answer, including a fact today's

@@ -4,14 +4,14 @@ import type { ToolItem } from "../../state/session.ts"
 import type { ToolPresentation } from "../registry.ts"
 
 /**
- * `render: "markdown"` (DESIGN §7.2.1, tui-plugin D12): the same call
+ * `render: "markdown"`: the same call
  * `ExtToolCard` would draw, except the body renders through the `markdown`
  * primitive (`AssistantTurn.tsx`'s own choice) instead of plain text — for a
  * tool whose output IS prose the model or the person is meant to read, a
  * `propose{plan_md}` being the motivating case (goals/tui-plugin.md U4).
  *
  * The width is a derived number, not a measurement — `AssistantTurn` says why
- * at length (BUGS.md #17); a table sized by the layout keeps the columns it
+ * at length; a table sized by the layout keeps the columns it
  * was first fitted with, so the number is what keeps it inside the frame.
  */
 export function MarkdownToolCard(props: { item: ToolItem; presentation: ToolPresentation }) {

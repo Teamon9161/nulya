@@ -4,7 +4,7 @@
  * One store rather than a signal per view, because the important property is
  * exclusivity: exactly one thing owns the keyboard at a time. `App` gates its
  * own key handling on `active()`, so `j`/`k` can never be consumed twice
- * (tui.md §11, T2 reminder 3).
+ * (reminder 3).
  */
 import { createContext, createSignal, useContext } from "solid-js"
 
@@ -22,8 +22,7 @@ export type OverlayKind =
   /**
    * The directory browser again, pointed at a `remote:` `/env` target
    * instead of this tab's own directory — picking WHERE on that machine a
-   * session's workspace goes, the second half of `/env`'s remote choice
-   * (goals/remote-env.md §3.9, tui.md §11 T101).
+   * session's workspace goes, the second half of `/env`'s remote choice.
    */
   | "envdir"
 

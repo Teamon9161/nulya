@@ -1,5 +1,5 @@
 /**
- * `createTabStore`'s in-place replace (T84): the move `/clear` runs on.
+ * `createTabStore`'s in-place replace: the move `/clear` runs on.
  *
  * `clear` is the one operation this store has that neither `open` nor
  * `replace` are — putting a fresh DRAFT where a tab (draft or session) used

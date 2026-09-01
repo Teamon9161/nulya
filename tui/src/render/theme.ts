@@ -1,11 +1,11 @@
 /**
- * Visual tokens (tui.md §6). Restraint is the rule: one colour means one thing,
+ * Visual tokens. Restraint is the rule: one colour means one thing,
  * role colour only ever touches a glyph or a head line, body text stays `fg`,
  * metadata is `dim`, and success/failure is a short chip rather than a colour
  * wash over a whole card.
  *
  * FOUR levels of brightness, because two were not enough to read a table by
- * (tui.md §11, T18). They are a hierarchy, not a palette — a token is chosen by
+ *. They are a hierarchy, not a palette — a token is chosen by
  * what a piece of text IS, never by how it should look:
  *
  *   fg     the thing itself: a card's head line, a selected row, a value
@@ -45,7 +45,7 @@ export interface Theme {
   selection: string
   /**
    * Where a cell goes when the pointer is on its row, and when the running
-   * highlight passes over it (T38).
+   * highlight passes over it.
    *
    * "Brighter" is not a direction a colour has on its own — on a light theme
    * the way to stand out is DOWN, toward ink. So each theme names its own end
@@ -121,7 +121,7 @@ export interface Glyphs {
   subSession: string
   /**
    * A row that takes you somewhere else — today the one link a card can carry,
-   * to the session a delegation opened (T43). Distinct from every fold and
+   * to the session a delegation opened. Distinct from every fold and
    * cursor mark on this screen, because it is the one glyph that means "this is
    * not where the thing is".
    */
@@ -146,13 +146,13 @@ export interface Glyphs {
    */
   pointer: string
   hairline: string
-  /** The left rule of the composition card — the one framed block (tui.md §4.1). */
+  /** The left rule of the composition card — the one framed block. */
   bar: string
   /** The effort dial in `/model`: ‹ auto › */
   dialLeft: string
   dialRight: string
   /**
-   * The mark on a PICKER's title — `/model` and `/mode` (T31). The two are one
+   * The mark on a PICKER's title — `/model` and `/mode`. The two are one
    * gesture at two altitudes (what the next session runs on, what happens to its
    * tool calls), and this is what says so at a glance. Panels that list a store
    * or a journal keep their bare titles: they are places, not choices.
@@ -161,20 +161,20 @@ export interface Glyphs {
   /** "this is the one in force" — the current model row, a passed check. */
   check: string
   /**
-   * The `/ext` switch: is this extension on for the next session (T22)? Two
+   * The `/ext` switch: is this extension on for the next session? Two
    * shapes, not two colours — a terminal with no colour still has to say which
    * one it is, the same reason cursor and pointer have two glyphs.
    */
   switchOn: string
   switchOff: string
   /**
-   * The opening screen's one tip (T38). Its own shape because one glyph means
+   * The opening screen's one tip. Its own shape because one glyph means
    * one thing here: `capability` is what an extension gained, and a tip is not
    * an event — it is the screen talking to the person.
    */
   tip: string
   /**
-   * The handle of the sessions sidebar (T69): a square whose left half is
+   * The handle of the sessions sidebar: a square whose left half is
    * filled — the screen with a pane docked down its left edge, which is the one
    * thing the glyph has to depict.
    *
@@ -184,7 +184,7 @@ export interface Glyphs {
    * answered at full size (§6.1 rule 4).
    */
   /**
-   * The way into `/settings` at the far end of the status line (T92).
+   * The way into `/settings` at the far end of the status line.
    *
    * The same character `build` uses, and the one place in this closed
    * vocabulary where two entries share a shape. It is deliberate: a gear is the
@@ -197,7 +197,7 @@ export interface Glyphs {
   settings: string
   sidebar: string
   /**
-   * A directory that already holds a `.nulya/` (T71, `/cwd`'s browser).
+   * A directory that already holds a `.nulya/` (`/cwd`'s browser).
    *
    * It says one thing and it is a fact about a place, not an event: there is
    * already a workspace here, so choosing it walks into work that exists
@@ -212,7 +212,7 @@ export interface Glyphs {
    */
   workspaceMark: string
   /**
-   * The tab strip's two controls (T70), and the only two glyphs in this table
+   * The tab strip's two controls, and the only two glyphs in this table
    * that belong to the host's chrome rather than to the transcript or a list.
    *
    * `closeTab` is `✕` and not `⊘` or `✗`: those two are things that HAPPENED to
@@ -225,7 +225,7 @@ export interface Glyphs {
   closeTab: string
   newTab: string
   /**
-   * How full the context window is, empty → full (T82). A LADDER, not five
+   * How full the context window is, empty → full. A LADDER, not five
    * glyphs: the entries have no meanings of their own, only positions in one
    * scale, and naming them separately would invite a caller to pick one.
    *
@@ -341,7 +341,7 @@ export interface Style {
 
 /**
  * One cell of a line that is running: a soft band sweeps left to right, rests
- * a beat past the end, and starts again (T38, ported from tcode's
+ * a beat past the end, and starts again (ported from tcode's
  * `theme::shimmer_color`).
  *
  * The band LIFTS the cell's own colour toward `theme.lift` instead of painting
@@ -414,7 +414,7 @@ export interface LiveStyle {
 
 /**
  * A `Style` that can change while the program runs — what `/settings` needs
- * once it writes a key (T100): an edit that only took effect at the next start
+ * once it writes a key: an edit that only took effect at the next start
  * would be a screen that says it did something and did not.
  *
  * IT IS ONE OBJECT WITH GETTERS, not a new object per reload, because the
@@ -515,15 +515,13 @@ export function useFrame(): Accessor<number> {
  * The width of the column a transcript's cards are laid out in — a NUMBER
  * derived from the pane tree, never measured from a box.
  *
- * This is T73's "a width is a number" carried to its conclusion (BUGS.md #17).
- * The number first came from `useScreen()`, which is a quarter too wide when
- * the sidebar is open; T73 then MEASURED the card's own box, which turned out
- * to be a box whose width can follow its content — so the measurement fed the
- * wrap width, the wrap width fed the layout, and the layout fed the next
- * measurement: two self-consistent widths alternating at frame rate. The
- * flicker rebuilt every `<text>` row of the card on every flip until the
- * native allocator gave out (`createTextBuffer` returning null is what finally
- * froze the screen). A derived number cannot feed back: the pane tree knows
+ * `useScreen()` alone is a quarter too wide when the sidebar is open, but
+ * measuring the card's own box instead is a trap: that box's width can
+ * follow its content, so the measurement feeds the wrap width, the wrap
+ * width feeds the layout, and the layout feeds the next measurement — two
+ * self-consistent widths alternating at frame rate, rebuilding every
+ * `<text>` row of the card on every flip until the native allocator gives
+ * out. A derived number cannot feed back: the pane tree knows
  * nothing about what the cards did with the width it gave them.
  *
  * Whoever puts a Transcript somewhere provides the pane's width here (`App`'s

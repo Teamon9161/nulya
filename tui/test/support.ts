@@ -45,12 +45,12 @@ export const scripted_batch_env = { NULYA_SCRIPTED_MODE: "batch" }
  * One `shell {background: true}`, then end of turn — and `background done` only
  * once a `task_finished` turn is in the transcript (`launch.ScriptedProvider`).
  * That last part is what makes the wake-up testable: it tells "was stepped
- * again" apart from "was stepped again AND read the report" (tui.md §5.9).
+ * again" apart from "was stepped again AND read the report".
  */
 export const scripted_background_env = { NULYA_SCRIPTED_MODE: "background" }
 
 /**
- * Settings for a test that wants tool calls to RUN (tui.md §5.7).
+ * Settings for a test that wants tool calls to RUN.
  *
  * Every step this TUI drives is gated — the kernel asks before each tool call —
  * and the default mode is `ask`, which means a person. A test with nobody at the
@@ -62,7 +62,7 @@ export const unsafe_settings: Settings = {
   driver: { mode: "unsafe" },
   // …and without the `handoff` or `agent` packages. Composing them is a real
   // behaviour with its own test; here they would put two more extensions in
-  // every workspace whose store these tests then read back (tui.md §5.8/§5.10).
+  // every workspace whose store these tests then read back.
   //
   // The session-prompt renderers are off for the same reason and one more:
   // `ground` is COMPILED, and a bundled draft is built the first time a session
@@ -77,7 +77,7 @@ export const unsafe_settings: Settings = {
  * A config the way `nulya config show --json` prints it, with one key present.
  *
  * Here rather than in either test file because `/model` and `/provider` are two
- * screens over these same rows (tui.md §11, T21) and both need them; a test
+ * screens over these same rows and both need them; a test
  * file importing another test file would register that file's tests twice.
  */
 export const fake_config: ConfigView = {
@@ -148,7 +148,7 @@ export function frameLines(frame: string): string[] {
  * The line under the composer. The frame ends with a newline, so the last row
  * is the blank after it and the status bar is the one before that.
  *
- * Worth a helper because a notice covers that whole line while it is up (T35):
+ * Worth a helper because a notice covers that whole line while it is up:
  * an assertion about the bar has to be about the bar, not about the frame
  * happening to contain the word somewhere — the composition card at the top
  * names the model too.

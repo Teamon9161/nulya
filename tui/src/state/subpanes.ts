@@ -1,6 +1,6 @@
 /**
  * A sub-agent observation pane, as an operation on ONE TAB's pane tree
- * (goals/tui-shell.md §5.3c, T72).
+ * (goals/tui-shell.md §5.3c).
  *
  * The sibling of `state/sidebar.ts`, and deliberately the same shape: pure
  * functions over a `PaneTree`, so what a split does — which side the newcomer
@@ -69,7 +69,7 @@ export interface OpenSubOptions {
  * already there keeps the position the eye starts at.
  *
  * FOCUS DOES NOT FOLLOW IT — the sidebar's rule, for the sidebar's reason
- * (T69). The gesture is "let me see that", and the conversation the person is
+ *. The gesture is "let me see that", and the conversation the person is
  * having is still the one they are typing into; a pane that claims the keyboard
  * the moment it appears is a composer that stops answering without anybody
  * having asked it to. Going there is `Ctrl+→` (or `Ctrl+↓` on a stacked
@@ -115,7 +115,7 @@ export function subSplitOf(tree: PaneTree, pane: PaneId): SplitDirection | null 
  * the ratio is the person's, and a share somebody dragged is not something a
  * resize gets to reset.
  *
- * THIS IS NOT THE MEASURE→LAYOUT→MEASURE LOOP T73–T78 DELETED. The terminal's
+ * THIS IS NOT A MEASURE→LAYOUT→MEASURE LOOP. The terminal's
  * width is an EXTERNAL input — the window somebody dragged — not a measurement
  * of what this tree produced, so nothing this returns can change it. And the
  * tree comes back by IDENTITY when no split needs turning, so a width that

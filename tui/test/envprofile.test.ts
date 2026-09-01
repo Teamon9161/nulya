@@ -1,5 +1,5 @@
 /**
- * `state/envprofile.ts` (tui.md §11 T88): the per-exec-target-kind profile
+ * `state/envprofile.ts`: the per-exec-target-kind profile
  * that decides which packages ride along as `--with`, which extra tools get
  * `--pin`ned, and which packages render this session's `--prompt`.
  *
@@ -28,7 +28,7 @@ describe("execTargetKind", () => {
     // `session new` is the one that refuses a bad spelling; this classifier
     // only picks a profile, and the conservative pick costs nothing extra.
     // `ssh:<dest>` used to be its own kind — retired 2026-08-30
-    // (goals/remote-env.md §7.1) — and now falls in here with any other
+    // — and now falls in here with any other
     // spelling `session new` will refuse.
     expect(execTargetKind("docker:box")).toBe("local")
     expect(execTargetKind("ssh")).toBe("local")
@@ -40,7 +40,7 @@ describe("execTargetKind", () => {
     expect(execTargetKind("  wsl:Ubuntu  ")).toBe("wsl")
   })
 
-  test("remote: covers the whole family — wsl, ssh, and exec — as one kind (T101)", () => {
+  test("remote: covers the whole family — wsl, ssh, and exec — as one kind", () => {
     expect(execTargetKind("remote:wsl")).toBe("remote")
     expect(execTargetKind("remote:wsl:Ubuntu")).toBe("remote")
     expect(execTargetKind("remote:ssh:box")).toBe("remote")

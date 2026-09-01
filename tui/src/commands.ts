@@ -1,5 +1,5 @@
 /**
- * The slash commands, once (tui.md §4.4).
+ * The slash commands, once.
  *
  * `App.runCommand` dispatches them, the composer completes them and `/help`
  * lists them; all three read this table, so a command cannot exist without
@@ -11,27 +11,24 @@
  * model can already do with `nulya skill load`, one round trip cheaper, with a
  * person as the one who decided. That is prompt sugar, not front-end
  * intelligence: nothing here chooses a skill, rewrites one, or triggers one on
- * its own (goals/tui-panel.md D8; this table's earlier "nulya has no slash
- * skills" mistook "who triggers" for "who judges").
+ * its own.
  *
  * The built-ins are tried first, so a skill can never take `/model` away.
  *
- * Three names dispatch without being listed: `/as` (what `/with` was called
- * until T36), `/resume` (the word other harnesses use for what `/sessions`
+ * Three names dispatch without being listed: `/as` (an older name for
+ * `/with`), `/resume` (the word other harnesses use for what `/sessions`
  * does) and `/exit` (theirs for `/quit`). None is on the table, because a
  * command in this table is a command this front end says exists, and each of
  * these would put a second word on the table for a concept that already has
  * one.
  *
- * `/clear` used to be a fourth — an alias for `/new` — until T84: the two
- * looked interchangeable because neither ever touched what was on disk (a
- * ledger is append-only, physics #1), but they disagreed about the TAB, and
- * that difference is exactly what somebody typing `/clear` from another
- * harness is asking for. `/new` opens a second tab and leaves the front one
- * exactly as it was; `/clear` replaces the front tab's own display with a
- * fresh draft, in place — same slot, same directory, and the session that was
- * there (if any) keeps its file and stays one `/sessions` away. Two words, two
- * things, so `/clear` is listed now instead of aliased.
+ * `/clear` and `/new` disagree about the TAB, which is exactly what somebody
+ * typing `/clear` from another harness is asking for: `/new` opens a second
+ * tab and leaves the front one exactly as it was, while `/clear` replaces the
+ * front tab's own display with a fresh draft, in place — same slot, same
+ * directory, and the session that was there (if any) keeps its file and stays
+ * one `/sessions` away. Two words, two things, so `/clear` is listed rather
+ * than aliased.
  *
  * They ARE completed, though (`alias_commands`), and that is not a
  * contradiction: not listing is about what this front end advertises, and
@@ -39,9 +36,9 @@
  * of a word they know from somewhere else. The menu row says where the word
  * goes, so the concept still has one name and the typist still gets an answer.
  *
- * `/evolve` was a fourth until T53. It is not an alias any more and it is not
- * reserved: the evolution package declares it (`contributes.commands`), so it
- * arrives through the package chain like `/ask` — which means it exists exactly
+ * `/evolve` is not an alias and it is not reserved: the evolution package
+ * declares it (`contributes.commands`), so it arrives through the package
+ * chain like `/ask` — which means it exists exactly
  * when that package is built and active on this machine, and `/ext` is where it
  * comes from. A name reserved here could never have fired.
  */
@@ -125,7 +122,7 @@ export const commands: Command[] = [
  * is dispatched before a package command is even looked up, so a package
  * allowed to claim `/resume` would register a command that could never fire.
  * Which is exactly why `/evolve` left this table when the evolution package
- * started declaring it (T53).
+ * started declaring it.
  */
 export const aliases: Readonly<Record<string, string>> = {
   as: "/with",

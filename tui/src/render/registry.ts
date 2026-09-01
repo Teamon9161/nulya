@@ -4,13 +4,13 @@
  * Everything else in `render/` receives a `ToolPresentation` and draws it. Two
  * reasons this is a single choke point: a name match scattered over a dozen
  * card components rots, and the same registry has to serve the live stream and
- * a replay (tui.md §3) — one decision, one place, both paths.
+ * a replay — one decision, one place, both paths.
  *
- * The evolution table (tui.md §5.2) is the interesting half. `nulya …` through
+ * The evolution table is the interesting half. `nulya …` through
  * `shell` is how the agent grows itself, so those calls get their own glyph,
  * accent and a head line with the facts already extracted. Extraction is always
  * best effort: a command this table cannot read falls back to the plain shell
- * presentation rather than failing (tui.md §5.2, "抽不到就退回 ShellCard").
+ * presentation rather than failing ("抽不到就退回 ShellCard").
  */
 import type { Glyphs } from "./theme.ts"
 
@@ -29,7 +29,7 @@ export interface ChecklistItem {
  * How a checklist item's state reads, in plain text (`ChecklistCard.tsx`,
  * `ui/PanelStrip.tsx` — the transcript card and the panel projection draw the
  * same convention, so the marker is written once). Not a new glyph: the
- * theme's glyph set is unicode/ascii dual (tui.md §6) and none of its
+ * theme's glyph set is unicode/ascii dual and none of its
  * existing entries mean "todo" — these three read the same in both modes.
  */
 export function checklistMarker(state: ChecklistState): string {
@@ -52,7 +52,7 @@ export interface ToolPresentation {
   body: BodyKind
   /** Reading, not acting: the chip counts output lines instead of ok/exit. */
   countsLines: boolean
-  /** A session this call names (tui.md §5.5); T3 makes it openable. */
+  /** A session this call names, so it can be opened. */
   sessionId: string | null
   /**
    * A delegation this call names, in the vocabulary every runner shares
@@ -81,7 +81,7 @@ export interface ToolView {
 
 /**
  * A manifest's per-tool rendering claim, as far as the registry is concerned
- * (`ToolSpec.ui.render`, DESIGN §7.2.1, tui-plugin D12) — resolved by the CALLER
+ * (`ToolSpec.ui.render`) — resolved by the CALLER
  * from the session's frozen composition (`ui/App.tsx`, since only it has both
  * the tool name and the composition to look it up in) and handed in here so
  * `describeTool` itself stays a pure function of "one call, one hint".
@@ -131,7 +131,7 @@ function firstLine(text: string, limit: number): string {
 }
 
 /**
- * Whether this `shell` call was launched with `background: true` (DESIGN §6.1).
+ * Whether this `shell` call was launched with `background: true`.
  *
  * Read from the ARGUMENTS, not from the result: it is true from the moment the
  * call is complete and stays true, where the receipt only exists once the call
@@ -149,7 +149,7 @@ export function isBackground(argsJson: string): boolean {
 }
 
 /**
- * The `agent` tool's call, and the session its receipt named (tui.md §5.10).
+ * The `agent` tool's call, and the session its receipt named.
  *
  * A delegation IS a sub-session, so it gets that glyph and that accent — and the
  * id comes from the receipt rather than from the arguments, because the session
@@ -384,7 +384,7 @@ function skillCard(words: string[], glyphs: Glyphs): ToolPresentation | null {
 
 /**
  * `nulya session …` inside a step is the agent driving another session — the
- * sub-agent primitive (tui.md §5.5). v1 only makes it visible; the id comes
+ * sub-agent primitive. v1 only makes it visible; the id comes
  * from the arguments, or for `session new` from what it printed.
  */
 function sessionCard(words: string[], output: string, glyphs: Glyphs): ToolPresentation | null {
@@ -403,7 +403,7 @@ function sessionCard(words: string[], output: string, glyphs: Glyphs): ToolPrese
     })
   }
   // Reading the store and judging a session are not sub-sessions: nothing is
-  // driven, and one of them is the slow loop's only write (DESIGN §3.3). They
+  // driven, and one of them is the slow loop's only write. They
   // still read as evolution — this is the agent looking at its own history.
   if (verb === "list") return make({ glyph: glyphs.readKernel, head: "sessions", countsLines: true })
   if (verb === "outcome") {
@@ -461,8 +461,8 @@ export function describeTool(view: ToolView, glyphs: Glyphs, hint: RenderHint = 
     const command = shellCommandOf(view.args)
     if (command === null) return shellPresentation(firstLine(view.args, 200), glyphs)
     // A background launch is not the action its command names: the call returns
-    // a receipt, and what the command DID is a separate event later (tui.md
-    // §5.9). So `nulya ext build … background: true` keeps the plain shell card,
+    // a receipt, and what the command DID is a separate event later.
+    // So `nulya ext build … background: true` keeps the plain shell card,
     // whose note is about the task rather than about a version that does not
     // exist yet.
     if (isBackground(view.args)) return shellPresentation(firstLine(command, 200), glyphs)
@@ -507,7 +507,7 @@ export function describeTool(view: ToolView, glyphs: Glyphs, hint: RenderHint = 
     })
   }
   // Anything else is an extension tool promoted onto the model's tool face
-  // (DESIGN §5.1). The ledger records the tool NAME; `ext:<id>/<tool>` is the
+  //. The ledger records the tool NAME; `ext:<id>/<tool>` is the
   // stable id and only shows up if a caller passes one, so both are accepted.
   const name = view.tool.startsWith("ext:") ? (view.tool.split("/").pop() ?? view.tool) : view.tool
   const summary = argsSummary(view.args, 120)

@@ -1,6 +1,5 @@
 /**
- * The sessions sidebar as an operation on the pane tree (goals/tui-shell.md
- * §5.4, S1b — the first real split, and the first consumer of T68's skeleton).
+ * The sessions sidebar as an operation on the pane tree.
  *
  * Everything here is a pure function over a `PaneTree`, for the reason the tree
  * itself is pure: whether the sidebar is open, how wide it is, and how many
@@ -39,7 +38,7 @@ export const default_sidebar_ratio = 0.25
 /**
  * Below this the sidebar hides itself, and comes back when there is room again.
  *
- * The same threshold the status line's right half uses (tui.md §6.4): under 60
+ * The same threshold the status line's right half uses: under 60
  * columns a quarter of the screen is fifteen cells, which is a column of
  * ellipses rather than a list. Hiding rather than shrinking, because a rail
  * that cannot say which session a row is is not a smaller sidebar — it is
@@ -58,7 +57,7 @@ export function isSidebarOpen(tree: PaneTree): boolean {
 /**
  * Put the sidebar beside `main`, WITHOUT giving it the keyboard.
  *
- * `focusNew: false` is the whole of T68's promise that a sidebar "has no reason
+ * `focusNew: false` keeps the promise that a sidebar "has no reason
  * to stop a person typing": showing the list is not the same gesture as going
  * to it, and the one people do a hundred times a day is the first. Focusing it
  * takes the keyboard — there is no third state where a pane answers `j` while

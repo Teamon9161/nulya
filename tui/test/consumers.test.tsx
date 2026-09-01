@@ -77,7 +77,7 @@ beforeAll(async () => {
   if (!has_zig) return
   ws = tempWorkspace()
   process.env["NULYA_HOME"] = join(ws.dir, "home")
-  // The binary carries its own drafts (DESIGN §7.8), so this works in a
+  // The binary carries its own drafts, so this works in a
   // throwaway directory that has never seen nulya's source tree — which is
   // also what a person installing these packages does.
   plan_version = await extBuild(ws, join(import.meta.dir, "..", "..", "extensions", "plan"))
@@ -120,7 +120,7 @@ function benchFor(sessionId: string): Bench {
     session: () => bench.session,
     tasks: () => [],
     // The real verb, and the whole of it: `session append` deposits into the
-    // inbox, and only a STEP drains it into the ledger (DESIGN §3.4) — which is
+    // inbox, and only a STEP drains it into the ledger — which is
     // what `attach.send` does for a tab that is driving, so a seam that only
     // appended would be testing half the path.
     appendNote: async (pkg, kind, text) => {
@@ -385,7 +385,7 @@ const first_plan = [
  * advance that a question will come up, and `/ask` is the command it declares
  * to bring itself into the session that needs it.
  *
- * What NEITHER of them says is `apply: "auto"` (T52) — the one field that
+ * What NEITHER of them says is `apply: "auto"` — the one field that
  * would put a package in every session on this machine — so `/ext`'s Enter on
  * either is a pointer move and nothing else. Asserted against the real frozen
  * manifests rather than described.
@@ -413,9 +413,9 @@ test.skipIf(!has_zig)("plan is a mode and ask is a capability, and neither asks 
 })
 
 /**
- * Wearing a package brings its tools with it (tui.md §11, T46).
+ * Wearing a package brings its tools with it.
  *
- * The two axes are independent everywhere else (DESIGN §7.5) and here they
+ * The two axes are independent everywhere else and here they
  * cannot be: a WORN package is a member of exactly the session that names it,
  * so a pin for its tool has nowhere to live except the same argv. On a standing
  * list it would wear `plan` in EVERY session (a pin brings its package in),
@@ -456,7 +456,7 @@ test.skipIf(!has_zig)("plan: /with puts the package AND its tools into the sessi
   await setup.mockInput.typeText("/with plan")
   setup.mockInput.pressEnter()
   await settle(setup, 3)
-  // The first message is what makes a draft a session (T22).
+  // The first message is what makes a draft a session.
   await setup.mockInput.typeText("probe")
   setup.mockInput.pressEnter()
   await until(async () => (await sessionList(ws)).some((row) => !known.has(row.id)))

@@ -4,7 +4,7 @@ import { hardWrapLines } from "../../ui/columns.ts"
 import type { CapabilityItem } from "../../state/session.ts"
 
 /**
- * A `capability_note`: the agent gained a capability mid-session (DESIGN §5.3).
+ * A `capability_note`: the agent gained a capability mid-session.
  * The ledger note is written for the model and contains invoke/load plumbing;
  * the transcript card is written for the person watching the session. It names
  * the extension and the newly available tools/skills. Version ids appear only

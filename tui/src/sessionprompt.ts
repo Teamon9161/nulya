@@ -1,6 +1,5 @@
 /**
- * Packages that RENDER a session's opening text rather than contribute it
- * (`docs/goals/ground.md`).
+ * Packages that RENDER a session's opening text rather than contribute it.
  *
  * A contributed `system_prompt` is bytes frozen inside a version: the same text
  * in every session, on every machine. Some opening text is the opposite —

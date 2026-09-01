@@ -1,6 +1,6 @@
 /**
  * `src/dirsource.ts`'s two REAL implementations of `browsedir.ts`'s
- * `DirSource` (tui.md §11 T101): this machine's disk, and a channel to
+ * `DirSource`: this machine's disk, and a channel to
  * another one. `browsedir.test.ts` proves the shared orchestration with
  * fakes; this proves the two real sources actually answer the questions
  * `browseAt` asks, and that the remote one is really a round trip rather

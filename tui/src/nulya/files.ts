@@ -1,5 +1,5 @@
 /**
- * The `.nulya/` directory layout (DESIGN §3.4 / §5.5 / §7.2), READ-ONLY. The
+ * The `.nulya/` directory layout, READ-ONLY. The
  * TUI never writes into `.nulya/` except through the CLI (`session append`
  * stages its text in `.nulya/scratch/`, see `cli.ts`) — the session file has
  * exactly one writer and it is `session step`.
@@ -44,7 +44,7 @@ export const extensions_dir = ".nulya/extensions"
  * The store roots, in the kernel's search order, as directories on this disk.
  *
  * Order and membership are `store.Roots` — workspace, then user, then whatever
- * `extensions.paths` adds (DESIGN §7.2) — and the kernel already prints them,
+ * `extensions.paths` adds — and the kernel already prints them,
  * one per `ext list` line. Reading them off that output is how the TUI avoids
  * a second implementation of "where do extensions live", which would drift the
  * moment a config layer moved.
@@ -78,7 +78,7 @@ export function rootsOf(ws: Workspace, listed: readonly { root: string }[]): str
 }
 
 /**
- * What one frozen extension version contributes (DESIGN §7.2). Only the parts
+ * What one frozen extension version contributes. Only the parts
  * the transcript shows; the manifest is the schema's single truth, so nothing
  * here ever runs a binary to ask what it has.
  */
@@ -103,8 +103,8 @@ export interface Contributions {
   /** The subset of `tools` whose surface is `internal`: callable with `ext run`, never on the model face. */
   internalTools: string[]
   /**
-   * The package's own answer to "what does installing me mean" (`manifest.Apply`,
-   * DESIGN §5.1 / §7.2.1). `auto` = once it has a `current`, the kernel composes
+   * The package's own answer to "what does installing me mean" (`manifest.Apply`).
+   * `auto` = once it has a `current`, the kernel composes
    * it into every fresh session that is not `--bare`; `manual` = it enters only
    * the sessions somebody names it in.
    *
@@ -117,14 +117,14 @@ export interface Contributions {
   skills: string[]
   /**
    * Files whose text becomes a system block for any session carrying this
-   * version. A `--with` package is usually nothing BUT these (DESIGN §7.1) —
+   * version. A `--with` package is usually nothing BUT these —
    * a mode, an identity — so a view that only counted tools and skills would
    * show the most deliberate part of a composition as empty.
    */
   systemPrompts: string[]
   /**
-   * This package's slash commands (`manifest.Command`, DESIGN §7.2.1,
-   * tui-plugin D1/D2/D8). Absent reads as empty, the same convention as
+   * This package's slash commands (`manifest.Command`).
+   * Absent reads as empty, the same convention as
    * `skills` / `system_prompts`. `action` is kept as WRITTEN — an open verb
    * vocabulary the kernel does not police beyond one reference check (a `run`
    * command must name a tool this same manifest declares) — so a verb this
@@ -142,8 +142,8 @@ export interface Contributions {
   policy: PackagePolicy | null
   /**
    * `ToolSpec.ui.render`, by tool name — a rendering hint from an OPEN
-   * vocabulary (`"checklist"`, `"markdown"`, more later, DESIGN §7.2.1,
-   * tui-plugin D12). A tool absent from this map made no claim; `render/
+   * vocabulary (`"checklist"`, `"markdown"`, more later).
+   * A tool absent from this map made no claim; `render/
    * registry.ts` is the one place that reads it and decides whether it
    * recognises the word.
    */
@@ -155,7 +155,7 @@ export interface Contributions {
    */
   panelTools: string[]
   /**
-   * `contributes.ui.tui` (DESIGN §7.2.1, tui-plugin D10): a package-relative
+   * `contributes.ui.tui`: a package-relative
    * path to THIS front end's module and the plugin-host API major version it
    * was written against, or null when the package ships no code layer for it.
    *
@@ -172,7 +172,7 @@ export interface Contributions {
 }
 
 /**
- * What a package says installing it means (`manifest.Apply`, DESIGN §5.1).
+ * What a package says installing it means (`manifest.Apply`).
  *
  * The one axis a manifest gets an opinion on that reaches beyond a single
  * session: `auto` is a package asking to be a member of every fresh session on
@@ -321,8 +321,7 @@ function contributionsOf(
   const surfaces = new Map(named.map((tool) => [tool["name"] as string, toolSurfaceOf(tool)]))
   // `recommended` defaults to TRUE, which is what `manual` means in practice:
   // on once the package is installed, and closable one tool at a time. Only a
-  // package with extras it wants left off writes anything (`manifest.ToolSpec`,
-  // DESIGN §5.1).
+  // package with extras it wants left off writes anything (`manifest.ToolSpec`).
   const declined = new Set(
     named.filter((tool) => tool["recommended"] === false).map((tool) => tool["name"] as string),
   )
@@ -333,7 +332,7 @@ function contributionsOf(
     autoTools: tools.filter((tool) => surfaces.get(tool) === "auto"),
     internalTools: tools.filter((tool) => surfaces.get(tool) === "internal"),
     // Top level, not under `contributes`: it is not a contribution, it is the
-    // author's reading of what activating the package means (DESIGN §7.2.1).
+    // author's reading of what activating the package means.
     apply: applyOf(manifest?.["apply"]),
     skills: stringList(contributes["skills"]),
     systemPrompts: promptPathList(contributes["system_prompts"]),
@@ -347,7 +346,7 @@ function contributionsOf(
 
 /**
  * Where a tool sits, given that its package is already a member of the session
- * (`manifest.Surface`, DESIGN §7.2.1). All three words answer that one
+ * (`manifest.Surface`). All three words answer that one
  * question, which is why none of them names a CLI flag any more:
  *
  *   - `auto`     — on the model's face as soon as the package is composed in.
@@ -373,7 +372,7 @@ function applyOf(value: unknown): PackageApply {
   return value === "auto" ? "auto" : "manual"
 }
 
-/** A tool's `ui` object (`ToolSpec.ui`, DESIGN §7.2.1), or `{}` when absent or malformed. */
+/** A tool's `ui` object (`ToolSpec.ui`), or `{}` when absent or malformed. */
 function toolUiOf(tool: Record<string, unknown>): Record<string, unknown> {
   const value = tool["ui"]
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}
@@ -419,7 +418,7 @@ function commandsOf(value: unknown): PackageCommand[] {
 }
 
 function policyOf(value: unknown): PackagePolicy | null {
-  // Null and "present but empty" are different facts (DESIGN §7.2.1): the
+  // Null and "present but empty" are different facts: the
   // package writing `contributes.policy` at all is what counts, even `{}`.
   if (typeof value !== "object" || value === null) return null
   const record = value as Record<string, unknown>
@@ -436,8 +435,8 @@ export function modelTools(what: Pick<Contributions, "tools" | "internalTools">)
 }
 
 /**
- * A tool's `render` claim (`ToolSpec.ui.render`, DESIGN §7.2.1, tui-plugin
- * D12), read from whichever member of the frozen composition declares
+ * A tool's `render` claim (`ToolSpec.ui.render`),
+ * read from whichever member of the frozen composition declares
  * `tool`. Null when nothing declares it, or when the declaring package said
  * nothing — "absent" and "not a member" are the same answer to a reader that
  * only wants to know whether to draw a hinted card.
@@ -476,7 +475,7 @@ export async function readActiveContributions(
  * Whether some other process holds the session's writer lease.
  *
  * `unknown` is a first-class answer. The kernel takes an exclusive advisory lock
- * on the sibling `<id>.lock` (DESIGN §3.4); on Windows that is a byte-range lock,
+ * on the sibling `<id>.lock`; on Windows that is a byte-range lock,
  * so a read of byte 0 from any other handle fails while it is held — a probe
  * that touches nothing. On POSIX the same lease is `flock(2)` (Zig's std takes
  * it wherever `O_EXLOCK` is not an open flag), which reads cannot see — but on
@@ -574,9 +573,8 @@ function siblingPath(ws: Workspace, id: string, suffix: string): string {
 /**
  * Is there anything in this session's inbox waiting for a step boundary?
  *
- * The one question the wake-up policy asks (tui.md §5.9, goals/background.md
- * D8). A deposit is one file per event, written `.tmp` then renamed (DESIGN
- * §3.4), so a `.json` in there is a whole event nobody has drained — a finished
+ * The one question the wake-up policy asks. A deposit is one file per event,
+ * written `.tmp` then renamed, so a `.json` in there is a whole event nobody has drained — a finished
  * background task, a turn appended from another terminal, a capability note.
  * WHAT is in there is deliberately not read: the kernel drains it, and stepping
  * because the inbox is non-empty is true of every depositor there will ever be.
@@ -600,7 +598,7 @@ export function inboxPending(ws: Workspace, id: string): boolean {
 export const task_log_tail_bytes = 64 * 1024
 
 /**
- * The tail of a background task's `output.log` (DESIGN §6.1).
+ * The tail of a background task's `output.log`.
  *
  * Not a live tail — it is re-read on the panel's own poll, which is honest about
  * what it is and costs nothing between reads. The path comes from `task list
@@ -620,7 +618,7 @@ export async function readTaskLog(ws: Workspace, path: string, bytes = task_log_
 
 // --- the extension store ----------------------------------------------------
 
-/** DESIGN §7.4: what goes into a version id, and therefore what a build needs. */
+/** What goes into a version id, and therefore what a build needs. */
 export type ImplementationKind = "compiled" | "script" | "data"
 
 export interface ExtensionVersion {
@@ -630,12 +628,12 @@ export interface ExtensionVersion {
 
 export interface ExtensionEntry {
   id: string
-  /** `current` pointer: the version the NEXT session would freeze (DESIGN §7.5). */
+  /** `current` pointer: the version the NEXT session would freeze. */
   current: string | null
   versions: ExtensionVersion[]
   kind: ImplementationKind
   tools: string[]
-  /** The declared `manual`-surface subset of `tools` (DESIGN §7.2.1). */
+  /** The declared `manual`-surface subset of `tools`. */
   manualTools: string[]
   /**
    * The `manual` tools this version recommends switching on when the package is
@@ -643,12 +641,12 @@ export interface ExtensionEntry {
    * package declared an extra `recommended: false`.
    */
   recommendedTools: string[]
-  /** The declared `auto`-surface subset of `tools` (DESIGN §7.2.1). */
+  /** The declared `auto`-surface subset of `tools`. */
   autoTools: string[]
-  /** The declared `internal`-surface subset of `tools` (DESIGN §7.2.1). */
+  /** The declared `internal`-surface subset of `tools`. */
   internalTools: string[]
   /**
-   * What ONE VERSION declares about what activating it means (DESIGN §5.1),
+   * What ONE VERSION declares about what activating it means,
    * defaulting to `manual`. Read this about a version that is about to become
    * `current` — a candidate — because no record exists for it yet.
    *
@@ -658,7 +656,7 @@ export interface ExtensionEntry {
   apply: PackageApply
   /**
    * Whether the kernel composes this package into every fresh session on this
-   * machine right now (`ext list`'s `standing` marker, DESIGN §5.1).
+   * machine right now (`ext list`'s `standing` marker).
    *
    * The kernel's own effective answer, written into the `current` record by the
    * activation that verified the manifest — never re-derived here from a
@@ -675,7 +673,7 @@ export interface ExtensionEntry {
    */
   commands: PackageCommand[]
   ui: PackageUi | null
-  /** Which store root holds this copy (DESIGN §7.2). */
+  /** Which store root holds this copy. */
   root: string
   /** An earlier root has the same id active: this copy is never the one that runs. */
   shadowed: boolean
@@ -698,8 +696,8 @@ function stringList(value: unknown): string[] {
 
 /**
  * `contributes.system_prompts`, whose entries are a bare path or an object
- * carrying `path` plus an optional `position` (`manifest.SystemPromptSpec`,
- * DESIGN §5.6). Only the path is projected: `position` orders one session's
+ * carrying `path` plus an optional `position` (`manifest.SystemPromptSpec`).
+ * Only the path is projected: `position` orders one session's
  * system blocks, and this front end counts prompt files and names their source
  * — it never assembles the blocks itself.
  */
@@ -732,7 +730,7 @@ function manifestFacts(manifest: Record<string, unknown> | null): Pick<
 > {
   const runtime = manifest?.["runtime"] as Record<string, unknown> | undefined
   // `runtime.entry` is a string, or an object keyed by OS for a script that
-  // ships one file per platform (DESIGN §7.1); the kind is the same question
+  // ships one file per platform; the kind is the same question
   // asked of every variant, as `manifest.isScript` asks it.
   const rawEntry = runtime?.["entry"]
   const entries =
@@ -743,7 +741,7 @@ function manifestFacts(manifest: Record<string, unknown> | null): Pick<
         : []
   return {
     // `bin/` means the kernel compiles it, anything else is frozen as-is; no
-    // runtime at all is a pure skill/prompt package (DESIGN §7.1).
+    // runtime at all is a pure skill/prompt package.
     kind: entries.length === 0 ? "data" : entries.some((e) => e.startsWith("bin/")) ? "compiled" : "script",
     ...contributionsOf(manifest),
   }
@@ -809,7 +807,7 @@ export async function listExtensions(ws: Workspace): Promise<ExtensionEntry[]> {
 }
 
 /**
- * The ids that exist only as SOURCE (tui.md §11, T22).
+ * The ids that exist only as SOURCE.
  *
  * `ext list` lists what a root holds — a directory with a built version — so a
  * draft that has never built is not in it. That is right for the kernel and
@@ -857,13 +855,13 @@ export async function draftEntries(
 // --- the usage journal ------------------------------------------------------
 
 /**
- * The projection of `.nulya/tool-usage.jsonl` (DESIGN §5.5) — counts only.
+ * The projection of `.nulya/tool-usage.jsonl` — counts only.
  *
  * Deliberately NOT a ranking. Nothing ranks: a tool reaches the model's tool
  * face because somebody wrote a pin (`registry.pinned_native_tools`, or
  * `session new --pin`), and this journal is the evidence they read, never the
  * decision. Sorting it into "who is next" here would invent an order the kernel
- * does not have (tui.md §2.1).
+ * does not have.
  */
 export interface ToolUsage {
   toolId: string

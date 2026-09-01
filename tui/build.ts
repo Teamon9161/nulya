@@ -1,5 +1,5 @@
 /**
- * `bun run compile` — one file you can put on PATH (tui.md §9, T4).
+ * `bun run compile` — one file you can put on PATH.
  *
  * Only `src/main.tsx` is an entry point, so `test/` (and the driver-loop fixture
  * that lives there) never reaches the executable. The Solid plugin is the same

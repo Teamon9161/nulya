@@ -1,5 +1,5 @@
 /**
- * `@path` references in the composer (tui.md §11, T13).
+ * `@path` references in the composer.
  *
  * Everything about matching — where a token starts, which characters belong to
  * it, how candidates are ranked — is ported from tcode's `composer.rs`
@@ -214,7 +214,7 @@ export interface ReferenceMatch {
   /**
    * What was picked. A directory is not an answer, it is a step: accepting one
    * has to leave the token open so the menu can offer what is inside it, which
-   * is the difference between `@docs/` completing to `@docs/goals/ground.md`
+   * is the difference between `@docs/` completing to a file deeper inside it
    * and completing to nothing at all (`Composer.tsx`'s `acceptReference`).
    */
   kind: ReferenceKind

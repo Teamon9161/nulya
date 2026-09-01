@@ -1,8 +1,8 @@
 /**
  * Open sessions, one per tab — and, before the first message, one tab that is
- * not a session at all (tui.md §11, T22).
+ * not a session at all.
  *
- * A tab is a session plus its attachment (tui.md §5.5). The second tab exists
+ * A tab is a session plus its attachment. The second tab exists
  * for one reason: the agent drove another session from inside a step, and you
  * want to watch it. That session already has a writer — the parent's shell — so
  * the new tab attaches as an observer by construction; nothing here has to force
@@ -55,7 +55,7 @@ interface TabCommon {
   ws: Workspace
   /**
    * This tab's own pane tree — the content area, split however this tab has it
-   * (goals/tui-shell.md §5.3c point 1, T72).
+   * (goals/tui-shell.md §5.3c point 1).
    *
    * Beside `ws` because it is the same kind of fact: something the whole screen
    * used to hold once, which turned out to belong to a tab. Switching tabs
@@ -68,7 +68,7 @@ interface TabCommon {
   /**
    * The reasoning effort this tab's steps run with (`session step --effort`).
    * Per tab, not per session file: it is a generation option the driver
-   * chooses each step, never part of the frozen identity (DESIGN §3).
+   * chooses each step, never part of the frozen identity.
    * Undefined = whatever the kernel defaults to for the session's model.
    */
   effort: Accessor<string | undefined>
@@ -93,7 +93,7 @@ export interface DraftTab extends TabCommon {
 
 /**
  * A session this tab is WATCHING rather than having: a delegation followed in a
- * pane of its own (goals/tui-shell.md §5.3c, T72).
+ * pane of its own (goals/tui-shell.md §5.3c).
  *
  * The same machinery a tab gets — state, attachment, task watch, replayed
  * header — minus the strip. It is made through the same private factory a tab
@@ -124,7 +124,7 @@ export interface SessionTab extends TabCommon {
   id: string
   state: SessionState
   attach: Attachment
-  /** The delegations this tab has open in panes of its own (T72). */
+  /** The delegations this tab has open in panes of its own. */
   subs: Accessor<SubView[]>
   /**
    * Follow `id` in the pane `pane`. Idempotent per pane; a session already
@@ -136,7 +136,7 @@ export interface SessionTab extends TabCommon {
   /** Stop following whatever `pane` held. Unknown panes are ignored. */
   unwatch(pane: string): void
   /**
-   * The background tasks this session has, re-read on a beat (tui.md §5.9).
+   * The background tasks this session has, re-read on a beat.
    * Per tab because a task belongs to a session and outlives every step of it —
    * and because the interval has to stop when the tab does.
    */
@@ -182,7 +182,7 @@ export interface SessionExtras {
   pin?: readonly string[]
   /**
    * `--bare`: ignore the config's standing `[extensions] with` and
-   * `pinned_native_tools`, composing from these flags alone (DESIGN §14). A
+   * `pinned_native_tools`, composing from these flags alone. A
    * sub-agent tab is what wants it, and it comes from the agent package's own
    * `render` rather than being decided here (`agents.ts`).
    */
@@ -194,7 +194,7 @@ export interface SessionExtras {
    */
   prompt?: readonly string[]
   /**
-   * `--env <spec>`: where this session's `shell` commands run (DESIGN §8.1).
+   * `--env <spec>`: where this session's `shell` commands run.
    * It joins the composition here rather than in `DraftTab` because it is the
    * same kind of thing every other entry on this list is — a decision the
    * screen makes once, at the moment a draft freezes, and never again.
@@ -203,7 +203,7 @@ export interface SessionExtras {
   /**
    * `--workspace <dir>`: the remote machine's absolute directory this
    * session's `shell` and every workspace-reading tool run against — only
-   * meaningful beside a `remote:` `execEnv` (goals/remote-env.md §3.3, T101).
+   * meaningful beside a `remote:` `execEnv`.
    */
   workspace?: string
   /** Fresh transient bytes for the `session new` process only. */
@@ -244,7 +244,7 @@ export interface TabStore {
    * that sentence and leave the draft where it is.
    *
    * `extra` is whatever the SCREEN decided this session should also carry — the
-   * `handoff` package, today (tui.md §5.8). It arrives as an argument rather
+   * `handoff` package, today. It arrives as an argument rather
    * than as tab state because it is a policy the caller owns and may not have
    * resolved (a build) until this very moment.
    */
@@ -302,7 +302,7 @@ export interface TabStore {
 /**
  * Load what a freshly opened session needs: the frozen header, what its frozen
  * extension versions contribute, and the whole event tail. Replay comes first so
- * that `--session <id>` paints what the live session left behind (tui.md §3).
+ * that `--session <id>` paints what the live session left behind.
  */
 async function hydrate(
   ws: Workspace,
@@ -313,7 +313,7 @@ async function hydrate(
   const header = await readHeader(ws, id)
   state.setHeader(header)
   // The FROZEN versions, not the store's `current`: what this session runs was
-  // decided at `session new` and cannot move (DESIGN §7.5).
+  // decided at `session new` and cannot move.
   if (header) setContributions(await readActiveContributions(ws, header.composition.active))
   try {
     state.applyEvents(await sessionEvents(ws, id))
@@ -409,13 +409,13 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
   }
 
   /**
-   * A delegation followed in one of this tab's panes (T72).
+   * A delegation followed in one of this tab's panes.
    *
    * `driven: false` is not a policy this makes up — it is what every session
    * opened here rather than created here already passes, and the reason a
    * delegation's pane observes: the sub-session's writer is the background task
    * driving it, so the lease decides and this never spawns a step of its own
-   * (`state/attach.ts`, tui.md §5.6). Nothing here is created on disk, so
+   * (`state/attach.ts`). Nothing here is created on disk, so
    * letting go is only detaching.
    */
   function makeSub(ws: Workspace, pane: string, id: string, label?: string): SubView {

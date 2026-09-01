@@ -16,8 +16,7 @@ export interface Wearable {
 }
 
 /**
- * Bare `/with`: which modes this machine could wear for one session (tui.md
- * §11, T37/K8).
+ * Bare `/with`: which modes this machine could wear for one session.
  *
  * The list is DERIVED, and that is the whole point of the command: a package
  * with a `current` and a system prompt. So this dialog offers exactly what has
@@ -25,7 +24,7 @@ export interface Wearable {
  * The front end knows no ids of its own.
  *
  * Same dialog above the composer as `/mode` and `/agent`, for the same reasons
- * (T28/T31): it is a CHOICE — hence the `◈` — and short enough that a full
+ *: it is a CHOICE — hence the `◈` — and short enough that a full
  * screen would be a screen mostly empty. Unlike `/agent`, taking a row acts:
  * wearing a package needs no argument nobody can guess, so the honest thing is
  * to open the tab.

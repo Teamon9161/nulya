@@ -5,13 +5,13 @@ import type { ToolPresentation } from "../registry.ts"
 
 /**
  * A tool the agent built for itself, promoted onto the model's tool face at a
- * session boundary (DESIGN §5.1/§5.5). It is a normal tool call — folded like
+ * session boundary. It is a normal tool call — folded like
  * any other output — but it carries the extension glyph, because a call the
  * kernel did not ship with is worth recognising at a glance.
  */
 export function ExtToolCard(props: { item: ToolItem; presentation: ToolPresentation }) {
   const style = useStyle()
-  // Same discipline as every other card (T26): how much came back, and a word
+  // Same discipline as every other card: how much came back, and a word
   // only when something went wrong.
   const chip = () => {
     if (props.item.state === "pending") return "…"

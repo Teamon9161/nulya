@@ -1,7 +1,7 @@
 /**
- * `TasksPanel` (tui.md §11, tasks panel): the composer-area, mouse-only view
+ * `TasksPanel` (tasks panel): the composer-area, mouse-only view
  * of a session's background tasks — the same terms every panel in that region
- * lives under (nothing at rest draws anything, T35/T38), plus the one thing
+ * lives under (nothing at rest draws anything), plus the one thing
  * specific to this one: a running row's stop button fires `onStop` with the
  * task's full name and nothing else, and a finished row has no button at all.
  */

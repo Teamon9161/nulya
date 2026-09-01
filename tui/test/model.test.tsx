@@ -1,8 +1,8 @@
 /**
- * `/model` (tui.md §11, T5 → T21): the picker over `nulya config show --json`,
+ * `/model`: the picker over `nulya config show --json`,
  * the launch plan, and the one file the TUI writes (`tui-state.json`).
  *
- * Since T21 this screen is models and nothing else — keys, endpoints and the
+ * This screen is models and nothing else — keys, endpoints and the
  * add-provider form are `/provider` and are tested in `provider.test.tsx`,
  * including the handoff between the two.
  *
@@ -206,7 +206,7 @@ test("/model is models and only models: grouped under their provider, nothing ab
     const frame = await settle(setup, 4)
     expect(frame).toContain("model · what the next session runs on")
     // The models of the providers that can run, each group under a heading that
-    // names its provider once (T31) — and NOT the models of the ones that
+    // names its provider once — and NOT the models of the ones that
     // cannot: no key, no row, no heading.
     const rows = frame.split("\n").map((line) => line.replace(/\s+$/, ""))
     const group = rows.findIndex((line) => line.trim() === "deepseek")
@@ -223,8 +223,8 @@ test("/model is models and only models: grouped under their provider, nothing ab
     // The offline stand-in can run, so it is a group of its own — and the fact
     // that it is a stand-in belongs to the provider, so it is on the heading.
     expect(frame).toContain("scripted · offline stand-in")
-    // T21: no providers row, and none of the provider keys are advertised here.
-    // Credentials are a command of their own now, not the tail of this list.
+    // No providers row, and none of the provider keys are advertised here.
+    // Credentials are a command of their own, not the tail of this list.
     expect(frame).not.toContain("providers ·")
     expect(frame).not.toContain("s paste a key")
     expect(frame).not.toContain("no key")
@@ -456,7 +456,7 @@ test("planLaunch: flags > last pick > active profile, and nothing runnable means
   // No memory, active profile has no key: same, blaming the active profile.
   expect(planLaunch({}, undefined, fake).guide).toContain("openai has no API key")
   // But with no real provider working at all, a list of models has nothing to
-  // offer: the first screen is the one that takes a key (T21).
+  // offer: the first screen is the one that takes a key.
   const stranded: ConfigView = {
     ...fake,
     profiles: fake.profiles.map((p) => (p.kind === "scripted" ? p : { ...p, credential: false })),
@@ -513,7 +513,7 @@ test("picking in /model writes the draft, not a session", async () => {
     expect(setup.captureCharFrame()).toMatch(/▾ scripted-demo/)
     setup.mockInput.pressEnter()
     // Enter on a draft spawns no process and writes no file: it says what the
-    // first message will start, and the pick is remembered (tui.md §11, T22).
+    // first message will start, and the pick is remembered.
     await until(() => setup.captureCharFrame().includes("starts when you send a message"), 15_000)
     expect(loadTuiState(statePath).model).toEqual({ profile: "scripted", model: "scripted-demo", effort: undefined })
     expect((await sessionList(ws)).length).toBe(before)
@@ -539,7 +539,7 @@ test("/effort sets this tab's effort: the header shows it and the next step is s
     await until(() => setup.captureCharFrame().includes("effort high"), 10_000)
     // The effort rides with the model, as tcode writes it: `id (effort)` — on
     // the bottom line, once the notice that answered `/effort` has come down
-    // off it on its own (T35).
+    // off it on its own.
     await until(() => statusLine(setup).includes("scripted-demo (high)"), 15_000)
     expect(loadTuiState(statePath).model?.effort).toBe("high")
     // The scripted provider ignores effort, but the flag must not break the
@@ -625,9 +625,9 @@ test("a guide can open on /provider instead, when there is no model anywhere to 
   }
 }, 60_000)
 
-// --- rebind: /model on a session that already exists (BUGS.md #12) ----------
+// --- rebind: /model on a session that already exists ----------
 //
-// The kernel grew `session rebind` (goals/model-rebind.md): a `model_rebind`
+// The kernel grew `session rebind`: a `model_rebind`
 // event is deposited into the inbox, drained at the next step boundary, and the
 // identity in force from then on is the one it names. What is tested here is the
 // front end's half — that Enter on a live tab MOVES that session instead of

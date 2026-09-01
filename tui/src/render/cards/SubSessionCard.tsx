@@ -11,13 +11,13 @@ import type { ToolPresentation } from "../registry.ts"
 
 /**
  * A call that opened a session of its own: a delegation, or `nulya session new`
- * through `shell` (tui.md §5.5, §5.10).
+ * through `shell`.
  *
  * It used to be an `EvolveCard` — the right picture for `session new`, and
  * half a picture for a delegation, because a delegation is not an action that
  * FINISHED. The call returns a receipt: somewhere else, a background task is
  * driving a session that will report back later. Two things follow, and they
- * are this card (T43).
+ * are this card.
  *
  * ONE, IT SAYS HOW IT IS GOING. The note is the same reading a background
  * `shell` gets (`state/tasks.ts`): the ledger's report once it has landed,
@@ -31,7 +31,7 @@ import type { ToolPresentation } from "../registry.ts"
  * what `nulya task status` wants).
  *
  * TWO, IT CAN BE OPENED. `Enter` in browse mode has opened the named session
- * since T3 and nothing on screen said so — an affordance three keystrokes deep
+ * and nothing on screen said so — an affordance three keystrokes deep
  * and undocumented is not one. The link is a row under the head line, outside
  * the fold, so it is there whether or not the body is; it opens the same tab
  * the same way (`state/navigate.ts`), and following it is how you watch a
@@ -66,7 +66,7 @@ export function SubSessionCard(props: { item: ToolItem; presentation: ToolPresen
     // (see ONE, above): the head line already says which agent and what for.
     if (started) return backgroundNote(started, props.item.taskResult, tasks(), { showTask: false })
     // `nulya session new` and the like: an action that already happened, and a
-    // successful one says nothing (T26).
+    // successful one says nothing.
     const exit = shell().exit
     if (exit !== null && exit !== 0) return { text: `exit ${exit}`, failed: true }
     return { text: props.item.ok === false ? "failed" : "", failed: props.item.ok === false }
@@ -110,7 +110,7 @@ export function SubSessionCard(props: { item: ToolItem; presentation: ToolPresen
     // link to nowhere is worse than no link.
     if (!target) return null
     /**
-     * FOUR, SINCE T72 IT OPENS BESIDE THIS CONVERSATION, NOT INSTEAD OF IT.
+     * IT OPENS BESIDE THIS CONVERSATION, NOT INSTEAD OF IT.
      * A delegation is subordinate to the turn that made it, and a tab of its
      * own said the opposite — a peer on the strip, with nothing on screen
      * relating the two. So the one row this card offers is the one gesture
@@ -120,7 +120,7 @@ export function SubSessionCard(props: { item: ToolItem; presentation: ToolPresen
      * a card would then carry two links of near-identical text for one
      * destination, on every delegation in the transcript. It is `t` in browse
      * mode instead — the same word `/sessions` already uses for "and give it
-     * a tab" (T70), so the vocabulary is one and the rare gesture costs no
+     * a tab", so the vocabulary is one and the rare gesture costs no
      * pixels.
      *
      * The row's text carries no id — `watch here`, not `watch d-… here` —

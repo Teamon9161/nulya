@@ -1,10 +1,10 @@
 /**
- * The note a person attaches to an approval (tui.md §5.7).
+ * The note a person attaches to an approval.
  *
  * tcode's approval dialog lets any option carry a free-text comment: "yes, but
  * use the other flag" reaches the model without making it redo the work, and
  * "no, because…" tells it why. The kernel's gate has a channel for exactly half
- * of that — `deny <note>` becomes the marker result of that call (DESIGN §4) —
+ * of that — `deny <note>` becomes the marker result of that call —
  * and there is deliberately no `allow <note>`: an allowed call runs, and what
  * the model then reads is the tool's own output. Growing a second payload on
  * `allow` would mean the kernel deciding where a person's words belong in a

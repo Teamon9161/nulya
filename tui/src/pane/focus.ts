@@ -1,12 +1,10 @@
 /**
- * Who owns the keyboard, in one function (goals/tui-shell.md §0).
+ * Who owns the keyboard, in one function.
  *
  * "High freedom without fights" rests on two structural rules, and this is the
  * second of them: **the keyboard has a single arbiter, and it is the host**.
- * Before T68 the answer was spread across a chain of `if`s in `App.tsx`, each
- * one correct and none of them stating the order out loud. Nothing about the
- * order changes here — this file is that chain, written down as a value so it
- * can be read, tested, and pointed at when S2 asks "can my surface have the
+ * This file is that arbitration, written down as a value so it
+ * can be read, tested, and pointed at when a surface asks "can my surface have the
  * keyboard?" (answer: only when a person focused its pane, and only when no
  * trusted zone is up).
  *
@@ -17,7 +15,7 @@
  *     (§1.1): the screens that would be a security incident if a package could
  *     imitate or outrank them.
  *  2. the focused pane, when its surface claims the keyboard (a full-screen
- *     view: `/ext`, `/sessions`, …). Before T68 this was `overlay.active()`.
+ *     view: `/ext`, `/sessions`, …).
  *  3. a plugin's panel.
  *  4. browse mode.
  *  5. the composer — the default, and the only one that is not exclusive.
@@ -49,8 +47,8 @@ export interface FocusState {
   /** Ctrl or Meta is held: the chord outranks every claim below (see above). */
   readonly modified: boolean
   /**
-   * A directory this screen just walked into is asking to be trusted
-   * (goals/tui-shell.md §5.3b point 6, DESIGN §9). Outermost of the dialogs
+   * A directory this screen just walked into is asking to be trusted.
+   * Outermost of the dialogs
    * because it is the only one that grants AUTHORITY rather than choosing
    * something: it is put once per directory, and until it is answered the
    * things it is about take no part in any session.
@@ -74,7 +72,7 @@ export function resolveFocus(state: FocusState): FocusOwner {
     // The pickers in the order they can stack: `/with`, `/agent` and `/env`
     // are only ever opened on purpose, while the mode picker can be opened FROM
     // the approval dialog by clicking the chip — the one moment two of these are
-    // on screen at once (tui.md §5.7, T31).
+    // on screen at once.
     if (state.password) return { kind: "dialog", dialog: "password" }
     if (state.checkout) return { kind: "dialog", dialog: "checkout" }
     if (state.withPicker) return { kind: "dialog", dialog: "with" }
@@ -92,7 +90,7 @@ export function resolveFocus(state: FocusState): FocusOwner {
 
 /**
  * Whether the composer may keep its cursor. Everything else on this screen is
- * exclusive, and a box that still blinks is a box saying "type here" (T28).
+ * exclusive, and a box that still blinks is a box saying "type here".
  */
 export function composerHasKeyboard(owner: FocusOwner): boolean {
   return owner.kind === "composer"

@@ -1,11 +1,11 @@
 /**
  * A delegation, watched inside the conversation that made it
- * (goals/tui-shell.md §5.3c, tui.md §5.5, T72).
+ * (goals/tui-shell.md §5.3c).
  *
  * The whole surface is three things: a line saying whose work this is, the
  * hairline that attaches it to the pane it split off from, and the same
  * `Transcript` the tab itself draws. Nothing here is a second way of showing a
- * session — it is the observer view this front end already had (tui.md §5.6),
+ * session — it is the observer view this front end already had,
  * put in a pane instead of a tab.
  *
  * WHY IT SAYS SO IN A LINE OF ITS OWN. Two transcripts on one screen is the
@@ -17,7 +17,7 @@
  *
  * WHY THE RULE. §6.1 keeps box-drawing for when ownership has to be said out
  * loud, and this is that case: the sidebar's boundary separates two independent
- * places (air is enough, T69), while this one says CONTAINED IN. It is one
+ * places (air is enough), while this one says CONTAINED IN. It is one
  * side, never four — a frame would make the pane look like a control, and this
  * front end still has exactly one bordered object (the composer).
  */
@@ -33,7 +33,7 @@ import { TasksContext } from "../state/tasks.ts"
 import type { SplitDirection } from "../pane/tree.ts"
 import type { SubView } from "../state/tabs.ts"
 
-/** The ascii border set, one side of it. The composer's discipline (T4). */
+/** The ascii border set, one side of it. The composer's discipline. */
 const ascii_border = {
   topLeft: "+",
   topRight: "+",
@@ -49,12 +49,12 @@ const ascii_border = {
 }
 
 /**
- * The attribution line, as text (T72).
+ * The attribution line, as text.
  *
  * A pure function so the one sentence this pane makes can be asserted without a
  * terminal: `⤷ explore · find the writers · observing`. The persona comes from
  * the watched session's own frozen header through `personaOf` — the SAME
- * reading the sessions list filters delegated conversations by (T70) — so a
+ * reading the sessions list filters delegated conversations by — so a
  * pane and a row cannot disagree about which agent a session is; `label` is
  * `SubSessionCard`'s task excerpt, not the delegation's `d-…` id (id-vs-task
  * readability pass) — the persona already says which agent, so the label says
@@ -98,8 +98,8 @@ export function SubAgentPane(props: {
    * The keys, only while this pane holds them.
    *
    * `useKeyboard` is global, so a surface that listens unconditionally fires
-   * alongside every other one on screen — the rule T69 wrote down for the
-   * docked rail, and the same one a package's T2 face will have to follow.
+   * alongside every other one on screen — the same rule the docked rail
+   * follows, and the same one a package's own surface will have to follow.
    * Read-only: the vocabulary is scrolling and leaving, and nothing here can
    * say anything to the conversation it is watching.
    */
@@ -153,7 +153,7 @@ export function SubAgentPane(props: {
           {fit(attribution(), room())}
         </text>
         <box flexGrow={1} />
-        {/* The same word the tab strip uses for the same act (T70): a button
+        {/* The same word the tab strip uses for the same act: a button
             named after what it does. `faint` until the pointer is on it —
             the only control in this pane that loses something. */}
         <text
@@ -171,7 +171,7 @@ export function SubAgentPane(props: {
           name (`<sid>/tN`), so the parent's projection would simply never
           match and every such card would fall back to the ledger — honest, but
           a poll running for nobody. The pane is a session view like any other,
-          so it brings its own (tui.md §5.9). */}
+          so it brings its own. */}
       <TasksContext.Provider value={props.view.tasks.tasks}>
         {/* No `onCommand`, no `cwd`, no `plan`: this transcript has no composer
             under it, so it makes no offers. The welcome screen is the

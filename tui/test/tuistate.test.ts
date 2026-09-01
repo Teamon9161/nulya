@@ -1,5 +1,5 @@
 /**
- * `state/tui_state.ts`'s remote additions (tui.md §11 T101/T102): the
+ * `state/tui_state.ts`'s remote fields: the
  * workspace that travels with `exec_env`, per-machine directory recents, and
  * the last `ext push` outcome per package.
  */
@@ -66,7 +66,7 @@ test("a remembered bare ssh: exec target (retired 2026-08-30) is dropped back to
   try {
     // Written directly, not through `rememberExecEnv`: this is state left
     // behind by an OLDER build, from before `ssh:<dest>` was refused as an
-    // exec target (goals/remote-env.md §7.1) — the load path is what has to
+    // exec target — the load path is what has to
     // cope with it, not the write path.
     writeFileSync(state.path, JSON.stringify({ exec_env: "ssh:box" }))
     expect(loadTuiState(state.path).exec_env).toBeUndefined()

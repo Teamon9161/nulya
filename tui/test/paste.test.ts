@@ -1,5 +1,5 @@
 /**
- * Folding a long paste (tui.md §11, T14).
+ * Folding a long paste.
  *
  * The threshold test is tcode's `long_or_multiline_pastes_fold_into_attachments`
  * boundary for boundary — the constants are ported, so the edges should be

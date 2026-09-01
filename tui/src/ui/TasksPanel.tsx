@@ -1,5 +1,5 @@
 /**
- * The background count on the activity line, opened out (tui.md §11, T87).
+ * The background count on the activity line, opened out.
  *
  * A composer-area panel like `ApprovalPanel` and a package's own `PluginPanel`
  * — NOT `/tasks`'s full-screen overlay (`overlays/TasksView.tsx`) — because

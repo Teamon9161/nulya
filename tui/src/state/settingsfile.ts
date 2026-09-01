@@ -1,6 +1,5 @@
 /**
- * The one thing `/settings` writes: a single key in the user's `tui.toml`
- * (tui.md §1.2 D10, §11 T100).
+ * The one thing `/settings` writes: a single key in the user's `tui.toml`.
  *
  * `tui.toml` is the person's file — hand-written, commented, ordered the way
  * they ordered it — so it is never re-serialised. What an edit does is find
@@ -30,7 +29,7 @@
  * settings file that no longer parses would take the whole screen's
  * configuration with it, and a wrong guess must cost nothing but a message.
  *
- * TWO MORE PROPERTIES, ADDED WHEN AN EXTERNAL REVIEW ASKED FOR THEM (T103).
+ * TWO MORE PROPERTIES, ADDED WHEN AN EXTERNAL REVIEW ASKED FOR THEM.
  * The edit is patched against a FRESH re-read of `path`, taken immediately
  * before the replacement is constructed (`patchAgainstFreshest`) — which
  * shrinks, but does not close, the window in which a person's own editor
@@ -240,7 +239,7 @@ export function layerSets(layer: Record<string, unknown> | null, dotted: string)
 
 /**
  * The patch-and-validate half of `writeSetting`, with the disk read handed
- * in as a function (T103, an external review point).
+ * in as a function (an external review point).
  *
  * `read` is called TWICE on purpose: once to compute the edit, once more
  * right before it is accepted. Re-patching against a second, later answer

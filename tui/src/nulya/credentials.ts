@@ -1,7 +1,7 @@
 /**
  * The two things the TUI writes into the kernel's user config: a profile's
  * `api_key` (pasted in `/model`), and a whole profile for an OpenAI- or
- * Anthropic-compatible endpoint the person adds there (tui.md §1.2 D10).
+ * Anthropic-compatible endpoint the person adds there.
  *
  * The file is the person's — hand-written, commented — so it is never
  * rewritten. What we add lands as a small block at the end, marked so it can be

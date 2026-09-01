@@ -1,5 +1,5 @@
 /**
- * `/provider` (tui.md §11, T21): the endpoints, their keys, the add form — and
+ * `/provider`: the endpoints, their keys, the add form — and
  * the handoff to `/model`, which is the whole point of splitting the two.
  *
  * The pair is exercised through a two-screen harness rather than through `App`:
@@ -294,7 +294,7 @@ test("s pastes a key where the key belongs, and the models screen gains that pro
     setup.mockInput.pressEnter()
     await until(() => setup.captureCharFrame().includes("GPT-5.6 Sol"), 10_000)
     const frame = await settle(setup, 3)
-    // Grouped under their provider since T31: the heading names it once, and
+    // Grouped under their provider the heading names it once, and
     // the models it just gained are the rows under it.
     const rows = frame.split("\n").map((line) => line.replace(/\s+$/, ""))
     const group = rows.findIndex((line) => line.trim() === "openai")

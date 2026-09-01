@@ -1,5 +1,5 @@
 /**
- * The pin panel's policy (tui.md §11, T12).
+ * The pin panel's policy.
  *
  * Two halves. The transitions and the quota line are pure — "what would the next
  * session's tool face be" is a question that must be answerable without a
@@ -148,7 +148,7 @@ test("the quota counts the builtin, because max_tools does", () => {
   // Over the line the panel does not prevent anything; it says what will happen
   // — in a sentence, and with the way out in it. `2+9/8 · nothing changed` was
   // the whole explanation somebody got for a switch that would not switch
-  // (tui.md §11, T23).
+  //.
   expect(quotaLine(8, 8)).toContain("tools 1+8/8")
   expect(quotaLine(8, 8)).toContain("1 more than registry.max_tools allows")
   expect(quotaLine(8, 8)).toContain("unpin one in the tools pane")
@@ -186,10 +186,8 @@ test("rows come only from extensions a pin could actually resolve through", () =
 })
 
 test("collapsed, the list is the switches: `auto` and `internal` rows both fold away", () => {
-  // The surfaces are the packages' own (DESIGN §7.2.1) — which is why `agent`
-  // splits: one pinnable tool, three internal ones. Before T34 the whole package
-  // was internal because its id was on a list here, and its delegation entry
-  // point was folded away with the rest.
+  // The surfaces are the packages' own — which is why `agent`
+  // splits: one pinnable tool, three internal ones.
   const entries: ExtensionEntry[] = [
     { ...entry("agent", "v-1", ["agent", "list", "render", "run"]), manualTools: ["agent"], internalTools: ["list", "render", "run"] },
     { ...entry("compact", "v-1", ["compact"]), manualTools: [], internalTools: ["compact"] },
@@ -200,7 +198,7 @@ test("collapsed, the list is the switches: `auto` and `internal` rows both fold 
 
   // Collapsed: every remaining row is a switch somebody can throw. The `auto`
   // pair is gone with the internal four — a checkbox no key in this pane can
-  // change is worse than no row (T59).
+  // change is worse than no row.
   expect(shownRows(rows, false).map((row) => row.id)).toEqual([
     toolId("agent", "agent"),
     toolId("std", "grep"),
@@ -301,7 +299,7 @@ test("the `this TUI` list becomes --pin, and the kernel freezes exactly it", asy
       runtime: { entry: "src/main.sh", interpreter: "sh" },
       contributes: {
         // `surface: "manual"` out loud: the kernel's default is `auto` now, and
-        // only a `manual` tool may be named by a pin (DESIGN §7.2.1, T52).
+        // only a `manual` tool may be named by a pin.
         tools: [
           { name: "append", description: "add a line", surface: "manual", input: { type: "object", properties: {} } },
           { name: "read", description: "read it back", surface: "manual", input: { type: "object", properties: {} } },
@@ -322,7 +320,7 @@ test("the `this TUI` list becomes --pin, and the kernel freezes exactly it", asy
   expect(header!.composition.native_tools).not.toContain("ext:notes/read")
 
   // And a pin the store cannot resolve is the kernel's refusal, verbatim —
-  // never something the panel predicts (DESIGN §5.1).
+  // never something the panel predicts.
   await expect(sessionNew(ws, { profile: "scripted", pin: ["ext:notes/nosuch"] })).rejects.toThrow(/pin/)
 })
 

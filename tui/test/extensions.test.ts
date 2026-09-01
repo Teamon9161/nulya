@@ -1,5 +1,5 @@
 /**
- * Installing what is on disk (tui.md §11, T11): the parse of `ext sync`, the
+ * Installing what is on disk: the parse of `ext sync`, the
  * decision about a project store, and the three keys the question offers.
  *
  * The parse runs against the REAL binary — a store root with drafts in it, and
@@ -238,7 +238,7 @@ test("a finished pass leaves one line worth reading, and names what it could not
   expect(summarize("this checkout", report(["0 built, 0 already built, 2 failed"]))).toBe("this checkout: 0 built · 2 failed")
 
   // A count is not news anybody can act on. `std: needs zig` scrolling past as
-  // "3 failed" is how it stayed invisible (tui.md §11, T22).
+  // "3 failed" is how it stayed invisible.
   const failed = report([
     "std: needs zig (compiled draft; set NULYA_ZIG or use the embedded toolchain)",
     "guide: v-abc123456789 already built",
@@ -348,7 +348,7 @@ test("the binary's bundled drafts seed into a store — dry-run counts them, a s
     expect(again.mine).toEqual([])
 
     // An edited draft is somebody's: seeding names it and leaves it, and only
-    // `--force` puts the binary's own source back (T42).
+    // `--force` puts the binary's own source back.
     const manifest = join(home, "extensions", "guide", "extension.json")
     const shipped = readFileSync(manifest, "utf8")
     writeFileSync(manifest, `${shipped}\n`)
@@ -392,7 +392,7 @@ test("bundled ask, handoff, and plan expose member-scoped tools without writing 
     expect(pinsOf(plan)).toEqual([])
     // None of the three asks to be in every session, so the start-up pass may
     // point `current` at all of them without deciding anything for anybody —
-    // including `plan`, which contributes a system prompt (T52).
+    // including `plan`, which contributes a system prompt.
     expect(ask.apply).toBe("manual")
     expect(handoff.apply).toBe("manual")
     expect(plan.apply).toBe("manual")
@@ -402,7 +402,7 @@ test("bundled ask, handoff, and plan expose member-scoped tools without writing 
 }, 120_000)
 
 /**
- * The bundled install is nobody's question any more (tui.md §11, T23), so the
+ * The bundled install is nobody's question any more, so the
  * whole of the consent lives in one rule: only what `ext seed` says arrived THIS
  * run is turned on. The first two cases are that rule with no binary in sight —
  * each returns before it would spawn anything.
@@ -432,7 +432,7 @@ test("only the bundled ids that arrived this run are activated", async () => {
  * It used to be the one exception: activating a package that contributed a
  * system prompt composed it, so every session on the machine started paying for
  * that prompt, and a background pass had no business deciding it. Activating
- * composes nothing now (DESIGN §5.1) — `[extensions] with` and `/ext`'s Enter
+ * composes nothing now — `[extensions] with` and `/ext`'s Enter
  * are what would — so the exception has nothing left to protect.
  *
  * Against a real store, because the claim is that the pointer MOVES: a
@@ -475,22 +475,9 @@ test("a bundled mode that arrives is activated too, and the pointer really moves
 })
 
 /**
- * The guard that used to live here is gone, and what it was for is worth
- * keeping written down.
- *
- * `autoActivatable` / `safeToActivateUnattended` refused to let a background
- * pass activate an `apply: "auto"` package, because of T31: `evolution` was
- * activated on the way in and every model on the machine then believed it was
- * the slow loop. But the thing that made that possible was DISCOVERY —
- * activation implying membership — and discovery went away with `activation`
- * (ext-review-2 Lane K). `evolution` is `apply: "manual"` today and shaped like
- * `plan`: activating it composes it into nothing.
- *
- * So the guard ended up holding exactly one bundled package — `guide`, whose
- * whole contribution is a line in the skill catalog — while the shape it was
- * written against (`apply: "auto"` plus a system prompt) is what the field is
- * FOR, and only ever arrives because somebody installed it. What replaces it is
- * saying so: the pass names what now reaches every session.
+ * A background sync pass activates an `apply: "auto"` package without asking,
+ * and says so: the pass names what now reaches every session, rather than
+ * silently deciding whether to activate it.
  */
 test("a first install is activated, pinned as the package asks, and named for what it now reaches", async () => {
   const store = tempWorkspace()
@@ -587,7 +574,7 @@ test("a package that is merely rebuilt gets no pins written for it", async () =>
 }, 120_000)
 
 /**
- * …and the same rule for a candidate whose own manifest cannot be read (T56).
+ * …and the same rule for a candidate whose own manifest cannot be read.
  *
  * `builtContributions` returning null used to SKIP the guard: the caller asked
  * `if (built && !safe(built))`, so a version this front end could not read at
@@ -710,9 +697,9 @@ test("a slash command exists exactly when the manifest declares it; wearCommand 
 })
 
 /**
- * `planCheckout` merges the workspace store question (DESIGN §9) and the
- * agent-definitions question (tui.md §5.10) into the one this screen actually
- * asks (T2, ext-review-2 §3b): nothing when neither needs a look, today's own
+ * `planCheckout` merges the workspace store question and the
+ * agent-definitions question into the one this screen actually
+ * asks (ext-review-2 §3b): nothing when neither needs a look, today's own
  * question unchanged when only one does, and a new three-answer question when
  * both do — never two prompts stacked on the same terminal.
  */
@@ -831,7 +818,7 @@ test("what a built version contributes is read from the root that sync wrote it 
     expect(what?.systemPrompts).toEqual(["prompts/identity.md"])
     // A manifest that says nothing about `apply` means `manual`, exactly as the
     // kernel reads it — so contributing a prompt does not by itself keep this
-    // package off the start-up pass (T52).
+    // package off the start-up pass.
     expect(what!.apply).toBe("manual")
   } finally {
     store.cleanup()
@@ -839,9 +826,9 @@ test("what a built version contributes is read from the root that sync wrote it 
 })
 
 /**
- * The four hard-coded lists this file used to hold are gone (tui.md §11, T34):
+ * The four hard-coded lists this file used to hold are gone:
  * which of a package's tools belong on the model's face is the package's own
- * word (`surface`, DESIGN §7.2.1), read out of the frozen manifest.
+ * word (`surface`), read out of the frozen manifest.
  */
 test("the pins an activation writes come from the manifest, per tool, for a package nobody here has heard of", () => {
   const pkg = (id: string, manualTools: string[], internalTools: string[] = []) => ({
@@ -899,7 +886,7 @@ test("the switch pins every pinnable tool a package declares, whatever kind of p
 })
 
 /**
- * The one thing `recommended` exists to let a package say (DESIGN §5.1).
+ * The one thing `recommended` exists to let a package say.
  *
  * `manual` means on-once-installed and closable one tool at a time — that is
  * the whole difference from `auto`, where the tool is on because the package is
@@ -928,7 +915,7 @@ test("turning a package on writes the pins it recommends, and an extra it does n
 
 /**
  * The three surface words, off a real built manifest — including the one a
- * manifest does not write (T52).
+ * manifest does not write.
  *
  * The default matters more than the words do. It used to be `pin`, so a tool
  * that said nothing landed in the pinnable half; it is `auto` now, because a
@@ -954,7 +941,7 @@ test("the std pin list is the frozen manifest's, with the literal only as a cold
             { name: "read", input: {}, surface: "manual", readonly: true },
             { name: "edit", input: {}, surface: "manual" },
             // An extra: pinnable, but not something turning the package on
-            // should switch on for everybody (`recommended`, DESIGN §5.1).
+            // should switch on for everybody (`recommended`).
             { name: "demolish", input: {}, surface: "manual", recommended: false },
             // An internal tool a future std might grow: it must not be pinned,
             // and no edit to this file is needed for that to hold.
@@ -989,7 +976,7 @@ test("the std pin list is the frozen manifest's, with the literal only as a cold
 
 /**
  * A package that asks for standing membership, read off a real built manifest
- * (T52). It is the one declaration that keeps the start-up pass from pointing
+ *. It is the one declaration that keeps the start-up pass from pointing
  * `current` at it, so the fixture is a whole build rather than a literal.
  */
 test("a manifest that says `apply: auto` is read as such, and kept off the unattended pass", async () => {
@@ -1125,7 +1112,7 @@ test("[env.wsl] parses field by field, leaving fields it did not mention at the 
   }
 })
 
-test("[env.remote] parses the same way, and does not leak into [env.wsl] / [env.local] (T101)", async () => {
+test("[env.remote] parses the same way, and does not leak into [env.wsl] / [env.local]", async () => {
   const layer = tempWorkspace()
   try {
     mkdirSync(join(layer.dir, ".nulya"), { recursive: true })
@@ -1142,7 +1129,7 @@ test("[env.remote] parses the same way, and does not leak into [env.wsl] / [env.
   }
 })
 
-test("[env.ssh] is an unrecognised key now that the exec-target ssh: spelling is retired (goals/remote-env.md §7.1)", async () => {
+test("[env.ssh] is an unrecognised key now that the exec-target ssh: spelling is retired", async () => {
   // `session new --env ssh:<dest>` itself is refused (`launch.legacySshHint`
   // points at `remote:ssh:` instead), so a `[env.ssh]` table in `tui.toml`
   // would never apply to any session this screen could actually start — it is

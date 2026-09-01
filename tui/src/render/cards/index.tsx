@@ -21,7 +21,7 @@ import type { Contributions } from "../../nulya/files.ts"
 
 /**
  * One transcript item → one card. Live and replay both come through here, so a
- * card can never depend on having seen the stream (tui.md §3).
+ * card can never depend on having seen the stream.
  */
 export function Card(props: { item: TranscriptItem; contributions?: Contributions[]; capabilityPreviousVersion?: string | null; highlightedCallId?: string | null }) {
   const plugins = usePlugins()
@@ -94,7 +94,7 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
       <Match when={props.item.kind === "thinking"}>
         <Thinking item={props.item as Extract<TranscriptItem, { kind: "thinking" }>} />
       </Match>
-      {/* A call the kernel is holding open for a verdict (tui.md §5.7): the card
+      {/* A call the kernel is holding open for a verdict: the card
           as usual, plus the mark that says this is the one being asked about.
           The keys are above the composer, where the answer is given. */}
       <Match when={props.item.kind === "tool"}>
@@ -108,7 +108,7 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
             <ApprovalPrompt />
           </Show>
           {/* Or the opposite mark: the gate answered for the person because the
-              command only reads (T65). Never both — a call is either being asked
+              command only reads. Never both — a call is either being asked
               about or was not asked about. */}
           <Show when={(props.item as Extract<TranscriptItem, { kind: "tool" }>).autoAllowed}>
             <AutoAllowedMark />
@@ -121,13 +121,13 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
           previousVersion={props.capabilityPreviousVersion}
         />
       </Match>
-      {/* A background command ended (tui.md §5.9): its own event, its own card,
+      {/* A background command ended: its own event, its own card,
           and the call that started it has already said what it is. */}
       <Match when={props.item.kind === "task"}>
         <TaskFinishedCard item={props.item as Extract<TranscriptItem, { kind: "task" }>} />
       </Match>
       {/* Not a turn at all: the boundary between two models answering the same
-          conversation (goals/model-rebind.md). */}
+          conversation. */}
       <Match when={props.item.kind === "rebind"}>
         <RebindCard item={props.item as Extract<TranscriptItem, { kind: "rebind" }>} />
       </Match>
@@ -140,7 +140,7 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
 
 /**
  * An event kind this build predates. Showing it raw beats hiding it: the ledger
- * alphabet is append-only (DESIGN §3.1), so an unknown kind means the TUI is
+ * alphabet is append-only, so an unknown kind means the TUI is
  * older than the kernel, not that something went wrong.
  */
 function UnknownCard(props: { item: UnknownItem }) {

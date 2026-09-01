@@ -3,13 +3,13 @@
  *
  * It owns the `session step --stream` subprocess and nothing else. Deciding
  * *why* or *how long* an agent should keep going is a driver-script or agent
- * concern (PLAN §3.6), never the TUI's — so there is no goal loop here, no
+ * concern, never the TUI's — so there is no goal loop here, no
  * retry policy, and no automatic continuation past a spent step budget.
  *
  * A step is started by itself in exactly one situation, spelled two ways: there
  * is something in the inbox that only a step boundary can drain. Inside a run
- * that is the case tui.md §4.3 calls for (the user spoke while the run was
- * ending); at rest it is `wake()` (a background task finished, or another
+ * that is the user speaking while the run was
+ * ending; at rest it is `wake()` (a background task finished, or another
  * process appended). Both are mechanical — an event exists and nobody else will
  * pick it up — and neither ever steps on an empty inbox.
  */
@@ -35,7 +35,7 @@ export type DriverStatus = "idle" | "sending" | "stepping" | "canceling"
 export interface Driver {
   status: Accessor<DriverStatus>
   /**
-   * When the current run began (`Date.now()`), or null while idle (T38).
+   * When the current run began (`Date.now`), or null while idle.
    *
    * The one thing a person wants from a spinner is whether it is still worth
    * waiting for, and only the thing that starts the run knows when that was.
@@ -56,7 +56,7 @@ export interface Driver {
   step(): Promise<void>
   /**
    * Step IF the session's inbox has something in it — the whole wake-up policy
-   * (tui.md §5.9, goals/background.md D8).
+   * (goals/background.md D8).
    *
    * A background task that finished deposits its report into the inbox and the
    * kernel drains it at the next step boundary; without somebody starting that
@@ -68,7 +68,7 @@ export interface Driver {
    * the ways the inbox becomes non-empty — a `session append` from another
    * terminal and an `ext activate` are two more — and stepping on an EMPTY inbox
    * is the thing that must never happen: a bare step re-sends the last assistant
-   * turn as a prefill (DESIGN §4), which is not a continuation, it is a lie
+   * turn as a prefill, which is not a continuation, it is a lie
    * about who spoke last.
    */
   wake(): Promise<void>
@@ -107,7 +107,7 @@ export interface DriverOptions {
   sshPassword?: (session: string) => Uint8Array | undefined
   /**
    * The session already has a writer: this process is not the driver after all.
-   * The kernel is the authority on that (`SessionBusy`, DESIGN §3.4), so the
+   * The kernel is the authority on that (`SessionBusy`), so the
    * role is not guessed here — it is reported when a step is refused.
    */
   onBusy?: () => void
@@ -118,7 +118,7 @@ export interface DriverOptions {
    */
   ready?: Promise<void>
   /**
-   * Answer the kernel's per-call gate (`--gate`, DESIGN §14). Read at every
+   * Answer the kernel's per-call gate (`--gate`). Read at every
    * spawn, not captured once, so a mode switched between two steps takes hold
    * on the next one — and a switch mid-batch reaches the very next request,
    * because each request is a fresh call into this.
@@ -355,7 +355,7 @@ export function createDriver(
       return
     }
     // Mid-run appends are not interruptions: the kernel drains the inbox at
-    // its next step boundary (DESIGN §3.4), so the turn joins the run itself.
+    // its next step boundary, so the turn joins the run itself.
     if (running) return
     // Drain to a stable tail, not merely the tail visible after this append:
     // another send may join while we await a queued append. The final identity
@@ -405,7 +405,7 @@ export function createDriver(
    * "deliver what is already queued" click landing after the step ended, and
    * that is exactly `wake` — inbox non-empty steps now instead of waiting for
    * the idle-poll timer, inbox empty stays a no-op (a bare step against an
-   * empty inbox would re-send the last assistant turn as prefill, DESIGN §4).
+   * empty inbox would re-send the last assistant turn as prefill).
    * Otherwise: append now (mirroring `send`'s queued-append path exactly, so
    * the transcript's `queued` marker behaves the same as any other mid-run
    * message), kill whatever step is running, wait for `drive()` to actually

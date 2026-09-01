@@ -1,8 +1,7 @@
 /**
- * Sub-agent panes: a delegation watched inside the conversation that made it
- * (goals/tui-shell.md §5.3c S1d, tui.md §11 T72).
+ * Sub-agent panes: a delegation watched inside the conversation that made it.
  *
- * The same split T68 and T69 drew. What the MODEL says — that there are two
+ * The same MODEL/FRAME split as elsewhere in this suite. What the MODEL says — that there are two
  * trees one hop apart, which way a split goes at a given width, where the
  * focus lands, what a pane's attribution line reads — is pinned without a
  * terminal. What only a frame can answer — that both conversations are on
@@ -177,7 +176,7 @@ test("a pane says whose work it is and that it cannot be typed into", () => {
     "explore · d-0123456789ab · observing",
   )
   // No persona to name — a session that wears no `agent-*` prompt — is one
-  // fewer thing said, not a placeholder word (tui.md §6.1 rule 4).
+  // fewer thing said, not a placeholder word.
   expect(attributionOf({ persona: null, label: "s-1" })).toBe("s-1 · observing")
 })
 
@@ -209,7 +208,7 @@ afterAll(() => ws.cleanup())
 /**
  * The parent's screen, with the one card that names the child on it. The shape
  * a `nulya session new` inside a step leaves behind: the id is in the tool
- * RESULT, which is why replay finds it too (tui.md §5.2).
+ * RESULT, which is why replay finds it too.
  */
 async function screen(width: number, height = 24) {
   const state = createSessionState(parent)
@@ -326,8 +325,7 @@ test("the keyboard reaches the pane, scrolls it, and Esc closes it", async () =>
     // The pane is gone and the conversation has the whole box back.
     expect(closed).not.toContain("observing")
     expect(closed).toContain("sub-session")
-    // …and the keyboard came home with it: this is the bug T69 had to fix once
-    // already, on the two ways of leaving a pane it added.
+    // …and the keyboard comes home with it.
     await setup.mockInput.typeText("back in the box")
     expect(await settle(setup, 2)).toContain("back in the box")
   } finally {

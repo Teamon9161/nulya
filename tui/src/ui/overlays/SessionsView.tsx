@@ -1,8 +1,8 @@
 /**
- * `/sessions` (F3): every durable session in the workspace (tui.md §5.4).
+ * `/sessions` (F3): every durable session in the workspace.
  *
  * The rows are `nulya session list --json` — the kernel's own read-only
- * projection of `.nulya/sessions/` plus the outcome journal (DESIGN §14), newest
+ * projection of `.nulya/sessions/` plus the outcome journal, newest
  * first, nested by `parent`. The TUI does not parse headers for this any more:
  * composition and verdict arrive already decided, and the verdict in particular
  * lives in a second journal the front end has no business reading. The opening
@@ -10,7 +10,7 @@
  * turns its newlines and tabs into spaces (`session_list.zig` `summarize`),
  * which is why nothing here has to.
  *
- * A ROW IS THE SENTENCE THAT STARTED IT (T47). Everything else a session file
+ * A ROW IS THE SENTENCE THAT STARTED IT. Everything else a session file
  * knows — how many events, which packages it wore, what it cost, on which model
  * — has been on this line at some point and is gone: none of it is how a person
  * recognises the conversation they want back, and a column that separates
@@ -92,7 +92,7 @@ export function ago(created: string, now: number = Date.now()): string {
 const verdict_glyph: Record<Verdict, string> = { success: "+", partial: "~", failure: "!" }
 
 /**
- * How long two presses may be apart and still be one gesture (T70).
+ * How long two presses may be apart and still be one gesture.
  *
  * The number every desktop uses, and the one thing about a double click that
  * is not ours to invent — a terminal sends two independent releases and
@@ -101,7 +101,7 @@ const verdict_glyph: Record<Verdict, string> = { success: "+", partial: "~", fai
 export const double_click_ms = 350
 
 /**
- * The sessions a person is HAVING, and the ones an agent was given (T70).
+ * The sessions a person is HAVING, and the ones an agent was given.
  *
  * A delegated session is a real session with a real ledger, and `session list`
  * is right to project it — but it is not a conversation anybody chose to start,
@@ -119,7 +119,7 @@ export const double_click_ms = 350
  * There is a third kind, and it is not a conversation of either sort: a session
  * whose ledger has NO events. A header exists and nothing was ever said into
  * it — a process that was killed before `sessionPrune` could take its
- * empty session back. Opening one shows an empty screen, and since T22 a new
+ * empty session back. Opening one shows an empty screen, and a new
  * message freezes a new session anyway, so nothing is lost by leaving it out.
  * It is counted rather than silently dropped (a list quietly shorter than the
  * store is a list that is lying), but unlike the delegated ones there is no key
@@ -283,11 +283,11 @@ export function firstSelectable(rows: readonly ListRow[]): number {
 }
 
 /**
- * What fits in one row of the narrow variant, from the outside in (T69).
+ * What fits in one row of the narrow variant, from the outside in.
  *
  * The sidebar is eighteen columns at 80 and twenty-eight at 120, so its layout
  * cannot be a smaller copy of the overlay's — it has to be a decision about
- * what a row is FOR. A row is the sentence that started the session (T47), so
+ * what a row is FOR. A row is the sentence that started the session, so
  * the sentence is the one thing that never yields: the cells around it are
  * dropped, in this order, until it has at least `min_said` columns.
  *
@@ -295,7 +295,7 @@ export function firstSelectable(rows: readonly ListRow[]): number {
  * The clock goes first: it orders rows, and they are already in order. Then the
  * verdict, then `live` — facts about a session that the full view still tells
  * in full. Last two: `◈`, which is the only thing saying a row is a delegation
- * rather than a conversation (T70, and it is only ever present in the mode a
+ * rather than a conversation (it is only ever present in the mode a
  * person turned on), and `▎ this one`, because a list of conversations that
  * cannot say which one you are in is not a list of your conversations.
  *
@@ -390,7 +390,7 @@ function depthOf(row: ListRow): number {
 const min_path = 16
 
 /**
- * A visible, clickable way to start a new tab from the sessions list (T84).
+ * A visible, clickable way to start a new tab from the sessions list.
  *
  * Before this row the only way to reach `onNew` from here was `n` on the
  * keyboard — a key nobody who has not already read the footer knows about —
@@ -470,7 +470,7 @@ export function SessionsView(props: {
   currentId: string
   /**
    * Go to that session HERE: this view's primary action, and what a single
-   * click and `Enter` both do (T70).
+   * click and `Enter` both do.
    *
    * It used to be `onOpen`, and it used to mean "a tab of its own" — which is
    * the wrong default for the gesture people make most. Clicking a row in a
@@ -484,7 +484,7 @@ export function SessionsView(props: {
   onNew: () => void
   onClose: () => void
   /**
-   * Which of the two presentations this is (T69). `overlay` is the full-screen
+   * Which of the two presentations this is. `overlay` is the full-screen
    * view F3 opens; `sidebar` is the rail docked beside the transcript. One
    * component, because they are one list read two ways — the rows, the cursor,
    * the refresh beat and what a click does are the same, and two components
@@ -510,7 +510,7 @@ export function SessionsView(props: {
   const [leases, setLeases] = createSignal<Record<string, LeaseState>>({})
   const [cursor, setCursor] = createSignal(0)
   const [notice, setNotice] = createSignal<string | null>(null)
-  /** `a`: show the delegated sessions too, this mount only (T70). */
+  /** `a`: show the delegated sessions too, this mount only. */
   const [showAgents, setShowAgents] = createSignal(false)
   let list: ScrollBoxRenderable | null = null
   const hover = createHover()
@@ -642,7 +642,7 @@ export function SessionsView(props: {
   }
 
   /**
-   * What the full view's key line adds about the rows it is not drawing (T70),
+   * What the full view's key line adds about the rows it is not drawing,
    * or nothing at all when there are none to speak of (§6.1 rule 4). Both
    * states name the key, because "these are showing" is as worth undoing as
    * "these are hidden".
@@ -670,7 +670,7 @@ export function SessionsView(props: {
   const goToTab = () => act(cursor(), (id, where) => props.onOpenTab(id, where))
 
   /**
-   * ONE CLICK GOES THERE, TWO GIVE IT A TAB (T70).
+   * ONE CLICK GOES THERE, TWO GIVE IT A TAB.
    *
    * A terminal has no double click, only two releases and a clock, so the
    * window is ours to draw (`double_click_ms`). What is NOT free is the order:
@@ -712,7 +712,7 @@ export function SessionsView(props: {
   }
 
   /**
-   * The docked list (T69).
+   * The docked list.
    *
    * The same rows, the same cursor and the same `clickRow`; what changes is the
    * width, and therefore what is on a row (`sidebarRowPlan`). It keeps the
@@ -856,7 +856,7 @@ export function SessionsView(props: {
       {/* The one dim line saying what can be done here (§6.1 rule 8), chosen
           for this width and this state by `railFooter`. The keys are only true
           while the keyboard is here; the count of what is not being shown is
-          true either way (T70). */}
+          true either way. */}
       <Show when={railFooter(inner(), owns_keys(), hidden(), split().empty.length).length > 0}>
         <text fg={style.theme.dim} height={1} flexShrink={0}>
           {railFooter(inner(), owns_keys(), hidden(), split().empty.length)}
@@ -867,7 +867,7 @@ export function SessionsView(props: {
 
   useKeyboard((key) => {
     // Not the focused pane: `useKeyboard` is global, and with a sidebar open
-    // there can be two of these listening at once (T69).
+    // there can be two of these listening at once.
     if (!owns_keys()) return
     if (help.consume(key)) return
     if (key.name === "escape") return props.onClose()
@@ -877,7 +877,7 @@ export function SessionsView(props: {
     if (key.name === "r") return void refresh().then(probe)
     // The two halves of the mouse's one-and-two, on the keyboard: `Enter` is
     // the single click and `t` is the double, so neither input is a second
-    // path to a behaviour the other cannot reach (T70).
+    // path to a behaviour the other cannot reach.
     if (key.name === "t") return goToTab()
     if (key.name === "a") return setShowAgents((now) => !now)
     if (key.name === "return") return go()
@@ -886,7 +886,7 @@ export function SessionsView(props: {
   // The docked variant, chosen once — a mount is one presentation or the other
   // for its whole life. Below `useKeyboard` on purpose: an early return above
   // it would leave the rail unable to answer a single key, which is a bug this
-  // file has already had once (T69).
+  // file has already had once.
   if (docked()) return dockedBody()
 
   return (
@@ -937,7 +937,7 @@ export function SessionsView(props: {
             const row = () => item()
             // Only while this pane holds the keyboard: a cursor row in a pane
             // that would not answer `Enter` is a promise the screen cannot keep
-            // (T69, and the same reason the docked variant withholds it).
+            // (and the same reason the docked variant withholds it).
             const selected = () => owns_keys() && index === cursor()
             const entry = () => sessionOf(row())
             const tone = () => ({ selected: selected(), hovered: hover.at() === index })
@@ -955,10 +955,10 @@ export function SessionsView(props: {
               (verdict() ? ` ${verdict_glyph[verdict()!]} ${verdict()}` : "") +
               (live() ? ` ${style.glyphs.assistant} live` : "")
             /**
-             * What is left for the sentence after the fixed ends. This row was
-             * the last one in the front end still trusting the terminal with its
-             * own wrapping (tui.md §11, T16 "仍未迁"); a long first line and a
-             * chip together are exactly the second row that garbles the first.
+             * What is left for the sentence after the fixed ends. Trusting the
+             * terminal with its own wrapping here would garble the display: a
+             * long first line and a chip together are exactly the second row
+             * that garbles the first.
              */
             const said = () =>
               Math.max(0, rowInner() - 2 - depthOf(row()) * 2 - displayWidth(clock_cell()) - displayWidth(chips()))
@@ -996,7 +996,7 @@ export function SessionsView(props: {
                   </text>
                 </box>
                 {/* Which persona this session was handed, when it is one an
-                    agent was given rather than a conversation (T70). `◈` is
+                    agent was given rather than a conversation. `◈` is
                     already "the identity this one is running as" (§6.3) — the
                     same mark the status bar wears it with. */}
                 <Show when={persona()}>
@@ -1013,7 +1013,7 @@ export function SessionsView(props: {
                     {style.glyphs.bar} this tab
                   </text>
                 </Show>
-                {/* No verdict is "not judged", which is NOT failure (DESIGN §3.3):
+                {/* No verdict is "not judged", which is NOT failure:
                     an unjudged session shows nothing rather than a neutral chip. */}
                 <Show when={verdict()}>
                   <text
@@ -1057,7 +1057,7 @@ export function SessionsView(props: {
         <text fg={style.theme.err}>{fit(notice()!, inner())}</text>
       </Show>
       {/* One dim line, and the count of what is not on it rides in it rather
-          than taking a second (T70): `wrapWords` folds at the ` · ` joints, so
+          than taking a second: `wrapWords` folds at the ` · ` joints, so
           a narrow terminal gets whole phrases instead of a second footer. */}
       <OverlayFooter
         width={inner()}

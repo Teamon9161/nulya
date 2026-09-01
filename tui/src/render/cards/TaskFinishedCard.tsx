@@ -6,11 +6,11 @@ import type { TaskItem } from "../../state/session.ts"
 
 /**
  * A `task_finished` event: the background command the model started has ended,
- * and this is the report it read (DESIGN §6.1, tui.md §5.9).
+ * and this is the report it read.
  *
  * The same glyph as the call that started it — it is still that command, and a
  * new symbol for "the same command, later" would be a symbol for a moment in
- * time rather than for a kind of thing (tui.md §6). What tells them apart is the
+ * time rather than for a kind of thing. What tells them apart is the
  * note, which is where the exit code and the wall clock are.
  *
  * Folded by default like every other captured output, with the log pointer on
@@ -21,7 +21,7 @@ export function TaskFinishedCard(props: { item: TaskItem }) {
   const style = useStyle()
   const report = createMemo(() => taskReportOf(props.item.text))
 
-  /** `background <task> · exit 1 · 41.8s` — `exit 0` stays silent (T26). */
+  /** `background <task> · exit 1 · 41.8s` — `exit 0` stays silent. */
   const chip = () => {
     const parsed = report()
     const how = props.item.exitCode === 0 ? "" : ` · exit ${props.item.exitCode}`

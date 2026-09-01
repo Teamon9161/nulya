@@ -1,6 +1,6 @@
 /**
  * The CLI contact surface, against the REAL `nulya` binary in scripted mode
- * (tui.md §8). No API key, no network, no mocked protocol: if the kernel's line
+ *. No API key, no network, no mocked protocol: if the kernel's line
  * protocol moves, these fail.
  */
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -58,7 +58,7 @@ describe("session step --stream", () => {
 
     const tags = streamTags(lines)
     // The turn the step boundary drained comes first — before the answer to it,
-    // which is the order it happened in (DESIGN §14).
+    // which is the order it happened in.
     expect(tags[0]).toBe("event:user_text")
     expect(tags[tags.length - 1]).toBe("run:done")
 
@@ -166,7 +166,7 @@ describe("session step --stream", () => {
 })
 
 /**
- * The surfaces M5 handed the front end (tui.md §9, T8). All three are read or
+ * The surfaces M5 handed the front end. All three are read or
  * written through the kernel rather than by walking `.nulya/` — the point being
  * that composition, cost and verdict have exactly one implementation.
  */
@@ -187,7 +187,7 @@ describe("the slow loop", () => {
     expect(one.events).toBeGreaterThan(0)
     expect(one.first_user_text).toBe("the first question")
     expect(one.created.endsWith("Z")).toBe(true)
-    // No verdict is "not judged" — NOT failure (DESIGN §3.3).
+    // No verdict is "not judged" — NOT failure.
     expect(one.outcome).toBeNull()
     // A session nobody stepped is listed too, with nothing in it.
     expect(before.find((entry) => entry.id === untouchedId)!.events).toBe(0)
@@ -206,7 +206,7 @@ describe("the slow loop", () => {
   }, 120_000)
 
   test("--with brings a built version into one session's composition, activating nothing", async () => {
-    // A data extension: no runtime, so no toolchain is involved (DESIGN §7.4).
+    // A data extension: no runtime, so no toolchain is involved.
     const draft = `${ws.dir}/mode-draft`
     await Bun.write(
       `${draft}/extension.json`,
@@ -286,7 +286,7 @@ test("the cache share is of the whole prompt, not of its uncached part", () => {
 
 test("what a session has cost is a phrase, or nothing at all before it has cost anything", () => {
   // The absent case is every draft tab and every session reopened but not
-  // stepped: the line that would carry it (T42: the activity line) is not
+  // stepped: the line that would carry it (the activity line) is not
   // there either, so `null` is what "say nothing" looks like here.
   expect(usageLabel(no_snapshot.usage)).toBeNull()
   expect(usageLabel({ ...no_snapshot.usage, input: 281_600, output: 12_000, cacheRead: 1_718_400 })).toBe(
@@ -297,7 +297,7 @@ test("what a session has cost is a phrase, or nothing at all before it has cost 
 })
 
 test("toolSaid reads the tool's sentence past the plain wire's exit / stderr framing", () => {
-  // A refusal on the plain wire, as `ext run` prints it (DESIGN §7.3).
+  // A refusal on the plain wire, as `ext run` prints it.
   expect(toolSaid({ stdout: "exit 1\nstderr:\nno agent 'x' (there are: explore, plan)\n", stderr: "" })).toBe(
     "no agent 'x' (there are: explore, plan)",
   )

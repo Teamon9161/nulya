@@ -148,7 +148,7 @@ export interface CharRange {
  *   - `你好abc` — `abc` lights up at 4..7, not at the code points 2..5. Two
  *     columns per CJK character, so every code-point offset behind one lands
  *     early, which is how a paste after a line of Chinese put the accent on
- *     the prose in front of it instead of on `[Pasted text #N]` (BUGS #13).
+ *     the prose in front of it instead of on `[Pasted text #N]`.
  *   - `ab\ncd` — `cd` is 2..4, not 3..5: a newline occupies no column.
  *   - `𝐀ab` (one code point, two UTF-16 units, one column) — `ab` is 1..3, so
  *     the space is not UTF-16 either.

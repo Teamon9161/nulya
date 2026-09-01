@@ -1,6 +1,5 @@
 /**
- * `/with` — putting a package in front of the model for ONE session
- * (DESIGN §7.5, PLAN §3.7.9).
+ * `/with` — putting a package in front of the model for ONE session.
  *
  * One move: start a session `--with` a named version. Nothing is activated, and
  * that is the point — `activate` moves a store pointer that every later session
@@ -15,7 +14,7 @@
  * This file used to be `evolve.ts`, and carried a build of one particular
  * package beside these functions: `/evolve` was hard-wired here to rebuild the
  * shipped evolution draft before wearing it. That package declares its own
- * command now (T53), so what is left is the general machinery `/with`, `/agent`
+ * command now, so what is left is the general machinery `/with`, `/agent`
  * and every package command share, and it is named after it.
  */
 import type { NewSessionOptions } from "./nulya/cli.ts"

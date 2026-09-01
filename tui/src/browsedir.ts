@@ -139,7 +139,7 @@ export interface BrowserInput {
    * POSIX ones (`node:path/posix`), since the far side of a `remote:` target
    * is not necessarily this host's platform and `node:path`'s `join` on a
    * Windows host hands back backslashes no shell over there would understand
-   * (`state/dirsource.ts`, goals/remote-env.md §3.9).
+   * (`state/dirsource.ts`).
    */
   readonly join?: (dir: string, name: string) => string
   readonly dirname?: (dir: string) => string
@@ -222,7 +222,7 @@ function samePlace(a: string, b: string): boolean {
  * Where a browser's listing and existence checks actually come from — this
  * machine's disk for `/cwd`, or a channel to another machine for the
  * directory a `remote:` `/env` target will use as its workspace
- * (`state/dirsource.ts`'s two implementations, goals/remote-env.md §3.9).
+ * (`state/dirsource.ts`'s two implementations).
  *
  * Every method answers one question about ONE path; nothing here reads a
  * directory SPECULATIVELY (no walking ahead, no stat-every-child-of-every-

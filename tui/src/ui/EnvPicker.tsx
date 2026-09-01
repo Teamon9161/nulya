@@ -7,10 +7,10 @@ import type { ExecChoice } from "../state/targets.ts"
 
 /**
  * Bare `/env`, the `⇥` chip and the welcome screen's `shell` row: where the
- * commands of the NEXT session go (DESIGN §8.1, tui.md §11 T93).
+ * commands of the NEXT session go.
  *
  * The same dialog above the composer as `/mode`, `/with` and `/agent`, for the
- * same reasons (T28/T31): it is a CHOICE, it is a handful of one-line answers,
+ * same reasons: it is a CHOICE, it is a handful of one-line answers,
  * and it belongs where the eye is while typing rather than on a screen of its
  * own. Which is also, exactly, where it was asked for.
  *

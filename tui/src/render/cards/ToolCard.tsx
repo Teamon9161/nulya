@@ -18,7 +18,7 @@ import type { ToolItem } from "../../state/session.ts"
 /**
  * One tool call → one card. `render/registry.ts` decides WHICH card and what
  * goes on its head line; this file only dispatches on that decision, so no
- * component below ever matches on a tool name or a command prefix (tui.md §3).
+ * component below ever matches on a tool name or a command prefix.
  *
  * Cancellation wins over the tool's own identity: what matters about a call the
  * kernel closed out is that it did not finish, not that it was a `shell`.

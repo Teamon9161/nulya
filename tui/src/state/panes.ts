@@ -1,9 +1,9 @@
 /**
  * The pane trees as this front end's state, and the adapter that lets the screen
  * that used to be "one transcript with an overlay in front of it" go on saying
- * exactly that (goals/tui-shell.md §5.4, S1).
+ * exactly that.
  *
- * THERE ARE TWO TREES, ONE HOP APART (§5.3c, T72). The app tree holds what is
+ * THERE ARE TWO TREES, ONE HOP APART. The app tree holds what is
  * across tabs — today the sessions sidebar — and one leaf that is a PORTAL
  * (`tab_surface`); the active tab's own tree hangs off that leaf and holds what
  * belongs to this conversation: the transcript, whichever full-screen view is
@@ -13,14 +13,12 @@
  * `pane/tree.ts` is pure and knows nothing about Solid; this is the signal that
  * holds one, plus the operations spelled as verbs the host actually performs.
  *
- * The second half is the migration itself. Before T68 a screen was chosen by an
- * `OverlayStore`: one signal naming which full-screen view was in front, `null`
- * for the transcript. That store's real content was never "which overlay" — it
- * was **which surface the one pane shows**, and `active()` was **does that
- * surface hold the keyboard**. So it becomes a projection of the pane tree
- * rather than a second place where the answer lives, and every caller keeps its
- * spelling. There is no second source of truth to drift: `kind()` reads the
- * tree, `open()` writes it.
+ * The second half is the migration itself: `overlay` is a projection of the
+ * pane tree rather than a second place where the answer lives. "Which
+ * overlay is in front" is **which surface the one pane shows**, and
+ * `active()` is **does that surface hold the keyboard** — every caller keeps
+ * its familiar spelling. There is no second source of truth to drift:
+ * `kind()` reads the tree, `open()` writes it.
  */
 import { createSignal, type Accessor } from "solid-js"
 import {
@@ -49,7 +47,7 @@ export interface PaneStore {
   focus: Accessor<PaneId>
   /**
    * The pane the screen is ABOUT: the one the transcript and every full-screen
-   * view live in, and the one a split puts a sidebar beside (T69).
+   * view live in, and the one a split puts a sidebar beside.
    *
    * It is the pane the store opened on, for as long as that pane exists. The
    * distinction only starts to matter once there are two of them: `/ext` opened
@@ -85,7 +83,7 @@ export interface PaneStore {
  * A tree, held in a signal.
  *
  * The derived halves are plain functions rather than memos, and that matters
- * since T72: a tab makes one of these, and a tab is made from an event handler,
+ * a tab makes one of these, and a tab is made from an event handler,
  * where Solid has no owner to dispose a computation against. Each of them is a
  * walk over at most three leaves, so there is nothing here a cache would buy.
  */
@@ -129,7 +127,7 @@ export const main_surface = "host:transcript"
 
 /**
  * THE PORTAL: the one leaf in the APP tree that shows the active tab's own tree
- * (goals/tui-shell.md §5.3c point 1, T72).
+ * (goals/tui-shell.md §5.3c point 1).
  *
  * There are two pane trees, because the two things that split the screen belong
  * to different owners. The sidebar is ACROSS tabs — one list of every open
@@ -159,7 +157,7 @@ export const tab_surface = "host:tab"
 export const subagent_surface = "host:subagent"
 
 /**
- * The sessions list, docked (T69). A surface of its own rather than a second
+ * The sessions list, docked. A surface of its own rather than a second
  * pane showing `host:sessions`, because the two are not the same screen: one is
  * the full-screen view F3 opens, the other is a narrow rail that lives beside
  * the transcript. They differ in width, in what they draw, and — the reason it
@@ -196,7 +194,7 @@ export interface FocusedPane {
 }
 
 /**
- * The focused leaf, through the portal (T72).
+ * The focused leaf, through the portal.
  *
  * The whole of the two-layer composition, in four lines: the app tree names a
  * leaf, and if that leaf is the portal the real answer is one hop further in.
@@ -213,14 +211,14 @@ export function focusThrough(app: PaneStore, tab: PaneStore): FocusedPane {
 /**
  * The old `OverlayStore` shape, answered from the pane trees.
  *
- * The two halves read DIFFERENT panes, and T69 is where that stopped being a
+ * The two halves read DIFFERENT panes, and it is not a
  * distinction without a difference:
  *
  *  - `kind()` / `open()` / `close()` are about the TAB's MAIN pane. Which
  *    full-screen view is in front is a fact about the pane the screen is about;
  *    F2 pressed while the keyboard sits in the sidebar still replaces the
  *    transcript, and F2 in one tab does not move what another tab is showing —
- *    which is what makes the tab's tree the right place for it (T72).
+ *    which is what makes the tab's tree the right place for it.
  *  - `active()` is about the FOCUSED pane, because it answers "does the
  *    composer still have the keyboard" — and that is decided by wherever the
  *    keyboard actually is, in whichever of the two trees holds it. It asks the

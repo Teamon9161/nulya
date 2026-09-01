@@ -1,5 +1,5 @@
 /**
- * `/with` (T8): a package worn for one session (`src/with.ts`).
+ * `/with`: a package worn for one session (`src/with.ts`).
  *
  * The whole claim under test is that wearing something changes THIS session's
  * composition and nothing else in the workspace — no `current` pointer moves,
@@ -41,7 +41,7 @@ test("a --with ref splits into id and version, and survives the round trip", () 
 })
 
 /**
- * A tab wearing a package says so (tui.md §11, T31).
+ * A tab wearing a package says so.
  *
  * `/evolve` opens a SECOND tab on the same model as the first, so without this
  * the two read identically — and the only difference between them is which one
@@ -77,8 +77,8 @@ test("a draft tab is named by what it wears as well as what it runs on", () => {
 })
 
 /**
- * The package the repository ships (`extensions/evolution`, DESIGN §7.6), and
- * the path `/evolve` takes since T53: the package DECLARES the command, so it
+ * The package the repository ships (`extensions/evolution`), and
+ * the path `/evolve` takes the package DECLARES the command, so it
  * reaches the slash chain the way `/ask` does — through `current`.
  *
  * Copied into the throwaway workspace rather than built in place: a build writes
@@ -99,9 +99,8 @@ test("/evolve is the evolution package's own command, and wearing it composes on
   // hash of the draft (physics #5).
   expect(await extBuild(ws, evolution_draft)).toBe(version)
 
-  // Built and not yet activated: no `current`, so no command. This is the whole
-  // behaviour change of T53 — `/evolve` used to build on demand and therefore
-  // always existed; now it exists exactly when the package is active.
+  // Built and not yet activated: no `current`, so no command — `/evolve`
+  // exists exactly when the package is active.
   expect((await extList(ws)).find((entry) => entry.id === "evolution")!.current).toBeNull()
   expect((await packageCommands(ws)).some((row) => row.command.name === "evolve")).toBe(false)
 
@@ -116,7 +115,7 @@ test("/evolve is the evolution package's own command, and wearing it composes on
   expect(parsed.kind).toBe("with")
   expect(typeof (parsed as { prompt: string | null }).prompt).toBe("string")
   // And the declared command is the ONLY one — nothing invents a second
-  // `/evolution` from the package's name (T54: commands exist by declaration).
+  // `/evolution` from the package's name (commands exist by declaration).
   expect((await packageCommands(ws)).some((row) => row.command.name === "evolution")).toBe(false)
 
   // Wearing is membership in ONE composition: the plain session next to it is

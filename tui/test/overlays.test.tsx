@@ -1,5 +1,5 @@
 /**
- * The two nulya-only views (tui.md §5.3 / §5.4) and the sub-session tab (§5.5),
+ * The two nulya-only views and the sub-session tab (§5.5),
  * driven programmatically through the test renderer.
  *
  * Both overlays read the real `.nulya/` layout, so every frame here is produced
@@ -65,7 +65,7 @@ beforeAll(async () => {
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", "lint"])
   // The template writes no `surface`, which now means `auto` — a tool the model
-  // gets with membership and that no pin may name (DESIGN §7.2.1, T52). These
+  // gets with membership and that no pin may name. These
   // tests are about PINNING, so the fixture says `manual` out loud.
   const lint_draft = join(ws.dir, ".nulya", "extensions", "lint", "extension.json")
   const lint_manifest = JSON.parse(readFileSync(lint_draft, "utf8")) as {
@@ -90,9 +90,7 @@ afterAll(() => {
 function stable(frame: string): string {
   return frame
     // Trailing blanks are not layout: a session id's hash is not a fixed length,
-    // so the row's last cell moves and the padding after it moves with it. That
-    // was a snapshot that failed on the shape of a random number (tui.md §11,
-    // T12 "偶发一个尾空格差异").
+    // so the row's last cell moves and the padding after it moves with it.
     .replace(/[ ]+$/gm, "")
     .replace(/s-\d+-[0-9a-f]+/g, "s-<id>")
     .replace(/v-[0-9a-z]{8,}/g, "v-<hash>")
@@ -130,7 +128,7 @@ test("/sessions lists the store and opens the highlighted session", async () => 
   ))
   try {
     const frame = await settle(setup, 6)
-    // A row is the sentence that started the session (T47): what was asked
+    // A row is the sentence that started the session: what was asked
     // first, and how long ago. The id is unreadable and only sometimes needed,
     // so it is printed once, in the title line, for the row under the cursor —
     // which starts on the newest listed session.
@@ -143,7 +141,7 @@ test("/sessions lists the store and opens the highlighted session", async () => 
     expect(frame).not.toContain(blank)
     expect(frame).toContain("1 empty session not listed")
     expect(frame).not.toContain("events")
-    // One line of keys, the rest behind `?` (tui.md §11, T18) — with what the
+    // One line of keys, the rest behind `?` — with what the
     // list is not drawing said between them.
     expect(frame).toContain("j/k move · Enter go there · t new tab · Esc close ·")
     expect(frame).toContain("? keys")
@@ -170,7 +168,7 @@ test("/sessions lists the store and opens the highlighted session", async () => 
 }, 60_000)
 
 test("how long ago is said the way a person says it", () => {
-  // The row is a sentence and this is the only number left on it (T47), so the
+  // The row is a sentence and this is the only number left on it, so the
   // boundaries are pinned: a timestamp nobody has to subtract today's date from,
   // and a date again once the distance stops being memorable.
   const now = Date.parse("2026-08-22T12:00:00Z")
@@ -236,7 +234,7 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     const frame = await settle(setup, 6)
     expect(frame).toContain("extensions · 1")
     // The switch, in words and as a marker: active, and how much of its tool
-    // face is pinned (tui.md §11, T22).
+    // face is pinned.
     expect(frame).toContain("lint · script · active · tools 0/1 pinned")
     expect(frame).toContain("● lint")
     expect(frame).toContain(version)
@@ -260,7 +258,7 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     expect(usage).toContain("builtin.shell")
 
     // The strip is a row of visible panes, so sideways keys walk it — and they
-    // wrap both ways, which is the half `Tab` alone never had (T24).
+    // wrap both ways, which is the half `Tab` alone never had.
     setup.mockInput.pressKey("h")
     expect(await settle(setup, 4)).toMatch(/tools 1\+0\/\d+/)
     setup.mockInput.pressKey("l")
@@ -282,7 +280,7 @@ test("/ext at eighty columns: visible panes cut to their columns, the version id
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", long_id])
   // `manual`, so the row this test measures is one the pin panel actually
-  // draws: since T59 the collapsed list is the switches, and a scaffolded tool
+  // draws: the collapsed list is the switches, and a scaffolded tool
   // is `auto` — it would fold away and take the cut cell with it.
   const long_draft = join(ws.dir, ".nulya", "extensions", long_id, "extension.json")
   const long_manifest = JSON.parse(readFileSync(long_draft, "utf8")) as {
@@ -311,7 +309,7 @@ test("/ext at eighty columns: visible panes cut to their columns, the version id
     const lines = frameLines(ids)
     const short = lines.find((line) => /[●○] lint {2,}\d\/\d tools/.test(line))
     expect(short).toBeDefined()
-    // And no version hash on any of these rows (tui.md §11, T23): the list is
+    // And no version hash on any of these rows: the list is
     // about whether to move something, not about which build it is.
     expect(lines.slice(0, 5).join("\n")).not.toContain(long_version)
 
@@ -380,7 +378,7 @@ test("/ext's tools pane pins with a keypress, and the pin is what the next sessi
 
 test("/ext names the drift between what this session froze and what the store points at", async () => {
   // A pure function, because this sentence is the view's whole reason to exist
-  // (DESIGN §7.5): the running session cannot change, so the store moving is the
+  //: the running session cannot change, so the store moving is the
   // only thing worth saying.
   const header: SessionHeader = {
     kind: "header",
@@ -404,7 +402,7 @@ test("/ext names the drift between what this session froze and what the store po
   try {
     const frame = await settle(setup, 6)
     // Short hashes in the sentence: it says two builds differ, and eight digits
-    // say that as well as twenty-four (tui.md §11, T23).
+    // say that as well as twenty-four.
     expect(frame).toContain(`frozen v-old · store ${shortVersion(version)}`)
     expect(shortVersion(version)).toHaveLength(10)
     // The whole id is still one line away, under the version the cursor is on.
@@ -417,10 +415,10 @@ test("/ext names the drift between what this session froze and what the store po
 test("the tools pane folds the internal half away and says how much it folded", async () => {
   // A real internal-tool package in the store, and deliberately one this front
   // end has never heard of: what keeps its tool off the model's face is its own
-  // manifest saying `"surface": "internal"` (DESIGN §7.2.1), not its id being on
-  // a list in `extensions.ts` — which is exactly what a third party could not do
-  // before T34. `ext init --script` names the tool after the id, so this row is
-  // `ext:patrol/patrol`, sorted above the pinnable one by the letter p.
+  // manifest saying `"surface": "internal"`, not its id being on
+  // a list in `extensions.ts`. `ext init --script` names the tool after the
+  // id, so this row is `ext:patrol/patrol`, sorted above the pinnable one by
+  // the letter p.
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", "patrol"])
   const draft = join(ws.dir, ".nulya", "extensions", "patrol", "extension.json")
@@ -461,11 +459,11 @@ test("the tools pane folds the internal half away and says how much it folded", 
 test("an internal tool is listed with no checkbox: there is no pin for it to be wrong about", () => {
   // `compact` drives the session it is called ABOUT — it appends to it and
   // steps it — so a model calling it from inside that session meets the
-  // kernel's writer lock every time (DESIGN §3.4). A checkbox beside it offered
-  // a state that cannot work; the row now says who calls it instead (T24).
+  // kernel's writer lock every time. A checkbox beside it offered
+  // a state that cannot work; the row now says who calls it instead.
   //
-  // WHICH tools those are is the package's own word since T34 (`surface`,
-  // DESIGN §7.2.1) rather than a list of bundled ids here — so a package this
+  // WHICH tools those are is the package's own word (`surface`)
+  // rather than a list of bundled ids here — so a package this
   // front end has never heard of gets the same treatment, and one that mixes
   // both kinds (the bundled `agent`) gets it per tool.
   const entry = (id: string, tools: string[], internalTools: string[] = []) => ({
@@ -566,14 +564,14 @@ test("t on a sub-session card opens it as a second tab, attached as an observer"
 
     setup.mockInput.pressEscape()
     await settle(setup, 3)
-    // `t`, not `Enter`: since T72 the primary gesture on this card watches the
+    // `t`, not `Enter`: the primary gesture on this card watches the
     // session in a pane of THIS tab, and `t` is the one that gives it a tab —
-    // the same pair of words the sessions list uses (T70).
+    // the same pair of words the sessions list uses.
     await setup.mockInput.typeText("t")
     const frame = await settle(setup, 6)
     // Two tabs, named by what they run on — the same model, so the `#n` that
-    // tells them apart (tui.md §11, T22). Neither shows a session id, and the
-    // one in front wears the left rule rather than a colour (T70).
+    // tells them apart. Neither shows a session id, and the
+    // one in front wears the left rule rather than a colour.
     expect(frame).toContain("scripted-demo #1")
     expect(frame).toContain(`${style.glyphs.bar} scripted-demo #2`)
     expect(frame.split("\n")[0]).not.toContain(parent)
@@ -605,7 +603,7 @@ test("/ext's action keys move the store's current pointer, with a confirmation",
     expect(setup.captureCharFrame()).toContain("versions · 2 · oldest → newest")
     // The version line is oldest first, so the cursor starts on the first build
     // — and pointing `current` back at it is the same verb as pointing it
-    // forward, which is why there is only one key here (DESIGN §7.4).
+    // forward, which is why there is only one key here.
     setup.mockInput.pressKey("a")
     const asked = await settle(setup, 3)
     expect(asked).toContain(`activate lint ${version}? y / Esc`)
@@ -619,7 +617,7 @@ test("/ext's action keys move the store's current pointer, with a confirmation",
 }, 120_000)
 
 /**
- * The half of the store `ext list` cannot see (tui.md §11, T22). An id with
+ * The half of the store `ext list` cannot see. An id with
  * source and no version is not in the kernel's listing — rightly, it holds
  * nothing — and before this it was invisible here too, which is how `std` sat
  * unbuilt in a user store for a week with no trace but a status line.
@@ -661,8 +659,8 @@ test("/ext lists an id that is only source, says what is missing, and refuses to
 }, 120_000)
 
 /**
- * What the panel draws about a version, and what it leaves out (tui.md §11,
- * T23). Pure, because "how much of this content address is worth reading" is a
+ * What the panel draws about a version, and what it leaves out. Pure,
+ * because "how much of this content address is worth reading" is a
  * decision, and one function makes it for every line on the screen.
  */
 test("a version id is short everywhere but the one line it is typed from", () => {
@@ -676,7 +674,7 @@ test("a version id is short everywhere but the one line it is typed from", () =>
 })
 
 /**
- * The switch (tui.md §11, T22). One key, both axes: `current` moves and the
+ * The switch. One key, both axes: `current` moves and the
  * package's tools go on this TUI's pin list, and off again together — so the
  * pin list can never name an extension no session could resolve.
  */
@@ -715,17 +713,12 @@ test("/ext: Enter turns an extension on and off, and both axes move together", a
 }, 120_000)
 
 /**
- * `/ext`'s Enter means exactly one thing: this package is now USABLE (tui.md
- * §11, T1, ext-review-2 §3b) — and since T52 it writes exactly two things, a
- * `current` and the package's `manual` pins.
+ * `/ext`'s Enter means exactly one thing: this package is now USABLE — and
+ * it writes exactly two things, a `current` and the package's `manual` pins.
  *
- * The bug T31 fixed: `evolution`'s prompt was in front of every model on the
- * machine, and nothing on the screen said so. The bug T1 fixed is what T31's
- * own fix grew into (K8): Enter on a mode wrote it onto a standing membership
- * list this front end kept, so turning `plan` on meant every session from then
- * on paid for its prompt. T52 removed that list outright — a package that
- * belongs in every session says `apply: "auto"` and the kernel composes it, for
- * every driver — so there is no third thing left for Enter to write.
+ * A package that belongs in every session says `apply: "auto"` and the
+ * kernel composes it, for every driver — so there is no third thing left for
+ * Enter to write.
  */
 test("/ext Enter on a prompt package moves current and writes no membership of its own", async () => {
   const shop = tempWorkspace()
@@ -755,7 +748,7 @@ test("/ext Enter on a prompt package moves current and writes no membership of i
       const frame = await settle(setup, 4)
       // No `standing` cell: nothing recorded this package as a standing member,
       // so the one word in the id list that is about reach stays empty. The
-      // cell reports the kernel's record, never a manifest's `apply` (T52/T56).
+      // cell reports the kernel's record, never a manifest's `apply`.
       expect(standingCell({ standing: false })).toBe("")
       // No declared command: the way in it names is `/with` (nothing derived).
       expect(frame).toContain("`/with house.style` wears its prompt")
@@ -768,12 +761,12 @@ test("/ext Enter on a prompt package moves current and writes no membership of i
       )
       const on = await settle(setup, 4)
       // The package declares no command, so nothing invents `/house.style`:
-      // the notice points at `/with` (T54 — commands exist only by declaration).
+      // the notice points at `/with` (commands exist only by declaration).
       expect(on).toContain("/with house.style opens a new tab wearing it for one session")
       expect(on).toContain("Enter again takes that away")
       // The pointer moved — `current` says which version `house.style` is now
       // — and NOTHING was written into this front end's state: no pins (the
-      // package declares no tool), and since T52 no membership list at all.
+      // package declares no tool), and no membership list at all.
       expect(loadTuiState(statePath).session_pins ?? []).toEqual([])
       expect(JSON.stringify(loadTuiState(statePath))).not.toContain("house.style")
 
@@ -796,7 +789,7 @@ test("/ext Enter on a prompt package moves current and writes no membership of i
 }, 120_000)
 
 /**
- * A full tool face stops the PINS, never the activation (tui.md §11, T23).
+ * A full tool face stops the PINS, never the activation.
  *
  * The bug this is for: six pins already down against `max_tools = 8`, and every
  * Enter on `compact` — which declares one tool — was refused whole, with
@@ -811,7 +804,7 @@ test("/ext: a full tool face leaves the extension half on rather than refusing i
     const run = (args: string[]) => Bun.spawnSync({ cmd: [full.bin, ...args], cwd: full.dir, env: process.env })
     run(["ext", "init", "--script", "lint"])
     // A pinnable tool, said out loud: the template's silence means `auto` now,
-    // and a quota is only about the pins (T52).
+    // and a quota is only about the pins.
     const draft = join(full.dir, ".nulya", "extensions", "lint", "extension.json")
     const manifest = JSON.parse(readFileSync(draft, "utf8")) as {
       contributes: { tools: Array<Record<string, unknown>> }
@@ -851,7 +844,7 @@ test("/ext: a full tool face leaves the extension half on rather than refusing i
 }, 120_000)
 
 /**
- * `/ext`'s push action (goals/remote-env.md §3.9, tui.md §11 T102). The
+ * `/ext`'s push action. The
  * "remote" is a real channel — `remote:exec:` pointed at the same binary,
  * same trick the kernel's own e2e-remote uses — so this exercises the real
  * `nulya ext push` round trip, not a stand-in for it.
@@ -905,7 +898,7 @@ test("/ext's r pushes the selected package's active version to this tab's remote
     ))
     try {
       await settle(setup, 5)
-      // `more` lines (the `r` hint among them) are one `?` away (T18); `r`
+      // `more` lines (the `r` hint among them) are one `?` away; `r`
       // itself is not consumed by that toggle, so this both confirms the hint
       // is there AND leaves the panel ready for the keypress below.
       setup.mockInput.pressKey("?")
@@ -922,7 +915,7 @@ test("/ext's r pushes the selected package's active version to this tab's remote
       expect(after).toContain("pushable")
       expect(after).toContain(pushed_version)
       // Remembered, and shown as "last time" on the next render — never as a
-      // present-tense claim this front end cannot back up (T102's own choice).
+      // present-tense claim this front end cannot back up.
       expect(await settle(setup, 3)).toContain("last time:")
     } finally {
       setup.renderer.destroy()
@@ -933,7 +926,7 @@ test("/ext's r pushes the selected package's active version to this tab's remote
 }, 120_000)
 
 /**
- * `/tasks` (tui.md §5.9). Every column on a row is `nulya task list --json`,
+ * `/tasks`. Every column on a row is `nulya task list --json`,
  * so this drives the real binary: a background command is started, finishes,
  * and the panel says what became of it.
  */

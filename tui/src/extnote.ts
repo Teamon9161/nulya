@@ -1,9 +1,9 @@
 /**
- * What a PLUGIN says to the model (`api.actions.appendNote`, tui-plugin D5).
+ * What a PLUGIN says to the model (`api.actions.appendNote`).
  *
  * A plugin changes the world only through verbs a person already has, and the
- * one that reaches the model is `session append` (tui.md §5.7's note, T17's
- * mid-task message, T15's skill echo — this is the fourth of the same family).
+ * one that reaches the model is `session append` — the same call an approval
+ * note, a mid-task message, and a skill echo already use.
  * Which is exactly right: a plan review's comments, an `ask` panel's answer and
  * a person typing the same words by hand are the same kind of thing, and they
  * should land in the ledger as the same kind of turn.

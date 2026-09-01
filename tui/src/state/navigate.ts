@@ -1,5 +1,5 @@
 /**
- * Opening a session in a tab, from a card (T43).
+ * Opening a session in a tab, from a card.
  *
  * A transcript card is handed one item and nothing else — which is right, and
  * is why replay and the live stream draw the same thing. But a delegation card
@@ -10,7 +10,7 @@
  * context with a default that does nothing, so a card in a test needs no
  * provider and a card in a screen without tabs simply has no link. It carries
  * the front end's own verb (`tabs.open`), not a new power: `Enter` in browse
- * mode has opened a sub-session since T3, and this is that move with something
+ * mode has opened a sub-session and this is that move with something
  * on screen to click.
  */
 import { createContext, useContext } from "solid-js"
@@ -18,7 +18,7 @@ import type { DelegationRecord } from "../nulya/files.ts"
 
 export interface Navigate {
   /**
-   * Follow this session in a pane of THIS tab (goals/tui-shell.md §5.3c, T72).
+   * Follow this session in a pane of THIS tab (goals/tui-shell.md §5.3c).
    *
    * The default of the two, because it is what the link is for: a delegation
    * belongs to the conversation that made it, and watching it work is something

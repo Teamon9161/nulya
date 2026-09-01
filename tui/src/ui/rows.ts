@@ -1,5 +1,5 @@
 /**
- * What every clickable row in this front end has in common (tui.md §11, T18).
+ * What every clickable row in this front end has in common.
  *
  * Three things, and they are here so that a new list cannot invent a fourth
  * answer to any of them:
@@ -20,13 +20,13 @@
  *    `theme.lift`. Both keep their own gutter mark, which is what survives a
  *    terminal with no colour at all.
  *
- *    The pointer used to get a band too, a fainter one. Two bands of nearly the
- *    same weight is a distinction nobody reads, and the quieter one was a slab
- *    of background drawn under text that had not been chosen — it made a row
+ *    A second band under the pointer, at nearly the cursor's own weight,
+ *    would be a distinction nobody reads, and would be a slab
+ *    of background drawn under text that had not been chosen — it would make a row
  *    look picked when the mouse had merely crossed it. A lift says the same
  *    thing without painting anything: the row brightens where its own colours
- *    are, so a warn-coloured cell stays warn (T38's shimmer took this route
- *    first, and `theme.lift` is the token it introduced for exactly this —
+ *    are, so a warn-coloured cell stays warn (`theme.lift` is the token for
+ *    exactly this —
  *    "brighter" is not a direction a colour has on a light background).
  *
  * Mouse handling itself stays in each component's own JSX: there is no global
@@ -66,7 +66,7 @@ export function createHover(): Hover {
  * checkbox inside a pin row is the one place where two nested targets both want
  * the same click and mean different things.
  *
- * IT CLAIMS THE RELEASE, NOT THE PRESS (T69). What `stop` protects against is
+ * IT CLAIMS THE RELEASE, NOT THE PRESS. What `stop` protects against is
  * the enclosing row ACTING, and a row acts on the release — a click is press
  * and release in the same cell, and nothing above has decided anything yet on
  * the way down. Stopping the press as well used to cost nothing because the

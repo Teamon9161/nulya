@@ -4,8 +4,8 @@ import { wrapWords } from "../../ui/columns.ts"
 import type { RebindItem } from "../../state/session.ts"
 
 /**
- * `model_rebind`: everything below this line was answered by a different model
- * (DESIGN §3.1, goals/model-rebind.md).
+ * `model_rebind`: everything below this line was answered by a different
+ * model.
  *
  * A rule rather than a card, because it is not a turn — the kernel projects no
  * PromptIR turn for this event on purpose, so the model above the line and the

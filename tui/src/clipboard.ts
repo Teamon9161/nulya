@@ -3,7 +3,7 @@ import { sniffImage } from "./image.ts"
 import type { ImageInput } from "./nulya/cli.ts"
 
 /**
- * The host clipboard, for the paste this front end takes over (tui.md §11, T79).
+ * The host clipboard, for the paste this front end takes over.
  *
  * A terminal can bracket-paste TEXT and has no protocol for anything else, so
  * an image has to be asked for from the desktop clipboard directly. The first

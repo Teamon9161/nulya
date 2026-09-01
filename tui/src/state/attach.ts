@@ -2,9 +2,9 @@
  * Attaching to one session — as its driver, or as an observer.
  *
  * A durable session has exactly one writer, enforced by an exclusive advisory
- * lease on `<id>.lock` (DESIGN §3.4). So "am I driving this?" is not a mode the
+ * lease on `<id>.lock`. So "am I driving this?" is not a mode the
  * TUI chooses; it is a fact about the world, and this module's whole job is to
- * keep the screen honest about it (tui.md §5.6):
+ * keep the screen honest about it:
  *
  *   driver   — we own the `session step --stream` subprocess. Deltas, tools and
  *              ledger lines all arrive on its stdout.
@@ -14,7 +14,7 @@
  *              which lands in the inbox for the other writer's next step
  *              boundary. Granularity drops from delta to event: deltas exist
  *              only on the driver's stdout, and inventing a second source for
- *              them would need a kernel change we are not making (tui.md §10.4).
+ *              them would need a kernel change we are not making.
  *
  * Two independent signals decide the role, and neither is a guess:
  *   1. the lease probe (`files.probeWriterLease`), polled while idle — on
@@ -35,7 +35,7 @@ export type Role = "driver" | "observer"
 export interface Attachment {
   role: Accessor<Role>
   status: Accessor<DriverStatus>
-  /** When whatever is running started, or null (`Driver.startedAt`, T38). */
+  /** When whatever is running started, or null (`Driver.startedAt`). */
   startedAt: Accessor<number | null>
   /** The lease has looked free for a while: `Enter` would take over. */
   takeoverReady: Accessor<boolean>
@@ -53,7 +53,7 @@ export interface Attachment {
    * the other writer drains it at its own next step boundary.
    */
   interruptAndDeliver(text: string, framed?: boolean, images?: readonly ImageInput[]): Promise<void>
-  /** Stop observing and try to drive again (tui.md §5.6, "press ↵ to take over"). */
+  /** Stop observing and try to drive again ("press ↵ to take over"). */
   takeOver(): void
   dispose(): void
 }
@@ -169,14 +169,14 @@ export function createAttachment(
       if (freeProbes >= needed) setTakeoverReady(true)
       return
     }
-    // The driver's wake-up (tui.md §5.9): something is in the inbox and only a
+    // The driver's wake-up: something is in the inbox and only a
     // step boundary drains it. On THIS timer rather than one of its own — it is
     // the same "what has the world done while we sat still" beat the lease probe
     // already runs, and a second timer would only be a second thing to stop.
     //
     // An observer never gets here, and must not: the other writer drains that
     // inbox at its own next step, and two writers is the one thing a durable
-    // session refuses (DESIGN §3.4).
+    // session refuses.
     if (role() === "driver" && driven) void driver.wake()
   }, pollMs)
 
@@ -192,7 +192,7 @@ export function createAttachment(
       return
     }
     // Observer: append only. The turn is deposited in the inbox and the other
-    // writer drains it at its next step boundary (DESIGN §3.4) — we must not
+    // writer drains it at its next step boundary — we must not
     // start a step of our own, and we could not if we tried. When the probe
     // can see that writer actually holding the lease, its run is in flight
     // and the turn carries the mid-task framing (midtask.ts); "free" and
@@ -264,7 +264,7 @@ export function createAttachment(
     driven = true
     // A turn we queued as observer is still in the inbox if the other writer
     // left before draining it. Taking over is the user saying "drive", and the
-    // one mechanical re-step tui.md §4.3 allows is exactly this case: our own
+    // one mechanical re-step this allows is exactly this case: our own
     // pending turn, nobody else to drain it.
     if (state.pendingCount() > 0) void driver.step()
   }

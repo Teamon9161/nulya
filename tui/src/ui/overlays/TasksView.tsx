@@ -1,10 +1,10 @@
 /**
- * `/tasks` (F7): the background commands this session started (tui.md §5.9).
+ * `/tasks` (F7): the background commands this session started.
  *
  * Every row is `nulya task list --session <id> --json` — state, exit code and
  * elapsed time come from the kernel's own projection, because `starting` and
  * `lost` are answers that need the task directory and its lease read together
- * (DESIGN §6.1) and a second implementation of them here would eventually
+ * and a second implementation of them here would eventually
  * disagree with the one that counts. This panel decides two things only: which
  * row the cursor is on, and whether the log is showing.
  *

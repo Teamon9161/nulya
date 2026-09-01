@@ -1,5 +1,5 @@
 /**
- * The evolution table (tui.md §5.2), unit-tested where it lives: one place
+ * The evolution table, unit-tested where it lives: one place
  * matches on a tool name or a command prefix, so one test file can cover every
  * row of it without a renderer.
  *
@@ -48,7 +48,7 @@ test("ext build reads the sealed version out of stdout", () => {
 test("activate is one verb, and an unknown one falls back to the shell card", () => {
   const activate = shell("nulya ext activate lint v-3f2a91")
   // There is no `ext rollback` any more — going back is `activate` pointed at an
-  // older version (DESIGN §7.4) — so the old spelling is just a command.
+  // older version — so the old spelling is just a command.
   const rollback = shell("nulya ext rollback lint v-0011aa")
   expect(activate.head).toBe("activate · lint@v-3f2a91")
   expect(rollback.head).toBe("nulya ext rollback lint v-0011aa")
@@ -113,7 +113,7 @@ test("shell and extension tools each get their own card", () => {
   expect(edit.head).toBe("edit · src/emit.zig")
   const ext = describeTool({ tool: "lint_zig", args: JSON.stringify({ path: "src" }), output: "" }, glyphs)
   expect(ext.kind).toBe("ext")
-  // The first argument is the subject and loses its key (T26); the rest keep theirs.
+  // The first argument is the subject and loses its key; the rest keep theirs.
   expect(ext.head).toBe("lint_zig · src")
   // `{path, offset?, limit?}` is a file TARGET, not three arguments: it reads as
   // one (`pathArgsSummary`), which is why the plumbing keys never appear.
@@ -133,7 +133,7 @@ test("a still-streaming call shows its raw arguments rather than guessing", () =
 })
 
 /**
- * A background launch is a launch, not the action it names (tui.md §5.9): the
+ * A background launch is a launch, not the action it names: the
  * call comes back with a receipt, and whether the command worked is a separate
  * event minutes later. So the evolution table stands down for it and the plain
  * shell card — whose note is about the task — draws it.

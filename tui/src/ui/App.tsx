@@ -214,7 +214,7 @@ export interface AppProps {
   /**
    * An existing session to open (`nulya-tui --session <id>`), or absent — and
    * then the screen starts on a DRAFT: no session, nothing on disk, until the
-   * first message (tui.md §11, T22).
+   * first message.
    */
   id?: string
   state?: SessionState
@@ -233,7 +233,7 @@ export interface AppProps {
    */
   guide?: string
   /**
-   * Which screen the guide opens (tui.md §11, T21). `/model` when something can
+   * Which screen the guide opens. `/model` when something can
    * run and the remembered pick simply cannot; `/provider` when NO provider can
    * run at all, because then a list of models has nothing to offer and the
    * missing key is the whole of the problem.
@@ -254,7 +254,7 @@ export interface AppProps {
    * a profile's default model id (so a draft that names a profile and no model
    * can still say which model the session will actually run on), and — via
    * `modelParamsFor` — a profile's own `catalog`, when the front tab's frozen
-   * identity is on a profile that reports one (codex today, DESIGN §9.5).
+   * identity is on a profile that reports one (codex today).
    */
   profiles?: ProfileView[]
   /**
@@ -265,29 +265,29 @@ export interface AppProps {
   pinnedTools?: string[]
   /**
    * Which store roots to build on the way in, and whether to let that pass move
-   * `current` (tui.md §11, T11). The user root needs no permission; the project
+   * `current`. The user root needs no permission; the project
    * root is only here when `main` found it already trusted — the trust question,
    * the one thing that can stop a session from being created at all, is asked
    * before this screen exists and is the only thing still asked there.
    *
    * `bundled` seeds the drafts this binary ships into the user store first
-   * (tui.md §11, T23). Both it and `user` are `[extensions] sync_on_start`;
+   *. Both it and `user` are `[extensions] sync_on_start`;
    * `activate` is `auto_activate`, and it gates the pointer moves in both.
    */
   sync?: SyncPlan
   /**
    * Whether the agent definitions that came with this CHECKOUT may be used
-   * (tui.md §5.10). Asked once before this screen exists, exactly as the store
+   *. Asked once before this screen exists, exactly as the store
    * question is, and for two reasons at once: a definition becomes a system
    * prompt, and materialising one builds into this workspace's extension store,
-   * which for an empty store is how the kernel records trust for it (DESIGN §9).
+   * which for an empty store is how the kernel records trust for it.
    * Definitions in `~/.nulya/agents` are never gated — nothing arrives there
    * without the person putting it there.
    */
   agentsTrusted?: boolean
   /**
    * `/settings` wrote a key in `tui.toml`: read the file chain again and let
-   * the answer reach the screen (T100, `render/theme.ts`'s `liveStyle`).
+   * the answer reach the screen (`render/theme.ts`'s `liveStyle`).
    *
    * The reload lives above this component because `style` is what the whole
    * tree draws from and it arrives as a prop; absent in tests, where a static
@@ -297,10 +297,10 @@ export interface AppProps {
 }
 
 /**
- * Which store roots a start-up pass touches, and whether it may move `current`
- * (tui.md §11, T11).
+ * Which store roots a start-up pass touches, and whether it may move
+ * `current`.
  *
- * Named since S1c because there are two callers now: the process's own pass
+ * There are two callers: the process's own pass
  * over the launch workspace, and the pass a tab makes the first time it walks
  * into a workspace nobody has been in yet (§5.3b point 6). The second one asks
  * for the project root alone — the user store is the machine's, and it is
@@ -315,8 +315,8 @@ export interface SyncPlan {
 
 /**
  * One call the kernel is holding open, and the promise it is held on. The
- * request is what `--gate` offered; resolving it is what lets the step continue
- * (tui.md §5.7).
+ * request is what `--gate` offered; resolving it is what lets the step
+ * continue.
  */
 interface Approval {
   request: GateRequest
@@ -327,7 +327,7 @@ interface Approval {
 
 /**
  * How long a notice stays up before the status line goes back to what it says
- * at rest (T35): as long as it takes to read it, and no longer.
+ * at rest: as long as it takes to read it, and no longer.
  *
  * A notice covers that whole line while it is up, so it has to come down on its
  * own — and a fixed number would be wrong at both ends, since the same slot
@@ -345,13 +345,13 @@ const ctrl_c_ms = 3000
 /**
  * The heartbeat echo going this stale means the reactive layer is dead — the
  * beat is written every second, so five missed echoes is not a busy loop, it
- * is a broken one (BUGS.md #17).
+ * is a broken one.
  */
 const reactive_stall_ms = 5000
 
 /**
  * The cards browse mode walks: everything with a body that is actually on
- * screen. It walks ROWS, not items (T43) — the transcript's own projection,
+ * screen. It walks ROWS, not items — the transcript's own projection,
  * so a call gathered into a run summary is not a place the cursor can land and
  * the run itself is. Anything outside `history_window` is not mounted, and a
  * selection there would be invisible.
@@ -367,8 +367,8 @@ function foldable(rows: readonly TranscriptRow[]): { key: string; item: Transcri
 
 /**
  * The whole screen: transcript, composer, status line — three blocks separated
- * by hairlines, no borders (tui.md §4.1, §6). The title line above them is gone
- * since T22: what it said that mattered — the model — is under the composer,
+ * by hairlines, no borders. The title line above them is gone
+ * what it said that mattered — the model — is under the composer,
  * and what it said that did not — a session id — is in `/sessions`.
  *
  * There is no intelligence above the driver here. Slash commands map one to one
@@ -381,18 +381,17 @@ export function App(props: AppProps) {
   const folds = createFoldStore()
   const browse = createBrowseStore()
   /**
-   * The content area is a pane tree (goals/tui-shell.md §5.1). Today it holds
-   * exactly one pane, which is why nothing on screen moved when T68 landed: the
-   * screen this front end has always drawn is that model's degenerate case.
+   * The content area is a pane tree; today it holds exactly one pane, so the
+   * screen this front end draws is that model's degenerate case.
    *
-   * `overlay` is the same store every call site below already used, answered
+   * `overlay` is the same store every call site below already uses, answered
    * from the tree instead of from a signal of its own — "which overlay is in
-   * front" was always "which surface the one pane shows", and `active()` was
-   * always "does that surface take the keyboard" (`state/panes.ts`).
+   * front" is "which surface the one pane shows", and `active()` is "does
+   * that surface take the keyboard" (`state/panes.ts`).
    */
   const surfaces = createSurfaceRegistry<JSX.Element>()
   /**
-   * The APP tree (T72): what is on screen across tabs. One leaf today — the
+   * The APP tree: what is on screen across tabs. One leaf today — the
    * portal — with the sessions sidebar splitting off beside it.
    */
   const panes = createPaneStore(tab_surface)
@@ -406,7 +405,7 @@ export function App(props: AppProps) {
   const keyboardLeaf = () => focusThrough(panes, tabPanes())
   const overlay = overlayAdapter(tabPanes, keyboardLeaf, (surface) => claimsKeyboard(surfaces, surface))
   /**
-   * The sessions sidebar (T69) — the first real split, and the first thing on
+   * The sessions sidebar — the first real split, and the first thing on
    * this screen whose state is NOT the pane tree.
    *
    * What is remembered is what was ASKED for, and the tree is reconciled to it.
@@ -431,10 +430,10 @@ export function App(props: AppProps) {
    */
   const screenRect = () => ({ x: 0, y: 0, width: screen().width, height: screen().height })
   /**
-   * The portal's box: where the front tab's own tree is laid out (T72).
+   * The portal's box: where the front tab's own tree is laid out.
    *
    * Measured through the app tree's `layout` rather than recomputed from the
-   * sidebar ratio, for the reason `sidebarWidth` is (T69): a second copy of the
+   * sidebar ratio, for the reason `sidebarWidth` is: a second copy of the
    * same arithmetic is a second answer waiting to disagree with the seam.
    */
   const portalRect = () =>
@@ -456,7 +455,7 @@ export function App(props: AppProps) {
       ? { kind: "session", id: props.id, state: props.state, created: props.created ?? false, effort: props.effort }
       : { kind: "draft", pick: props.pick, effort: props.effort }
   /**
-   * Every step this TUI drives is gated (tui.md §5.7): the kernel asks before
+   * Every step this TUI drives is gated: the kernel asks before
    * each tool call and this answers. The mode is not passed to the kernel and
    * never could be — `--gate` has one semantic, allow or deny, and WHICH calls
    * are worth a person's attention is this front end's policy. So a mode
@@ -482,7 +481,7 @@ export function App(props: AppProps) {
   })
 
   /**
-   * A sub-agent split follows the terminal it is drawn in (§5.3c, T72).
+   * A sub-agent split follows the terminal it is drawn in.
    *
    * `subSplitDirection` answers "is there room to read two conversations side
    * by side" from the width, and the width is something a person changes by
@@ -504,7 +503,7 @@ export function App(props: AppProps) {
    *
    * They used to be one each, built from the process's workspace, which was
    * right while there was one. Keyed and kept, rather than rebuilt per read:
-   * the path index walks a repository (T13) and the other two spawn the binary,
+   * the path index walks a repository and the other two spawn the binary,
    * so a memo that ran on every frame would be a process per frame. A workspace
    * a tab still holds keeps its table; there is no eviction because the number
    * of directories a person has tabs in is the number of tabs.
@@ -520,13 +519,13 @@ export function App(props: AppProps) {
       return made
     }
   }
-  // The workspace's paths, for `@` completion (tui.md §11, T13). Built in the
+  // The workspace's paths, for `@` completion. Built in the
   // background from the moment the screen exists: the first `@` before it
   // finishes shows nothing and the next one shows everything, which beats a
   // composer that stops accepting characters while git walks a monorepo.
   const referencesFor = perWorkspace((where) => createProjectIndex(where.dir))
   /**
-   * The skill catalog behind `/name` (tui.md §11, T15). It goes stale exactly
+   * The skill catalog behind `/name`. It goes stale exactly
    * when an extension is activated or deactivated, which is why `/ext` hands
    * back `invalidate` rather than this polling for it.
    */
@@ -540,7 +539,7 @@ export function App(props: AppProps) {
   const packageCmdsFor = perWorkspace((where) => createPackageCommandTable(where))
 
   /**
-   * The line under the composer, when it has news (T35).
+   * The line under the composer, when it has news.
    *
    * A notice covers that whole line while it is up, so it must also come down
    * on its own: a message that stays is a message that stops being true — the
@@ -585,7 +584,7 @@ export function App(props: AppProps) {
    */
   const [syncing, setSyncing] = createSignal<SyncProgress | null>(null)
   /**
-   * The permission mode (tui.md §5.7). Remembered on screen, like the model
+   * The permission mode. Remembered on screen, like the model
    * pick: `tui-state.json` first (what was last chosen here), then `tui.toml`'s
    * `[driver] mode`, then `ask`.
    */
@@ -593,14 +592,14 @@ export function App(props: AppProps) {
     loadTuiState(props.statePath).mode ?? props.style.settings.driver.mode,
   )
   /**
-   * Whether the mode picker is up, and which row its cursor is on (tui.md §5.7,
-   * T31). A dialog above the composer rather than a full-screen overlay — two
-   * rows of content — so it is its own two signals rather than an `OverlayKind`.
+   * Whether the mode picker is up, and which row its cursor is on. A dialog
+   * above the composer rather than a full-screen overlay — two rows of
+   * content — so it is its own two signals rather than an `OverlayKind`.
    */
   const [modePicker, setModePicker] = createSignal(false)
   const [modeChoice, setModeChoice] = createSignal(0)
   /**
-   * Whether the context panel is open (`ui/ContextPanel.tsx`, T82) — the ring on
+   * Whether the context panel is open (`ui/ContextPanel.tsx`) — the ring on
    * the status row, opened out.
    *
    * Deliberately NOT one of `resolveFocus`'s dialogs: it chooses nothing, takes
@@ -626,7 +625,7 @@ export function App(props: AppProps) {
   const pending = (): Approval | null => pendingQueue()[0] ?? null
   /**
    * Calls `A` has waved through: the rest of the batch the person was looking
-   * at when they pressed it (tui.md §5.7).
+   * at when they pressed it.
    *
    * Ids, not a flag, and that is the whole point. A run can contain several
    * steps, so "allow the rest" as a boolean would quietly cover a batch nobody
@@ -634,7 +633,7 @@ export function App(props: AppProps) {
    * of them already drawn as a card — and nothing else can join the set.
    */
   const [batchAllowed, setBatchAllowed] = createSignal<ReadonlySet<string>>(new Set())
-  /** Which answer the approval dialog's cursor is on (tui.md §5.7). */
+  /** Which answer the approval dialog's cursor is on. */
   const [choice, setChoice] = createSignal(0)
   /** Whether the dialog's note field has the keyboard rather than the list. */
   const [noteFocused, setNoteFocused] = createSignal(false)
@@ -642,7 +641,7 @@ export function App(props: AppProps) {
   let noteField: InputRenderable | null = null
 
   /**
-   * What the `/agent` PICKER is showing, and nothing else (tui.md §5.10).
+   * What the `/agent` PICKER is showing, and nothing else.
    *
    * Read once when the picker opens and never consulted by a path that starts
    * something: `agentsIn` returns its listing, and every caller acting on a
@@ -661,8 +660,8 @@ export function App(props: AppProps) {
   /** Whether the picker is up, and which row its cursor is on (`AgentPicker`). */
   const [agentPicker, setAgentPicker] = createSignal(false)
   /**
-   * Whether the composer-area background-tasks panel is open (`TasksPanel`,
-   * tui.md §11) — the background count on the activity line, opened out.
+   * Whether the composer-area background-tasks panel is open (`TasksPanel`) —
+   * the background count on the activity line, opened out.
    *
    * Deliberately NOT one of `resolveFocus`'s dialogs: it chooses nothing and
    * takes no keystroke of its own (its stop buttons are mouse-only, `ui/rows.
@@ -677,14 +676,14 @@ export function App(props: AppProps) {
   const [withPicker, setWithPicker] = createSignal(false)
   const [withChoice, setWithChoice] = createSignal(0)
   const [wearables, setWearables] = createSignal<Wearable[]>([])
-  /** Bare `/env`: where this machine can run a shell (`EnvPicker`, T93). */
+  /** Bare `/env`: where this machine can run a shell (`EnvPicker`). */
   const [envPicker, setEnvPicker] = createSignal(false)
   const [envChoice, setEnvChoice] = createSignal(0)
   const [envTargets, setEnvTargets] = createSignal<ExecChoice[]>([])
   /**
    * The remote directory browser's pending target, between picking a
    * `remote:` row in `EnvPicker` and choosing a directory on it — the second
-   * half of a two-part choice (goals/remote-env.md §3.9, T101). `null` means
+   * half of a two-part choice. `null` means
    * the `envdir` overlay has nothing to show, which is also why opening it is
    * never the picker's own move: `beginRemoteBrowse` sets this and THEN opens
    * the overlay, so the two can never disagree about whether there is a
@@ -727,7 +726,7 @@ export function App(props: AppProps) {
    * Any of the composer's pickers is up. One accessor because every rule about
    * them is about ALL of them — who holds the keyboard, whether the composer
    * may blink, whether a shortcut layer answers — and a fifth picker should
-   * change one line rather than six (T93).
+   * change one line rather than six.
    */
   const pickerUp = () => modePicker() || withPicker() || agentPicker() || envPicker()
   const [agentChoice, setAgentChoice] = createSignal(0)
@@ -746,14 +745,14 @@ export function App(props: AppProps) {
    * which is why every caller goes through this instead of building again — and
    * why nothing here happens on mount.
    *
-   * One map where there used to be one `let` per package (T34): configured
+   * One map where there used to be one `let` per package: configured
    * entries come from `[extensions] session_with`, and `agentPackage`
    * below reads the same entry the composition does rather than building the
    * same draft a second time.
    *
    * KEYED BY WORKSPACE as well as by id (S1c). A version resolved here is a
    * version in a particular store, and the store search order is the
-   * workspace's (`.nulya/extensions` first, DESIGN §5.5) — so the same id in
+   * workspace's (`.nulya/extensions` first) — so the same id in
    * two directories can honestly be two versions, and a cache that remembered
    * only the id would compose the second workspace's session out of the first
    * one's build.
@@ -784,12 +783,12 @@ export function App(props: AppProps) {
   const [composedWithTools, setComposedWithTools] = createSignal<string[]>([])
   /**
    * The `surface:"auto"` tools those composed packages will put on the face,
-   * known before the session exists (T42) — so the draft screen can count them.
+   * known before the session exists — so the draft screen can count them.
    *
    * Read from the ACTIVE version's manifest plus config projection, not by
    * resolving the member: `sessionMember` may build a bundled draft, which is a
    * toolchain run, and a screen that has not been asked for anything yet must
-   * not start one (T23). Under-reporting while background sync is still
+   * not start one. Under-reporting while background sync is still
    * activating a freshly built bundled package is the right way to be wrong.
    */
   const refreshComposedMembership = async () => {
@@ -797,14 +796,13 @@ export function App(props: AppProps) {
       const [listed, config] = await Promise.all([listExtensions(ws()), configShow(ws(), props.driver?.env)])
       healStandingPins(listed)
       const profile = envProfile(execEnv(props.statePath))
-      // Three ways a package is in every session started here (T52): it asked
+      // Three ways a package is in every session started here: it asked
       // and the kernel recorded it (`standing` — the kernel's own answer, never
-      // an `apply` re-read here, T56), config named it, or this front end always
-      // brings it. Under `--bare` (T88/T101's `remote` default — `ssh` was a
-      // second kind with the same default until the bare `ssh:<dest>` exec
-      // target was retired, goals/remote-env.md §7.1) neither standing table
-      // applies — config's `with` and every `apply:"auto"` package's own bit —
-      // so only THIS list's own `--with` refs count.
+      // an `apply` re-read here), config named it, or this front end always
+      // brings it. Under `--bare` (the default for `remote` exec targets)
+      // neither standing table applies — config's `with` and every
+      // `apply:"auto"` package's own bit — so only THIS list's own `--with`
+      // refs count.
       const named = profile.bare ? new Set(profile.with) : new Set([...config.extensions.with, ...profile.with])
       setComposedWithTools(
         listed
@@ -819,7 +817,7 @@ export function App(props: AppProps) {
   /**
    * The profile the NEXT `session new` from this screen would compose with,
    * for the exec target `spec` names — `/env`'s pending choice on a draft, or
-   * a started session's frozen `environment` (T88, `state/envprofile.ts`).
+   * a started session's frozen `environment` (`state/envprofile.ts`).
    *
    * One function two call sites read: `sessionExtras()` (what is actually
    * sent to the kernel) and the draft screen's tool count
@@ -839,9 +837,9 @@ export function App(props: AppProps) {
    * first message, not when somebody happens to open `/ext`.
    *
    * One kind of stale line: a pin whose package has no `current` any more. A
-   * pin brings its package in (DESIGN §5.1), and with nothing to bring the
+   * pin brings its package in, and with nothing to bring the
    * session does not start at all (`WithVersionNotFound`, `cli/session.zig`).
-   * `/ext` has repaired this list since T12, but only while its panel was up.
+   * `/ext` has repaired this list but only while its panel was up.
    * The list is our own program state; dropping a line out loud is the honest
    * repair, and the same one `ExtView.dropOrphanPins` makes.
    */
@@ -858,7 +856,7 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Why the draft in front of this person is still a draft (tui.md §11, T46).
+   * Why the draft in front of this person is still a draft.
    *
    * A `session new` that refuses says a paragraph — the untrusted store and
    * everything in it, or every pin when one of them names nothing — and it used
@@ -981,7 +979,7 @@ export function App(props: AppProps) {
   createEffect(() => {
     if (!props.style.motion) return
     // Every kind of work that draws a moving line, not just the driver's own.
-    // A background task spins while the driver rests (tui.md §5.9) — and so does
+    // A background task spins while the driver rests — and so does
     // the start-up store pass, which is the FIRST thing anybody sees and used to
     // be the one moving line that did not move: it runs before there is a
     // session to be stepping, so `idle` plus no tasks stopped the clock and
@@ -994,8 +992,8 @@ export function App(props: AppProps) {
   })
 
   /**
-   * Build the drafts sitting in the store roots, in the background (tui.md §11,
-   * T11). A compiled draft takes seconds, so this must never be on the way in —
+   * Build the drafts sitting in the store roots, in the background. A
+   * compiled draft takes seconds, so this must never be on the way in —
    * the transcript is usable throughout and the status line says what is going
    * on. Nothing here decides what a draft is or which version it becomes: the
    * plan and the pass are both `nulya ext sync`.
@@ -1006,34 +1004,28 @@ export function App(props: AppProps) {
    * where they put it.
    *
    * Whether a pointer may move at all is not decided here. Every unattended
-   * move in this front end goes through `activateUnattended` (T56), which asks
+   * move in this front end goes through `activateUnattended`, which asks
    * the reach question from both sides: does the CANDIDATE declare
    * `apply: "auto"`, and is whatever is active today STANDING — the kernel's
    * own record, not a manifest re-read here. For everything else activating
-   * composes nothing (DESIGN §5.1) and is safe to do unattended. For an
+   * composes nothing and is safe to do unattended. For an
    * `apply: "auto"` package on either side of the move, activating IS
    * composing — the kernel joins or drops it from every fresh session here
    * from that moment — and a background pass does not get to decide what
-   * every session on this machine carries, in either direction. That is
-   * T31's bug in its current spelling: the guard used to be "does it
-   * contribute a system prompt", which was the closest thing to this
-   * question anybody could ask before a package could state its reach; T55
-   * closed the mirror case the single-sided version missed — a standing
-   * package whose newest draft quietly turned `manual` — and T56 made a
-   * store that cannot answer a refusal rather than a yes.
+   * every session on this machine carries, in either direction.
    */
   const syncStores = async (where: Workspace = props.ws, asked?: SyncPlan) => {
     const plan = asked ?? props.sync
     if (!plan) return
     // The drafts the BINARY ships, into the user store, before the pass that
-    // builds them: seeding writes source only (DESIGN §7.8), so the one pass
+    // builds them: seeding writes source only, so the one pass
     // below builds what arrived along with everything else. This used to be a
     // question on a bare terminal BEFORE the screen existed, and answering it
     // held that terminal for a minute of zig with `installing…` as the only
-    // sign of life (tui.md §11, T23).
+    // sign of life.
     //
     // It also CARRIES FORWARD the drafts a previous binary seeded and nobody has
-    // edited since (T42) — before that, upgrading nulya left the user store on
+    // edited since — before that, upgrading nulya left the user store on
     // whatever source the first binary happened to drop, so a package that grew
     // a tool, or lost a manifest field, stayed as it was until somebody deleted
     // the directory. Drafts that were edited are left alone and named
@@ -1088,7 +1080,7 @@ export function App(props: AppProps) {
         // next one in the same list `ext sync` is walking. Naming it is what
         // turns a stalled counter into `building std` — the whole difference
         // between a screen that looks stuck and one that says who it is waiting
-        // for (tui.md §11, T57).
+        // for.
         const queue = (await planStore(where, root.user)).lines.map((line) => line.id)
         const total = queue.length
         if (total === 0) continue
@@ -1190,7 +1182,7 @@ export function App(props: AppProps) {
         news.push(`extension sync: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
-    // What the binary brought and what it did not dare touch (T42). The second
+    // What the binary brought and what it did not dare touch. The second
     // half is the one that needs a person: a bundled draft it cannot recognise
     // as its own is either something you wrote or something an old nulya seeded,
     // and only you know which — so it is named with the command that replaces it
@@ -1198,15 +1190,15 @@ export function App(props: AppProps) {
     if (refreshed.length > 0) news.push(`${refreshed.join(" & ")} updated to this build`)
     if (untouched.length > 0) {
       // A notice is not where this lives — it is durable state, and `/ext` says
-      // it for as long as it is true, with the key that fixes it (T42). Naming a
+      // it for as long as it is true, with the key that fixes it. Naming a
       // shell command here was the wrong shape twice over: it is gone in six
       // seconds, and it asks a person to leave the program to repair it.
       news.push(`${untouched.join(" & ")} differ from this build · /ext · s updates one`)
     }
     // There used to be one more line here: whichever mode packages were active
     // on this machine, named because activating one put its system prompt in
-    // front of every model (T31). That state no longer exists — `current` says
-    // which version an id means and composes nothing (DESIGN §5.1) — so there
+    // front of every model. That state no longer exists — `current` says
+    // which version an id means and composes nothing — so there
     // is nothing to warn about and no list to compute.
     setSyncing(null)
     setNotice(news.length > 0 ? news.join(" · ") : null)
@@ -1238,11 +1230,10 @@ export function App(props: AppProps) {
    */
   const entered = createEntryOnce([props.ws.dir])
   /**
-   * What the agent definitions that came with a CHECKOUT may do, per workspace
-   * (tui.md §5.10).
+   * What the agent definitions that came with a CHECKOUT may do, per
+   * workspace.
    *
-   * A map rather than the single prop it used to be, for the same reason
-   * everything else in S1c became one: this is a fact about a directory, and
+   * A map rather than a single value: this is a fact about a directory, and
    * the screen now holds tabs in several. `props.agentsTrusted` is the launch
    * workspace's answer, already given.
    *
@@ -1296,7 +1287,7 @@ export function App(props: AppProps) {
    *
    * The kernel's own gate is untouched and still has the last word: a store
    * this refuses to trust makes `session new` fail in that tab, with the
-   * kernel's paragraph shown in full where the draft is (`refusal`, T46).
+   * kernel's paragraph shown in full where the draft is (`refusal`).
    */
   const enterWorkspace = (where: Workspace) =>
     entered.enter(where.dir, async () => {
@@ -1460,8 +1451,7 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Dragging across the screen selects text, and letting go copies it
-   * (tui.md §11, T18).
+   * Dragging across the screen selects text, and letting go copies it.
    *
    * All the machinery is OpenTUI's: a press on selectable text starts a
    * selection, the drag extends it, the release emits it, and `getSelectedText`
@@ -1573,7 +1563,7 @@ export function App(props: AppProps) {
   const spinnerFrame = () => props.style.spinner[spinnerTick() % props.style.spinner.length]!
 
   /**
-   * What the line above the composer says (T38). The rules are in
+   * What the line above the composer says. The rules are in
    * `WorkingStatus.activityOf` — a pure function of the same facts the status
    * bar reads — so "what is happening" has exactly one definition.
    */
@@ -1605,7 +1595,7 @@ export function App(props: AppProps) {
   // log is what turned the third freeze from a mystery into a stack trace.
   {
     const crashes = installCrashLog(props.ws.dir, renderer)
-    // The reactive heartbeat (BUGS.md #17): a signal written every second, an
+    // The reactive heartbeat: a signal written every second, an
     // effect that echoes it. When the echo goes stale the renderer is fine but
     // Solid is not — updates no longer reach the screen, which nothing
     // frame-level can see. The verdict goes to the crash log, and the console
@@ -1655,7 +1645,7 @@ export function App(props: AppProps) {
    */
   const clockNow = () => (spinnerTick(), Date.now())
 
-  /** The session a card names, if it names one — the sub-session link (tui.md §5.5). */
+  /** The session a card names, if it names one — the sub-session link. */
   const sessionOf = (item: TranscriptItem | null): string | null => {
     if (!item || item.kind !== "tool") return null
     return describeTool({ tool: item.tool, args: item.args, output: item.output }, props.style.glyphs).sessionId
@@ -1692,7 +1682,7 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Show the sessions list beside the transcript, or put it away (T69).
+   * Show the sessions list beside the transcript, or put it away.
    *
    * Three ways in, one verb: `/sidebar`, the key, and the handle on the status
    * line. Nothing here touches the focus — showing a list and going to it are
@@ -1709,14 +1699,15 @@ export function App(props: AppProps) {
 
   /**
    * Move the keyboard to a pane, and hand it back to the box if that pane does
-   * not want it (T69).
+   * not want it.
    *
    * The second half cannot be left to the effect above. Solid flushes effects
    * while the signal is still settling, and at that instant the composer's own
    * `disabled` effect has not yet made the textarea focusable again — so a
    * `focus()` from inside the flush is refused, and the box ends up enabled,
    * blank and not listening. Every OTHER way of leaving a pane already tells
-   * the composer by hand (`closeOverlay`); these two are the ways T69 added.
+   * the composer by hand (`closeOverlay`); `settleKeyboard`/`goToPane` are the
+   * other path.
    */
   const settleKeyboard = () => {
     if (!overlay.active()) composer?.focus()
@@ -1726,7 +1717,7 @@ export function App(props: AppProps) {
     settleKeyboard()
   }
   /**
-   * A click landed in one of the FRONT TAB's panes (T72).
+   * A click landed in one of the FRONT TAB's panes.
    *
    * Both hops, in the order the mouse makes them: the app tree has to be
    * pointing at the portal for the inner focus to be the one that answers, and
@@ -1745,7 +1736,7 @@ export function App(props: AppProps) {
     tabPanes().focusOn(tabPanes().main())
   }
   /**
-   * Move the keyboard one pane in a direction, INNERMOST FIRST (T72).
+   * Move the keyboard one pane in a direction, INNERMOST FIRST.
    *
    * A tiling window manager's rule for nested containers, and the only one that
    * composes without either tree learning about the other: try the tab's own
@@ -1784,7 +1775,7 @@ export function App(props: AppProps) {
     if (browse.active()) leaveBrowse()
     // A full-screen view is about the main pane, so that is where the keyboard
     // has to be for it to be answerable — F2 pressed with the keyboard in the
-    // sidebar (or in a sub-agent pane, T72) opens `/ext` in front of the
+    // sidebar (or in a sub-agent pane) opens `/ext` in front of the
     // transcript, not beside it.
     goToMain()
     const opening = overlay.kind() !== kind
@@ -1798,8 +1789,8 @@ export function App(props: AppProps) {
   }
 
   /**
-   * `/provider` chose a provider: `/model`, landed on its first model (tui.md
-   * §11, T21). This is the second step of "pick a provider, then its model" —
+   * `/provider` chose a provider: `/model`, landed on its first model. This
+   * is the second step of "pick a provider, then its model" —
    * two screens, as in tcode, rather than two levels of one. The guide goes
    * with it: whatever sent the person to the providers has been dealt with by
    * the time they are choosing among models.
@@ -1814,7 +1805,7 @@ export function App(props: AppProps) {
   const closeOverlay = () => {
     overlay.close()
     // "Back to the transcript" includes bringing the keyboard back with it:
-    // this is also how a click in the sidebar ends (T69).
+    // this is also how a click in the sidebar ends.
     goToMain()
     composer?.focus()
       // `/ext` may have moved a membership, pin, or activation while it was up,
@@ -1865,7 +1856,7 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Go to a session HERE: the tab in front becomes that session (T70).
+   * Go to a session HERE: the tab in front becomes that session.
    *
    * The list's primary action, and the reason it needed a second verb at all.
    * `openSession` grows the tab strip by one every time, which is right when
@@ -1890,13 +1881,13 @@ export function App(props: AppProps) {
   }
 
   /**
-   * What a card's link does (T43). One entry point, so clicking `↗ open …` on a
+   * What a card's link does. One entry point, so clicking `↗ open …` on a
    * delegation card and pressing `Enter` on it in browse mode are the same move
    * and cannot drift; browse mode steps aside first, because the keyboard
    * belongs to the tab that just came to the front.
    */
   /**
-   * Follow a delegation in a pane of the tab that made it (§5.3c, T72).
+   * Follow a delegation in a pane of the tab that made it.
    *
    * The default of the card's two routes, and the one that says what a
    * delegation IS: subordinate to this conversation. A pane rather than a tab
@@ -1970,7 +1961,7 @@ export function App(props: AppProps) {
   /**
    * Whether that model is catalogued as accepting images (`[[models]]` with
    * `vision = true`) — the same question, against the same table, that the
-   * kernel's gate asks when the turn is appended (DESIGN §14). An id the
+   * kernel's gate asks when the turn is appended. An id the
    * catalog does not mention is a refusal there, so it is one here too.
    *
    * Null only when this launch has no catalog at all: the front end may repeat
@@ -1989,7 +1980,7 @@ export function App(props: AppProps) {
    * to (`runningModel`, the single place that answers this). A frozen identity
    * is still frozen; there is simply a chain of freeze points now, and reading
    * only the header would leave this line naming a model that has stopped
-   * answering (goals/model-rebind.md §7).
+   * answering.
    */
   const modelName = (): string => {
     const here = tab()
@@ -2002,7 +1993,7 @@ export function App(props: AppProps) {
    * What the next `session new` from this TUI would put on the model's face:
    * the merged config pins, this TUI's own pin list, and `surface:"auto"` tools
    * from packages composed into every session started here — all of it
-   * filtered through the exec-target profile (`envProfile`, T88): under
+   * filtered through the exec-target profile (`envProfile`): under
    * `--bare` the config's own pin list drops out entirely, and the env
    * profile's own `pins` list joins in.
    *
@@ -2031,7 +2022,7 @@ export function App(props: AppProps) {
   }
 
   /**
-   * The packages whose SYSTEM PROMPT this tab is wearing (tui.md §11, T31).
+   * The packages whose SYSTEM PROMPT this tab is wearing.
    *
    * A `--with` member is usually nothing but a prompt — a mode, an identity —
    * and it is the single fact that changes what the model thinks it is. It was
@@ -2060,7 +2051,7 @@ export function App(props: AppProps) {
 
   /**
    * Where this tab's `shell` commands run, when that is not this host
-   * (DESIGN §8.1). Empty means the ordinary answer and the status line spends
+   *. Empty means the ordinary answer and the status line spends
    * no column on it.
    *
    * Two sources for one fact, and they are not interchangeable: a started
@@ -2083,9 +2074,9 @@ export function App(props: AppProps) {
    * exists, the same row read off its header) is actually about — this
    * machine's own `ws().dir` unless a `remote:` target is in force, in which
    * case it is the WORKSPACE that target's `--workspace` names, not the
-   * directory this process happens to be running in (goals/remote-env.md §3.9,
-   * T101; "the pair on the welcome screen — where the files are, where the
-   * commands go" already said this for `shell`, this is the other half).
+   * directory this process happens to be running in — "the pair on the
+   * welcome screen — where the files are, where the commands go" already
+   * said this for `shell`, this is the other half.
    *
    * Two sources, same split `runsIn` already draws: a draft reads the pending
    * choice (`tui_state.ts`), a started session reads its FROZEN header — `/env`
@@ -2122,12 +2113,10 @@ export function App(props: AppProps) {
    * does not move after creation, physics #2).
    *
    * The profile matters as much as the model id: the same id can mean two
-   * different windows depending on who serves it (DESIGN §9.5 — a ChatGPT
-   * subscription's `gpt-5.6-sol` is not the public API's), so this reads
-   * `modelParamsFor` — the one place that per-profile-catalog-first,
-   * global-`[[models]]`-fallback lookup happens, also used by `/model`'s rows.
-   * Before this shared function existed, the gauge read the global list only
-   * and disagreed with the picker on the same session (`docs/BUGS.md` #8).
+   * different windows depending on who serves it — a ChatGPT subscription's
+   * `gpt-5.6-sol` is not the public API's — so this reads `modelParamsFor` —
+   * the one place that per-profile-catalog-first, global-`[[models]]`-fallback
+   * lookup happens, also used by `/model`'s rows.
    */
   const contextWindow = (): number | null => {
     const now = runningModel(snapshot())
@@ -2155,13 +2144,10 @@ export function App(props: AppProps) {
    * goals/model-rebind.md).
    *
    * Two answers, because there are two things in front of a person. A DRAFT has
-   * no session yet, so the pick is simply what its first message will freeze —
-   * unchanged since T22. A session that already exists is MOVED: `session
-   * rebind` deposits a `model_rebind` event and everything from the next step on
-   * is answered by the new model, with this conversation's whole history intact.
-   * Opening a second draft beside it — what this used to do — was the only
-   * honest move while a session's identity was frozen once and for all; the
-   * kernel now freezes a chain, so "switch model" finally means what it says.
+   * no session yet, so the pick is simply what its first message will freeze.
+   * A session that already exists is MOVED: `session rebind` deposits a
+   * `model_rebind` event and everything from the next step on is answered by
+   * the new model, with this conversation's whole history intact.
    *
    * The effort dial rides along either way: it is a per-step generation option,
    * never frozen, so it takes hold on the tab in front of us with no ceremony.
@@ -2175,7 +2161,7 @@ export function App(props: AppProps) {
       here.setEffort(pick.effort)
       // The event is in the inbox, not yet in the ledger — the kernel drains it
       // at the next step boundary. Echoing it here is the same move a just-sent
-      // user turn gets (T27): the chips read the new model straight away, and
+      // user turn gets: the chips read the new model straight away, and
       // the announcement carries the kernel's own words about what the switch
       // costs until its `model_rebind` event arrives and replaces it.
       here.state.noteRebind(
@@ -2296,14 +2282,13 @@ export function App(props: AppProps) {
    * Everything the SCREEN adds to a top-level `session new`: one `--with` for
    * each id the exec-target profile brings in — `[extensions] session_with`
    * on `local` / `wsl`, or whatever `tui.toml`'s `[env.<kind>]` says instead
-   * (T88, `envProfile`). `/env`'s pending choice decides which profile this
+   * (`envProfile`). `/env`'s pending choice decides which profile this
    * is, and it is read once, right here, at the same moment as everything
    * else on this list — a choice made after this line is a choice about the
    * NEXT session, which is exactly what `/env` says it is.
    *
-   * One list, where until T52 there were two — this one and `/ext`'s own
-   * `standing_with`. A package that belongs in every session says so in its
-   * manifest now (`apply: "auto"`), and the kernel composes it at `session new`
+   * One list. A package that belongs in every session says so in its
+   * manifest (`apply: "auto"`), and the kernel composes it at `session new`
    * whatever is driving; what is left here is the other direction, composing a
    * package that did NOT ask, which is this front end's line to write.
    *
@@ -2313,7 +2298,7 @@ export function App(props: AppProps) {
    * member's `surface:"manual"` tools DO need a pin in the same argv, since
    * membership is not a tool face; that is `SessionMember.pins`, read off the
    * version being composed, so a package that moves a tool between surfaces is
-   * followed without an edit here. The profile's own `pins` list (T88) joins
+   * followed without an edit here. The profile's own `pins` list joins
    * the same argv for the same reason — an extra native slot this env's
    * `--with` members did not ask for on their own.
    *
@@ -2531,7 +2516,7 @@ export function App(props: AppProps) {
     void loadPlugins()
   })
 
-  // ── The gate (tui.md §5.7) ────────────────────────────────────────────────
+  // ── The gate ────────────────────────────────────────────────
 
   /** The tab a gate request belongs to — the session being stepped, not the one in front. */
   const tabOf = (session: string): SessionTab | null =>
@@ -2577,7 +2562,7 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Answer one gate request (`nulya session step --gate`, DESIGN §14).
+   * Answer one gate request (`nulya session step --gate`).
    *
    * Rules and mode decide first (`approvals.ts`); only what neither settles
    * reaches a person, above the composer (`ui/ApprovalPanel.tsx`). The kernel is
@@ -2586,7 +2571,7 @@ export function App(props: AppProps) {
    */
   const approve = (request: GateRequest, session: string): Promise<GateVerdict> => {
     const asked = tabOf(session)
-    // A read-only agent's ceiling, before every table (tui.md §5.10): the whole
+    // A read-only agent's ceiling, before every table: the whole
     // meaning of `readonly: true` is that nothing can lift it — an `allow` entry
     // that quietly re-admitted `shell` to a read-only persona would make the
     // word a decoration. It is a policy like every other one here, not a
@@ -2624,7 +2609,7 @@ export function App(props: AppProps) {
       return Promise.resolve<GateVerdict>({ allow: true })
     }
     if (verdict === "allow") {
-      // The one layer that owes an explanation (T65): in `ask` mode a call went
+      // The one layer that owes an explanation: in `ask` mode a call went
       // through without a question, and the card is where that is said.
       if (judged.via === "readonly-command") asked?.state.markAutoAllowed(request.call_id)
       return Promise.resolve<GateVerdict>({ allow: true })
@@ -2651,10 +2636,10 @@ export function App(props: AppProps) {
 
   /**
    * Answer with a note — the gesture the whole dialog is built around
-   * (`approvalnote.ts`, tui.md §5.7).
+   * (`approvalnote.ts`).
    *
    * The kernel's gate carries a note on exactly one of its two answers: `deny
-   * <note>` becomes that call's marker result (DESIGN §4). A note on a YES has
+   * <note>` becomes that call's marker result. A note on a YES has
    * nowhere in the gate to go, and should not — the call runs, and what the
    * model reads next is the tool's own output. So it goes where everything else
    * a person says goes: `session append`, drained at the next step boundary,
@@ -2713,7 +2698,7 @@ export function App(props: AppProps) {
    * flips to `unsafe` while a card is up meant that card too — leaving it
    * waiting would make the switch look broken and hold the kernel for no reason.
    *
-   * It says NOTHING afterwards (T31). The chip on the status line already shows
+   * It says NOTHING afterwards. The chip on the status line already shows
    * which mode this is, and the picker that was just up said what both of them
    * do; a two-line explanation of a state that is drawn three columns away is
    * how the one line with no room to spare lost the model, the cost and the
@@ -2732,7 +2717,7 @@ export function App(props: AppProps) {
 
   /**
    * Open the picker — what a click on the chip and a bare `/mode` both do
-   * (tui.md §5.7, T31). It used to be a toggle, which is the one gesture that
+   *. It used to be a toggle, which is the one gesture that
    * cannot say what the other side is.
    */
   const openModePicker = () => {
@@ -2744,8 +2729,7 @@ export function App(props: AppProps) {
   const closeModePicker = () => setModePicker(false)
 
   /**
-   * The chip's click: open the picker, and close it again if it is already up
-   * (T42).
+   * The chip's click: open the picker, and close it again if it is already up.
    *
    * The same gesture on the same spot goes both ways everywhere else on this
    * screen — every overlay opens and closes on its own key and on a second
@@ -2755,7 +2739,7 @@ export function App(props: AppProps) {
    */
   const toggleModePicker = () => (modePicker() ? closeModePicker() : openModePicker())
 
-  /** `/context` and a click on the ring: the same gesture both ways (T82). */
+  /** `/context` and a click on the ring: the same gesture both ways. */
   const toggleContextPanel = () => setContextPanel((up) => !up)
 
   /**
@@ -2788,7 +2772,7 @@ export function App(props: AppProps) {
 
   /**
    * Either picker holds the keyboard while it is up, for the same reason the
-   * approval dialog does (T28): a list you choose from is not a list you can
+   * approval dialog does: a list you choose from is not a list you can
    * choose from if `j` goes into the composer behind it.
    */
   createEffect(() => {
@@ -2797,9 +2781,9 @@ export function App(props: AppProps) {
   })
 
   /**
-   * A plugin panel takes the keyboard the same way (T28's rule, applied to a
-   * surface this front end did not write): a box that still blinks says "type
-   * here", and what is typed there would be eaten by the panel anyway.
+   * A plugin panel takes the keyboard the same way, applied to a surface this
+   * front end did not write: a box that still blinks says "type here", and
+   * what is typed there would be eaten by the panel anyway.
    */
   createEffect(() => {
     if (plugins.panel()) composer?.blur()
@@ -2809,13 +2793,13 @@ export function App(props: AppProps) {
   })
 
   /**
-   * The keyboard moved INTO a pane, or back out of it (T69).
+   * The keyboard moved INTO a pane, or back out of it.
    *
    * Until there was a second pane, every way of putting the keyboard in one
    * went through `openOverlay`, which blurred the composer on the spot. Focus
    * can now move on its own — Ctrl+←/→, a click in the sidebar — so the rule
    * lives where the fact does: while a focused pane claims the keyboard, the
-   * box must stop saying "type here" (T28), and when it stops, the box gets it
+   * box must stop saying "type here", and when it stops, the box gets it
    * back if nothing else has taken it meanwhile.
    */
   createEffect(() => {
@@ -2838,9 +2822,8 @@ export function App(props: AppProps) {
   /**
    * The answers, widest-reaching last within each side: allow this one, allow
    * the batch, allow the kind, allow everything — then deny. Every one of them
-   * takes the note, which is why none of them is "deny with a reason": that was
-   * a separate answer only because the note used to belong to one key
-   * (tui.md §5.7).
+   * takes the note, so none of them needs to be "deny with a reason" as a
+   * separate answer.
    */
   const approvalChoices = createMemo((): ApprovalChoice[] => {
     const asked = pending()
@@ -2905,13 +2888,13 @@ export function App(props: AppProps) {
   })
 
   // `/evolve` used to live here, as the one command this front end special-cased
-  // into a build (T53): it rebuilt the shipped evolution draft and wore the
+  // into a build: it rebuilt the shipped evolution draft and wore the
   // version it produced. It is now the evolution package's OWN declaration —
   // `contributes.commands` with `{with: true}` — so it arrives through the same
   // chain as `/ask` and `/plan` (`runPackageCommand`), and this file has stopped
   // knowing one package's name.
 
-  // ── `/agent` (tui.md §5.10) ───────────────────────────────────────────────
+  // ── `/agent` ───────────────────────────────────────────────
 
   /**
    * The definitions ONE DIRECTORY holds — through the package, which is the one
@@ -2945,8 +2928,8 @@ export function App(props: AppProps) {
   }
 
   // Deliberately NOT on mount: reading the definitions means building the
-  // package, which is a compiled build, and a compiled build on the way in is
-  // the thing T11/T23 exist to keep off the critical path. It happens when
+  // package, which is a compiled build, and a compiled build on the way in
+  // does not belong on the critical path. It happens when
   // `/agent` is used, and — in the background, once — when the first session is
   // composed, exactly as any compiled session package does.
 
@@ -2956,9 +2939,9 @@ export function App(props: AppProps) {
    *
    * Every part of it is something this front end already does — `session new
    * --prompt` a file, `--with` the packages its pins imply (`/evolve`), `--pin`
-   * a tool face (T12), `--max-steps` a run (the driver's own option) — which is
-   * the point: a sub-agent is a `session new` with a particular set of arguments
-   * (PLAN §3.2), and there is nothing here the kernel had to grow.
+   * a tool face, `--max-steps` a run (the driver's own option) — which is
+   * the point: a sub-agent is a `session new` with a particular set of arguments,
+   * and there is nothing here the kernel had to grow.
    *
    * A visible tab rather than a hidden run, because a delegation that goes wrong
    * is a delegation somebody has to be able to watch, cancel and read afterwards.
@@ -2985,7 +2968,7 @@ export function App(props: AppProps) {
     }
     // Only a directory that has actually been ANSWERED for may start what
     // arrived in it: a definition is a system prompt, and materialising the tab
-    // builds into that checkout's extension store (DESIGN §9). "Not answered
+    // builds into that checkout's extension store. "Not answered
     // yet" is its own refusal rather than a yes — the question may be on screen
     // this very second, and starting the persona would be answering it.
     const gate = agentStart(entry.layer, agentsTrustIn(where))
@@ -3023,7 +3006,7 @@ export function App(props: AppProps) {
     if (pick) draft.setPick(pick)
     try {
       const child = await tabs.materialize(draft, {
-        // The persona rides as BYTES the header freezes (DESIGN §3): nothing is
+        // The persona rides as BYTES the header freezes: nothing is
         // installed, so `/ext` gains nothing and no `ext prune` can take this
         // session's own identity text away from its resume.
         prompt: [m.prompt],
@@ -3031,7 +3014,7 @@ export function App(props: AppProps) {
         // that names somebody to pass work to: everything else is a leaf, and a
         // delegated session that cannot delegate simply does not carry the tool.
         // The persona's OWN pins bring their packages in by themselves — that
-        // implication is the kernel's (DESIGN §5.1), not a list assembled here.
+        // implication is the kernel's, not a list assembled here.
         //
         // No pin goes with that `--with`: the `agent` tool is `surface: "auto"`,
         // so membership already is its tool face, and a pin naming it would be
@@ -3170,7 +3153,7 @@ export function App(props: AppProps) {
    * typing the general form by hand — `with` is `startDraft`'s own `--with`
    * move (`wearNow` below), `run <tool>` is `ext run` naming the version this
    * package is active AT RIGHT NOW (not whatever it was when the table was
-   * last read), and `skill <ref>` is T15's `skillTurn` with the ref standing
+   * last read), and `skill <ref>` is `skillTurn` with the ref standing
    * in for whatever the person would otherwise have typed after `/`.
    *
    * `with` alone is like a plugin command: it does not stop at wearing. Text typed
@@ -3246,8 +3229,8 @@ export function App(props: AppProps) {
    *
    * It is the kernel's own word: this runs `session new --with <id>[@<version>]`
    * and nothing else, so the front end does not get to call it something else
-   * (tui.md §11, T36). The two earlier names both said less than the flag does —
-   * `/mode` collided with the permission mode (T24), and `/as` read the general
+   *. The two earlier names both said less than the flag does —
+   * `/mode` collided with the permission mode, and `/as` read the general
    * verb as a special case: `--with` is MEMBERSHIP, and a member may contribute
    * only tools or only skills, in which case no session is speaking "as"
    * anything. `/as` stays as an alias because it is in people's fingers.
@@ -3267,7 +3250,7 @@ export function App(props: AppProps) {
 
   /**
    * Bare `/with`: the modes this machine could wear, as a dialog above the
-   * composer (tui.md §11, T37/K8).
+   * composer.
    *
    * Derived from the store and nothing else: a package with a `current` and a
    * SYSTEM PROMPT. That is what makes wearing one a decision worth a dialog —
@@ -3276,7 +3259,7 @@ export function App(props: AppProps) {
    * The filter used to also ask the manifest whether the package had declared
    * itself opt-in, and skip the ones that had not, because those were already
    * in every session and a row offering one would offer a no-op. Nothing is
-   * automatically in every session now (DESIGN §5.1), so the question has no
+   * automatically in every session now, so the question has no
    * answer to ask for and every mode belongs on this list.
    */
   const openWithPicker = async () => {
@@ -3313,7 +3296,7 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Bare `/env`, the `⇥` chip and the welcome screen's `shell` row (T93).
+   * Bare `/env`, the `⇥` chip and the welcome screen's `shell` row.
    *
    * The list is what this machine answers (`state/targets.ts`), never a pair of
    * words written here — and it is probed on every open rather than cached,
@@ -3348,11 +3331,10 @@ export function App(props: AppProps) {
    * Running `/env` bare there would CLEAR the target, which is the one thing a
    * person on this dialog cannot have meant.
    *
-   * A `remote:` row is not applied on the spot (T101, goals/remote-env.md
-   * §3.9): choosing THAT target is only half a decision — the workspace, the
-   * directory this machine's `--workspace` will freeze in, is the other half
-   * — so it hands off to the directory browser instead of calling `setExecEnv`
-   * directly.
+   * A `remote:` row is not applied on the spot: choosing THAT target is
+   * only half a decision — the workspace, the directory this machine's
+   * `--workspace` will freeze in, is the other half — so it hands off to the
+   * directory browser instead of calling `setExecEnv` directly.
    */
   const takeEnvChoice = () => {
     const one = envTargets()[envChoice()]
@@ -3371,7 +3353,7 @@ export function App(props: AppProps) {
   /**
    * The first half of the remote flow's second half: open a channel to
    * confirm `spec` is reachable, then open the browser there
-   * (goals/remote-env.md §3.9). A check that fails is shown exactly as it
+   *. A check that fails is shown exactly as it
    * came back and the browser never opens — a directory listing over a
    * channel that just refused would be a screen of round trips that can only
    * fail the same way again.
@@ -3472,7 +3454,7 @@ export function App(props: AppProps) {
   }
 
   /**
-   * `/outcome <verdict> [note]` — how this session turned out (DESIGN §3.3).
+   * `/outcome <verdict> [note]` — how this session turned out.
    *
    * It goes to the outcome journal, never to the ledger: a judgment ABOUT a
    * session is not a turn IN it, and the kernel takes no lease for it — so this
@@ -3509,14 +3491,14 @@ export function App(props: AppProps) {
 
   /**
    * `/env [<spec>]`: where the shell commands of the sessions this TUI starts
-   * from now on will run (DESIGN §8.1).
+   * from now on will run.
    *
    * Deliberately NOT a change to the tab in front of you: the target is frozen
    * in a session's header, exactly like its model identity, because a
    * transcript only means something against the machine that produced it. So
    * the answer is always about the NEXT session, and the sentence says so.
    *
-   * No argument opens the picker (T93). It used to print a notice instead, on
+   * No argument opens the picker. It used to print a notice instead, on
    * the reasoning that the useful set is not enumerable — an ssh destination is
    * whatever that person's `ssh_config` calls a host, and the distributions on
    * this machine are "a `wsl -l` away". Both halves of that sentence name a
@@ -3544,7 +3526,7 @@ export function App(props: AppProps) {
     )
     // The tool-face count and the `⇥` chip both read `tui-state.json` through
     // functions Solid cannot see as reactive (a file, not a signal) — `/env`
-    // changed what the NEXT session composes (T88's per-kind profile), so this
+    // changed what the NEXT session composes, so this
     // is the same "something wrote that file" bump `healStandingPins` uses.
     setPlanTick((tick) => tick + 1)
     void refreshComposedMembership()
@@ -3553,7 +3535,7 @@ export function App(props: AppProps) {
   /**
    * `ask` is only for the deliberate `/quit`: a session that did work and was
    * never judged leaves a hole in the slow loop — no verdict means `unknown`,
-   * which is not failure but is not knowledge either (DESIGN §3.3) — and the
+   * which is not failure but is not knowledge either — and the
    * judgment costs a second while the work is still in mind. Asked once per
    * session and never in the way: type `/quit` again and it lets go. Ctrl+C is
    * the escape hatch and never asks anything.
@@ -3567,7 +3549,7 @@ export function App(props: AppProps) {
       return
     }
     // Leaving does not stop them, and pretending otherwise would be the lie
-    // (tui.md §5.9): a task is a detached process with a supervisor of its own,
+    //: a task is a detached process with a supervisor of its own,
     // its output keeps going into its log, and its report will be waiting in the
     // inbox for whoever steps this session next. Said once, then `/quit` again
     // leaves; `/tasks` is where they are actually stopped.
@@ -3605,7 +3587,7 @@ export function App(props: AppProps) {
     }
     if (command === "/mode") {
       const word = words[1]
-      // Bare `/mode` is the picker, not a flip (T31): the two modes and what
+      // Bare `/mode` is the picker, not a flip: the two modes and what
       // each one does are the answer to "which mode am I in", and a toggle can
       // only ever say one of them. Named, it still switches on the spot.
       if (!word) openModePicker()
@@ -3644,7 +3626,7 @@ export function App(props: AppProps) {
       return true
     }
     // Collapse only. The other direction — one key that opens everything —
-    // was a key (T38): a screenful of every tool body at once is not a view of
+    // was a key: a screenful of every tool body at once is not a view of
     // anything, and folding back down is what a person actually wants after
     // reading a few cards open.
     if (command === "/fold") {
@@ -3672,10 +3654,9 @@ export function App(props: AppProps) {
         setNotice(`no session '${id}' in ${sessions_dir} · ${command} with no id lists them`)
         return true
       }
-      // The named form of what `Enter` in that list does, so it follows it
-      // (T45 said so, and T70 changed what `Enter` does): naming a session goes
-      // to it here rather than growing the strip by one — `/sessions` with no
-      // id is one keystroke away for the other verb.
+      // The named form of what `Enter` in that list does, so it follows it:
+      // naming a session goes to it here rather than growing the strip by
+      // one — `/sessions` with no id is one keystroke away for the other verb.
       switchToSession(id)
       return true
     }
@@ -3709,7 +3690,7 @@ export function App(props: AppProps) {
     // Which directory this tab works in (§5.3b). Bare, the browser; with an
     // argument, that directory straight away — the named form of what taking a
     // row does, exactly as `/resume <id>` is the named form of `Enter` in the
-    // sessions list (T45/T70). `~` and a relative path both work, because a
+    // sessions list. `~` and a relative path both work, because a
     // person typing a path types the one they would type in a shell.
     if (command === "/cwd") {
       const said = rest.trim()
@@ -3796,7 +3777,7 @@ export function App(props: AppProps) {
 
   /**
    * The one path a message takes, and the one place a session comes into
-   * existence (tui.md §11, T22).
+   * existence.
    *
    * A `/name` no built-in claimed is offered to a loaded PLUGIN's command
    * next (`runPluginCommand`, U3), then to a package's DECLARED one
@@ -3914,14 +3895,14 @@ export function App(props: AppProps) {
       void here.attach.cancel()
       return
     }
-    // Nothing to stop and nothing typed: Esc means "go read" (tui.md §4.2).
+    // Nothing to stop and nothing typed: Esc means "go read".
     if (composer?.isEmpty() ?? true) enterBrowse()
   }
 
   const handleGlobalQuit = () => {
     // A FULL-SCREEN view is up, so there is nothing on this screen to stop and
     // Ctrl+C is about leaving. Deliberately `kind()` rather than `active()`
-    // since T69: a focused sidebar also takes the keyboard, but the transcript
+    // a focused sidebar also takes the keyboard, but the transcript
     // and its step are still right there beside it, and the narrowing below —
     // clear the draft, kill the step, then quit — is what Ctrl+C means then.
     if (overlay.kind() !== null) {
@@ -3929,7 +3910,7 @@ export function App(props: AppProps) {
       return
     }
     // Ctrl+C narrows from the nearest thing to stop to the furthest, and
-    // NEVER quits on its first press (tui.md §1.2 D6). Three truths about
+    // NEVER quits on its first press. Three truths about
     // "stop", in the order a person means them: the draft in the box, the
     // kernel's step, and last — only ever after having said so — this process.
     // Losing a half-written message to a reflex, or the whole screen, is not
@@ -4008,7 +3989,7 @@ export function App(props: AppProps) {
     })
 
     /**
-     * Move the keyboard between panes (T69).
+     * Move the keyboard between panes.
      *
      * A layer of its own so it can be OFF while there is only one pane: Ctrl+←
      * and Ctrl+→ are the composer's word-motion, and taking them permanently
@@ -4080,10 +4061,9 @@ export function App(props: AppProps) {
   /**
    * Who holds the keyboard for this keystroke (`pane/focus.ts`).
    *
-   * The order this returns is the order the branches below used to state one
-   * `if` at a time; putting it in one pure function is the whole of T68's focus
-   * half — there is now a single place to read the answer, and a single place
-   * S2 has to satisfy to give a package's surface the keyboard.
+   * The order this returns is read as a priority list: one pure function is
+   * the single place to read the answer, and the single place S2 has to
+   * satisfy to give a package's surface the keyboard.
    *
    * `modified` is passed in rather than filtered out beforehand because the
    * exception belongs beside the rule: a chord skips every claimant so that
@@ -4117,7 +4097,7 @@ export function App(props: AppProps) {
     /**
      * The agent picker, on the same terms as the mode picker below it: while a
      * dialog above the composer is up it holds the keyboard, so the list is a
-     * list you can actually choose from (T28). It is the outermost of the three
+     * list you can actually choose from. It is the outermost of the three
      * because it is the one that can only be opened deliberately.
      */
     /**
@@ -4196,7 +4176,7 @@ export function App(props: AppProps) {
     /**
      * The mode picker, first of all — it is the most recently opened dialog, and
      * it can be opened by CLICKING the chip while a call is waiting, which is
-     * the one moment two dialogs are on screen at once (tui.md §5.7, T31).
+     * the one moment two dialogs are on screen at once.
      * Answering it re-judges that waiting call on the spot (`chooseMode`).
      */
     if (owner.kind === "dialog" && owner.dialog === "mode") {
@@ -4217,7 +4197,7 @@ export function App(props: AppProps) {
       return consume(key, () => {})
     }
     /**
-     * The approval dialog owns the keyboard while it is up (tui.md §5.7).
+     * The approval dialog owns the keyboard while it is up.
      *
      * The kernel is stopped on this one call, so there is nothing else on screen
      * to type at — and that is what lets typing have a single obvious meaning
@@ -4306,9 +4286,9 @@ export function App(props: AppProps) {
       if (key.name === "j" || key.name === "down") return moveBrowse(1)
       if (key.name === "k" || key.name === "up") return moveBrowse(-1)
       if (key.name === "space") return toggleSelected()
-      // The card's `↗` row, on the keyboard (T72): `Enter` watches it here
+      // The card's `↗` row, on the keyboard: `Enter` watches it here
       // and `t` gives it a tab, the same two words `/sessions` uses for the
-      // same pair of gestures (T70). One vocabulary, and neither input can
+      // same pair of gestures. One vocabulary, and neither input can
       // reach a behaviour the other cannot.
       if (key.name === "t") {
         const id = sessionOf(selectedItem())
@@ -4331,7 +4311,7 @@ export function App(props: AppProps) {
 
   /**
    * Enter on an empty composer is the take-over gesture: the lease has looked
-   * free for a while and this process is willing to drive again (tui.md §5.6).
+   * free for a while and this process is willing to drive again.
    */
   const takeOverIfOffered = (): boolean => {
     const here = live()
@@ -4349,12 +4329,12 @@ export function App(props: AppProps) {
    * component holds — the thunks are only ever called by a mounted pane, which
    * is long after every handle above exists.
    *
-   * The bodies are the ones the `<Switch>` held before T68, moved verbatim: the
+   * The bodies are the ones the `<Switch>` held moved verbatim: the
    * point of S1a is that the skeleton changed and nothing else did.
    */
   for (const definition of hostSurfaces({
     /**
-     * The portal (T72): the front tab's own tree, drawn by the SAME `PaneHost`
+     * The portal: the front tab's own tree, drawn by the SAME `PaneHost`
      * the app tree is. That reuse is the whole of the two-layer composition —
      * mounting, the hit test and pane-local focus each stay one implementation,
      * used twice, and a single-leaf tab tree still renders its surface with no
@@ -4363,7 +4343,7 @@ export function App(props: AppProps) {
      */
     tab: () => <PaneHost tree={tabPanes().tree()} registry={surfaces} onFocusPane={goToTabPane} />,
     /**
-     * A delegation, followed (T72). The view is looked up by the PANE, because
+     * A delegation, followed. The view is looked up by the PANE, because
      * that is what a sub-agent surface is keyed by: one registration serves
      * every pane, and two tabs watching the same session are two panes with two
      * followers, which a per-session-id registration could not have expressed.
@@ -4387,7 +4367,7 @@ export function App(props: AppProps) {
       )
     },
     transcript: () => (
-      // The cards' wrap width, as a number from the pane tree (BUGS.md #17):
+      // The cards' wrap width, as a number from the pane tree:
       // this pane's own box when the tab is split, the portal otherwise.
       <BodyWidthContext.Provider
         value={() =>
@@ -4410,7 +4390,7 @@ export function App(props: AppProps) {
           cwd={displayCwd()}
           onPickCwd={() => openOverlay("cwd")}
           // Always a value on this screen, `this machine` included: here it is
-          // still a decision (T93). The status line below says the opposite
+          // still a decision. The status line below says the opposite
           // thing by staying silent about the ordinary answer.
           shell={runsIn() || "this machine"}
           onPickEnv={() => void openEnvPicker()}
@@ -4435,7 +4415,7 @@ export function App(props: AppProps) {
       />
     ),
     /**
-     * The same list, docked (T69). Its `onClose` is not "close the view" — it
+     * The same list, docked. Its `onClose` is not "close the view" — it
      * is "give the keyboard back", which is what Esc means in a pane that is
      * still on screen after you leave it.
      *
@@ -4463,7 +4443,7 @@ export function App(props: AppProps) {
       <ExtView
         // The tab's directory. Every write this view makes — build, activate,
         // deactivate, prune, seed — lands in a store, and the store search
-        // order is the workspace's (DESIGN §5.5); the capability note it asks
+        // order is the workspace's; the capability note it asks
         // the kernel to deposit goes into the session below, which is this
         // tab's. One directory for both, or the two disagree.
         ws={ws()}
@@ -4508,7 +4488,7 @@ export function App(props: AppProps) {
         onClose={closeOverlay}
         {...(props.onSettingsEdited ? { onEdited: props.onSettingsEdited } : {})}
         // The choices this front end makes and remembers for itself, each
-        // opening the same thing its status-line chip opens (T92). They are
+        // opening the same thing its status-line chip opens. They are
         // computed here rather than in the view because every one of them is
         // already an accessor this component holds: a second reading of "what
         // model is this tab on" would be a second answer waiting to disagree.
@@ -4556,8 +4536,8 @@ export function App(props: AppProps) {
     ),
     /**
      * The same browser, a channel to `remoteBrowse()!.spec` for a data source
-     * instead of this machine's disk (`dirsource.ts`'s `remoteDirSource`,
-     * T101). `remoteBrowse` is only ever null before `beginRemoteBrowse` sets
+     * instead of this machine's disk (`dirsource.ts`'s `remoteDirSource`).
+     * `remoteBrowse` is only ever null before `beginRemoteBrowse` sets
      * it and after `applyRemoteWorkspace`/`onClose` clears it — both of which
      * close this overlay in the same breath — so a mount that somehow sees
      * null draws nothing rather than guessing at a target.
@@ -4617,7 +4597,7 @@ export function App(props: AppProps) {
               <PluginContext.Provider value={plugins}>
               {/* The live task rows, for the one card that needs a fact nothing
                   appended can carry: how long a background command has been
-                  going (tui.md §5.9). */}
+                  going. */}
               <TasksContext.Provider value={tasks}>
               {/* What a card's `↗ open …` link does — the front end's own verb,
                   handed down so a card can offer it without knowing about tabs
@@ -4631,10 +4611,10 @@ export function App(props: AppProps) {
                   only one tab. There is no title line either: what a person
                   needs to know about the session — what it runs on — is under
                   the composer where they are looking, and the id it used to lead
-                  with was a string nobody reads (T22). */}
+                  with was a string nobody reads. */}
               <box flexDirection="column" width="100%" height="100%">
-                {/* The mouse's half of the two verbs the keyboard already has
-                    (T70): `✕` is Ctrl+W's `tabs.close`, `+` is the draft a
+                {/* The mouse's half of the two verbs the keyboard already has:
+                    `✕` is Ctrl+W's `tabs.close`, `+` is the draft a
                     bare `/new` opens. */}
                 <TabBar
                   tabs={tabs.tabs()}
@@ -4651,9 +4631,8 @@ export function App(props: AppProps) {
                 </Show>
 
                 {/* The content area, mounted through the surface registry
-                    rather than a switch over overlay names (goals/tui-shell.md
-                    §5.1, T68). One pane today, so what this draws is what the
-                    `<Switch>` before it drew, node for node. */}
+                    rather than a switch over overlay names. One pane today,
+                    so what this draws is exactly the one active overlay's view. */}
                 <PaneHost tree={panes.tree()} registry={surfaces} onFocusPane={goToPane} />
 
                 {/* A deliberate seam between the record and the controls: the
@@ -4683,7 +4662,7 @@ export function App(props: AppProps) {
                     }}
                   />
                 </Show>
-                {/* Where the next session's shell runs (T93). Same dialog shape
+                {/* Where the next session's shell runs. Same dialog shape
                     as the pickers around it, and the same rule: a target is
                     frozen when a session starts, so this is always about the
                     next one. */}
@@ -4699,7 +4678,7 @@ export function App(props: AppProps) {
                     }}
                   />
                 </Show>
-                {/* Which agent to delegate to (tui.md §5.10). Same dialog shape
+                {/* Which agent to delegate to. Same dialog shape
                     as the mode picker, above it for the same reason it holds the
                     keyboard first: it is only ever opened on purpose. */}
                 <Show when={agentPicker()}>
@@ -4713,7 +4692,7 @@ export function App(props: AppProps) {
                     }}
                   />
                 </Show>
-                {/* The permission mode, where it is chosen (tui.md §5.7, T31).
+                {/* The permission mode, where it is chosen.
                     Above the approval dialog because it can be opened from one:
                     a click on the chip while a call waits is exactly the "stop
                     asking me" gesture, and the answer re-judges that call. */}
@@ -4734,7 +4713,7 @@ export function App(props: AppProps) {
                   <PluginPanel panel={plugins.panel()!} revision={plugins.revision()} />
                 </Show>
                 {/* The call the kernel is stopped on, asked where the answer is
-                    given (tui.md §5.7). Above the composer for the same reason
+                    given. Above the composer for the same reason
                     the handover proposal is: it is a question about what happens
                     next, not a thing that happened. */}
                 <Show when={pending()}>
@@ -4751,7 +4730,7 @@ export function App(props: AppProps) {
                     onReady={(field) => (noteField = field)}
                   />
                 </Show>
-                {/* The context ring, opened out (T82). Low among the panels
+                {/* The context ring, opened out. Low among the panels
                     because it is the expansion of a chip on the row below the
                     composer, and hidden outright while a host dialog is up —
                     the same terms a package's panel lives under, for the same
@@ -4859,7 +4838,7 @@ export function App(props: AppProps) {
 }
 
 /**
- * One of the two rules that separate the three blocks (tui.md §6). Sized to the
+ * One of the two rules that separate the three blocks. Sized to the
  * terminal exactly: a longer string would wrap and silently eat rows.
  */
 function Hairline() {

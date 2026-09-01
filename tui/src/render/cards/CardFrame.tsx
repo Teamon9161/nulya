@@ -6,7 +6,7 @@ import { useFolds } from "../../state/folds.ts"
 import { useBrowse } from "../../state/browse.ts"
 
 /**
- * `ok` is not one of these on purpose (T26): a call that worked says how much
+ * `ok` is not one of these on purpose: a call that worked says how much
  * it brought back, in the same dim as every other note, and the colours are
  * left to the two cases where something needs saying.
  */
@@ -37,9 +37,9 @@ export function sizeNote(output: string): string {
  * body; the layout, the fold affordance and the spill pointer live here once,
  * so a new card cannot accidentally invent a second visual language.
  *
- * No borders anywhere (tui.md §6): the body is indented, not boxed.
+ * No borders anywhere: the body is indented, not boxed.
  *
- * THE HEAD LINE READS LEFT TO RIGHT (T26). The note used to be a right-aligned
+ * THE HEAD LINE READS LEFT TO RIGHT. The note used to be a right-aligned
  * chip, which put an `ok` at column 98 with thirty blank columns between it and
  * the call it belonged to — a second ragged column of small print, and the main
  * reason a screenful of calls looked like a form rather than a story. It sits
@@ -55,7 +55,7 @@ export function CardFrame(props: {
   head: string
   /**
    * A head line with more than one emphasis in it (the run summary's tool
-   * names against its `×N` counts and `·` joints, T43-run-summary) — every
+   * names against its `×N` counts and `·` joints) — every
    * other card leaves this out and colours the whole of `head` by `headTone`.
    * When given, it REPLACES `head` for both layout and colour; `head` stays
    * required anyway, as the plain-text form callers, tests and any other
@@ -66,13 +66,13 @@ export function CardFrame(props: {
   chipTone?: ChipTone
   /** `dim` for a card that is context rather than something that happened. */
   headTone?: "muted" | "dim"
-  /** From `tui.toml` (tui.md §7); a per-card toggle overrides it. */
+  /** From `tui.toml`; a per-card toggle overrides it. */
   defaultOpen: boolean
   /** False when there is nothing to reveal: no fold marker, no click target. */
   foldable: boolean
   spillPath?: string | null
   /**
-   * One thing this card can DO, on a row of its own under the head line (T43).
+   * One thing this card can DO, on a row of its own under the head line.
    *
    * OUTSIDE THE FOLD, like the spill pointer above it and for the same reason:
    * a card is folded by default, and an affordance nobody can see is not one.
@@ -162,7 +162,7 @@ export function CardFrame(props: {
         width="100%"
         backgroundColor={selected() ? style.theme.selection : undefined}
         // Clicking the head line is the mouse half of the fold interaction
-        // (tui.md §4.2); the keyboard half is browse mode. The lift under the
+        //; the keyboard half is browse mode. The lift under the
         // pointer is the only thing that says a head line answers to a click
         // at all — a card has no button to look like.
         onMouseDown={click.onMouseDown}
@@ -175,7 +175,7 @@ export function CardFrame(props: {
         </text>
         {/* `muted`, not `fg`: a call is what the model DID, and the brightest
             text on screen should stay what it and the person SAID. The glyph
-            already carries the role colour (tui.md §6). */}
+            already carries the role colour. */}
         <box flexDirection="row" flexShrink={0} height={1}>
           <Index each={headCells()}>
             {(ch, index) => (
@@ -212,7 +212,7 @@ export function CardFrame(props: {
         <ActionRow action={props.action!} />
       </Show>
 
-      {/* Cut, never wrapped (tui.md §6): a spill path is as long as the scratch
+      {/* Cut, never wrapped: a spill path is as long as the scratch
           directory made it, and a second row of path under every long-output
           card is the transcript's rhythm broken by a pointer nobody reads twice. */}
       <Show when={props.spillPath}>
@@ -228,7 +228,7 @@ export function CardFrame(props: {
  * The one clickable row a card may offer. It looks like what it is — the arrow
  * glyph, `accent.evolve`, and the same hover tint the head line uses, because
  * the tint is the only thing on this screen that says "a click does something
- * here" (T43). Press and release on the same cell, so dragging across it to
+ * here". Press and release on the same cell, so dragging across it to
  * copy text does not navigate.
  */
 function ActionRow(props: { action: { text: string; onPress: () => void } }) {

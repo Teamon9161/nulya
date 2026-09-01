@@ -1,5 +1,5 @@
 /**
- * The shape every dialog above the composer shares (tui.md §6).
+ * The shape every dialog above the composer shares.
  *
  * There are four of them — `/mode`, `/agent`, `/with` and the approval dialog —
  * and they were four hand-built copies of the same three parts, which is how
@@ -27,7 +27,7 @@ export const dialog_gutter = 2
 /**
  * A dialog's first line: what this is, then what it is for.
  *
- * `glyph` is optional and means something when it is there (tui.md §6): `◈` is
+ * `glyph` is optional and means something when it is there: `◈` is
  * the mark of choosing what this session runs as. The approval dialog has none
  * on purpose — it is not a choice about identity, it is one call being judged,
  * and its colour is what says so.

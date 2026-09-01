@@ -3,7 +3,7 @@
  * (goals/tui-shell.md §5.1: "the host is the first consumer, so the API cannot
  * be more honest for itself than for anybody else").
  *
- * Each entry is one of the screens that existed before T68, unchanged — what is
+ * Each entry is one of the screens that existed unchanged — what is
  * new is that the host now says out loud, per screen, the two things a pane
  * needs to know about it:
  *
@@ -32,17 +32,17 @@ import { main_surface, overlay_surfaces, sidebar_surface, subagent_surface, tab_
 /**
  * One thunk per screen, in the host's own vocabulary.
  *
- * The mount is passed along (T69) because two of these can now be on screen at
+ * The mount is passed along because two of these can now be on screen at
  * the same time — the sessions list docked while `/sessions` is also in front —
  * and a view that listens for keys has to know whether it is the one being
  * typed at. Every other thunk ignores the argument, which is the honest shape:
  * a screen that does not care is written as though it had never been offered.
  */
 export interface HostViews {
-  /** The portal: the active tab's own pane tree, drawn (T72). */
+  /** The portal: the active tab's own pane tree, drawn. */
   tab: (mount: SurfaceMount) => JSX.Element
   transcript: (mount: SurfaceMount) => JSX.Element
-  /** One delegation, followed in a pane of the tab that made it (T72). */
+  /** One delegation, followed in a pane of the tab that made it. */
   subagent: (mount: SurfaceMount) => JSX.Element
   sessions: (mount: SurfaceMount) => JSX.Element
   sidebar: (mount: SurfaceMount) => JSX.Element
@@ -54,7 +54,7 @@ export interface HostViews {
   model: (mount: SurfaceMount) => JSX.Element
   provider: (mount: SurfaceMount) => JSX.Element
   cwd: (mount: SurfaceMount) => JSX.Element
-  /** The same browser, choosing a directory on a `remote:` `/env` target instead of this tab's own (T101). */
+  /** The same browser, choosing a directory on a `remote:` `/env` target instead of this tab's own. */
   envdir: (mount: SurfaceMount) => JSX.Element
 }
 
@@ -70,7 +70,7 @@ function surface(
 export function hostSurfaces(views: HostViews): SurfaceDefinition<JSX.Element>[] {
   return [
     /**
-     * The portal into the front tab's own tree (T72).
+     * The portal into the front tab's own tree.
      *
      * `claimsKeyboard: false`, and it is never consulted: `focusThrough`
      * resolves the app tree's focus one hop further whenever it lands here, so
@@ -83,20 +83,19 @@ export function hostSurfaces(views: HostViews): SurfaceDefinition<JSX.Element>[]
     // is up belongs to the composer below it.
     surface(main_surface, "transcript", false, views.transcript),
     /**
-     * A delegation, watched (T72). It CLAIMS the keyboard for the reason the
+     * A delegation, watched. It CLAIMS the keyboard for the reason the
      * docked rail does: focusing it is how you scroll back through what the
      * sub-agent has been doing, and a pane that answers `j` while the composer
      * still blinks is the trap that boolean exists to prevent.
      */
     surface(subagent_surface, "sub-agent", true, views.subagent),
     /**
-     * The sessions list, docked (T69).
+     * The sessions list, docked.
      *
-     * It CLAIMS the keyboard, which is not what T68 forecast, and the field's
-     * own definition is why: `claimsKeyboard` asks "does focusing this pane
+     * It CLAIMS the keyboard: `claimsKeyboard` asks "does focusing this pane
      * take the keyboard away from the composer", and the honest answer for a
-     * list you drive with `j` is yes. The promise T68 was making — a sidebar
-     * has no reason to stop a person typing — is kept where it actually lives:
+     * list you drive with `j` is yes. A sidebar has no reason to stop a
+     * person typing, and that is kept true where it actually lives:
      * OPENING it does not focus it (`state/sidebar.ts`, `focusNew: false`), so
      * the keyboard only ever comes here because somebody sent it here, and Esc
      * sends it back. The alternative is a pane that answers `j` while the
@@ -122,7 +121,7 @@ export function hostSurfaces(views: HostViews): SurfaceDefinition<JSX.Element>[]
     /**
      * The same browser, a second registration: choosing WHERE on a `remote:`
      * target a session's workspace goes, rather than this tab's own directory
-     * (goals/remote-env.md §3.9, T101). Two surface ids because two things
+     *. Two surface ids because two things
      * can be true at once about "is the directory browser up" — this tab's
      * own `/cwd` and a pending `/env` choice are unrelated questions, and one
      * flag answering both would make picking a remote workspace look like it

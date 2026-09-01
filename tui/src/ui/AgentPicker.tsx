@@ -6,11 +6,10 @@ import { DialogHint, DialogTitle, dialog_gutter } from "./Dialog.tsx"
 import type { AgentEntry } from "../agents.ts"
 
 /**
- * Bare `/agent`: which personas this workspace and this machine define
- * (tui.md §5.10).
+ * Bare `/agent`: which personas this workspace and this machine define.
  *
- * The same dialog above the composer that `/mode` is, and for the same reasons
- * (T31): it is a CHOICE — hence the `◈` in the title, which belongs to choices
+ * The same dialog above the composer that `/mode` is, and for the same
+ * reasons: it is a CHOICE — hence the `◈` in the title, which belongs to choices
  * and never to a panel that lists a store or a journal — and it is short enough
  * that a full screen would be a screen mostly empty. `↑↓` / digits / hover move
  * the cursor, `Enter` and a click take the row, `Esc` closes: `ui/rows.ts`, like

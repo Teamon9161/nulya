@@ -1,7 +1,7 @@
 /**
- * A driver script, of the kind PLAN §3.6 describes: it decides WHEN a session
+ * A driver script: it decides WHEN a session
  * steps, and nothing else. Stands in for "another terminal running a loop" so
- * that the observer path (tui.md §5.6) can be tested unattended.
+ * that the observer path can be tested unattended.
  *
  *   bun driver-loop.ts <bin> <workspace> <session-id> <stop-file>
  *

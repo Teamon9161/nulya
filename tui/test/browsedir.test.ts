@@ -1,5 +1,5 @@
 /**
- * `src/browsedir.ts`'s `DirSource` seam (tui.md §11 T101): the one function
+ * `src/browsedir.ts`'s `DirSource` seam: the one function
  * — `browseAt` — that local and remote directory browsing both call, proven
  * here with two FAKE sources rather than real disk or a real channel. One
  * fake speaks the way `local` does (drive letters, `~`, backslash-ish join);

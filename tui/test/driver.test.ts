@@ -397,8 +397,8 @@ test("a retry line drops the failed attempt's cards and usage; the next started 
 })
 
 /**
- * Cost accounting (T8). Both mouths report the same step: the stream as it
- * happens, the ledger once the step is written (DESIGN §3.1 / §14). The ledger
+ * Cost accounting. Both mouths report the same step: the stream as it
+ * happens, the ledger once the step is written. The ledger
  * is the one that counts — otherwise a step would be paid for twice, and a
  * session reopened tomorrow would claim to have cost nothing.
  */

@@ -5,7 +5,7 @@ import { columnWidth, fit } from "./columns.ts"
 import { barCells, fillGlyph, type ContextFill, type ContextSection } from "../state/context.ts"
 
 /**
- * The ring, opened out (tui.md §4.5, §11 T82).
+ * The ring, opened out.
  *
  * A composer-area panel, like every other thing on this screen that is about
  * the conversation right there (`ApprovalPanel`, `ModePicker`, `PluginPanel`) —

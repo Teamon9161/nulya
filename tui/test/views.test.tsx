@@ -1,5 +1,5 @@
 /**
- * The three T4 views (`/help`, `/settings`, `/usage`) and the one thing that
+ * The three full-screen views (`/help`, `/settings`, `/usage`) and the one thing that
  * makes a keymap worth having: a `[keys]` line in `tui.toml` really does move
  * the binding, in the app and in the help page that documents it.
  */
@@ -60,13 +60,13 @@ test("/help lists the bindings that are actually in force", async () => {
   // rows would turn "not discoverable" into "not scrolled to".
   const setup = await overlay(() => <HelpView keys={createKeymap(default_settings)} onClose={() => {}} />, style, 100, 98)
   try {
-    // Eight passes, not four: a busy machine captured a half-painted frame once
-    // (T1's `settle()` note) and a snapshot that flaky is worse than none.
+    // Eight passes, not four: a busy machine can capture a half-painted frame,
+    // and a snapshot that flaky is worse than none.
     const frame = await settle(setup, 8)
     expect(frame).toContain("help · keys and commands")
     expect(frame).toContain("escape")
     expect(frame).toContain("f3")
-    // Folding has no binding any more (T38) — a click on a head line, or
+    // Folding has no binding any more — a click on a head line, or
     // browse mode — so the page must not print one.
     expect(frame).not.toContain("ctrl+o")
     // Nothing was overridden, so nothing claims to be.
@@ -151,7 +151,7 @@ test("/settings at eighty columns: a path too long for its column is cut, the cl
     const key = lines.find((line) => line.includes("transcript.history_window"))!
     expect(key).toMatch(/transcript\.history_window {2,}\S/)
 
-    // The footer is one line until `?` asks for the rest (tui.md §11, T18).
+    // The footer is one line until `?` asks for the rest.
     expect(frame).toContain("Esc close · j/k move · Enter change · ? keys")
     expect(frame).not.toContain("the kernel's own config is a different chain")
 
@@ -196,7 +196,7 @@ test("/usage at eighty columns: the label column holds, the caveat is broken, a 
 
       // The token block is a table, and its numbers are RIGHT-aligned: what
       // lines up is the last digit, because that is the digit that says whether
-      // this is a hundred or a million (tui.md §6).
+      // this is a hundred or a million.
       const input = lines.find((line) => line.includes("input tokens"))!
       const output = lines.find((line) => line.includes("output tokens"))!
       expect(input.indexOf("1200") + "1200".length).toBe(output.indexOf("80") + "80".length)
@@ -225,7 +225,7 @@ test("a [keys] override in tui.toml really moves a binding", async () => {
   const settings = await loadSettings(ws.dir, {})
   expect(settings.keys["help"]).toBe("ctrl+b")
   // Nobody is at this keyboard to answer the gate, so the tool call runs
-  // (tui.md §5.7); the binding is what this test is about.
+  //; the binding is what this test is about.
   const bindings: Settings = { ...settings, driver: unsafe_settings.driver, extensions: unsafe_settings.extensions }
 
   const id = await sessionNew(ws, { profile: "scripted" })
@@ -373,7 +373,7 @@ test("/outcome records how this session went, without touching the session file"
     const judged = (await sessionList(ws)).find((row) => row.id === id)!
     expect(judged.outcome?.verdict).toBe("partial")
     expect(judged.outcome?.note).toBe("the shell call worked")
-    // A judgment is not a turn: the ledger did not grow (DESIGN §3.3).
+    // A judgment is not a turn: the ledger did not grow.
     expect(judged.events).toBe(0)
     expect(await settle(setup, 3)).toContain("partial")
   } finally {
@@ -382,7 +382,7 @@ test("/outcome records how this session went, without touching the session file"
 }, 120_000)
 
 /**
- * Wearing a package is visible without opening anything (tui.md §11, T31).
+ * Wearing a package is visible without opening anything.
  *
  * A `--with` member is usually nothing but a system prompt — a mode, an
  * identity — and it decides what the model thinks it is. It was on the draft
@@ -412,7 +412,7 @@ test("a tab wearing a package says so on the draft card and on the status line",
     const frame = await settle(setup, 4)
     // The draft card's `with` row, and the chip under the composer that will
     // still be there once the card is gone — visible once the notice that
-    // answered `/with` has come off that line on its own (T35).
+    // answered `/with` has come off that line on its own.
     expect(frame).toContain("with        evolution")
     await until(() => statusLine(setup).includes("◈ evolution"), 15_000)
   } finally {

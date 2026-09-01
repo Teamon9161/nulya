@@ -1,12 +1,12 @@
 /**
- * The projection of `.nulya/tool-usage.jsonl` (DESIGN §5.5): counts, and only
+ * The projection of `.nulya/tool-usage.jsonl`: counts, and only
  * counts.
  *
  * Nothing here decides anything. A tool reaches the model's tool face only
  * because somebody wrote a pin — the operator in `registry.pinned_native_tools`,
- * or an evolution session with `session new --pin` (DESIGN §5.1/§5.5) — and
+ * or an evolution session with `session new --pin` — and
  * these counts are evidence for that judgement, never a queue for it. So the
- * table sorts by uses and says as much (tui.md §2.1).
+ * table sorts by uses and says as much.
  *
  * `width` is passed in rather than read from the terminal: this table is drawn
  * both full-width (`/usage`) and inside `/ext`'s pane, and a cell sized against
@@ -20,7 +20,7 @@ import type { ToolUsage } from "../../nulya/files.ts"
 const caption = "tool usage · .nulya/tool-usage.jsonl · evidence for a pin, not a queue"
 
 /**
- * The numerals line up, the words after them line up too (tui.md §6).
+ * The numerals line up, the words after them line up too.
  *
  * `9 uses` / `128 uses` / `1041 uses` left-aligned is four ragged columns where
  * there should be two: the eye scans a count by its last digit, and a table

@@ -2,8 +2,8 @@
  * The checkout question, asked on screen (goals/tui-shell.md §5.3b point 6).
  *
  * A workspace store that arrived with a clone takes part in no session until
- * somebody has looked at it once (DESIGN §9), and a definition in
- * `.nulya/agents` is a system prompt that checkout wrote (tui.md §5.10). For
+ * somebody has looked at it once, and a definition in
+ * `.nulya/agents` is a system prompt that checkout wrote. For
  * the directory the process was launched in, both are still asked by `main` on
  * the bare terminal before the alternate screen — the right place, because at
  * that moment there is no screen. For every OTHER directory a tab walks into,

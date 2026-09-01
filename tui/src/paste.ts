@@ -1,5 +1,5 @@
 /**
- * Long pastes, folded (tui.md §11, T14).
+ * Long pastes, folded.
  *
  * A thousand-line stack trace pasted into a three-row input box hides
  * everything else on screen and makes the draft impossible to edit. tcode's
@@ -116,7 +116,7 @@ const numbered_placeholder = /\[(?:Pasted text|Image) #(\d+)\]/g
 
 /**
  * The number the composer's next placeholder should start from, given every
- * message it can still recall (`Up` walks `history`, tui.md §11 T14/T79).
+ * message it can still recall (`Up` walks `history`).
  *
  * Counting up forever from process start is correct but reads badly:
  * `[Image #7]` looks like seven pictures are attached when there may be one,
@@ -142,7 +142,7 @@ export function nextAttachmentAfter(history: readonly string[]): number {
   return max + 1
 }
 
-// ── pending pastes: where async content lands (tui.md §11 T103, review ③) ──
+// ── pending pastes: where async content lands ───────────────────────────────
 
 /**
  * `Ctrl+V`, `Alt+V`, a right-click and a bracketed paste that might be an
@@ -170,8 +170,7 @@ export function nextAttachmentAfter(history: readonly string[]): number {
  * (`numbered_placeholder` above).
  *
  * `Composer.tsx`'s `submit` refuses to send while `hasPendingPaste` below
- * still sees one of these in the draft (an external review point, tui.md
- * §11 T103) — a paste is a promise to put the real content there, and
+ * still sees one of these in the draft — a paste is a promise to put the real content there, and
  * mailing the literal brackets because Enter landed a few dozen milliseconds
  * early would break that promise for good: by the time the read answers the
  * box has already been cleared and the token nowhere left to settle into.

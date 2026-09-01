@@ -1,5 +1,5 @@
 /**
- * `/settings` writes (tui.md §11, T100): the minimal TOML edit underneath it,
+ * `/settings` writes: the minimal TOML edit underneath it,
  * and the panel that drives it.
  *
  * The pure half is where the guarantees are — the file stays the person's

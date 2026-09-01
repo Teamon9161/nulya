@@ -12,16 +12,16 @@ import type { SessionHeader } from "../../nulya/ledger.ts"
 const label_width = 9
 
 /**
- * What this session froze at `init` (tui.md §5.1, DESIGN §3.4/§7.5): the model
+ * What this session froze at `init`: the model
  * identity, the tool face the model actually sees, the skills on offer, and the
  * parent it forked from.
  *
  * One card per session, at the top. It is not a ledger event — the header is
- * not an event (DESIGN §3.1) — so it is drawn from the header rather than
+ * not an event — so it is drawn from the header rather than
  * pushed into the transcript's item list, and it says nothing that is not in
  * that header plus the frozen manifests it names.
  *
- * It FOLDS, and it starts folded (`transcript.composition`, tui.md §7). Two
+ * It FOLDS, and it starts folded (`transcript.composition`). Two
  * lines is the whole card at rest: what this session is, and the one fact that
  * changes what it can do — the model, plus counts. The rest is provenance
  * (which version of which extension), and provenance is what a fold is for: it
@@ -34,9 +34,9 @@ const label_width = 9
  * pointer cannot be read, and the shrink is what turned `model` into `mode`.
  *
  * A tab with no session has no card at all. It used to draw this same one in the
- * future tense (T22); the facts that were worth having before anything is frozen
+ * future tense; the facts that were worth having before anything is frozen
  * are on the welcome screen now, in a shape that suits a decision rather than a
- * record (`ui/Welcome.tsx`, T24).
+ * record (`ui/Welcome.tsx`).
  *
  * The model row answers to a click when `onPickModel` is given: it opens
  * `/model`, which on a started session now MOVES it (`session rebind`,
@@ -46,7 +46,7 @@ const label_width = 9
  * bottom line is where "right now" is said; a record whose top line silently
  * renamed itself would misattribute every turn under it. Rendered without the
  * callback (a test, a card on its own) the row is inert and does not light up: a
- * highlight on a row that does nothing when pressed would be a lie (T18).
+ * highlight on a row that does nothing when pressed would be a lie.
  */
 export function CompositionCard(props: {
   header: SessionHeader | null
@@ -94,7 +94,7 @@ export function CompositionCard(props: {
   })
 
   /**
-   * Builtin tools are always there and always first (DESIGN §5.1/§5.2); the
+   * Builtin tools are always there and always first; the
    * promoted ones are the interesting half, so only those carry the ⚡.
    * `native_tools` holds stable ids (`ext:<ext>/<tool>`) — the tool name is
    * what the model actually calls.

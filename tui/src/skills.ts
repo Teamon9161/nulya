@@ -1,5 +1,5 @@
 /**
- * Skills as slash commands (tui.md §11, T15).
+ * Skills as slash commands.
  *
  * A skill is a prompt the kernel discloses progressively: `nulya skill list`
  * names them, `nulya skill load <ref>` prints the body, and until now the only

@@ -1,10 +1,10 @@
 /**
- * Background tasks (tui.md §5.9, goals/background.md B5).
+ * Background tasks (goals/background.md B5).
  *
  * The one policy this front end adds is three words long — driver, idle, inbox
  * non-empty — so most of what is pinned here is the two ways it can be wrong:
  * stepping when the inbox is empty (a bare step re-sends the last assistant turn
- * as a prefill, DESIGN §4) and stepping while somebody else holds the writer
+ * as a prefill) and stepping while somebody else holds the writer
  * lease. Both go through the real binary.
  *
  * The rest is reading: a receipt and a report are text the kernel writes, and
@@ -176,7 +176,7 @@ test("an observer never steps, however full the inbox gets", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, id, "hold the lease")
   // Somebody else drives: one `session step` holds the writer lease for its
-  // whole run (DESIGN §3.4), and the scripted loop never ends its turn.
+  // whole run, and the scripted loop never ends its turn.
   const holder = sessionStep(ws, id, { env: { NULYA_SCRIPTED_MODE: "loop" }, maxSteps: 400 })
   let holding = false
   const drain = (async () => {
@@ -226,7 +226,7 @@ test("`task list --json` is the projection every view reads", async () => {
 }, 120_000)
 
 /**
- * `state/tasks.stopTask` (tui.md §11, tasks panel): the one place that pairs
+ * `state/tasks.stopTask` (tasks panel): the one place that pairs
  * a kill with the note that says a PERSON asked for it. Both `TasksPanel`'s
  * stop button and `/tasks`'s `k` go through this, so this is the one test
  * that has to prove the pairing rather than each caller proving it again.

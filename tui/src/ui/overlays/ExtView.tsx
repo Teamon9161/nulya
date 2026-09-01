@@ -1,5 +1,5 @@
 /**
- * `/ext` (F2): the extension store as a view (tui.md §5.3).
+ * `/ext` (F2): the extension store as a view.
  *
  * Three things live here that exist nowhere else on the screen:
  *
@@ -8,7 +8,7 @@
  *    timeline is the extension's whole history, and going back is a normal move
  *    along it rather than an undo.
  *  - the DRIFT. This session froze specific versions at `session new` and cannot
- *    change them mid-flight (DESIGN §7.5). When `current` has moved since, that
+ *    change them mid-flight. When `current` has moved since, that
  *    difference is the single most useful sentence in the view:
  *    `frozen v-a · store v-b → next session`.
  *  - the USAGE table, a plain projection of `.nulya/tool-usage.jsonl`. It does
@@ -19,15 +19,12 @@
  *  - the SWITCH. `Enter` on an id makes the extension active or inactive for
  *    the next session: active = point `current` at a built version AND pin
  *    every `surface:"manual"` tool it declares; inactive = take those pins
- *    back and clear `current`. Those are the only two things it writes (T52).
+ *    back and clear `current`. Those are the only two things it writes.
  *    "Active" names what THIS store root points at, not whether the next
  *    session actually carries it — a `manual` package still needs naming
  *    (`/with`, a declared command, `[extensions] with`) to reach one; only
- *    `standing` (`apply: "auto"`) answers that (T55). T12 §5 held the
- *    two axes apart on principle and refused to merge them — that principle is
- *    right about the kernel and was wrong about the screen, where both keys were
- *    invisible and the state they moved was drawn nowhere (tui.md §11, T22). The
- *    axes are still two: the TOOLS pane is where one tool is pinned on its own,
+ *    `standing` (`apply: "auto"`) answers that. The axes are still two: the
+ *    TOOLS pane is where one tool is pinned on its own,
  *    and the version line is where one specific build is pointed at.
  *
  * An extension id, a tool name and a store root are all as long as somebody
@@ -101,7 +98,7 @@ const panes: VisiblePane[] = ["extensions", "tools", "usage"]
  * An action waiting for `y`. Only two are left, and both name a VERSION: moving
  * the pointer along the timeline by hand, and the one action here that deletes
  * something. The active/inactive switch asks nothing — it moves a pointer and a
- * pin list, both of which the same key puts back (tui.md §11, T22).
+ * pin list, both of which the same key puts back.
  */
 type Pending =
   | { kind: "activate"; id: string; version: string }
@@ -137,12 +134,12 @@ export function switchState(active: boolean, tools: number, pinned: number): Swi
 const switch_width = 2
 
 /**
- * The one word in the id list that is about REACH rather than contents (T52):
- * the kernel composes this package into every fresh session on this machine
- * (DESIGN §5.1), so the row is not "available", it is "in everything".
+ * The one word in the id list that is about REACH rather than contents:
+ * the kernel composes this package into every fresh session on this machine,
+ * so the row is not "available", it is "in everything".
  *
  * Read from the kernel's record (`ext list`'s `standing` marker) rather than
- * from the current version's `apply` (T56). The manifest field is what a
+ * from the current version's `apply`. The manifest field is what a
  * VERSION declares; the record is what the activation verified and what
  * sessions actually get, and only the second is a state this column can report.
  * A package that declares `apply: "auto"` and has no `current` is standing in
@@ -213,7 +210,7 @@ export function toolRows(
  * A row the fold hides: one this pane cannot switch.
  *
  * `Space` writes and takes back PINS, and a pin is the way in for exactly one
- * surface (`manual`, DESIGN §5.1). So the rows with a working checkbox are the
+ * surface (`manual`). So the rows with a working checkbox are the
  * `manual` ones — plus any row that somehow HAS a pin down, whatever its
  * surface, because taking that back is a thing this pane can do and the one
  * wrong checkbox in the list is the last thing to hide.
@@ -229,7 +226,7 @@ function isFolded(row: ToolRow): boolean {
   return row.state === "off" || row.state === "composed"
 }
 
-/** The rows nobody can switch here (tui.md §11, T33, T59). */
+/** The rows nobody can switch here. */
 export function foldedRows(rows: readonly ToolRow[]): ToolRow[] {
   return rows.filter(isFolded)
 }
@@ -237,11 +234,10 @@ export function foldedRows(rows: readonly ToolRow[]): ToolRow[] {
 /**
  * What the list draws. Collapsed, the list is the switches and nothing else.
  *
- * The internal rows were listed beside them until T33, when there were six of
- * them to five pinnable ones — and, sorted by id, they came FIRST. The pinnable
+ * The internal rows are folded away from the pinnable ones: the pinnable
  * half is capped by `registry.max_tools`; the internal half is capped by
  * nothing, so it grows the wrong way with every bundled package. The `auto`
- * rows joined them at T59 for a different reason: they are not noise, they are
+ * rows are folded too, for a different reason: they are not noise, they are
  * MISLEADING — a row in a column of checkboxes, sitting in the list a person
  * came here to toggle things in, that no key in this pane can change.
  *
@@ -255,7 +251,7 @@ export function shownRows(rows: readonly ToolRow[], expanded: boolean): ToolRow[
 /**
  * The one line the folded half becomes, and the key that opens it.
  *
- * Grouped by the package's own word (`auto` / `internal`, T52) and each with
+ * Grouped by the package's own word (`auto` / `internal`) and each with
  * what that word means, because the word alone is a manifest field and the
  * sentence is the reason the rows have no checkbox. Two groups, one line and
  * one key: the fold is a single control, and a reader deciding whether to open
@@ -293,7 +289,7 @@ export function frozenVersion(header: SessionHeader | null | undefined, id: stri
 }
 
 /**
- * A version id, cut to the digits an eye uses (tui.md §11, T23).
+ * A version id, cut to the digits an eye uses.
  *
  * `v-` and 24 hex digits is a CONTENT ADDRESS: it exists so two builds of the
  * same source are the same name, and nothing about it is meant to be read. So
@@ -316,8 +312,8 @@ export function driftLine(frozen: string | null, current: string | null): string
 }
 
 /**
- * Why the source in a store directory is not a version, and what to do about it
- * (tui.md §11, T22).
+ * Why the source in a store directory is not a version, and what to do about
+ * it.
  *
  * The kernel's own sentence is the first line and carries the repair — including
  * the absolute directory a zig 0.16.0 can be unpacked into — so it is relayed
@@ -361,7 +357,7 @@ function stamp(mtime: number): string {
 /**
  * What the state column says about a row. An `internal` tool's state is not a
  * pin state — it says who calls it, which is the answer to the question the
- * empty checkbox raises (T24). An `auto` one says what puts it on the face.
+ * empty checkbox raises. An `auto` one says what puts it on the face.
  */
 export function labelOf(row: ToolRow): string {
   if (row.auto && row.state === "off") return "auto · with the package"
@@ -384,7 +380,7 @@ export function ExtView(props: {
   /**
    * The session file the screen is following, relative to the workspace. Passed
    * to `ext activate` as `NULYA_SESSION` so the kernel deposits its capability
-   * note where the model will see it (DESIGN §5.3) — the one action in this view
+   * note where the model will see it — the one action in this view
    * that a running session can do anything about.
    */
   sessionFile?: string
@@ -408,7 +404,7 @@ export function ExtView(props: {
   const screen = useScreen()
   /**
    * The store's listing and the ids that are only source, kept apart because
-   * they cost two different things (tui.md §11, T23).
+   * they cost two different things.
    *
    * `ext list` is one subprocess and answers at once; the source-only half is
    * two `ext sync --dry-run` passes, which hash and plan every draft in every
@@ -449,7 +445,7 @@ export function ExtView(props: {
   const [pane, setPane] = createSignal<Pane>("extensions")
   const [notice, setNotice] = createSignal<string | null>(null)
   /**
-   * Bumped after `pushExtension` records an outcome (T102): `lastPush` is a
+   * Bumped after `pushExtension` records an outcome: `lastPush` is a
    * plain file read, not a signal, so nothing tells the footer's `more` line
    * to look again just because the file changed underneath it — the same
    * "something wrote that file" bump `App.tsx`'s `planTick` exists for.
@@ -464,7 +460,7 @@ export function ExtView(props: {
   /**
    * The kernel's own standing membership list (`[extensions] with`, DESIGN
    * §5.1), read from the same projection the pins come from. This front end
-   * never writes it — since T52 it keeps no standing list of its own at all —
+   * never writes it — it keeps no standing list of its own at all —
    * but a package config already composes is one whose row must not read as
    * "inactive".
    */
@@ -481,7 +477,7 @@ export function ExtView(props: {
   /**
    * Bundled ids whose draft in the user store is NOT what this binary ships and
    * that `ext seed` will not touch on its own — someone edited it, or an older
-   * nulya (one from before seed kept a record) wrote it (DESIGN §7.2, T42).
+   * nulya (one from before seed kept a record) wrote it.
    *
    * It belongs on this screen and not only in a start-up notice: the state is
    * durable — it is a fact about a directory, true until somebody acts on it —
@@ -542,7 +538,7 @@ export function ExtView(props: {
   /**
    * What the SOURCE in each store directory would build to, versus what is
    * there — the one thing the store's own listing cannot say. A plan, so this
-   * view never writes anything by opening; and since T22 it is also half the
+   * view never writes anything by opening; and it is also half the
    * LIST, because an id that has never built is not in `ext list` at all.
    *
    * The two dry-runs are the expensive pair, so they run when the answer can
@@ -657,17 +653,15 @@ export function ExtView(props: {
   const isActive = (entry: ExtensionEntry) => entry.current !== null && !entry.shadowed
   /**
    * …and one that is a MEMBER of every session opened here, from any of the
-   * three things that can say so (T52): the package asked and the kernel
+   * three things that can say so: the package asked and the kernel
    * recorded it (`standing`), the kernel's `[extensions] with`, and `tui.toml`'s
-   * `session_with` (the packages this front end always brings, T42).
+   * `session_with` (the packages this front end always brings).
    *
-   * The first is new and the reason the list is no longer four: this front end
-   * kept a `standing_with` of its own until T52, written by Enter, and a
-   * package that wants to be everywhere says so itself now — one fact, honoured
-   * by the kernel for every driver rather than by each front end separately.
-   * Which is why it is read from the kernel's record and not from the current
-   * version's `apply` (T56): re-deriving it here would be a second answer to a
-   * question that has one.
+   * A package that wants to be everywhere says so itself, in its own
+   * manifest — one fact, honoured by the kernel for every driver rather than
+   * by each front end separately. Which is why it is read from the kernel's
+   * record and not from the current version's `apply`: re-deriving it here
+   * would be a second answer to a question that has one.
    *
    * Three sources and one question, because the row is drawn once. Which one a
    * given id came from is in the detail pane below, where the answer differs.
@@ -704,7 +698,7 @@ export function ExtView(props: {
    * the detail beside it is the half that explains what the cursor is on.
    *
    * Four columns, and each one answers the list's only question — should I move
-   * this? (tui.md §11, T23). The `3v comp` cell that used to sit beside the id
+   * this?. The `3v comp` cell that used to sit beside the id
    * answered a different one: how many builds are behind it and what kind of
    * package it is are facts about a package somebody has already walked up to,
    * and they are in the detail pane and on the version line, where walking up to
@@ -897,18 +891,18 @@ export function ExtView(props: {
   }
 
   /**
-   * The switch: `Enter` on an id, or a click on its marker (tui.md §11, T22).
+   * The switch: `Enter` on an id, or a click on its marker.
    *
    * ACTIVE is both axes at once — point `current` at a built version, and pin
    * every `manual` tool it declares so the model can call them. What
    * `current` then MEANS is the package's own word: `manual` makes it
    * nameable (a declared command, `/with`, a pin), `auto` makes the kernel
-   * compose it into every fresh session here (DESIGN §5.1). INACTIVE is both
+   * compose it into every fresh session here. INACTIVE is both
    * back. Nothing here is irreversible and nothing here reaches the session
    * already on screen (physics #2), which is why neither direction asks for a
    * `y`.
    *
-   * Both directions are OPTIMISTIC (tui.md §11, T23): the row moves on the
+   * Both directions are OPTIMISTIC: the row moves on the
    * keypress, the notice says the work is in flight, and the subprocess that
    * takes the better part of a second confirms or puts it back. The alternative
    * — and what this used to be — is three seconds of a screen that has not
@@ -963,7 +957,7 @@ export function ExtView(props: {
       return
     }
     /*
-     * A full tool face stops the PINS, never the activation (tui.md §11, T23).
+     * A full tool face stops the PINS, never the activation.
      *
      * The two axes are independent, and only one of them has a quota: an
      * extension can be active with nothing on the native face at all, and
@@ -993,7 +987,7 @@ export function ExtView(props: {
         // The one change in this panel a running model can act on: with the
         // session named, the kernel deposits a capability note and the model
         // learns at its next step boundary that `ext run` reaches a new version
-        // (DESIGN §5.3). A draft tab has no session to tell.
+        //. A draft tab has no session to tell.
         await extSetCurrent(props.ws, "activate", entry.id, version, { session: props.sessionFile })
       }
     } catch (error) {
@@ -1006,13 +1000,11 @@ export function ExtView(props: {
     }
     // Agreed: now the pin lists are written where the next `session new` reads.
     if (change) await applyPin(change, { reconcile: false })
-    // And that is the whole of it. Enter wrote a THIRD thing until T52 — an id
-    // on this front end's own `standing_with`, so that a package with skills or
-    // commands would actually be in a session — because `activate` alone
-    // composes nothing (DESIGN §5.1). A package says that for itself now
+    // And that is the whole of it: `activate` alone composes nothing, but a
+    // package that wants to be in every session says so itself
     // (`apply: "auto"`), the kernel honours it for every driver, and a front
     // end keeping a private membership list beside it would be a second answer
-    // to a question that now has one.
+    // to a question that already has one.
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
@@ -1073,7 +1065,7 @@ export function ExtView(props: {
     props.onMembershipChanged?.()
     setNotice(
       // What actually leaves, per shape. `ext deactivate` is the ONE way back
-      // for a standing package (DESIGN §5.1) — with no `current` it is in
+      // for a standing package — with no `current` it is in
       // nothing — so that is the sentence its row gets. Read from the kernel's
       // record: what this takes away is what the package HAD, and a manifest
       // declaring `apply: "auto"` that no activation recorded was taking part
@@ -1138,7 +1130,7 @@ export function ExtView(props: {
 
   /**
    * `s` — take this binary's own copy of a bundled draft, and make it the one
-   * that runs (T42).
+   * that runs.
    *
    * The one thing `ext seed` will not do by itself: this draft is either
    * somebody's edit or an older nulya's copy, and only a person knows which. So
@@ -1185,8 +1177,8 @@ export function ExtView(props: {
   /**
    * `a` on the version line: point `current` at exactly this build.
    *
-   * One verb, both directions — going back is activating an older version
-   * (DESIGN §7.4), and the CLI has no separate `rollback` for it to mirror.
+   * One verb, both directions — going back is activating an older version,
+   * and the CLI has no separate `rollback` for it to mirror.
    */
   const act = () => {
     const entry = selected()
@@ -1203,7 +1195,7 @@ export function ExtView(props: {
 
   /**
    * The `remote:` target THIS tab runs on, or null when it does not — the
-   * gate `r` (push) reads (goals/remote-env.md §3.9, T102). A started
+   * gate `r` (push) reads. A started
    * session's target is FROZEN in its header, same rule `App.tsx`'s `runsIn`
    * lives by; a draft has no header yet, so it reads the pending `/env`
    * choice instead (`tui_state.ts`).
@@ -1218,9 +1210,9 @@ export function ExtView(props: {
    * last time it ran for whatever is selected right now. Deliberately not a
    * present-tense claim ("pushed" / "not pushed"): a record of what the
    * kernel said LAST time is the whole of what this front end can honestly
-   * keep between the moment it asked and now (T102's own reasoning — a push
+   * keep between the moment it asked and now — a push
    * is answered once, by the kernel, and re-asking is what content addressing
-   * makes cheap).
+   * makes cheap.
    */
   function pushHint(spec: string, entry: ExtensionEntry | null): string {
     pushTick() // read for the dependency: `lastPush` below is a file, not a signal
@@ -1233,7 +1225,7 @@ export function ExtView(props: {
   /**
    * `r`: `nulya ext push <id>@<version> --env <spec>` — copy the selected
    * package's ACTIVE version onto the machine this tab's target names
-   * (T102). Only the active version, never a draft's plan or an older one on
+   *. Only the active version, never a draft's plan or an older one on
    * the timeline: pushing is about running what this tab is about to run,
    * not about publishing a choice this screen has no UI for making.
    *
@@ -1308,7 +1300,7 @@ export function ExtView(props: {
         setNotice(output.split("\n").slice(-2).join(" · "))
       } else {
         // A store action, not a session event: it changes what the NEXT session
-        // freezes and nothing about this one (DESIGN §7.5), so it never touches
+        // freezes and nothing about this one, so it never touches
         // the ledger and its output stays here.
         //
         // The one exception is the note: an activation is the single change here
@@ -1349,14 +1341,14 @@ export function ExtView(props: {
     if (key.name === "escape") return props.onClose()
     // The visible pane strip is a row, so the keys that walk it are the ones
     // that mean sideways: h/l beside j/k, ←/→ beside ↑/↓, and Tab because a
-    // strip of panes is a strip of tabs (T24). Shift+Tab and h go back — a
+    // strip of panes is a strip of tabs. Shift+Tab and h go back — a
     // cycle you can only go forwards round is three presses to undo one.
     if (key.name === "tab") return step(key.shift ? -1 : 1)
     if (key.name === "l" || key.name === "right") return step(1)
     if (key.name === "h" || key.name === "left") return step(-1)
     if (key.name === "j" || key.name === "down") return move(1)
     if (key.name === "k" || key.name === "up") return move(-1)
-    // Enter is the row's action, the same one a second click performs (T18): on
+    // Enter is the row's action, the same one a second click performs: on
     // an id it is the switch, on a tool row it is that tool's pin.
     if (key.name === "return") {
       if (pane() === "tools") return pinKey("toggle")
@@ -1374,7 +1366,7 @@ export function ExtView(props: {
     // key that appears to do nothing, which is worse than a key that is unbound.
     if (key.name === "d" && pane() === "tools" && (foldOpen() || folded().length > 0)) return toggleFold()
     if (key.name === "p") return prune()
-    // Only reachable at all when this tab HAS a remote target (T102) — an
+    // Only reachable at all when this tab HAS a remote target — an
     // unbound key elsewhere in this view is quieter than one that answers
     // with a notice explaining a machine nobody chose.
     if (key.name === "r" && remoteTarget()) return void pushExtension()
@@ -1385,7 +1377,7 @@ export function ExtView(props: {
   /**
    * The pin panel. One row per tool, three states, and the quota above them —
    * `1+N/8`, because the builtin counts and a refused pin is otherwise a
-   * mystery (DESIGN §5.1).
+   * mystery.
    *
    * A pin written by a project or system config layer is shown and not touched:
    * this view writes one key in one file (D3), and quietly editing somebody
@@ -1449,7 +1441,7 @@ export function ExtView(props: {
               >
                 {/* The same three colours the id list's switch uses: `ok` for on
                     and ours, `warn` for on but written somewhere we may not
-                    edit, `faint` for off. One meaning, one colour (tui.md §6).
+                    edit, `faint` for off. One meaning, one colour.
                     An internal or auto-surface tool has no box: there is no
                     pin state this checkbox can honestly change. */}
                 <text
@@ -1610,7 +1602,7 @@ export function ExtView(props: {
                 // `differs` outranks the sync word: an id whose draft is not
                 // this binary's is usually `active` there — the quiet, true,
                 // useless answer — while the fact worth acting on is that the
-                // code running is older than the binary running it (T42).
+                // code running is older than the binary running it.
                 const draft = () =>
                   outdated().includes(entry().id) ? "differs" : draftColumn(draftOf(entry().id), entry().current)
                 const tone = () => ({
@@ -1624,7 +1616,7 @@ export function ExtView(props: {
                 // Walking up to a row and acting on it are two decisions, and a
                 // pointer only has one button — so the FIRST click on a row is
                 // the cursor and a second click on the row the cursor is already
-                // on is Enter (T18's rule, T24 applies it here). It makes the
+                // on is Enter. It makes the
                 // switch reachable without hitting the two-column marker, which
                 // is a target the size of a full stop.
                 const click = onClick(() => {
@@ -1659,7 +1651,7 @@ export function ExtView(props: {
                     </text>
                     {/* Is this extension active for the next session? Two shapes
                         and three colours, so the answer survives a terminal with
-                        no colour at all (tui.md §11, T22). */}
+                        no colour at all. */}
                     <box
                       width={switch_width}
                       height={1}
@@ -1687,7 +1679,7 @@ export function ExtView(props: {
                       </text>
                     </box>
                     {/* `apply: "auto"`: activating this package composes it into
-                        every session on this machine (T52). Warn-coloured while
+                        every session on this machine. Warn-coloured while
                         it is active — that is the state somebody has to be able
                         to spot without reading a detail pane. */}
                     <box width={idCols().standing} flexShrink={0}>
@@ -1712,7 +1704,7 @@ export function ExtView(props: {
                       </text>
                     </box>
                     {/* An id an earlier root already has active: this copy never
-                        runs (DESIGN §7.2). Saying so is the whole point — a
+                        runs. Saying so is the whole point — a
                         silently omitted duplicate is how it becomes a mystery. */}
                     <box width={idCols().shadow} flexShrink={0}>
                       <text fg={rowText(style, tone(), style.theme.warn)}>
@@ -1801,12 +1793,12 @@ export function ExtView(props: {
                       what made `agent` look switched off on a machine where
                       every session had it. WHICH of the three said so is the
                       part worth printing, because they are undone in three
-                      different places (T52). */}
+                      different places. */}
                   {/* The draft in the store is not the source this binary
-                      carries, and seeding will not overwrite it on its own
-                      (DESIGN §7.2): only a person knows whether that is their
-                      edit or a copy an older nulya left behind. Said here,
-                      where it stays true, with the key that resolves it. */}
+                      carries, and seeding will not overwrite it on its own:
+                      only a person knows whether that is their edit or a
+                      copy an older nulya left behind. Said here, where it
+                      stays true, with the key that resolves it. */}
                   <Show when={outdated().includes(entry.id)}>
                     <Lines
                       text={`differs from the source this binary ships · your edit, or a copy an older nulya seeded · \`s\` replaces it with this build's (older source stays inside its frozen versions)`}
@@ -1893,7 +1885,7 @@ export function ExtView(props: {
                           </box>
                           <box width={versionCols().current} flexShrink={0}>
                             {/* `✓ current` is the same mark in the same colour as
-                                `/model`'s (tui.md §6): one glyph, one colour, one
+                                `/model`'s: one glyph, one colour, one
                                 meaning — "this is the one in force". It used to be
                                 `⚡`, which is what an extension GAINED, not which
                                 build it points at. */}

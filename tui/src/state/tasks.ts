@@ -1,5 +1,5 @@
 /**
- * The background tasks of one session, as a live projection (tui.md §5.9).
+ * The background tasks of one session, as a live projection.
  *
  * A task outlives the step that started it and outlives this process, so it is
  * not session view state: nothing about it is in the ledger until it ends, and
@@ -103,11 +103,11 @@ export function seconds(total: number): string {
 
 /**
  * Stop a background task FROM THE TUI, and say so to the model in the same
- * breath (tui.md §11, tasks panel).
+ * breath (tasks panel).
  *
  * `nulya task kill` alone leaves the model unable to tell a person's stop
  * button apart from its own `shell` call — both produce the same `· killed`
- * marker on the task's report (DESIGN §6.1). This is the one place that pairs
+ * marker on the task's report. This is the one place that pairs
  * the kill with the attribution (`taskstop.ts`), so `TasksPanel` and
  * `TasksView` (`/tasks`) cannot drift into two different answers for "what do
  * we tell the model when a person presses stop". The note is appended only
@@ -117,7 +117,7 @@ export function seconds(total: number): string {
  * `send` is `Attachment.send` from whichever tab owns this task: `framed:
  * true` so the note lands exactly as written, whether that tab is driving
  * (drained at the next step boundary) or only observing (still appended,
- * never taking the writer lease — DESIGN §3.4).
+ * never taking the writer lease).
  */
 export async function stopTask(
   ws: Workspace,
@@ -136,7 +136,7 @@ export interface TaskOutcome {
 }
 
 /**
- * How a background task is going, in the words a head line uses (T43).
+ * How a background task is going, in the words a head line uses.
  *
  * TWO SOURCES IN ONE ORDER, and the order is the whole of it: the LEDGER's
  * report if it has landed — a fact, and one that survives closing the session
@@ -144,7 +144,7 @@ export interface TaskOutcome {
  * seconds come from while it is still going. Neither is invented: with no
  * report and no live row, all that can honestly be said is the name.
  *
- * Two callers since T43 — a `shell {background: true}` receipt and a delegation
+ * Two callers — a `shell {background: true}` receipt and a delegation
  * receipt — which is why it is here rather than inside one of the cards. They
  * are the same fact about the same kind of thing, and a person should not have
  * to learn that `running 42s` and `still going` mean the same.
@@ -180,7 +180,7 @@ export function backgroundNote(
   }
   if (live.state === "lost") return { text: join("lost"), failed: false }
   // Not the running fallback: "running 12s" about a machine nobody can ask
-  // would be a guess dressed as a clock (goals/remote-env.md §6.7).
+  // would be a guess dressed as a clock.
   if (live.state === "unreachable") return { text: join("unreachable"), failed: false }
   return { text: join(`running${live.elapsed_s !== null ? ` ${seconds(live.elapsed_s)}` : ""}`), failed: false }
 }

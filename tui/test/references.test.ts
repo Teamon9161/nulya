@@ -1,5 +1,5 @@
 /**
- * `@path` references (tui.md §11, T13).
+ * `@path` references.
  *
  * The first four tests are tcode's own, one for one — `reference_token_avoids_
  * email_addresses`, `reference_matching_prefers_basenames_then_fuzzy_paths`,

@@ -4,13 +4,13 @@
  * Two different scopes, kept apart on purpose:
  *
  *  - TOKENS are this session's. Every step's cost is recorded on its assistant
- *    event (DESIGN §3.1), so opening a session replays its whole price — not
+ *    event, so opening a session replays its whole price — not
  *    only the steps this process happened to watch. A step whose provider
  *    reported nothing is absent rather than zero, which is why the count of
  *    priced steps is shown next to the number of steps.
  *  - TOOL USES are the workspace's. They come from `.nulya/tool-usage.jsonl`,
- *    the journal the kernel appends to across every session (DESIGN §5.5) —
- *    counts only, never a ranking (tui.md §2.1).
+ *    the journal the kernel appends to across every session —
+ *    counts only, never a ranking.
  *
  * Every line is laid out here and never by the terminal: labels are a column
  * sized from their own text, and the two sentences are broken at their ` · `
@@ -66,7 +66,7 @@ export function UsageView(props: { ws: Workspace; snapshot: SessionSnapshot; onC
   const padLeft = (text: string, width: number) => " ".repeat(Math.max(0, width - text.length)) + text
 
   /**
-   * The numbers are a column of their own, right-aligned (tui.md §6).
+   * The numbers are a column of their own, right-aligned.
    *
    * Six counts left-aligned under one another is six different places for the
    * last digit, and the last digit is what says whether this is a hundred or a

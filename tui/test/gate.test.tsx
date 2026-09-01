@@ -1,5 +1,5 @@
 /**
- * The permission mode on screen (tui.md §5.7), against the real binary.
+ * The permission mode on screen, against the real binary.
  *
  * Every step this TUI drives is gated: `nulya session step --gate --stream` asks
  * before each tool call and this front end answers. So these tests are about the
@@ -34,7 +34,7 @@ import {
  *
  * With one addition, and it is load-bearing: the scripted provider's one call is
  * `shell echo hello-from-nulya`, and `echo` is a command the read-only
- * classifier waves through (T65). `[approvals] ask` is the table that says "stop
+ * classifier waves through. `[approvals] ask` is the table that says "stop
  * for this anyway" — it outranks the classifier by construction — so a checkpoint
  * on `echo` is how these tests keep asking the question they are about.
  */
@@ -58,8 +58,8 @@ async function stepUntilAsked(width = 100, height = 24, env: Record<string, stri
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
-    // A state file of this call's own. `/mode` REMEMBERS the choice (tui.md
-    // §7), so one test that switches to unsafe would otherwise decide the mode
+    // A state file of this call's own. `/mode` REMEMBERS the choice,
+    // so one test that switches to unsafe would otherwise decide the mode
     // every later test in this file starts in.
     () => (
       <App
@@ -84,7 +84,7 @@ async function stepUntilAsked(width = 100, height = 24, env: Record<string, stri
 test("in ask mode a tool call waits, marked on its card and asked above the box", async () => {
   const { state, setup } = await stepUntilAsked()
   try {
-    // Two halves of one question (tui.md §5.7): the card says WHICH call, the
+    // Two halves of one question: the card says WHICH call, the
     // dialog above the composer offers the answers and takes the note.
     const frame = setup.captureCharFrame()
     expect(frame).toContain("echo hello-from-nulya")
@@ -108,7 +108,7 @@ test("in ask mode a tool call waits, marked on its card and asked above the box"
 
 /**
  * The note on a DENY has a kernel channel: `deny <note>` becomes that call's
- * marker result (DESIGN §4). Reaching it takes no dedicated key — type, and the
+ * marker result. Reaching it takes no dedicated key — type, and the
  * words are already in the note.
  */
 test("a note on a denial reaches the model as that call's result", async () => {
@@ -127,7 +127,7 @@ test("a note on a denial reaches the model as that call's result", async () => {
     await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved), 30_000)
     const call = state.snapshot.items.find((item) => item.kind === "tool" && item.resolved)!
     expect(call.kind === "tool" && call.ok).toBe(false)
-    // The kernel's own marker, plus the words the person typed (DESIGN §4).
+    // The kernel's own marker, plus the words the person typed.
     expect(call.kind === "tool" && call.output).toContain("denied by the user")
     expect(call.kind === "tool" && call.output).toContain("not on this machine")
     // A denial is not an execution: nothing the command would have printed.
@@ -160,7 +160,7 @@ test("`allow everything from here on` answers this call and switches the mode", 
 }, 120_000)
 
 /**
- * The classifier, through the real gate (T65).
+ * The classifier, through the real gate.
  *
  * The mode is `ask` and nobody presses anything: the scripted provider's call is
  * `echo hello-from-nulya`, `echo` only reads, so the gate answers for the person
@@ -271,7 +271,7 @@ test("a note on an approval runs the call and reaches the model as its own turn"
 }, 120_000)
 
 /**
- * A turn with three calls in it (tui.md §5.7). The kernel offers them one at a
+ * A turn with three calls in it. The kernel offers them one at a
  * time — call N only once N-1 has run — so the batch answer is a decision about
  * the calls a person can SEE, all three already on screen as cards, rather than
  * a promise about anything the model has not written yet.
@@ -315,7 +315,7 @@ test("a lone call is not a batch", async () => {
 }, 120_000)
 
 /**
- * The dialog answers to the mouse alone (tui.md §5.7): hovering a row moves the
+ * The dialog answers to the mouse alone: hovering a row moves the
  * cursor onto it, clicking it answers, and a note typed first rides along —
  * dropping it because the last gesture happened to be a click would be a small
  * betrayal of what was written.
@@ -345,7 +345,7 @@ test("the pointer alone answers the dialog, note and all", async () => {
 }, 120_000)
 
 /**
- * The mode is CHOSEN from a list now, not flipped (tui.md §11, T31).
+ * The mode is CHOSEN from a list now, not flipped.
  *
  * A toggle cannot say what the other side is, so every press had to be followed
  * by two lines explaining the state it had just moved to — on the one line of
@@ -411,7 +411,7 @@ test("a verdict is one line, and a note keeps its words but not its newlines", (
 })
 
 /**
- * The proposal is the CALL, not a file (DESIGN §11). Nothing is written when the
+ * The proposal is the CALL, not a file. Nothing is written when the
  * model hands off — the four sections are the call's arguments and the kernel
  * froze them into the ledger — so this front end finds a handover in the
  * transcript it already holds.

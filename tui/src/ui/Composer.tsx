@@ -35,7 +35,7 @@ import type { ImageInput } from "../nulya/cli.ts"
 
 /**
  * The composer's border in ascii mode: the one bordered object on screen still
- * has to draw on a font without the box-drawing set (tui.md §6).
+ * has to draw on a font without the box-drawing set.
  */
 const ascii_border = {
   topLeft: "+", topRight: "+", bottomLeft: "+", bottomRight: "+",
@@ -82,7 +82,7 @@ export function wrappedRows(text: string, width: number): number {
  * The composer. Enter sends, Shift+Enter (or Ctrl+J, for terminals without the
  * Kitty protocol) makes a newline, Up on an empty buffer walks the history.
  * Sending while a step runs is allowed and does not interrupt it — the turn is
- * queued and the kernel drains it at its next step boundary (tui.md §4.4).
+ * queued and the kernel drains it at its next step boundary.
  *
  * A step ALREADY running can also be interrupted (agent-runner ar-t1): `App`
  * claims Ctrl+G for that at the screen level while there is something to
@@ -95,7 +95,7 @@ export function wrappedRows(text: string, width: number): number {
 
  * Two menus can appear above the box, and neither ever changes what Enter
  * means. A line beginning with `/` lists the matching commands; an `@` at a word
- * boundary lists project paths (tui.md §11, T13), where `↑↓` move the selection
+ * boundary lists project paths, where `↑↓` move the selection
  * and `Tab` accepts. Enter always sends exactly what is written, which is the
  * one promise an input box must not break — a menu that stole Enter would make
  * every message a gamble on what was highlighted.
@@ -115,14 +115,14 @@ export interface ComposerApi {
   focus(): void
   blur(): void
   /**
-   * Throw away what is in the box. Ctrl+C's first meaning (tui.md §4.4): a
+   * Throw away what is in the box. Ctrl+C's first meaning: a
    * draft the user has decided against is a thing to cancel, and cancelling it
    * must not also be the thing that quits the program.
    */
   clear(): void
   /**
    * Put a submitted line back in the box, when the send could not happen at all
-   * — a session that would not start (tui.md §11, T22). Never for a turn the
+   * — a session that would not start. Never for a turn the
    * kernel accepted: that one is in the ledger, and a second copy in the
    * composer would invite it to be sent twice.
    */
@@ -156,7 +156,7 @@ export function Composer(props: {
   /**
    * Whether the model this tab talks to is catalogued as accepting images, and
    * what it is called — the same `[[models]]` claim the kernel's vision gate
-   * reads at submit (DESIGN §14), asked here so a picture that could never be
+   * reads at submit, asked here so a picture that could never be
    * sent is refused on the gesture instead of on the turn.
    *
    * `null` when nothing told us: an absent catalog is not a claim either way,
@@ -166,7 +166,7 @@ export function Composer(props: {
   onNotice?: (text: string) => void
   /**
    * Enter on an empty composer. Returns true when it meant something — the
-   * take-over gesture of observer mode (tui.md §5.6) — and false when Enter on
+   * take-over gesture of observer mode — and false when Enter on
    * nothing should stay nothing.
    */
   onEmptySubmit?: () => boolean
@@ -217,8 +217,8 @@ export function Composer(props: {
   const [at, setAt] = createSignal(0)
   const [pick, setPick] = createSignal(0)
   /**
-   * Built-in commands first, then packages, then skills (tui.md §11, T15;
-   * tui-plugin D1/D8) — the same order dispatch uses (`ui/App.tsx`
+   * Built-in commands first, then packages, then skills — the same order
+   * dispatch uses (`ui/App.tsx`
    * `runCommand` → `runPackageCommand` → `skillTurn`), so what the menu
    * offers first is what Enter would run.
    *
@@ -241,7 +241,7 @@ export function Composer(props: {
   }
 
   /**
-   * Folded pastes, by the number in their placeholder (tui.md §11, T14).
+   * Folded pastes, by the number in their placeholder.
    *
    * Kept for the life of the composer rather than drained on submit, for the
    * same reason the message history is: a recalled draft has to still mean what
@@ -363,7 +363,7 @@ export function Composer(props: {
   }
 
   /**
-   * How tall the box is: exactly what is in it (T26).
+   * How tall the box is: exactly what is in it.
    *
    * It used to be three rows always, so two of them were blank on every screen
    * anybody ever looks at, and a twelve-line paste scrolled inside a window of
@@ -426,8 +426,8 @@ export function Composer(props: {
   }
 
   /**
-   * The synchronous half of an async paste (tui.md §11 T103, an external
-   * review point): claim a spot with a fresh, never-reused marker AT THE
+   * The synchronous half of an async paste: claim a spot with a fresh,
+   * never-reused marker AT THE
    * CURSOR the instant the gesture happens, before anything is awaited. The
    * async caller settles it later with `settleToken`, wherever the marker
    * ended up — never at "the cursor", which may have moved by then.
@@ -506,7 +506,7 @@ export function Composer(props: {
 
   /**
    * Hang an image on the draft, or say why this one cannot be — the two
-   * refusals the kernel would make at submit (DESIGN §9.5/§14), made here where
+   * refusals the kernel would make at submit, made here where
    * the gesture is, because a draft built around an image that can never be
    * sent is worse than a paste that said no.
    *
@@ -679,8 +679,8 @@ export function Composer(props: {
 
   const submit = (interrupt = false) => {
     const text = area?.plainText ?? ""
-    // A paste still in flight (tui.md §11 T103, an external review point):
-    // sending now would mail the literal `[Pasting… #N]` brackets, and by the
+    // A paste still in flight: sending now would mail the literal
+    // `[Pasting… #N]` brackets, and by the
     // time the read answers the box is already cleared with nowhere left for
     // it to settle into. Refuse and say so; the block lifts itself the moment
     // the marker resolves or is deleted, so Enter just needs pressing again.
@@ -712,9 +712,9 @@ export function Composer(props: {
    *
    * A file is an answer and gets the trailing space that starts the next word.
    * A directory is not: it is one level of the path, and the space would close
-   * the token and take the menu down with it, so picking `@docs/` used to be
-   * the end of the road rather than the way to `@docs/goals/ground.md`. Left
-   * open, the very next keystroke — or `Tab` again — completes inside it.
+   * the token and take the menu down with it before it reaches anything
+   * deeper inside. Left open, the very next keystroke — or `Tab` again —
+   * completes inside it.
    */
   const acceptReference = (match: ReferenceMatch, start: number, end: number): void => {
     if (!area) return

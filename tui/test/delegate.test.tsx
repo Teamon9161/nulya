@@ -1,5 +1,5 @@
 /**
- * `/agent` on screen (tui.md §5.10), against the real binary.
+ * `/agent` on screen, against the real binary.
  *
  * The pure halves — parsing a definition, the prompt it becomes, the ceiling —
  * are `agents.test.ts`. What is left, and what only a real run can show, is that
@@ -39,8 +39,7 @@ const style = createStyle(
  * A home of this file's own. These tests build the bundled `agent` package, and
  * a bundled package builds into the USER store — which `test/isolate.ts` points
  * at one scratch directory for the whole run. Without this, `/ext`'s assertions
- * in another file would find an `agent` row nobody put there (the same accident
- * T21 records, one package later).
+ * in another file would find an `agent` row nobody put there.
  */
 const shared_home = process.env["NULYA_HOME"]
 
@@ -111,12 +110,12 @@ test("/agent opens a second tab on a session wearing the definition's prompt, an
     const child = (await agentSession("probe"))!
     await settle(setup, 4)
     // A visible tab, and the status line says which persona it is wearing —
-    // once the notice announcing the new tab has come off that line (T35).
+    // once the notice announcing the new tab has come off that line.
     await until(() => statusLine(setup).includes("agent-probe"), 15_000)
 
     // The scripted provider's `shell echo hello-from-nulya` is refused by the
-    // ceiling, and the model is told why — a deny is that call's tool_result
-    // (DESIGN §4), so it is in the ledger and not only on the screen.
+    // ceiling, and the model is told why — a deny is that call's tool_result,
+    // so it is in the ledger and not only on the screen.
     await until(async () => (await sessionEvents(ws, child)).some((event) => event.kind === "tool_results"), 60_000)
     const batches = (await sessionEvents(ws, child)).filter(
       (event): event is Extract<LedgerEvent, { kind: "tool_results" }> => event.kind === "tool_results",
@@ -133,7 +132,7 @@ test("/agent opens a second tab on a session wearing the definition's prompt, an
     expect(user?.kind === "user_text" && user.text).toContain("find the parser")
 
     // …and the parent is still there, untouched: this tab has no session at all,
-    // because a draft that only delegated never had anything to say (T22).
+    // because a draft that only delegated never had anything to say.
     expect((await sessionList(ws)).filter((entry) => entry.id === child)).toHaveLength(1)
   } finally {
     setup.renderer.destroy()
@@ -142,7 +141,7 @@ test("/agent opens a second tab on a session wearing the definition's prompt, an
 
 /**
  * A definition that arrived with a CHECKOUT may only run in a directory
- * somebody has actually answered for (tui.md §5.10, DESIGN §9). Its body
+ * somebody has actually answered for. Its body
  * becomes a session's system prompt, and materialising the tab builds into that
  * checkout's own extension store — so "nobody has answered yet" has to refuse,
  * exactly as "answered no" does. It used to be the one state that ran.
@@ -251,7 +250,7 @@ test("bare /agent lists the definitions and Enter writes the command instead of 
 
 /**
  * The `agent` package is brought into a session only where it could do
- * something, and never into a delegated one (tui.md §5.10).
+ * something, and never into a delegated one.
  */
 test("a session carries the agent tool when this workspace defines agents, and a delegated session never does", async () => {
   const setup = await open()
@@ -264,8 +263,8 @@ test("a session carries the agent tool when this workspace defines agents, and a
     const parent = (await sessionList(ws)).find((e) => e.composition.active.some((r) => r.startsWith("agent@")))!
     expect(parent.composition.native_tools).toContain("ext:agent/agent")
     // …and ONLY that one. The package's other three declare `surface:
-    // "driver"` in their manifest (DESIGN §7.2.1), and that is what keeps them
-    // off the face — nothing here knows their names (tui.md §11, T34).
+    // "driver"` in their manifest, and that is what keeps them
+    // off the face — nothing here knows their names.
     for (const driver of ["ext:agent/run", "ext:agent/render", "ext:agent/list"]) {
       expect(parent.composition.native_tools).not.toContain(driver)
     }

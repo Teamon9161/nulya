@@ -1,7 +1,7 @@
 /**
  * The `ui.panel: true` projection: a tool's latest call, always visible above
  * the composer even when the transcript that call happened in has scrolled
- * off (DESIGN §7.2.1, tui-plugin D12, U2 §3).
+ * off (U2 §3).
  *
  * A pure projection of the ledger's own items — never a second source of
  * truth. Replaying a session must draw the same strip a live one did, so this

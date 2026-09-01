@@ -1,5 +1,5 @@
 /**
- * The pane model (goals/tui-shell.md §5.1, tui.md §11 T68).
+ * The pane model.
  *
  * Three pure things get pinned here, and each one is pinned for the same
  * reason: they are the answers a window manager gives that no frame can show.
@@ -10,7 +10,7 @@
  *  - the REGISTRY: that first holder wins, so no package can take a screen a
  *    person has to be able to trust.
  *  - the ARBITER: the ORDER the keyboard is claimed in — the one property that
- *    was, before T68, spelled only as the order of `if`s in a 3000-line file.
+ *    was, spelled only as the order of `if`s in a 3000-line file.
  */
 import { expect, test } from "bun:test"
 import {
@@ -270,16 +270,15 @@ test("the keyboard is claimed in one order, outermost first", () => {
 
 test("a chord outranks every claimant, so Ctrl+C still reaches the host", () => {
   // The reason this exception exists: killing the step is one of the two ways
-  // out of a question nobody wants to answer (tui.md §5.7).
+  // out of a question nobody wants to answer.
   const asked: FocusState = { ...nobody, approval: true, modified: true }
   expect(resolveFocus(asked)).toEqual({ kind: "composer" })
   expect(resolveFocus({ ...nobody, pluginPanel: true, modified: true })).toEqual({ kind: "composer" })
 })
 
 test("a full-screen surface holds the keyboard even against a chord", () => {
-  // Not an oversight — it is what `if (overlay.active()) return` did before
-  // T68, and the shortcuts that stay live inside a view are keymap layers,
-  // which are answered before the arbiter is ever consulted.
+  // Not an oversight: the shortcuts that stay live inside a view are keymap
+  // layers, which are answered before the arbiter is ever consulted.
   const inside: FocusState = { ...nobody, modified: true, keyboardPane: { pane: "one", surface: "host:ext" } }
   expect(resolveFocus(inside).kind).toBe("surface")
 })

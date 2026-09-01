@@ -7,10 +7,10 @@ import { modes, type PermissionMode } from "../approvals.ts"
 
 /**
  * `/mode` and the status-line chip: which permission mode this run is in
- * (tui.md §5.7, T31 — tcode's `mode_picker.rs` in nulya's two-mode vocabulary).
+ * (tcode's `mode_picker.rs` in nulya's two-mode vocabulary).
  *
  * A dialog above the composer, not a full-screen overlay, and the same shape as
- * the approval dialog next to it (`ApprovalPanel`, T28): a title, one row per
+ * the approval dialog next to it (`ApprovalPanel`): a title, one row per
  * answer with the shared cursor gutter, a `✓` on the one in force, one hint
  * line. Two rows of content do not earn a screen, and the thing being chosen is
  * about what happens in the transcript right there.

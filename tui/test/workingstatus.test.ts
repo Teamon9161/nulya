@@ -1,5 +1,5 @@
 /**
- * T38's pure functions (tui.md §4.4b, §11 T38): the one line above the composer
+ * `WorkingStatus`'s pure functions: the one line above the composer
  * that says what is happening right now, and the two related timings — how long
  * a notice stays up, and the sweep that says a line is alive.
  *
@@ -80,7 +80,7 @@ test("activityOf: awaiting a gate verdict outranks everything, including an erro
     }),
   )
   // `text` says what OUTRANKED everything; `background` says a task is still
-  // running regardless of which row won (T87 tasks panel: the two coexist).
+  // running regardless of which row won (tasks panel: the two coexist).
   expect(a).toEqual({ text: "waiting for your answer", tone: "warn", moving: false, background: 3 })
 })
 
@@ -132,7 +132,7 @@ test("activityOf: driver — stepping outranks sending and a stale lastStopped, 
   expect(thinking?.text).toBe("waiting for model")
   expect(thinking?.cancelable).toBe(true)
   // No background task running: the field is absent, not zero — nothing at
-  // rest costs a column (T35).
+  // rest costs a column.
   expect(thinking?.background).toBeUndefined()
 })
 
@@ -207,7 +207,7 @@ test("elapsedLabel: seconds below the minute, and the minute boundary", () => {
   expect(elapsedLabel(59_000)).toBe("59s")
   expect(elapsedLabel(59_999)).toBe("59s") // floors, does not round up into the next second
   // One format for a duration in this front end, so this is the same function
-  // `/tasks` and a background card's note go through (tui.md §6).
+  // `/tasks` and a background card's note go through.
   expect(elapsedLabel(60_000)).toBe(seconds(60))
   expect(elapsedLabel(100_000)).toBe(seconds(100))
 })
@@ -296,7 +296,7 @@ test("pickTip: deterministic for a fixed source, and reaches both ends of the li
   expect(last).not.toBe(first)
   expect(pickTip(glyphs, () => 1)).toBe(last)
 
-  // Every tip is written for one glyph set (T70): the one that names the
+  // Every tip is written for one glyph set: the one that names the
   // sidebar handle has to name the handle this terminal actually draws, or it
   // is pointing at a control that is not on the screen.
   const ascii = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, ascii: true } }, {})

@@ -9,14 +9,14 @@ import type { ToolItem } from "../../state/session.ts"
 
 /**
  * A `shell` call: the command on the head line, the captured output folded
- * away by default (tui.md §4.2, D5). The note carries the two facts worth
+ * away by default. The note carries the two facts worth
  * seeing without unfolding — how much came back, and how it exited.
  *
- * `exit 0` is not one of them (T26). A call that worked says only how much it
+ * `exit 0` is not one of them. A call that worked says only how much it
  * brought back; silence is what success looks like, and it leaves the colour
  * and the words for the call that failed.
  *
- * `background: true` is the same card with a different note (tui.md §5.9): the
+ * `background: true` is the same card with a different note: the
  * call returned a receipt, not a result, so what is worth seeing is which task
  * it is and whether it is still going. No new glyph — it is still a command run
  * in a shell, and the note says the one thing that differs.
@@ -101,8 +101,8 @@ function ShellCommand(props: { command: string }) {
 
 /**
  * `stdout` + `--- stderr ---` + `[exit N]` is the shape `tools/shell.zig`
- * writes (tui.md §2.1). Splitting it lets stderr take the error colour without
- * washing the whole card (tui.md §6).
+ * writes. Splitting it lets stderr take the error colour without
+ * washing the whole card.
  */
 export function ShellOutput(props: { output: string }) {
   const style = useStyle()

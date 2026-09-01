@@ -1,7 +1,7 @@
 /**
- * Observer mode end to end (tui.md §5.6, the T3 completion criterion).
+ * Observer mode end to end.
  *
- * The scenario is the one the milestone asks for: a driver script loops
+ * A driver script loops
  * `nulya session step` in another process while the TUI attaches to the same
  * session. Everything here is unattended — the "other terminal" is
  * `test/fixtures/driver-loop.ts` — and nothing is simulated: a real binary holds
@@ -56,9 +56,9 @@ test("a session driven by somebody else is observed, appended to, and then taken
     await until(() => state.lastSeq() > before, 30_000)
 
     // 3. An observer may still speak: the turn is deposited in the inbox and
-    //    the OTHER writer drains it at its next step boundary (DESIGN §3.4).
+    //    the OTHER writer drains it at its next step boundary.
     //    When the probe has already confirmed the lease as held, the turn goes
-    //    out wrapped as a mid-task message (tui.md §11, T17) — so it is matched
+    //    out wrapped as a mid-task message — so it is matched
     //    through the same parser the cards use, not by its raw text.
     await attach.send("a word from the observer")
     expect(state.snapshot.items.some((item) => item.kind === "user" && item.queued)).toBe(true)

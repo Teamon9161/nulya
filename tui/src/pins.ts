@@ -1,9 +1,9 @@
 /**
- * Pins: which extension tools the NEXT session puts on the model's tool face
- * (tui.md §11, T12).
+ * Pins: which extension tools the NEXT session puts on the model's tool
+ * face.
  *
- * A pin is a decision, and the kernel keeps two places to write it down
- * (DESIGN §5.1): `registry.pinned_native_tools` in the config chain, and
+ * A pin is a decision, and the kernel keeps two places to write it down:
+ * `registry.pinned_native_tools` in the config chain, and
  * `session new --pin` in argv. `session new` unions them — config says "in this
  * workspace, always", argv says "for this session" — and a union only ever
  * ADDS. That asymmetry is the whole shape of this module, so it is said out
@@ -35,7 +35,7 @@
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
 
-/** The one builtin is always on the face and always counts (DESIGN §5.1). */
+/** The one builtin is always on the face and always counts. */
 export const builtin_tools = 1
 
 export type PinState = "always" | "session" | "other" | "composed" | "off"
@@ -152,7 +152,7 @@ export function promote(id: string, sources: PinSources): PinChange {
 
 /**
  * Every tool of an extension onto this TUI's list, in one move — the pin half
- * of the `/ext` switch (tui.md §11, T22). Only ever adds: turning an extension
+ * of the `/ext` switch. Only ever adds: turning an extension
  * ON must not silently take a pin off something else.
  */
 export function pinAll(ids: readonly string[], sources: PinSources): PinChange {
@@ -167,7 +167,7 @@ export function pinAll(ids: readonly string[], sources: PinSources): PinChange {
  * The other half: take an extension's tools off both lists this panel writes.
  *
  * A pin left behind by a deactivation is not harmless — a pin brings its
- * package in at `current` (DESIGN §5.1), and with no `current` the next
+ * package in at `current`, and with no `current` the next
  * `session new` refuses (`WithVersionNotFound`) and the session simply does not
  * start — so OFF has to clear `always` too, which is the one case where this
  * module writes the config file without being asked for `A`. A pin some other
@@ -209,7 +209,7 @@ export function orphanPins(pins: readonly string[], available: readonly string[]
  * Every tool id a STANDING pin list may name, from a store listing.
  *
  * One condition is the kernel's: the extension has an active, un-shadowed
- * version — a pin brings its package in at `current` (DESIGN §5.1), and with no
+ * version — a pin brings its package in at `current`, and with no
  * `current` the session does not open. The second condition is the tool's
  * manifest surface: only `surface:"manual"` tools may be pinned.
  * `surface:"auto"` tools arrive with membership, and `surface:"internal"` tools
@@ -233,7 +233,7 @@ export function resolvableStandingPins(
 }
 
 /**
- * The quota line. `max_tools` counts the builtin (DESIGN §5.1), so it is shown
+ * The quota line. `max_tools` counts the builtin, so it is shown
  * rather than hidden — a face of 8 that already spends 1 is the fact behind
  * every "why was my pin refused".
  *
@@ -252,8 +252,8 @@ export function quotaLine(maxTools: number, pinned: number): string {
 /**
  * The face is full and a batch of pins did not fit — in a sentence somebody can
  * act on, rather than in the gauge's arithmetic (`2+9/8 · nothing changed` was
- * the whole explanation a person got for pressing Enter and seeing nothing
- * happen, tui.md §11, T23).
+ * once the whole explanation a person got for pressing Enter and seeing
+ * nothing happen).
  *
  * It is not a refusal. Membership and pins are two axes: an extension can be
  * active with none of its tools on the native face, and `nulya ext run` reaches

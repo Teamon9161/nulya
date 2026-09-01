@@ -2,7 +2,7 @@
  * `/help` (F1): the keys and slash commands, as they are bound right now.
  *
  * It reads the live keymap rather than a hand-written list, so a `[keys]`
- * override in `tui.toml` (tui.md §7) shows up here instead of quietly making
+ * override in `tui.toml` shows up here instead of quietly making
  * the documentation wrong. Bindings that differ from the default are marked.
  *
  * Every description is broken into lines here rather than left to the terminal.
@@ -70,7 +70,7 @@ const mouse: Array<[string, string]> = [
  * The slash lines that are not built-in commands: a package's own, a skill, and
  * everything else. The first two exist only when something is active, which is
  * why they are described by shape rather than listed by name — `/evolve` is one
- * of them since T53, and it is there exactly when the evolution package is.
+ * of them and it is there exactly when the evolution package is.
  */
 const slashes: Array<[string, string]> = [
   ["/<package command>", "declared by an active extension · /ext lists them"],
@@ -214,7 +214,7 @@ export function HelpView(props: { keys: Keymap; onClose: () => void }) {
           )}
         </For>
       </scrollbox>
-      {/* The same footer every other overlay has (tui.md §6): one dim line, in
+      {/* The same footer every other overlay has: one dim line, in
           one place, broken at its own joints — it used to be a bare `<text>`
           here, which is the one panel where the line could not wrap and
           therefore the one panel where a narrow terminal garbled it. */}

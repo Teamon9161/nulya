@@ -1,8 +1,8 @@
 /**
- * `tui.toml` (tui.md §7): user layer, then project layer, then defaults.
+ * `tui.toml`: user layer, then project layer, then defaults.
  *
  * Deliberately NOT part of the kernel's config chain — the kernel has no
- * business knowing a fold default (tui.md §1.2 D4). The paths mirror it so
+ * business knowing a fold default. The paths mirror it so
  * "where does settings live" still has one answer.
  */
 import { existsSync } from "node:fs"
@@ -15,12 +15,12 @@ import type { TomlValue } from "./settingsfile.ts"
 
 export type FoldDefault = "expanded" | "collapsed"
 /**
- * `hidden` is the default (T43). Reasoning is not something the model SAID and
+ * `hidden` is the default. Reasoning is not something the model SAID and
  * not something it DID — it is the provider's own scratch, kept in the ledger
- * for replay (DESIGN §3.1) — and a collapsed card for it still spends a head
+ * for replay — and a collapsed card for it still spends a head
  * line, a glyph and a fold marker on every single answer, directly above the
  * answer. What that line was doing for a reader is said better by the status
- * line, which reads `thinking` while the model is in exactly that state (T38).
+ * line, which reads `thinking` while the model is in exactly that state.
  *
  * Nothing is lost and nothing is decided for anybody: the reasoning is in the
  * ledger either way, and `transcript.thinking = "collapsed"` brings the card
@@ -34,7 +34,7 @@ export interface Settings {
     tool_output: FoldDefault
     thinking: ThinkingDefault
     /**
-     * The composition card at the top of a session (tui.md §5.1). Collapsed by
+     * The composition card at the top of a session. Collapsed by
      * default: what it says at rest — model and counts — is what changes what
      * the session can do; the extension versions under it are provenance, and
      * provenance does not earn a fifth of the screen on every session.
@@ -42,7 +42,7 @@ export interface Settings {
     composition: FoldDefault
     /**
      * Gather a run of finished, successful, bodyless calls into one line
-     * (T43, `render/runs.ts`). On by default: a model that reads eleven files
+     * (`render/runs.ts`). On by default: a model that reads eleven files
      * before answering should not push what it SAID off the screen.
      *
      * Off restores one row per call. It is a boolean and not a fold default
@@ -56,7 +56,7 @@ export interface Settings {
      * How many transcript items are mounted at once, counting from the newest.
      * 0 draws everything. The whole session is always in the ledger file; this
      * only bounds what the renderer has to lay out on every frame, which is what
-     * keeps a long session's typing latency flat (tui.md §11, T4).
+     * keeps a long session's typing latency flat.
      */
     history_window: number
     /**
@@ -69,7 +69,7 @@ export interface Settings {
      * reused). A report that has not reached its first blank line yet IS that
      * one trailing block, so every delta re-lays-out the whole answer, and in a
      * sticky-bottom scrollbox every height change moves the screen. That is the
-     * flicker (BUGS.md #21).
+     * flicker.
      *
      * Sampling the text instead of following it is the cheap half of the fix:
      * it does not stop the trailing block from being unstable, it stops us from
@@ -94,7 +94,7 @@ export interface Settings {
   }
   extensions: {
     /**
-     * Build the drafts in the store roots when the TUI opens (tui.md §11, T11).
+     * Build the drafts in the store roots when the TUI opens.
      * On by default because "the source is there and nothing built it" is never
      * what anyone wanted; the user store runs in the background, and the
      * project store is gated by the trust question, which no setting can skip.
@@ -102,7 +102,7 @@ export interface Settings {
     sync_on_start: boolean
     /**
      * Let that pass move `current` onto what it just built. It never moves a
-     * pointer that names something else (DESIGN §7.2), so a rollback survives
+     * pointer that names something else, so a rollback survives
      * this being on.
      */
     auto_activate: boolean
@@ -110,24 +110,24 @@ export interface Settings {
      * The packages every TOP-LEVEL session this TUI starts is composed with:
      * `--with <id>@<v>`. Tools in those packages that declare `surface:"auto"`
      * reach the model face through membership; they are not written as pins.
-     * One list where there used to be one boolean per package (T34) — "which
+     * One list where there used to be one boolean per package — "which
      * packages" is a list-shaped question, and a new one should not need a new
      * key and a new branch in `App.tsx`.
      *
      * This is the FRONT END's list, and a package can now say the same thing
      * for itself: `apply: "auto"` in its manifest makes the kernel compose it
-     * into every fresh session, whatever is driving (DESIGN §5.1). This key
+     * into every fresh session, whatever is driving. This key
      * stays for the other direction — composing a package that did NOT ask,
      * and doing it only here.
      *
      * Both defaults earn their place. `handoff`'s tool only ever WRITES A FILE
-     * proposing a handover (DESIGN §11) — the fork is this front end's move and
+     * proposing a handover — the fork is this front end's move and
      * it still asks first in `ask` mode. `agent` ships four personas, so there
      * is always something to delegate to, and a delegation is a background task
      * the model can only ASK for; every tool call inside it still meets the gate.
      *
      * TOP-LEVEL only, and that is load-bearing for `agent`: a delegated session
-     * composes itself (DESIGN §7.8), so this list never reaches one.
+     * composes itself, so this list never reaches one.
      */
     session_with: string[]
     /**
@@ -139,7 +139,7 @@ export interface Settings {
      * special case beside it. These packages are not members — nothing about
      * them is composed into the session; what lands there is the FILE they
      * wrote, with a one-session lifetime, which is the side of the line
-     * `--prompt` serves (`docs/goals/session-prompt.md`).
+     * `--prompt` serves.
      *
      * The bundled `ground` reports where the session is running: project
      * layout, the project's own instruction files, environment, git state.
@@ -156,7 +156,7 @@ export interface Settings {
      *
      * On by default, because loading is already gated by the one boundary this
      * decision has: an extension's code runs on this machine the moment
-     * anybody calls `ext run`, and the trust gate (DESIGN §9) is where that was
+     * anybody calls `ext run`, and the trust gate is where that was
      * decided (tui-plugin D4). Off is for somebody who wants the screen to be
      * only ever the screen — and per package, the switch is `/ext`'s own: a
      * package that is not active and not worn is never loaded.
@@ -165,12 +165,9 @@ export interface Settings {
   }
   /**
    * Per exec-target-KIND overrides of `session_with` / `session_prompts` /
-   * pins (`tui.toml` `[env.local]` / `[env.wsl]` / `[env.remote]`, tui.md §11
-   * T88/T101, `state/envprofile.ts`). A table for a kind that never gets a
-   * session (nobody uses `/env`) costs nothing and is never read. (`[env.
-   * ssh]` used to be a fourth table, for the bare `ssh:<dest>` exec target —
-   * retired 2026-08-30, goals/remote-env.md §7.1 — and is now simply an
-   * unrecognised key, same as any other typo.)
+   * pins (`tui.toml` `[env.local]` / `[env.wsl]` / `[env.remote]`,
+   * `state/envprofile.ts`). A table for a kind that never gets a
+   * session (nobody uses `/env`) costs nothing and is never read.
    *
    * Kept apart from `extensions` above rather than nested inside it: those
    * fields ARE the `local`/`wsl` default (`envprofile.ts`'s
@@ -183,8 +180,7 @@ export interface Settings {
      * The permission mode a run STARTS in: `ask` puts every tool call the rules
      * have no opinion about in front of a person, `unsafe` runs it.
      * `tui-state.json` (what was last chosen on screen) wins over this; the chip
-     * on the status line and `/mode` change it for the run in flight
-     * (tui.md §5.7).
+     * on the status line and `/mode` change it for the run in flight.
      */
     mode: PermissionMode
   }
@@ -346,7 +342,7 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
 
 /**
  * Every key `mergeLayer` above reads, what it accepts, and how to show what it
- * is set to (tui.md §11, T94).
+ * is set to.
  *
  * WHY IT EXISTS. `/settings` used to list nine of these and say nothing about
  * what any of them would take, so the only way to find out that
@@ -365,21 +361,19 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
  * row for a key nobody reads fails; a key read but not listed is the one thing
  * that test cannot catch, which is why the order here follows the parser's.
  *
- * WHAT IT GAINED WHEN THE SCREEN LEARNED TO WRITE (T100). A row now also says
+ * WHAT IT GAINED WHEN THE SCREEN LEARNED TO WRITE. A row now also says
  * HOW its key changes — the same vocabulary, used a second way. That is the
  * point: the words a key accepts are written once, so the list a picker offers
  * and the list the third column advertises cannot come to disagree.
  */
 
 /**
- * How `/settings` changes a key, for the keys it will change (T100).
+ * How `/settings` changes a key, for the keys it will change.
  *
  * A closed list is chosen from, a number and a list are typed. A field with no
  * `edit` is one this screen will not write — `keys.*`, whose names are an open
- * set, and the `env.<kind>` rows, whose one line stands for three tables (T101
- * added `remote` to `local`/`wsl`; the fourth, `ssh`, was retired 2026-08-30
- * along with the bare `ssh:<dest>` exec target, goals/remote-env.md §7.1) and
- * so has no single value to put anywhere.
+ * set, and the `env.<kind>` rows, whose one line stands for three tables
+ * (`local`/`wsl`/`remote`) and so has no single value to put anywhere.
  */
 export type SettingEdit =
   | { kind: "choice"; values: readonly string[]; boolean?: true }
@@ -451,7 +445,7 @@ const yesno = "true | false"
  * Comma-jointed, and that is not decoration: `approvals.allow` holds command
  * patterns, which contain spaces, so a space-jointed line cannot be read back
  * — `git status git push` is one entry or two and the screen would not say
- * which. It is also what `/settings` types into and splits on (T100), so what
+ * which. It is also what `/settings` types into and splits on, so what
  * is shown and what is typed are the same string.
  */
 const shown = (xs: readonly string[]) => (xs.length === 0 ? "—" : xs.join(", "))

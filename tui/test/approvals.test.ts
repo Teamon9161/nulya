@@ -1,6 +1,6 @@
 /**
- * The approval policy (tui.md §5.7): the pure decision behind every gated tool
- * call. The kernel has one semantic — allow, or deny with a note (DESIGN §14) —
+ * The approval policy: the pure decision behind every gated tool
+ * call. The kernel has one semantic — allow, or deny with a note —
  * so everything a person would call "permissions" is here, and it is a function.
  */
 import { expect, test } from "bun:test"
@@ -57,11 +57,11 @@ function context(over: Partial<ApprovalContext> = {}): ApprovalContext {
 }
 
 /**
- * The rename (tui.md §11, T31). `auto` promised a judgement — tcode's `Auto` is
+ * The rename. `auto` promised a judgement — tcode's `Auto` is
  * a classifier reviewing each action — where this mode makes none at all, so it
  * is `unsafe`, tcode's own name for the same stance. The compatibility read
  * that kept `auto` meaning `unsafe` is gone with every other pre-release shim
- * (T52): there are two words, and anything else names no mode.
+ *: there are two words, and anything else names no mode.
  */
 test("there are two modes, and a word that is neither names none", () => {
   expect(modes).toEqual(["ask", "unsafe"])
@@ -93,7 +93,7 @@ test("a state file's mode survives a round trip, and a word that is no mode is n
 })
 
 /**
- * The picker's selection logic (T31), without a terminal. It opens on the mode
+ * The picker's selection logic, without a terminal. It opens on the mode
  * in force and CLAMPS rather than wraps: with two rows a wrap makes ↑ and ↓ the
  * same key, and "press down twice to be sure" would land back where it started.
  */
@@ -116,14 +116,14 @@ test("the mode picker opens on the mode in force and clamps at both ends", () =>
 })
 
 test("the mode is the fallback and only the fallback", () => {
-  // A command the classifier has no opinion about (T65), so what is being read
+  // A command the classifier has no opinion about, so what is being read
   // here is the fallback itself and not the layer above it.
   expect(decide(shell("rm -rf build"), context({ mode: "ask" }))).toBe("ask")
   expect(decide(shell("rm -rf build"), context({ mode: "unsafe" }))).toBe("allow")
 })
 
 /**
- * The classifier's place in the chain (T65). It is one layer, near the bottom:
+ * The classifier's place in the chain. It is one layer, near the bottom:
  * everything a person wrote outranks it, and it never speaks in `unsafe`, where
  * the next line allows the call anyway and `via` would be claiming a reason
  * that was not the reason.
@@ -181,7 +181,7 @@ test("an entry is a tool id, a tool name, or a shell command prefix", () => {
 })
 
 test("a manifest's readonly claim allows, and the switch stops believing it", () => {
-  // The claim rides on the request itself now (DESIGN §4): nothing here opens a
+  // The claim rides on the request itself now: nothing here opens a
   // manifest, and the config key still decides whether to believe what arrives.
   expect(decide(readWith(true), context())).toBe("allow")
   expect(decide(readWith(true), context({ rules: { ...default_rules, manifest_readonly: false } }))).toBe("ask")

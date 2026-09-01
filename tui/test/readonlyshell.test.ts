@@ -1,5 +1,5 @@
 /**
- * The read-only command classifier (tui.md §11, T65) — a pure function, so the
+ * The read-only command classifier — a pure function, so the
  * whole of it is a table.
  *
  * Every case here is written in the one direction the file is written in: a

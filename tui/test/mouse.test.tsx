@@ -1,5 +1,5 @@
 /**
- * The pointer (tui.md §11, T18).
+ * The pointer.
  *
  * The mouse is the one input path nobody had automated, and the one place a
  * front end silently rots: a click target that drifts by a row when the box
@@ -35,7 +35,7 @@ const style: Style = createStyle(unsafe_settings, {})
 let ws: TempWorkspace
 let first: string
 let second: string
-/** The first session's opening line: how its row is found on screen (T47). */
+/** The first session's opening line: how its row is found on screen. */
 const said = "make the budgets configurable"
 
 beforeAll(async () => {
@@ -60,7 +60,7 @@ beforeAll(async () => {
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", "lint"])
   // The template writes no `surface`, which now means `auto` — a tool the model
-  // gets with membership and that no pin may name (DESIGN §7.2.1, T52). These
+  // gets with membership and that no pin may name. These
   // tests are about PINNING, so the fixture says `manual` out loud.
   const lint_draft = join(ws.dir, ".nulya", "extensions", "lint", "extension.json")
   const lint_manifest = JSON.parse(readFileSync(lint_draft, "utf8")) as {
@@ -164,9 +164,7 @@ test("a click lands on the card under it after the transcript has scrolled", asy
 }, 60_000)
 
 test("/sessions: one click goes to that session, two give it a tab of its own", async () => {
-  // T70 turned this pair around. It used to be "click to select, click again to
-  // open a tab", which spent the gesture people make constantly on the outcome
-  // they wanted least. What is pinned here is that the two gestures are two
+  // What is pinned here is that the two gestures are two
   // DIFFERENT verbs — the reason the single click has to wait out the double
   // click window rather than firing and being amended.
   const [went, setWent] = createSignal<string | null>(null)
@@ -266,7 +264,7 @@ test("/ext: clicking a pane name goes to it, clicking [x] pins the tool", async 
 
 test("the tab bar answers to a click, with the same select F4 uses", async () => {
   const [active, setActive] = createSignal(0)
-  // A tab is named by what it runs on, not by its session id (tui.md §11, T22).
+  // A tab is named by what it runs on, not by its session id.
   const tab = (model: string) =>
     ({
       kind: "session",
@@ -322,7 +320,7 @@ test("the tab strip's own two controls: ✕ closes that tab, + starts one", asyn
   )
   try {
     const line = (await settle(setup, 4)).split("\n")[0]!
-    // Which one is in front is a SHAPE (T70): `▎` on it, blanks on the rest,
+    // Which one is in front is a SHAPE: `▎` on it, blanks on the rest,
     // so a terminal with no colours still says it. It used to be `⤷` on every
     // tab, which said nothing about any of them.
     expect(line).toContain(`${style.glyphs.bar} alpha-1`)
@@ -456,11 +454,11 @@ test("clicking the input box leaves browse mode", async () => {
 }, 120_000)
 
 test("clicking empty transcript does not take the keyboard away from the box", async () => {
-  // The bug T70 fixed, and the reason it was invisible for so long: nothing on
-  // screen changes. `ScrollBoxRenderable` is focusable, OpenTUI's autoFocus
+  // Nothing on screen changes when this goes wrong, which is what makes it
+  // worth pinning: `ScrollBoxRenderable` is focusable, OpenTUI's autoFocus
   // walks up from a mouse-down to the first focusable ancestor, and the
   // transcript is that ancestor for every cell of itself — so a click on empty
-  // space left the composer bordered, blinking and deaf.
+  // space can leave the composer bordered, blinking and deaf.
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
@@ -494,7 +492,7 @@ test("the model is a click target wherever it is written: the line under the com
   const state = createSessionState(id)
   const setup = await testRender(
     // A state file of this test's own: the mode chip below is CHOSEN from, and
-    // `/mode` remembers the choice (tui.md §7). Without this, picking `ask`
+    // `/mode` remembers the choice. Without this, picking `ask`
     // here would be picking it for every later test in the run that renders an
     // App without a state path — and their tool calls would sit waiting for a
     // person who is not there.
@@ -517,13 +515,13 @@ test("the model is a click target wherever it is written: the line under the com
     const frame = await settle(setup, 4)
     const rows = frame.split("\n")
 
-    // The bottom line, where tcode puts it (tui.md §11, T22): the model leads
+    // The bottom line, where tcode puts it: the model leads
     // it, and the model is the target. No session id, no provider name.
     // The frame ends with a newline, so the last row is the blank after it.
     const bar = rows.length - 2
     expect(rows[bar]).toContain("scripted-demo · tools 1+0")
     expect(rows[bar]).not.toContain(id)
-    // No keyboard hints and no `/help` on it any more (T38): a reminder that
+    // No keyboard hints and no `/help` on it any more: a reminder that
     // is always there is read once and then never again, and it was spending
     // the busiest line on the screen. The permission mode leads the line.
     expect(rows[bar]).not.toContain("Ctrl+O")
@@ -564,7 +562,7 @@ test("the model is a click target wherever it is written: the line under the com
     expect(await settle(setup, 4)).toContain("frozen composition")
 
     // The permission mode is on that line too, and clicking it OPENS THE
-    // PICKER rather than flipping the mode (tui.md §11, T31): a chip that
+    // PICKER rather than flipping the mode: a chip that
     // silently changed how every tool call is treated, in one click, with the
     // two words never spelled out anywhere, was the worst kind of quiet.
     const chip = rows[bar]!.lastIndexOf("unsafe")
@@ -585,8 +583,8 @@ test("the model is a click target wherever it is written: the line under the com
 }, 120_000)
 
 test("the pointer lifts a row's own colours and paints nothing behind it", () => {
-  // T95. The one background left belongs to the KEYBOARD cursor; a second band
-  // for the pointer made a row the mouse had merely crossed look chosen.
+  // The one background left belongs to the KEYBOARD cursor; a second band
+  // for the pointer would make a row the mouse had merely crossed look chosen.
   expect(rowBackground(style, { selected: false, hovered: true })).toBeUndefined()
   expect(rowBackground(style, { selected: true, hovered: true })).toBe(style.theme.selection)
   // Lifted, not replaced: a warn-coloured cell under the pointer is still
@@ -600,8 +598,8 @@ test("the pointer lifts a row's own colours and paints nothing behind it", () =>
 
 test("with no colour to lift toward, the pointer says nothing rather than something wrong", () => {
   // `NO_COLOR` collapses every token onto the terminal's own foreground, so
-  // `lift` IS `fg` and the mix is a no-op — the same way T38's shimmer stops
-  // moving. What is left of the pointer there is the gutter mark.
+  // `lift` IS `fg` and the mix is a no-op. What is left of the pointer there
+  // is the gutter mark.
   const mono = createStyle(default_settings, { NO_COLOR: "1" })
   expect(lifted(mono, true, mono.theme.fg).toLowerCase()).toBe(mono.theme.fg.toLowerCase())
 })

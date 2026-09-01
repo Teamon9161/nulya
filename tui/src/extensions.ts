@@ -1,10 +1,11 @@
 /**
- * Installing what is already on disk, at start-up (tui.md §11, T11).
+ * Installing what is already on disk, at start-up.
  *
  * The store layout has always been "a draft lives at `<root>/<id>/`, its frozen
  * versions beside it", and `nulya ext sync` builds every draft in a root. So the
  * front end's whole job here is WHEN to run it, and that splits along the one
- * line the kernel draws (DESIGN §9, physics #6):
+ * line the kernel draws between code a person put on this machine themselves
+ * and code that arrived with someone else's checkout:
  *
  *  - the USER store is the person's own directory. Nothing arrives in it without
  *    them putting it there, so syncing it needs no permission — it runs in the
@@ -53,8 +54,8 @@ export interface StoreAction {
 /**
  * The three keys, and what each one does. `t` is the whole answer — trust,
  * build, use. `s` builds without granting anything: on a store that held only
- * source this still ends up trusted, because a local build IS the trust
- * (DESIGN §9), which is why the two are offered separately only where they
+ * source this still ends up trusted, because a local build IS the trust,
+ * which is why the two are offered separately only where they
  * differ — a checkout shipping already-built versions. `n` does nothing at all.
  */
 export function answerFor(key: string): StoreAnswer | null {
@@ -82,7 +83,7 @@ export function workspaceStorePath(ws: Workspace): string {
 
 /**
  * Whether this machine has recorded trust for `store`, by reading the kernel's
- * own journal (`<user dir>/trusted-stores.jsonl`, DESIGN §9). A read, never a
+ * own journal (`<user dir>/trusted-stores.jsonl`). A read, never a
  * write: the TUI never records trust — `nulya ext trust` does, after printing
  * what it is about to trust.
  */
@@ -115,7 +116,7 @@ export function samePath(a: string, b: string): boolean {
  * What a store root has in it, in the two forms that matter: source waiting to
  * be built, and versions already there.
  *
- * The second is the one the trust gate is about (DESIGN §9) — a checkout that
+ * The second is the one the trust gate is about — a checkout that
  * ships BUILT extensions is what the kernel refuses to compose until somebody
  * has looked. Both come from the kernel's own commands rather than a directory
  * walk here: `ext sync --dry-run` decides what a draft is, `ext list` decides
@@ -176,7 +177,7 @@ export function summarize(where: string, report: SyncReport): string {
  * The ids a pass could not build, split by what would fix them.
  *
  * `3 failed` scrolling past in the status bar is how `std` stayed invisible for
- * a week (tui.md §11, T22): a count says something went wrong, a name says what
+ * a week: a count says something went wrong, a name says what
  * to go and look at. The split is the same lesson one level down — the name is
  * only actionable next to the right verb, and "not built" beside a draft that
  * merely wants a toolchain sends a person to read source that compiles fine.
@@ -325,7 +326,7 @@ export async function applyStoreAction(ws: Workspace, action: StoreAction): Prom
   return extSync(ws, { activate: action.activate })
 }
 
-// ── merging the two start-up questions into one (T2, ext-review-2 §3b) ─────
+// ── merging the two start-up questions into one ─────────────────────────────
 
 const agents_choices: ReadonlyArray<[key: string, what: string]> = [
   ["t", "trust these definitions"],
@@ -358,15 +359,15 @@ export interface CheckoutAsk {
 export type CheckoutPlan = { kind: "none" } | CheckoutAsk
 
 /**
- * The one start-up question a checkout actually needs (T2, ext-review-2 §3b).
+ * The one start-up question a checkout actually needs.
  *
  * Two different things can each need a look before a session may compose
- * them — the workspace extension store (DESIGN §9, `planProjectStore`) and
- * the agent definitions beside it (tui.md §5.10, `planProjectAgents`) — and
+ * them — the workspace extension store (`planProjectStore`) and
+ * the agent definitions beside it (`planProjectAgents`) — and
  * they share everything but the file they are about: the same "only a
  * keypress moves it" shape, the same "not now is a real answer, asked once"
  * rule, even the same reason (a local build is how the kernel records trust,
- * DESIGN §9, so the question has to come before the first one). Stacked as
+ * so the question has to come before the first one). Stacked as
  * two separate prompts on a bare terminal, that resemblance read as
  * repetition instead of the single fact it is.
  *
@@ -468,26 +469,22 @@ export function planStore(ws: Workspace, user: boolean): Promise<SyncReport> {
   return extSync(ws, { user, dryRun: true })
 }
 
-// ── The bundled extensions (DESIGN §7.8) ────────────────────────────────────
+// ── The bundled extensions ────────────────────────────────────
 //
 // The binary embeds the six drafts nulya's own repo ships, and `ext seed`
 // writes them into a store root — so they are installable in ANY workspace,
 // not just a nulya checkout.
 //
-// There used to be two hard-coded lists here saying which of them meant what:
-// one for "install means active everywhere", one for "these tools are a driver
-// interface". Both are gone (T34) — and both questions are the package's own
-// words in the frozen manifest now: `contributes.tools[].surface` for the
-// second (DESIGN §7.2.1) and top-level `apply` for the first (DESIGN §5.1).
-// That is the only place that knows, and it works for a package this repository
-// has never heard of.
+// Which of them mean what is the package's own words in the frozen manifest:
+// `contributes.tools[].surface` for whether a tool is a driver interface, and
+// top-level `apply` for whether installing it means active everywhere. That is
+// the only place that knows, and it works for a package this repository has
+// never heard of.
 //
-// Since T23 nobody is asked about any of it: the user store is the person's own
-// directory, what lands in it came with the binary they ran, and the question
-// that used to guard it was asked on a bare terminal before the screen existed
-// and then held it there for a minute of zig. It happens on the way in, in the
-// background, with the status line saying so — and one Enter in `/ext` undoes
-// any of it.
+// Nobody is asked about any of it: the user store is the person's own
+// directory, what lands in it came with the binary they ran, and syncing it
+// happens on the way in, in the background, with the status line saying so —
+// and one Enter in `/ext` undoes any of it.
 
 /**
  * The six std tools, as the stable ids `session new --pin` takes.
@@ -508,23 +505,19 @@ export const std_pins = [
 
 /**
  * The pins turning a package on should write: one per `manual` tool the package
- * RECOMMENDS (`manifest.ToolSpec.recommended`, DESIGN §5.1 / §7.2.1).
+ * RECOMMENDS (`manifest.ToolSpec.recommended`).
  *
- * This replaces `pinsOnActivate(id)`, which answered per PACKAGE from a list of
- * names in this file. Per tool is the shape the question actually has — the
- * bundled `agent` package has one manual tool and three internal ones — and
- * asking the package means an extension from outside this repository gets the
- * same answer instead of arriving in the tools pane wearing a checkbox that
- * cannot work.
- *
- * It used to be every `manual` tool, which is the same answer for every bundled
- * package (they all recommend all of theirs, the default) and the WRONG one for
- * a package that mixes: an author writes `auto` for the tools the package is
- * for and `manual` for extras nobody wants by default, and a front end that
- * pinned all the manual ones turned on exactly the half meant to stay off. The
- * default is `true`, so nothing here changes for a package that says nothing —
- * `manual` means on-once-installed and closable, which is the whole difference
- * from `auto`.
+ * Per tool, not per package: the bundled `agent` package has one manual tool
+ * and three internal ones, and asking the package means an extension from
+ * outside this repository gets the same answer instead of arriving in the
+ * tools pane wearing a checkbox that cannot work. Pinning every `manual` tool
+ * unconditionally would be the WRONG answer for a package that mixes: an
+ * author writes `auto` for the tools the package is for and `manual` for
+ * extras nobody wants by default, and a front end that pinned all the manual
+ * ones would turn on exactly the half meant to stay off. The default is
+ * `true`, so nothing here changes for a package that says nothing — `manual`
+ * means on-once-installed and closable, which is the whole difference from
+ * `auto`.
  *
  * An empty list is a perfectly ordinary answer, and it now has three shapes.
  * `compact` declares only `internal` tools: `nulya ext run` reaches them
@@ -546,7 +539,7 @@ export function pinsOf(what: Pick<Contributions, "id" | "recommendedTools">): st
  * `derivedCommand`), which meant the front end was inventing names the
  * manifest never claimed and a package could end up with two equivalent
  * commands (`/evolve` and a derived `/evolution`). The manifest is the single
- * source of truth about a package (DESIGN §7.2.1), so the obvious three-line
+ * source of truth about a package, so the obvious three-line
  * entry is now simply written where it is wanted — `plan` and `evolution`
  * declare theirs — and a prompt package that declares nothing is still one
  * `/with <id>` away.
@@ -570,27 +563,16 @@ export type UnattendedOutcome =
  * THE door every unattended pointer move goes through — the start-up sync, the
  * ids `ext seed` just dropped, and anything later that builds in the background.
  *
- * It carries no policy any more, and the reason it once did is worth keeping.
- * `autoActivatable` / `safeToActivateUnattended` refused to activate a package
- * declaring `apply: "auto"`, because of T31's bug: `evolution` was activated on
- * the way in and every model on the machine then believed it was the slow loop.
- * But what made that bug possible was DISCOVERY — activation implying membership
- * — and discovery was deleted with `activation` (ext-review-2 Lane K). Today
- * `evolution` is `apply: "manual"` and shaped exactly like `plan`: pointing
- * `current` at it composes it into nothing, and its prompt reaches only the tab
- * somebody opens with `/evolve`.
+ * It carries no policy: activating a package that declares `apply: "auto"` is
+ * allowed even unattended, because reaching every session is a decision the
+ * manifest itself makes, not one this pass second-guesses. Every route into
+ * this function already passes a person: installing this binary, writing
+ * source into their own store, or answering the checkout trust question,
+ * which offers "build but do not activate" in as many words.
  *
- * So by the end the guard held exactly one bundled package — `guide`, whose
- * entire contribution is one line in the skill catalog — while the shape it was
- * written to stop (`apply: "auto"` PLUS a system prompt: a mode) is the shape
- * the field exists to serve, and arrives only by someone installing it. Every
- * route into this function already passes a person: installing this binary,
- * writing source into their own store, or answering the checkout trust question,
- * which offers "build but do not activate" in as many words (DESIGN §9).
- *
- * What replaces it is VISIBILITY, the `warnUserScope` precedent: the pass says
- * which packages now reach every session, and `/ext`'s `standing` column and
- * Enter take one back.
+ * What stands in for a gate is VISIBILITY, the `warnUserScope` precedent: the
+ * pass says which packages now reach every session, and `/ext`'s `standing`
+ * column and Enter take one back.
  *
  * An unreadable manifest is still `held`, and that is not policy: a pass that
  * cannot read what it is about to point at has no business pointing at it.
@@ -641,11 +623,11 @@ export async function builtContributions(
 }
 
 /**
- * Write the bundled drafts into the user store — source only (DESIGN §7.8).
+ * Write the bundled drafts into the user store — source only.
  *
  * The kernel leaves an id that already has a draft there alone, so this is safe
  * on every start and the ids it REPORTS are exactly the ones that arrived this
- * time. That list is the whole consent model since T23: what arrived just now
+ * time. That list is the whole consent model: what arrived just now
  * is installed and turned on, what was already there was already somebody's
  * decision — including the decision to turn it off in `/ext`, which no later
  * start may undo.
@@ -658,11 +640,10 @@ export function seedBundled(ws: Workspace): Promise<SeedReport> {
  * Finish the install for the ids that ARRIVED in this run: point `current` at
  * what the build pass produced, and put the std tools on this TUI's pin list.
  *
- * Which ones get activated used to be a list of two names, then a rule about
- * system prompts, then a rule of this function's own. It is now the same
- * `activateUnattended` the start-up sync goes through, because "these ids
- * arrived with the binary" says where a candidate came from and nothing about
- * whether moving a pointer would change what every session here carries.
+ * Which ones get activated goes through the same `activateUnattended` the
+ * start-up sync uses, because "these ids arrived with the binary" says where
+ * a candidate came from and nothing about whether moving a pointer would
+ * change what every session here carries.
  *
  * Returns the parts of the sentence the status line will say.
  */
@@ -742,7 +723,7 @@ export async function adoptInstalled(
  * took off with `Space` would come back on the next rebuild, and a switch that
  * undoes itself is not a switch.
  *
- * WHICH tools is the package's own word (`pinsOf` → `recommended`, DESIGN §5.1),
+ * WHICH tools is the package's own word (`pinsOf` → `recommended`),
  * so a package that grew, lost, or declined one is followed without editing this
  * file. The quota is checked against the whole prospective face at once: a
  * `session new` that refuses to start is worse than an unpinned tool, so if the
@@ -849,25 +830,26 @@ export async function activeVersionOf(ws: Workspace, id: string): Promise<string
 }
 
 /**
- * The slash commands of every ACTIVATED, TRUSTED package (DESIGN §7.2.1,
- * tui-plugin D1/D2/D8) — the data source `/ext` itself reads (`listExtensions`
- * → `ext list`), so this spawns no process of its own beyond that one call.
+ * The slash commands of every ACTIVATED, TRUSTED package — the data source
+ * `/ext` itself reads (`listExtensions` → `ext list`), so this spawns no
+ * process of its own beyond that one call.
  *
  * "Activated" here is deliberately not "a member of the CURRENT session's
  * composition": a `with` command's whole point is to bring a package INTO a
  * session that does not have it yet, and that has to be typable before there
- * is anything to be a member of (a draft tab, tui.md §11 T22). So
+ * is anything to be a member of (a draft tab). So
  * the filter is exactly `ext list`'s own notion of "holding a current version,
  * not shadowed" — the same one `/with`'s picker uses.
  *
  * Trust is the one thing `ext list` does not say: a workspace store that
- * arrived with a checkout and has never been looked at (DESIGN §9) still lists
+ * arrived with a checkout and has never been looked at still lists
  * its `current` versions, but naming one of its commands would run headlong
  * into the kernel's own refusal at the first `session new` or `ext run`. So
  * this reads the same trust journal the start-up question does
  * (`storeTrusted`) and drops that root's entries rather than offering a
  * command that cannot work. Every other root (the user's own, or an
- * `extensions.paths` addition) needs no such gate (DESIGN §9, physics #6).
+ * `extensions.paths` addition) needs no such gate: nothing arrives there
+ * without a person putting it there themselves.
  *
  * Returned in `ext list`'s own order — root by root, in kernel search order —
  * which is what lets a caller resolve a same-name collision between two

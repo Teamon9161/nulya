@@ -4,7 +4,7 @@ import { hardWrapLines } from "../../ui/columns.ts"
 import type { UserItem } from "../../state/session.ts"
 
 /**
- * A user turn. Markdown is deliberately off here (tui.md §4.2): what the user
+ * A user turn. Markdown is deliberately off here: what the user
  * typed is shown as typed, newlines and all. A mid-task message (midtask.ts)
  * renders through here too — `text` is then the folded body and `badge` says
  * how it arrived, while the ledger keeps the full sentinel.

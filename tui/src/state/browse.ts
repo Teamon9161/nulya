@@ -1,7 +1,7 @@
 /**
  * Browse mode: `Esc` on an empty composer moves the keyboard into the
  * transcript, where `j`/`k` walk the foldable cards and `Enter`/`Space` toggle
- * one (tui.md §4.2). Purely view state — nothing here is session truth.
+ * one. Purely view state — nothing here is session truth.
  *
  * The store only remembers WHICH card is highlighted. Which cards exist and in
  * what order is the transcript's business, so moving the selection is a

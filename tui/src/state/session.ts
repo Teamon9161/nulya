@@ -2,12 +2,12 @@
  * The view state of one session: an ordered list of transcript items, built
  * from ledger events plus the transient stream of the step in flight.
  *
- * Two rules shape everything here (tui.md §0.2, §3):
+ * Two rules shape everything here:
  *
  *  - The ledger is the only truth. Stream lines produce *provisional* items;
  *    when the step's ledger lines arrive they REPLACE them. Replaying a session
  *    with `session events` therefore lands on the same items as watching it
- *    live — the property T1's tests pin down.
+ *    live.
  *  - Items are keyed by ledger `seq`, so arrival order never decides display
  *    order. A `user_text` drained from the inbox mid-step carries a small seq
  *    and sorts back into place even though it arrived after the model deltas.
@@ -62,8 +62,8 @@ export interface ToolItem extends ItemBase {
   spillPath: string | null
   resolved: boolean
   /**
-   * The kernel is holding this call open, waiting for a verdict (`--gate`,
-   * DESIGN §14). A view fact, not a ledger one: the call is still exactly what
+   * The kernel is holding this call open, waiting for a verdict (`--gate`).
+   * A view fact, not a ledger one: the call is still exactly what
    * the assistant turn recorded, and one keypress later it either ran or came
    * back denied. At most one call is ever awaiting — the kernel executes a batch
    * serially and asks about each call in turn.
@@ -71,7 +71,7 @@ export interface ToolItem extends ItemBase {
   awaiting: boolean
   /**
    * The gate answered this call without asking, because the command it carries
-   * only reads (`readonlyshell.ts`, tui.md §11 T65). A view fact of the same
+   * only reads (`readonlyshell.ts`). A view fact of the same
    * genre as `awaiting`: nothing about the call changed, and what this records
    * is that a question a person would expect to see was not asked. Silence
    * would make `ask` mode look like it had quietly stopped working.
@@ -79,7 +79,7 @@ export interface ToolItem extends ItemBase {
   autoAllowed: boolean
   /**
    * How the background task this call started ended, once its report landed
-   * (tui.md §5.9). Set by the `task_finished` event, matched to this card by the
+   *. Set by the `task_finished` event, matched to this card by the
    * full task name in its own receipt — so a reopened session shows the same
    * head line without any process being asked anything.
    */
@@ -109,8 +109,8 @@ export interface TaskItem extends ItemBase {
 }
 
 /**
- * From here on, this conversation runs on another model (`model_rebind`,
- * DESIGN §3.1). Drawn as a plain divider: the model never sees this event — the
+ * From here on, this conversation runs on another model (`model_rebind`).
+ * Drawn as a plain divider: the model never sees this event — the
  * kernel deliberately projects no turn for it — but the person reading the
  * transcript is looking at two different models' words above and below the
  * line, which is exactly the kind of fact a transcript exists to keep.
@@ -152,7 +152,7 @@ export interface UsageTotals {
   output: number
   cacheRead: number
   cacheWrite: number
-  /** Steps whose cost is known: the ledger recorded usage for them (DESIGN §3.1). */
+  /** Steps whose cost is known: the ledger recorded usage for them. */
   pricedSteps: number
   /**
    * The whole prompt of the most recent step — NOT a total across steps. A step
@@ -192,7 +192,7 @@ export function compactCount(n: number): string {
  * What this session has cost, in one phrase — or null before it has cost
  * anything (a draft tab, a session reopened but not stepped).
  *
- * It is said on the ACTIVITY line and only while something is happening (T42):
+ * It is said on the ACTIVITY line and only while something is happening:
  * a running total is news exactly while it is moving, and the row under the
  * composer is a standing description of the session, read once and then
  * trusted. `/usage` is where the whole ledger's arithmetic lives.
@@ -265,7 +265,7 @@ export interface SessionSnapshot {
 }
 
 /**
- * What a session runs on NOW (goals/model-rebind.md §7).
+ * What a session runs on NOW.
  *
  * A model is frozen at `session new`, but the freeze point is a CHAIN: each
  * `model_rebind` event appends another one, and the one in force is the last.
@@ -301,7 +301,7 @@ export interface SessionState {
   /** Remove one optimistic turn after its own append failed. Committed turns are never touched. */
   rejectUser(localId: string): void
   /**
-   * A `session rebind` the kernel accepted (goals/model-rebind.md): the event
+   * A `session rebind` the kernel accepted: the event
    * is in the inbox and lands at the next step boundary, so this echoes it the
    * way `enqueueUser` echoes a deposited turn — the chips read the new model
    * immediately, and the card carries what the kernel said about the costs
@@ -326,7 +326,7 @@ export interface SessionState {
 }
 
 /**
- * What a tab that has no session yet shows (tui.md §11, T22).
+ * What a tab that has no session yet shows.
  *
  * Not a placeholder for missing data: a draft tab genuinely has no header, no
  * items, no cost and no steps, because nothing has happened. So the readers
@@ -355,7 +355,7 @@ export const no_snapshot: SessionSnapshot = {
  * that is exactly what `insertCommitted` maintains — so this walks back from the
  * end and touches only the handful of items belonging to the step in flight.
  * Scanning forward instead costs a pass over the whole store on every event,
- * which is what made replaying a long session quadratic (tui.md §11, T4).
+ * which is what made replaying a long session quadratic.
  */
 function firstProvisionalIndex(items: TranscriptItem[]): number {
   let at = items.length
@@ -408,7 +408,7 @@ export function createSessionState(id: string): SessionState {
   let localRebind = 0
 
   /**
-   * Calls the gate waved through on its own (T65), by id rather than by item.
+   * Calls the gate waved through on its own, by id rather than by item.
    *
    * A provisional card is REPLACED by the committed one when the assistant
    * event lands (`dropInFlight`), and the gate answers somewhere either side of
@@ -476,7 +476,7 @@ export function createSessionState(id: string): SessionState {
 
   // The highest seq already in `items`. A session can be fed from two mouths at
   // once — the step subprocess we own, and a `session events --follow` tail when
-  // somebody else drives (tui.md §5.6) — and both replay the same lines. Since
+  // somebody else drives — and both replay the same lines. Since
   // seq is monotonic and an event is immutable, "already seen" is exactly
   // "seq <= applied", so idempotence costs one comparison.
   let applied = 0
@@ -485,7 +485,7 @@ export function createSessionState(id: string): SessionState {
    * Per-step usage the stream reported and whose ledger line has not landed yet.
    *
    * Both mouths report the same numbers: the stream as it happens, the ledger as
-   * `assistant.usage` once the step is written (DESIGN §3.1 / §14). Adding both
+   * `assistant.usage` once the step is written. Adding both
    * would double every step, and dropping the stream's would leave the status bar
    * blank until the step ended — so the stream's count is provisional exactly the
    * way its cards are, and the ledger line replaces it. Ledger lines of a step
@@ -513,8 +513,7 @@ export function createSessionState(id: string): SessionState {
   /**
    * One event into one draft. Kept separate from `applyEvent` so replaying a
    * whole tail is a single store transaction instead of one per event — the
-   * difference between opening a 5k-event session in a second and in several
-   * (tui.md §11, T4).
+   * difference between opening a 5k-event session in a second and in several.
    */
   function applyInto(draft: SessionSnapshot, event: LedgerEvent) {
     if (event.seq <= applied) return
@@ -750,7 +749,7 @@ export function createSessionState(id: string): SessionState {
           }
           case "usage": {
             const line_usage = line as unknown as Usage
-            // Per-step counts, not cumulative (tui.md §11, T0 reminder 2), and
+            // Per-step counts, not cumulative (reminder 2), and
             // provisional until this step's assistant line lands.
             const usage: Usage = {
               input_tokens: line_usage.input_tokens,
@@ -770,7 +769,7 @@ export function createSessionState(id: string): SessionState {
           }
           case "retry": {
             // The attempt that just streamed failed and is re-sent from scratch
-            // (DESIGN §13): its cards and any usage it reported never become
+            //: its cards and any usage it reported never become
             // ledger facts, so they go the way of a canceled step's. The next
             // `started` clears the notice.
             const retry = line as unknown as { attempt: number; max_retries: number; delay_ms: number; error: string }
@@ -810,7 +809,7 @@ export function createSessionState(id: string): SessionState {
         return
       }
       if (line.stream === "step" && line.event === "end") {
-        // This step's ledger lines were flushed before this marker (DESIGN §14),
+        // This step's ledger lines were flushed before this marker,
         // so anything still provisional never made it into the ledger — a turn
         // canceled in the provider phase, for instance. Drop it rather than
         // leave a card the session file does not back.
@@ -919,7 +918,7 @@ export function createSessionState(id: string): SessionState {
 
 /**
  * A best-effort readable projection of `assistant.reasoning`. The kernel keeps
- * it opaque on purpose (DESIGN §3.1) — it is a provider-shaped array kept for
+ * it opaque on purpose — it is a provider-shaped array kept for
  * replay — so we try the one shape that carries plain text (Anthropic's
  * `thinking` blocks) and otherwise say so instead of guessing.
  */

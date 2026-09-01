@@ -1,5 +1,5 @@
 /**
- * Is this `shell` command one that only READS? (tui.md §5.7, T65)
+ * Is this `shell` command one that only READS?
  *
  * A pure function over the command string, sitting in the approval chain
  * between `[approvals] allow` and the mode fallback. It exists for one reason:
@@ -10,9 +10,9 @@
  * what keeps the interesting one legible.
  *
  * IT IS NOT A SECURITY BOUNDARY, and nothing here should ever be read as one.
- * The kernel's own line on this has not moved (DESIGN §9, tui.md §5.7 last
- * bullet): `shell` and an extension are equally privileged, and real isolation
- * waits for the sandbox (PLAN §3.8). Which is exactly why the READ-ONLY
+ * The kernel's own line on this has not moved: `shell` and an extension are
+ * equally privileged, and real isolation
+ * waits for the sandbox. Which is exactly why the READ-ONLY
  * CEILING — the one an agent definition or a package's `contributes.policy`
  * raises — does not use this file: that ceiling refuses `shell` outright,
  * because "no OS sandbox means you cannot tell `cat foo` from `rm foo`"
@@ -256,7 +256,7 @@ const git_branch_flags = new Set([
   "--sort", "--format", "--color", "--no-color", "-i", "--ignore-case",
 ])
 
-/** `nulya <verb…>` that only projects what is already on disk (DESIGN §14). */
+/** `nulya <verb…>` that only projects what is already on disk. */
 const nulya_readonly: string[][] = [
   ["help"], ["config", "show"], ["ext", "list"], ["ext", "inspect"], ["ext", "api"],
   ["session", "list"], ["session", "events"], ["task", "list"], ["task", "status"],

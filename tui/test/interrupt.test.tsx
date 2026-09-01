@@ -1,5 +1,5 @@
 /**
- * Interrupt-and-deliver end to end (agent-runner ar-t1, tui.md §4.4b/§5),
+ * Interrupt-and-deliver end to end,
  * against the real binary and the real key-decoding path — not a synthetic
  * `KeyEvent` object.
  *

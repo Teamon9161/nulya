@@ -1,9 +1,7 @@
 /**
- * Where a session's `shell` could run, as this machine answers it (DESIGN §8.1,
- * tui.md §11 T93).
+ * Where a session's `shell` could run, as this machine answers it.
  *
- * `/env` used to be typing only, and the reason written down at the time was
- * that the useful set is not enumerable: an ssh destination is whatever that
+ * The useful set is not enumerable: an ssh destination is whatever that
  * person's `ssh_config` calls a host, and the distributions on this machine are
  * "a `wsl -l` away". Both halves of that sentence name a source — so this
  * module asks those two sources instead of offering a hard-coded pair of words.
@@ -13,16 +11,12 @@
  * row that hands the typing back.
  *
  * Two sources feed two different things: `wsl -l` also seeds `wsl:` (moves
- * only the SHELL, DESIGN §8.1); both sources seed the `remote:wsl:`/
- * `remote:ssh:` rows, which move the whole WORKSPACE too (goals/remote-env.md
- * §3.9) — picking one of those is the first half of a two-part choice, the
+ * only the SHELL); both sources seed the `remote:wsl:`/
+ * `remote:ssh:` rows, which move the whole WORKSPACE too — picking one of
+ * those is the first half of a two-part choice, the
  * second being WHICH directory on that machine (`ui/App.tsx`'s remote-browse
- * flow, `dirsource.ts`'s `remoteDirSource`). There is no bare `ssh:` row any
- * more: that exec-target spelling was retired 2026-08-30
- * (goals/remote-env.md §7.1) because it moved only the shell while the
- * workspace stayed here, which was dishonest the moment anything else read a
- * file — `remote:ssh:` is the only ssh-shaped spec `session new` still
- * accepts.
+ * flow, `dirsource.ts`'s `remoteDirSource`). There is no bare `ssh:` row:
+ * `remote:ssh:` is the only ssh-shaped spec `session new` accepts.
  *
  * NOTHING HERE DECIDES ANYTHING. The kernel parses the spec
  * (`environment.parseExecTarget`) and refuses a bad one with the vocabulary in
@@ -68,7 +62,7 @@ export async function execChoices(probe: TargetProbe = hostProbe): Promise<ExecC
     // the spec is frozen into a session header, and a name still means the same
     // distribution after somebody runs `wsl --set-default`.
     ...distros.map((name) => ({ spec: `wsl:${name}`, what: "a WSL distribution · the workspace as /mnt/…" })),
-    // The `remote:` family (goals/remote-env.md §3.9): the WORKSPACE moves,
+    // The `remote:` family: the WORKSPACE moves,
     // not just the shell — `extensions/std`, `ground`, everything that reads
     // files reads THAT machine's, over a channel this harness itself opens
     // (no ssh/wsl config of its own to read, so these ride the same two

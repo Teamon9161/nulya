@@ -1,5 +1,5 @@
 /**
- * The code palette (T91): which one a name means, and where its reach stops.
+ * The code palette: which one a name means, and where its reach stops.
  *
  * The colours themselves are not asserted — a hex in a test is the same hex in
  * the source with a second place to edit it. What is asserted is the shape of

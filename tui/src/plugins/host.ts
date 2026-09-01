@@ -136,7 +136,7 @@ export interface PluginHostSeams {
    * The frozen composition members of every open session tab — the "worn this
    * session" half of the load set. A session that exists at all implies its
    * workspace store was trusted, because the kernel refuses to create one
-   * otherwise (DESIGN §9), so these need no separate trust check.
+   * otherwise, so these need no separate trust check.
    */
   members?: () => readonly Pick<Contributions, "id" | "version">[]
   session: () => SessionView | null

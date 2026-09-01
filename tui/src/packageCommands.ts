@@ -1,9 +1,9 @@
 /**
- * Package-declared slash commands, once (tui.md §4.4, goals/tui-plugin.md U2).
+ * Package-declared slash commands, once.
  *
  * `contributes.commands` lets an extension add itself to the slash chain
  * without this front end knowing its name in advance — the same relationship
- * `skills.ts` already has with `nulya skill list` (T15), one layer earlier: a
+ * `skills.ts` already has with `nulya skill list`, one layer earlier: a
  * package says "I offer `/plan`, and typing it means `with`", and dispatch
  * insertS one more link — built-in → PACKAGE → skill → the model, verbatim
  * (`commands.ts`, `ui/App.tsx` `runCommand`/`runPackageCommand`).

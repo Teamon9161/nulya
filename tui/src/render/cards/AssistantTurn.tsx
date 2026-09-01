@@ -4,10 +4,9 @@ import { hardWrapLines } from "../../ui/columns.ts"
 import type { AssistantItem } from "../../state/session.ts"
 
 /**
- * An assistant turn: role colour on the glyph only, body text in plain `fg`
- * (tui.md §6).
+ * An assistant turn: role colour on the glyph only, body text in plain `fg`.
  *
- * NO TRAILING CURSOR (T43). A ` ▍` used to be appended to the content while the
+ * NO TRAILING CURSOR. A ` ▍` used to be appended to the content while the
  * turn streamed, and because it was appended to the CONTENT it was markdown:
  * every delta re-parsed a document one glyph longer, and at every block
  * boundary that glyph changed the answer. Text ending in a newline put the
@@ -22,13 +21,13 @@ import type { AssistantItem } from "../../state/session.ts"
  * still uses OpenTUI's markdown primitive because code blocks and lists need
  * their own renderer more than they need the plain-prose fast path.
  *
- * THE BODY'S WIDTH IS A DERIVED NUMBER (`useBodyWidth`, BUGS.md #17): the
+ * THE BODY'S WIDTH IS A DERIVED NUMBER (`useBodyWidth`): the
  * pane's width minus the glyph column and padding, minus ONE COLUMN ALWAYS
  * RESERVED for the scrollbox's scrollbar. Reserving it unconditionally is what
  * removes the last feedback path — a width that depends on whether the content
- * overflows is a width the content gets a vote on, and that vote is the T73
- * flicker. Measuring the box instead of deriving the number was tried twice
- * (T73, T76) and both endings are in the bug log.
+ * overflows is a width the content gets a vote on, and that feedback loop is
+ * what produces visible flicker. Measuring the box instead of deriving the
+ * number reintroduces exactly that loop.
  */
 export function AssistantTurn(props: { item: AssistantItem }) {
   const style = useStyle()

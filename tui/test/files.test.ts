@@ -1,5 +1,5 @@
 /**
- * The `.nulya/` projections T3 added (tui.md §5.3 / §5.4): the session store,
+ * The `.nulya/` projections this front end reads: the session store,
  * the writer lease, the extension store and the usage journal. Every assertion
  * here runs against files a REAL `nulya` binary wrote — a hand-built fixture
  * would only prove that the parser parses itself.
@@ -38,7 +38,7 @@ async function drainStep(id: string, env: Record<string, string> = scripted_env,
 }
 
 /**
- * The lease probe (tui.md §5.6). On Windows the kernel's exclusive lock is a
+ * The lease probe. On Windows the kernel's exclusive lock is a
  * byte-range lock, so a read of the lock file is a faithful, non-mutating probe.
  * On Linux the same lease is `flock`, invisible to reads but published in
  * `/proc/locks` — an equally non-mutating probe. Where neither exists the probe
@@ -87,11 +87,11 @@ test("listExtensions reads the version line, the current pointer and the manifes
   expect(lint.current).toBe(version!)
   expect(lint.versions.map((entry) => entry.version)).toContain(version!)
   // A `src/` entry is frozen, not compiled — that is what makes its version id
-  // compiler-independent (DESIGN §7.4).
+  // compiler-independent.
   expect(lint.kind).toBe("script")
   expect(lint.tools.length).toBeGreaterThan(0)
   // The template writes neither `surface` nor `apply`, so this reads the two
-  // kernel defaults through a real build (T52): a tool nobody placed is `auto`
+  // kernel defaults through a real build: a tool nobody placed is `auto`
   // — model-facing with membership, never pinnable — and a package that said
   // nothing about its reach is `manual`.
   expect(lint.autoTools).toEqual(lint.tools)
@@ -99,9 +99,9 @@ test("listExtensions reads the version line, the current pointer and the manifes
   expect(lint.internalTools).toEqual([])
   expect(lint.apply).toBe("manual")
   // …and it is in no session by itself: `standing` is the kernel's own record,
-  // and a `manual` package never gets one (T56).
+  // and a `manual` package never gets one.
   expect(lint.standing).toBe(false)
-  // Which root it came from is the kernel's answer, not ours (DESIGN §7.2), and
+  // Which root it came from is the kernel's answer, not ours, and
   // the only copy here is the workspace one, so nothing shadows anything.
   expect(lint.root).toBe(".nulya/extensions")
   expect(lint.shadowed).toBe(false)
@@ -111,7 +111,7 @@ test("listExtensions reads the version line, the current pointer and the manifes
 
 /**
  * `standing` is a STATE the kernel records, not a field this front end derives
- * (T56). `ext list` prints the word inside the contribution marker, off the
+ *. `ext list` prints the word inside the contribution marker, off the
  * record the activation wrote into `current` — so it is false for a version
  * that merely declares `apply: "auto"` and true only once something activated
  * it, and false again the moment the pointer is gone. A manifest read here
@@ -154,7 +154,7 @@ test("listExtensions carries the kernel's standing record, not the manifest's ap
 
 test("a system prompt entry projects its path in either form, bare or with a position", async () => {
   // `contributes.system_prompts` entries may be a bare path or an object
-  // carrying `path` plus an optional `position` (DESIGN §5.6). `position`
+  // carrying `path` plus an optional `position`. `position`
   // orders one session's system blocks — the kernel's business — so this
   // projection takes the path from both forms and nothing else.
   const dir = join(ws.dir, ".nulya", "extensions", "mode.two")

@@ -8,7 +8,7 @@ import type { ToolPresentation } from "../registry.ts"
 
 /**
  * An evolution action: `nulya src | ext … | skill load` run through `shell`
- * (tui.md §5.2). Same folded body as any shell call, but the evolve accent and
+ *. Same folded body as any shell call, but the evolve accent and
  * a head line the registry has already read the facts out of — these are the
  * moments nulya exists to make visible, so they must not look like `ls`.
  */
@@ -26,7 +26,7 @@ export function EvolveCard(props: { item: ToolItem; presentation: ToolPresentati
       return size.length > 0 ? `${size} · exit ${exit}` : `exit ${exit}`
     }
     if (exit !== null && exit !== 0) return `exit ${exit}`
-    // Success is silent (T26): an evolution action that worked has its result
+    // Success is silent: an evolution action that worked has its result
     // in the head line already (`ext build · lint → v-3f2a91`).
     return props.item.ok === false ? "failed" : ""
   }

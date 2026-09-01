@@ -5,26 +5,13 @@
  * both — "run on that from here". On a DRAFT tab, "from here" is its first
  * message: nothing is created, the pick is what will be frozen. On a tab that
  * already has a session, `App.chooseModel` runs `nulya session rebind` and THIS
- * session moves — history intact, from its next step on (BUGS.md #12,
- * goals/model-rebind.md). Until the kernel grew that verb, a model was frozen
- * once and for all and this screen could only ever open a second draft beside
- * the session it was asked about; the freeze is now a chain of points rather
- * than a single one, so the screen says what a person always read into it.
+ * session moves — history intact, from its next step on.
  *
  * What it does NOT do is re-decide any of the kernel's three gates (credential,
  * vision when the transcript already holds images, already-on-it). Their words
  * name the config key or the command that fixes them, and they reach the screen
  * verbatim.
  *
- * Four shapes, and the fourth is the one tcode had all along (tui.md §11,
- * T5 → T6 → T20 → T21). T5 was a flat table of every (profile, model): seven
- * profiles became fourteen rows, thirteen of them repeating "no key". T6 nested
- * providers over models, which shortened the list but buried the thing being
- * picked one level down. T20 kept the nesting but inverted it — models first,
- * providers behind a last row — and that is where the real fault showed: a
- * person who wanted "this provider's models" found provider-picking and
- * model-picking tangled on one screen, with `s`, `a` and `p` in the middle of a
- * list of models. So T21 cuts along the seam tcode cuts along: TWO commands.
  * `/model` is a list of models and an effort dial; `/provider` (F6) is where
  * credentials and endpoints live. Enter on a ready provider over there comes
  * back here, landed on that provider's first model — that is "pick a provider,
@@ -78,8 +65,8 @@ export interface PickerRow {
  * `[[models]]` list. The same id can be two different models: `gpt-5.6-sol`
  * on a ChatGPT subscription has 258k of context and an `xhigh` rung on its
  * ladder, while the public API's entry for that id says 1.05M and stops at
- * `high`. An id-keyed catalog cannot say which one a given profile means
- * (DESIGN §9.5), so whoever actually serves the row is the honest source.
+ * `high`. An id-keyed catalog cannot say which one a given profile means,
+ * so whoever actually serves the row is the honest source.
  *
  * This is the ONE place that fallback happens. Both the picker's rows
  * (`modelRows`, below) and the status bar's context gauge (`App.contextWindow`)
@@ -128,7 +115,7 @@ export function rowKey(row: PickerRow): string {
 }
 
 /**
- * One drawn line: a provider heading, or one of its models (tui.md §11, T31).
+ * One drawn line: a provider heading, or one of its models.
  *
  * The provider used to be a COLUMN, repeated on every row of the same endpoint —
  * which is how tcode's picker is not laid out, and the repetition was buying
@@ -217,7 +204,7 @@ export function ModelView(props: {
   onPick: (pick: ModelPick) => void
   /** A line for the status bar: Enter on a row that cannot run, … */
   onNotice: (message: string) => void
-  /** Where credentials and endpoints are: `/provider`, the other half of T21. */
+  /** Where credentials and endpoints are: `/provider`. */
   onOpenProviders: () => void
   onClose: () => void
   /** Test seam: the loader defaults to the real `nulya config show --json`. */
@@ -280,7 +267,7 @@ export function ModelView(props: {
 
   /**
    * The keys, in two parts: the two or three that are the point, and the rest
-   * behind `?` (tui.md §11, T18). With no rows there is one thing to do and the
+   * behind `?`. With no rows there is one thing to do and the
    * brief says only that.
    */
   const footer = (): { brief: string; more: string[] } => {
@@ -356,7 +343,7 @@ export function ModelView(props: {
    * label keeps its first twenty columns as a floor, and the id, with none,
    * yields before the label loses a letter (at 80 columns the two were the same
    * width, and "widest first" cut `DeepSeek V4 Fla…` while its id sat whole
-   * beside it). There is no provider column since T31: it is the heading above
+   * beside it). There is no provider column it is the heading above
    * the group, said once.
    */
   const cols = createMemo(() => {

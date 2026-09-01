@@ -1,6 +1,6 @@
 /**
  * The note that says a background task was stopped BY THE USER, from the TUI
- * (tui.md §11, tasks panel).
+ * (tasks panel).
  *
  * The kernel already says a background task was killed: the supervisor writes
  * `· killed` into that task's `task_finished` text (`cli/task.zig`, DESIGN

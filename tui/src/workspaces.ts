@@ -17,7 +17,7 @@
  * It is deliberately NOT `~` itself, and the reason is structural rather than
  * tidiness (§5.3b point 5): `~/.nulya` is the USER layer. Making the home
  * directory a workspace would collapse the user extension store onto a
- * workspace store, and the kernel's trust gate (DESIGN §9) would then see a
+ * workspace store, and the kernel's trust gate would then see a
  * store it never recorded a local build for and refuse to open a session at
  * all. One directory down, and the two layers stay two layers.
  */

@@ -2,12 +2,8 @@
  * `/provider` (F6): the endpoints that serve models — their keys, and adding
  * one that the kernel already knows how to speak to.
  *
- * This screen is the second half of the T21 split (tui.md §11, T5 → T6 → T20 →
- * T21). Everything here used to be a level BEHIND `/model`: T20 put models
- * first and left providers, keys and the add-endpoint form behind a last row,
- * which meant one screen answered two different questions and neither key
- * (`s`, `a`) belonged where it was pressed. tcode has had the answer since the
- * beginning — `/model` picks a model, `/provider` configures a provider — so
+ * tcode has had the answer since the beginning — `/model` picks a model,
+ * `/provider` configures a provider — so
  * these are two commands over the same `nulya config show --json` rows.
  *
  * The list is every profile, runnable or not: what a person needs here is the
@@ -179,7 +175,7 @@ export function ProviderView(props: {
 
   /**
    * The keys of the level that is up, in two parts: the two or three that are
-   * the point, and the rest behind `?` (tui.md §11, T18). A text step's hint
+   * the point, and the rest behind `?`. A text step's hint
    * lives on its field instead — there the question is what to type.
    */
   const footer = (): { brief: string; more: string[] } => {

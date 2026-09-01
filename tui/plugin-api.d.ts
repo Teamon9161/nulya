@@ -2,7 +2,7 @@
  * The nulya TUI plugin host API — version 2.
  *
  * This file is THE CONTRACT. A package declares `contributes.ui.tui = {entry,
- * api}` in its manifest (DESIGN §7.2.1) — the block is keyed by front end, and
+ * api}` in its manifest — the block is keyed by front end, and
  * `tui` is this one's key; the entry is a TypeScript module inside the package
  * that default-exports, or named-exports, an `activate` function. The host
  * imports it and calls `activate(api)` once.
@@ -287,7 +287,7 @@ export interface SessionView {
 }
 
 /**
- * A background task of the front tab's session (DESIGN §6.1). The shape is
+ * A background task of the front tab's session. The shape is
  * `nulya task list --json`'s own; unknown states are possible and a reader
  * should not switch exhaustively over them.
  */
@@ -300,7 +300,7 @@ export interface TaskView {
 }
 
 /**
- * A `session step --stream` line (DESIGN §14), typed. The union is OPEN on
+ * A `session step --stream` line, typed. The union is OPEN on
  * purpose: the kernel may add a stream or an event, and a plugin that
  * `switch`es over `event` must have a default rather than assume this list is
  * final.
@@ -320,7 +320,7 @@ export type StreamLineView =
   | { stream: string; event: string; [field: string]: unknown }
 
 /**
- * A ledger event (DESIGN §3.1), in the shape `session events` prints. Kept
+ * A ledger event, in the shape `session events` prints. Kept
  * open for the same reason the stream union is: the event alphabet is
  * append-only, and a build that refused an unknown `kind` would be a build
  * that stops working when the kernel grows.

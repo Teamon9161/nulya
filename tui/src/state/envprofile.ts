@@ -1,8 +1,8 @@
 /**
  * Per exec-target-KIND tool-face profile (`tui.toml` `[env.local]` / `[env.wsl]`
- * / `[env.remote]`, tui.md §11 T88).
+ * / `[env.remote]`).
  *
- * `/env` (T86, DESIGN §8.1) moves where a session's `shell` commands run, but
+ * `/env` moves where a session's `shell` commands run, but
  * the screen's own composition choices — which packages ride along as
  * `--with`, which extra tools get `--pin`ned, which packages render this
  * session's opening prompt — do not automatically follow, and the two halves
@@ -18,7 +18,7 @@
  * push per remote machine, for one consumer).
  *
  * `std` is a different story and the reason here used to be wrong. Since
- * Phase 3 (goals/remote-env.md §6.4) a SESSION's extension calls run on the
+ * Phase 3 a SESSION's extension calls run on the
  * machine holding the workspace, so a pinned `ext:std/read` there would read
  * the far filesystem, correctly — it is not pointed at the host any more. What
  * actually keeps it off this list is that the far machine needs a build of
@@ -45,16 +45,13 @@
  */
 
 /**
- * The three kinds `/env`'s spec grammar can name (DESIGN §8.1, goals/
- * remote-env.md §3.9). `remote` covers the whole `remote:` family — `wsl` vs
- * `ssh` vs `exec` moves the CHANNEL, not what this profile should compose,
- * and the reasoning below (§3.9's own: no `std` pin, no `ground`, `--bare`)
- * applies identically to all three.
+ * The three kinds `/env`'s spec grammar can name. `remote` covers the whole
+ * `remote:` family — `wsl` vs `ssh` vs `exec` moves the CHANNEL, not what
+ * this profile should compose, and the reasoning below (no `std` pin, no
+ * `ground`, `--bare`) applies identically to all three.
  *
- * There used to be a fourth, `ssh`, for the bare `ssh:<dest>` exec-target
- * spelling — retired 2026-08-30 (goals/remote-env.md §7.1). `[env.ssh]` is
- * therefore an unrecognised key in `tui.toml` now (`settings.ts` no longer
- * reads it), and a spec still typed that way reads as `local` below, same as
+ * `[env.ssh]` is an unrecognised key in `tui.toml` (`settings.ts` does not
+ * read it), and a bare `ssh:<dest>` spec reads as `local` below, same as
  * any other spelling this classifier does not know.
  */
 export type ExecTargetKind = "local" | "wsl" | "remote"
@@ -123,8 +120,7 @@ export interface ResolvedEnvProfile {
  * with a local filesystem in mind) do not creep in either — this is a
  * different machine's filesystem, `std`'s read/grep/glob would answer
  * questions about the wrong one, and `ground`'s facts (this cwd, this branch)
- * would describe the host, not the workspace the session is actually about
- * (goals/remote-env.md §3.2).
+ * would describe the host, not the workspace the session is actually about.
  */
 function defaultProfile(
   kind: ExecTargetKind,

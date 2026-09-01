@@ -1,6 +1,5 @@
 /**
- * The one line above the composer that says what is happening right now
- * (tui.md §4.4b, §11 T38).
+ * The one line above the composer that says what is happening right now.
  *
  * It exists because "what is happening" and "what this session is" are two
  * different questions, and they were sharing one row. The row under the
@@ -43,20 +42,20 @@ export interface Activity {
    * Esc really stops this: the step THIS tab is driving. `moving` alone is not
    * it — an observer's queued append and an idle tab's background tasks are in
    * flight, but Esc over them enters browse mode, and a background command
-   * would outlive the step anyway (tui.md §5.9).
+   * would outlive the step anyway.
    */
   cancelable?: boolean
   /** The one entry here that is a place rather than a state: `/tasks`. */
   opens?: "tasks"
   /**
    * How many background tasks are running, alongside whatever else `text`
-   * says (T87 tasks panel). Kept off `text` on purpose: a count folded into
+   * says (tasks panel). Kept off `text` on purpose: a count folded into
    * the sentence would fight the step's own words for the same columns, and
    * it needs its own click zone regardless of what is currently in flight —
    * a foreground step and a background task are two different things
    * happening at once, and the step being cancelable does not make the task
    * one too. `undefined` when there are none, so a session with no
-   * background task costs no column (T35's "nothing at rest draws nothing").
+   * background task costs no column: nothing at rest draws nothing.
    */
   background?: number
   /**
@@ -71,12 +70,12 @@ export interface Activity {
 /**
  * A store pass in flight: which draft it is on, and how far along it is.
  *
- * It is here rather than in a notice because of what T35 made the notice: news
- * that covers the row and then takes itself down (`noticeHold`, three seconds
+ * It is here rather than in a notice because a notice is news that covers
+ * the row and then takes itself down (`noticeHold`, three seconds
  * at the floor). The kernel reports a draft when that draft FINISHES, so a
- * compiled one holds the count still for as long as zig takes — the notice
- * expired mid-build and the screen went quiet for the rest of a minute, which
- * is exactly the state a person reads as "nothing is happening". Progress is
+ * compiled one holds the count still for as long as zig takes — a notice
+ * would expire mid-build and leave the screen quiet for the rest of a minute,
+ * which is exactly the state a person reads as "nothing is happening". Progress is
  * not news; it is what is happening, and that is this line.
  */
 export interface SyncProgress {
@@ -133,11 +132,11 @@ export function activityOf(facts: {
   // Every branch below but the last one is about something OTHER than the
   // background count, and a background task does not stop existing just
   // because a step started — so whatever this function is about to say, the
-  // count rides along beside it (T87 tasks panel). The last branch is where
+  // count rides along beside it (tasks panel). The last branch is where
   // the count IS the whole sentence, and does not need to say itself twice.
   const withBackground = (activity: Activity): Activity =>
     facts.background > 0 ? { ...activity, background: facts.background } : activity
-  // The kernel is stopped on a call, waiting for a verdict (tui.md §5.7). It
+  // The kernel is stopped on a call, waiting for a verdict. It
   // outranks everything: nothing else can be happening while it is true.
   if (facts.awaiting) return withBackground({ text: "waiting for your answer", tone: "warn", moving: false })
   // The message is in the transcript in full (`ErrorNotice`); this is the
@@ -186,8 +185,8 @@ export function activityOf(facts: {
   }
   // Last, and only when nothing else is running: a detached command outlives
   // the step that started it, so an idle driver with one going is the one case
-  // where saying nothing would be a lie (tui.md §5.9). The count IS the text
-  // here, so it does not also ride in `background` (T35: nothing said twice).
+  // where saying nothing would be a lie. The count IS the text
+  // here, so it does not also ride in `background`: nothing is said twice.
   if (facts.background > 0) {
     return { text: `${facts.background} background`, tone: "run", moving: true, opens: "tasks" }
   }
@@ -196,7 +195,7 @@ export function activityOf(facts: {
 
 /**
  * How long this has been going on, in the ONE format this front end uses for a
- * duration (`state/tasks.seconds`, tui.md §6).
+ * duration (`state/tasks.seconds`).
  *
  * It used to have its own — `1m40s` here, `1m 40s` in `/tasks` and on a
  * background card's note — which is two spellings of the same fact on two rows
@@ -219,7 +218,7 @@ export function WorkingStatus(props: {
   /**
    * What this session has cost so far (`state/session.usageLabel`), or absent
    * before it has cost anything. It rides the line that is only up while
-   * something is running (T42): a total is worth reading while it moves, and
+   * something is running: a total is worth reading while it moves, and
    * the row under the composer — where it used to stand all day — is a
    * description of the session, not a meter.
    */
@@ -277,7 +276,7 @@ export function WorkingStatus(props: {
 
   /**
    * The background count, said beside whatever else this line is about
-   * (T87 tasks panel) — its own segment rather than a fourth thing packed
+   * (tasks panel) — its own segment rather than a fourth thing packed
    * into `tail()`, because it answers to a click and the rest of the tail
    * does not.
    */

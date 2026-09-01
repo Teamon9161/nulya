@@ -1,5 +1,5 @@
 /**
- * The three facts about a provider that both screens ask (tui.md §11, T21).
+ * The three facts about a provider that both screens ask.
  *
  * `/model` and `/provider` are two views over the same `nulya config show
  * --json` rows, and exactly three questions are put on both: which model ids a

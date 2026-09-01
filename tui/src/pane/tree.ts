@@ -67,8 +67,8 @@ export interface PaneBox {
 
 /**
  * How small a pane may be squeezed by dragging a seam. Not a paint concern: a
- * pane thinner than this cannot show a gutter plus content (tui.md §6.5 puts
- * every surface's content at column 3), so the model refuses to describe one.
+ * pane thinner than this cannot show a gutter plus content (every surface's
+ * content starts at column 3), so the model refuses to describe one.
  */
 export const min_ratio = 0.1
 export const max_ratio = 0.9
@@ -122,8 +122,7 @@ function replaceNode(node: PaneNode, target: PaneId, make: (found: PaneNode) => 
  * Show a different surface in an existing pane.
  *
  * This — not split/close — is what opening and closing a full-screen view is
- * while there is only one pane, which is why the migration in T68 could keep
- * the drawn result byte-identical: one leaf whose surface changes.
+ * while there is only one pane: one leaf whose surface changes.
  */
 export function setSurface(tree: PaneTree, pane: PaneId, surface: SurfaceId): PaneTree {
   const root = replaceNode(tree.root, pane, (found) =>

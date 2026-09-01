@@ -6,7 +6,7 @@ import { runningModel } from "../state/session.ts"
 import type { Tab } from "../state/tabs.ts"
 
 /**
- * What a tab is called (tui.md §11, T22).
+ * What a tab is called.
  *
  * Not the session id. An id is `s-1787067298663-31302c`: it is the handle for
  * `--session` and for `/sessions`, and it says nothing a person recognises. What
@@ -14,7 +14,7 @@ import type { Tab } from "../state/tabs.ts"
  * only when two tabs would otherwise read the same, and `(new)` on a tab that is
  * still a draft, because "has this one started yet" is the other real difference.
  *
- * A draft wearing a `--with` package says so too (T31): `/evolve` opens a second
+ * A draft wearing a `--with` package says so too: `/evolve` opens a second
  * tab on the SAME model as the first, so without it the two read identically and
  * the only difference between them — which one thinks it is the slow loop — was
  * invisible from the one line whose whole job is telling tabs apart.
@@ -43,7 +43,7 @@ export function tabLabels(tabs: readonly Tab[]): string[] {
 export const min_tab_label = 8
 
 /**
- * What one row of N tabs looks like at this width (T70).
+ * What one row of N tabs looks like at this width.
  *
  * The strip is the one row in this front end whose CONTENTS ARE DECIDED BY THE
  * PERSON — open a fifth tab on an eighty column terminal and the layout has to
@@ -82,15 +82,15 @@ export function stripPlan(
 }
 
 /**
- * One line of open sessions, and only when there is more than one (tui.md §5.5).
+ * One line of open sessions, and only when there is more than one.
  * A single-session screen must look exactly as it did before tabs existed —
  * which is also why the `+` lives here and not on a screen with one tab: the
  * strip is the tab UI, and a control for tabs on a screen that is not showing
  * any is chrome nobody asked for.
  *
  * A tab is the one thing on screen that looks like a control, so it answers to
- * a click as well as to F4 — the same `select` either way (tui.md §11, T18) —
- * and since T70 it carries the other two verbs a strip of tabs is expected to
+ * a click as well as to F4 — the same `select` either way —
+ * and it carries the other two verbs a strip of tabs is expected to
  * have. Both are the front end's existing ones: `✕` is `closeTab`'s own
  * `tabs.close`, `+` is the `startDraft` a bare `/new` runs. Neither is a second
  * path to a second behaviour.
@@ -104,7 +104,7 @@ export function stripPlan(
  * SWITCHING TABS DOES NOT MOVE THE TABS: a marker only the active tab paid for
  * would shift every name two cells to the left of it each time the front tab
  * changed, which is the same bug shape as a right-aligned cell that moves every
- * time the cursor does (T12, T47).
+ * time the cursor does.
  */
 export function TabBar(props: {
   tabs: Tab[]

@@ -1,6 +1,6 @@
 /**
  * A RUN: the stretch of calls between one thing the model said and the next,
- * collapsed to a line (T43).
+ * collapsed to a line.
  *
  * The transcript already treated a run as one block, but the block was still
  * one row per call, and a model that reads eleven files before answering pushed
@@ -12,7 +12,7 @@
  *  - **Anything still going.** The call in flight is the whole of "what is
  *    happening"; folding it away would leave the screen silent at the one
  *    moment there is something to watch.
- *  - **Anything that failed.** Success is silent here (T26) and failure is not:
+ *  - **Anything that failed.** Success is silent here and failure is not:
  *    a call that came back `exit 1` keeps its own row, in its own colour. A
  *    summary line that quietly contains a failure is the one shape of this
  *    feature that would be worse than not having it.
@@ -22,13 +22,13 @@
  *  - **Anything that opened something else**: a session, a background task.
  *    Those cards carry a link and a live note; they are not finished actions.
  *  - **Evolution actions.** `nulya ext build`, `activate`, `skill load` — the
- *    moments this harness exists to make visible (tui.md §5.2). Not noise, by
+ *    moments this harness exists to make visible. Not noise, by
  *    definition.
  *
  * WHICH LEAVES: plain `shell` calls and plain extension tool calls that worked.
  * The reading (`read`, `grep`, `glob`, `ls`) that a run is mostly made of.
  *
- * HOW A PACKAGE OPTS OUT: it declares `render` on the tool (DESIGN §7.2.1). The
+ * HOW A PACKAGE OPTS OUT: it declares `render` on the tool. The
  * vocabulary is open and the kernel enforces nothing; what a driver may read
  * out of it is "this package has an opinion about how its call should look",
  * and a call with a picture to show is not one to summarise. One declaration,
@@ -57,7 +57,7 @@ export function foldsIntoRun(candidate: RunCandidate): boolean {
   // A cancellation marker is a result the kernel wrote in place of one, and it
   // is the card's whole subject (`CanceledCard`).
   if (item.output.length > 0 && cancelMarkerOf(item.output) !== null) return false
-  // A receipt, not a result: the thing it started is still going (DESIGN §6.1).
+  // A receipt, not a result: the thing it started is still going.
   if (startedTaskOf(item.output) !== null) return false
   const exit = splitShellOutput(item.output).exit
   return exit === null || exit === 0
@@ -131,7 +131,7 @@ export interface RunSummaryPart {
  * volumes: WHAT the run did — a tool name, or the `Run N commands` sentence
  * shell earns at more than one call — and the counting and joining around it,
  * which is chrome the same way a fold marker or a `×3` on any other card is
- * (`CardFrame`'s `headParts`, T43-run-summary). `runSummary` itself is built
+ * (`CardFrame`'s `headParts`). `runSummary` itself is built
  * from this rather than the other way round, so the two can never say
  * different words for the same run.
  */

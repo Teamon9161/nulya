@@ -1,7 +1,7 @@
 /**
- * The sessions sidebar (goals/tui-shell.md §5.4 S1b, tui.md §11 T69).
+ * The sessions sidebar.
  *
- * Two halves, and the split is the same one T68 drew: what the MODEL says
+ * Two halves, the same MODEL/FRAME split as elsewhere in this suite: what the MODEL says
  * (open, close, resize, how wide a rail actually is, what fits in one of its
  * rows) is pinned without a terminal; what only a frame can answer — that the
  * list and the transcript are on screen together, that the composer still
@@ -145,7 +145,7 @@ test("a session an agent was handed is told apart by the prompt it wears, not by
     row("s-1"),
     row("s-2", "agent-explore"),
     // A per-session prompt that is NOT a persona: `--prompt` is a general
-    // kernel feature (DESIGN §5.6) and only the `agent-` label is the agent
+    // kernel feature and only the `agent-` label is the agent
     // package's (`personaOf`).
     row("s-3", "house-style"),
     row("s-4", "house-style", "agent-plan"),
@@ -224,7 +224,7 @@ test("a full-screen view opens in the main pane even when the keyboard is in the
   define("host:ext", true)
   const panes = createPaneStore(main_surface, "main")
   // One tree here, standing in for both layers: the adapter reads whichever
-  // store it is handed, and composing the two is T72's own test.
+  // store it is handed.
   const overlay = overlayAdapter(
     () => panes,
     () => ({ pane: panes.focus(), surface: panes.surface() }),
@@ -269,8 +269,8 @@ let other: string
 
 /**
  * Two sessions that have actually said something. The opening line only
- * reaches `session list` once a step has drained the inbox into the ledger
- * (DESIGN §6.1), and a row here IS its opening line — an undrained session
+ * reaches `session list` once a step has drained the inbox into the ledger,
+ * and a row here IS its opening line — an undrained session
  * would put "nothing said yet" in every row and test nothing.
  *
  * They are short on purpose: the rail is eighteen columns of content at 80,
@@ -355,7 +355,7 @@ test("the sidebar comes up docked, beside a transcript that is still there", asy
     expect(frame).toContain("budgets")
 
     // And the box still takes what is typed — the whole reason opening the rail
-    // does not focus it (T69).
+    // does not focus it.
     await setup.mockInput.typeText("still typing here")
     expect(await settle(setup, 2)).toContain("still typing here")
     expect(steady(frame)).toMatchSnapshot()
@@ -426,7 +426,7 @@ test("the keyboard goes to the rail only when it is sent there, and Esc sends it
   try {
     await until(() => setup.captureCharFrame().includes("older one"), 30_000)
     // Up, and the box still has the keyboard: no cursor row in the rail, and
-    // what is typed is typed (T69 — opening is not going).
+    // what is typed is typed (opening is not going).
     await setup.mockInput.typeText("before")
     expect(await settle(setup, 2)).toContain("before")
 
@@ -455,7 +455,7 @@ test("the keyboard goes to the rail only when it is sent there, and Esc sends it
     expect(await settle(setup, 2)).toContain("before and after!")
 
     // The mouse is the third way out: a click on the transcript takes the
-    // keyboard out of the rail — and, since T70, hands it all the way back to
+    // keyboard out of the rail — and, hands it all the way back to
     // the box rather than to the scrollbox that used to swallow it.
     press(setup, ctrl_left)
     expect(cursorInRail(await settle(setup, 3))).toBe(true)
@@ -469,9 +469,9 @@ test("the keyboard goes to the rail only when it is sent there, and Esc sends it
 }, 120_000)
 
 test("one click in the rail goes to that session in this tab, and the strip does not grow", async () => {
-  // T70's whole point: "show me that conversation" is one press, and it does
+  // "show me that conversation" is one press, and it does
   // NOT open a second tab — which is what the tab strip's absence says here,
-  // since the strip only exists once there is more than one tab (T22).
+  // since the strip only exists once there is more than one tab.
   const { setup } = await screen(80, 24, { open: true, ratio: default_sidebar_ratio })
   try {
     await until(() => setup.captureCharFrame().includes("older one"), 30_000)
@@ -559,7 +559,7 @@ test("the list is about the sessions a person is having, and says how many it is
   // A delegated session is a real session with a real ledger — `session list`
   // is right to project it — and it is not a conversation anybody started, nor
   // one to send a message to from here. The frozen `agent-<name>` prompt is the
-  // whole test, and it is the same one `wearing()` reads (T70).
+  // whole test, and it is the same one `wearing` reads.
   const persona = join(ws.dir, "agent-explore.md")
   writeFileSync(persona, "you are the scout\n")
   const handed = await sessionNew(ws, { profile: "scripted", prompt: [persona] })

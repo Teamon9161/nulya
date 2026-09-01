@@ -1,6 +1,6 @@
 /**
- * `/settings`: the values in force right now, which file each layer came from
- * (tui.md §7), and — since T100 — the place they are changed.
+ * `/settings`: the values in force right now, which file each layer came from,
+ * and the place they are changed.
  *
  * IT WRITES, AND THAT IS NOT A SECOND AUTHOR. This screen used to say
  * "read-only here, edit the file", on the reasoning that a TUI which also wrote
@@ -20,7 +20,7 @@
  * that key says so and the write is refused rather than made where it would
  * have no effect.
  *
- * WHAT IT DOES LEAD TO (T92). Not every choice on this screen lives in that
+ * WHAT IT DOES LEAD TO. Not every choice on this screen lives in that
  * file: the model, the permission mode, the working directory and where the
  * shell runs are chosen in the interface and remembered in `tui-state.json`,
  * which is this front end's own note to itself and not a second author of
@@ -29,7 +29,7 @@
  * `settings` finds the things they can actually change, rather than a table
  * whose only instruction is to go and edit a file.
  *
- * WHAT THE FILE WILL TAKE (T94). Every row of the lower table names what it
+ * WHAT THE FILE WILL TAKE. Every row of the lower table names what it
  * accepts beside what it is set to, and the table is every key the parser
  * reads (`state/settings.ts`'s `setting_fields`). That vocabulary is now used
  * twice — printed in the third column, and offered by the picker Enter opens —

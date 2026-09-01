@@ -1,6 +1,6 @@
 /**
- * T82's pure functions: how full the context window is, what the ring shows for
- * it, and which rows the panel gets.
+ * The context-window pure functions: how full the context window is, what
+ * the ring shows for it, and which rows the panel gets.
  *
  * Three mechanisms are worth pinning and nothing else is. (1) `contextFill`
  * refuses to invent a meter when either half of the fraction is missing, and

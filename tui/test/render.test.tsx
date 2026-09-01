@@ -1,5 +1,5 @@
 /**
- * Frame tests over the real test renderer (tui.md §8). Two things are pinned
+ * Frame tests over the real test renderer. Two things are pinned
  * here: each card's shape, and the property the whole design rests on — live
  * and replay draw the same frame.
  *
@@ -37,7 +37,7 @@ import type { Contributions } from "../src/nulya/files.ts"
 
 const style: Style = createStyle(unsafe_settings, {})
 const narrow: Style = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, max_width: 40 } }, {})
-/** One row per call — the transcript before run summaries, and `run_summary = false` after (T43). */
+/** One row per call — the transcript before run summaries, and `run_summary = false` after. */
 const listed_style: Style = createStyle(
   { ...unsafe_settings, transcript: { ...unsafe_settings.transcript, run_summary: false } },
   {},
@@ -46,7 +46,7 @@ const listed_style: Style = createStyle(
 /**
  * The cards as the screen actually stacks them. It goes through `Transcript`
  * rather than mapping `Card` itself, because the blank rows BETWEEN cards are
- * part of what these snapshots are pinning (T26) and they are decided there.
+ * part of what these snapshots are pinning and they are decided there.
  */
 function Harness(props: {
   items: TranscriptItem[]
@@ -60,7 +60,7 @@ function Harness(props: {
     <StyleContext.Provider value={props.style ?? style}>
       <FoldContext.Provider value={createFoldStore()}>
         {/* Only the background cards read this, and only for the seconds on a
-            task still running (tui.md §5.9); every other card draws the same
+            task still running; every other card draws the same
             with or without it. */}
         <TasksContext.Provider value={() => props.tasks ?? []}>
           <Transcript items={props.items} header={props.header} error={props.error} contributions={props.contributions} />
@@ -563,11 +563,9 @@ test("a skill echo folds back to the `/name args` that was typed", async () => {
 })
 
 /**
- * T43: reasoning is not on screen unless it is asked for. It used to be a
- * collapsed card above every answer — a head line, a glyph and a fold marker
- * spent on the one thing the model neither said nor did. `collapsed` still
- * draws exactly that card, which is the half this pins: the default changed,
- * the card did not.
+ * Reasoning is not on screen unless it is asked for. `collapsed` draws a
+ * card above the answer — a head line, a glyph and a fold marker for the one
+ * thing the model neither said nor did; `hidden` (the default) draws nothing.
  */
 test("thinking is hidden by default, and `collapsed` brings the card back", async () => {
   expect(await frameOf([thinking_item])).not.toContain("thinking")
@@ -611,7 +609,7 @@ test("an extension tool call carries the ⌘ glyph and an argument digest", asyn
   const frame = await frameOf([ext_tool_item])
   expect(frame).toContain("⌘ lint_zig · src/emit.zig")
   // A call that worked says how much it brought back and nothing else: the
-  // word `ok` on every successful line was noise (T26).
+  // word `ok` on every successful line was noise.
   expect(frame).toContain("(1 line)")
   expect(frame).not.toContain("ok")
   expect(frame).not.toContain("0 findings")
@@ -656,7 +654,7 @@ test("every evolution action in §5.2 has its own head line", async () => {
         output: ".nulya/extensions/lint: v-3f2a91 (built)\n[exit 0]",
       }),
       shellItem({ key: "v4", command: "nulya ext activate lint v-3f2a91", output: "lint: current -> v-3f2a91\n[exit 0]" }),
-      // Going back is the same verb aimed at an older version (DESIGN §7.4),
+      // Going back is the same verb aimed at an older version,
       // so it draws the same head line — there is no second glyph for it.
       shellItem({ key: "v5", command: "nulya ext activate lint v-0011aa", output: "lint: current -> v-0011aa\n[exit 0]" }),
       shellItem({ key: "v6", command: "nulya ext run lint lint_zig '{\"path\":\"src\"}'", output: "0 findings\n[exit 0]" }),
@@ -690,7 +688,7 @@ test("a sub-session names the session it drives", async () => {
 })
 
 /**
- * A delegation is the one card whose story continues somewhere else (T43), so
+ * A delegation is the one card whose story continues somewhere else, so
  * it says how that is going and offers a way in. Without a `Navigate` there is
  * no link at all — a card in a screen with no tabs must not offer one.
  *
@@ -742,7 +740,7 @@ test("a delegation says how its background task is going, and offers the session
     expect(frame).toContain("running 42s")
     expect(frame).not.toContain("s-1/t1")
     // The one row the card offers goes to a PANE of this tab, not to a tab of
-    // its own (T72), and carries no id either — `watch here`.
+    // its own, and carries no id either — `watch here`.
     expect(frame).toContain("↗ watch here")
     // …and the row is the affordance, not decoration: clicking it navigates.
     const rows = frame.split("\n")
@@ -868,7 +866,7 @@ test("a delegation record naming a foreign runner offers /tasks instead of a tab
 })
 
 /**
- * The run summary (T43). A stretch of finished, successful, bodyless calls is
+ * The run summary. A stretch of finished, successful, bodyless calls is
  * one line; a failure in the middle of it is not in that line.
  */
 test("a run of successful calls becomes one line, and a failure stays out of it", async () => {
@@ -884,7 +882,7 @@ test("a run of successful calls becomes one line, and a failure stays out of it"
   expect(frame).toContain("Run 2 commands")
   // And it does NOT wear the assistant's glyph. The summary sits directly under
   // the sentence the model said; one glyph on two kinds of row that are always
-  // neighbours is a glyph that says nothing (tui.md §6).
+  // neighbours is a glyph that says nothing.
   const summary = frame.split("\n").find((line) => line.includes("Run 2 commands"))!
   expect(summary).not.toContain(style.glyphs.assistant)
   // The failure keeps its own row, its own command and its own exit.
@@ -916,7 +914,7 @@ const card_contributions = [
     ui: null,
   },
   // A `--with` package: no tool, no skill, one prompt — worn for this
-  // session only, and the card has to say so (DESIGN §7.5).
+  // session only, and the card has to say so.
   {
     id: "evolution",
     version: "v-db04b7",
@@ -1143,7 +1141,7 @@ test("diff stats count only hunk body lines", () => {
 })
 
 /**
- * The whole point of `tui.toml` (tui.md §7): a real file in a real workspace
+ * The whole point of `tui.toml`: a real file in a real workspace
  * changes what the transcript looks like. Asserting on a hand-built settings
  * object would only test the renderer — this walks the actual path.
  */
@@ -1177,12 +1175,12 @@ test("a project tui.toml flips the diff default", async () => {
 test("the transcript's rhythm: two rows before a person, one between beats and tool records", async () => {
   const run = (key: string, command: string) => shellItem({ key, command, output: "ok\n[exit 0]" })
   const items: TranscriptItem[] = [user_item, thinking_item, assistant_item, run("r1", "ls"), run("r2", "pwd"), user_item]
-  // The pure function first: it is the whole of the rhythm (T26). Thinking is a
-  // card like any other and gets its own row of air (T43) — when it is on
+  // The pure function first: it is the whole of the rhythm. Thinking is a
+  // card like any other and gets its own row of air — when it is on
   // screen at all, which by default it is not.
   expect(items.map((item, index) => gapBefore(items[index - 1], item))).toEqual([1, 1, 1, 1, 1, 2])
   // Drawn with the run summary OFF, because the rhythm is about where the blank
-  // rows go and the summary is about how many rows there are (T43). What the
+  // rows go and the summary is about how many rows there are. What the
   // summary does to these same two calls is its own test.
   const frame = await frameOf(items, 76, 20, listed_style)
   const rows = frame.split("\n").map((row) => row.trimEnd())
@@ -1196,7 +1194,7 @@ test("the transcript's rhythm: two rows before a person, one between beats and t
 test("clicking a card's head line folds it", async () => {
   const setup = await testRender(() => <Harness items={[shell_item]} />, { width: 76, height: 12 })
   try {
-    // Row 0 is the transcript's leading blank; the card starts on row 1 (T26).
+    // Row 0 is the transcript's leading blank; the card starts on row 1.
     expect(await settle(setup)).not.toContain("running 12 tests")
     await setup.mockMouse.click(4, 1)
     expect(await settle(setup)).toContain("running 12 tests")
@@ -1286,7 +1284,7 @@ test("a spilled result points at its file", async () => {
 })
 
 /**
- * Background calls (tui.md §5.9). Same glyph, same card — what changes is the
+ * Background calls. Same glyph, same card — what changes is the
  * note, because the call returned a receipt instead of a result: which task it
  * is, and whether it is still going.
  */
@@ -1306,7 +1304,7 @@ test("once the report lands, the call that started it says how it ended", async 
   // From the ledger, not from any process: this is what a reopened session sees.
   const failed = await frameOf([backgroundItem({ key: "e6:c2", task: "s-1/t4", result: { exitCode: 1, duration: "41.8s" } })])
   expect(failed).toContain("$ zig build test  (background s-1/t4 · exit 1 · 41.8s)")
-  // …and a task that worked says only how long it took (T26).
+  // …and a task that worked says only how long it took.
   const worked = await frameOf([backgroundItem({ key: "e6:c3", task: "s-1/t5", result: { exitCode: 0, duration: "0.4s" } })])
   expect(worked).toContain("$ zig build test  (background s-1/t5 · 0.4s)")
   expect(worked).not.toContain("exit 0")
@@ -1360,7 +1358,7 @@ test("capability notes name activation, availability and version changes", async
 test("a narrow viewport cuts the head, never the state word", async () => {
   // The note used to be dropped whole below 60 columns, which took `exit 1`
   // off the screen — the one thing on that line worth carrying to a phone-sized
-  // terminal. It stays now; the command gives up columns instead (T26).
+  // terminal. It stays now; the command gives up columns instead.
   const frame = await frameOf([shell_item], 48, 12, narrow)
   expect(frame).toContain("exit 1")
   expect(frame).toContain("$ zig build")
@@ -1462,7 +1460,7 @@ test("typing and pressing Enter drives a real step", async () => {
  * Everything above the composer's box — the transcript, without the status
  * bar's counters (a live run has stepped, a reopened one has not). The two
  * hairlines this used to slice between are gone: the box's own border is the
- * only line drawn between the regions now (T26).
+ * only line drawn between the regions now.
  */
 function transcriptOf(frame: string): string {
   const rows = frame.split("\n")
@@ -1503,11 +1501,10 @@ test("closing and reopening with --session paints the same transcript", async ()
 }, 120_000)
 
 /**
- * Clicking a head line is now the ONLY pointer gesture for folding, and since
- * T38 there is no key beside it except browse mode's — `ctrl+o` (this card) and
- * `ctrl+shift+o` (all of them at once) are gone. A third way to fold, acting on
- * whichever card happened to be last, was one way too many; opening every card
- * on the screen at once was never a view of anything.
+ * Clicking a head line is the ONLY pointer gesture for folding, and there is
+ * no key beside it except browse mode's. A third way to fold, acting on
+ * whichever card happened to be last, would be one way too many; opening every
+ * card on the screen at once is never a view of anything.
  */
 test("clicking a tool card's head line expands it, and clicking it again folds it", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
@@ -1555,7 +1552,7 @@ test("Esc on an empty composer opens browse mode, where Enter folds a card", asy
     expect(occurrences(await settle(setup, 5))).toBe(1)
 
     // Nothing is running and nothing is typed, so Esc hands the keyboard to the
-    // transcript rather than canceling (tui.md §4.2).
+    // transcript rather than canceling.
     setup.mockInput.pressEscape()
     expect(await settle(setup, 3)).toContain("browse · j/k move")
 

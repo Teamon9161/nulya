@@ -8,7 +8,7 @@
  * `<user config dir>/tui-state.json`. A missing or broken file means "nothing
  * remembered" and never stops the TUI from opening.
  *
- * The rule it serves (tui.md §1.2 D8): a person starts `nulya` and picks the
+ * The rule it serves: a person starts `nulya` and picks the
  * model on screen; they must never have to find a config file to switch models.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
@@ -43,7 +43,7 @@ export interface TuiState {
    */
   asked_stores?: string[]
   /**
-   * Where the NEXT session's `shell` commands run (`/env`, DESIGN §8.1) — the
+   * Where the NEXT session's `shell` commands run (`/env`) — the
    * spec verbatim, `""`/absent meaning this host.
    *
    * Program state for the model pick's reason: a person working inside a WSL
@@ -51,7 +51,7 @@ export interface TuiState {
    * It is not `tui.toml` and deliberately not the kernel's config either — the
    * kernel has no such key, because "is wsl narrower or wider than local" has
    * no honest answer in a config chain whose project layer may only narrow
-   * (DESIGN §8.1). Remembering a choice is a front end's job; ranking targets
+   *. Remembering a choice is a front end's job; ranking targets
    * would not be.
    *
    * The spelling is never checked here. `session new` refuses a bad one with
@@ -60,7 +60,7 @@ export interface TuiState {
   exec_env?: string
   /**
    * The remote workspace `exec_env` would freeze in with `--workspace`
-   * (goals/remote-env.md §3.3, tui.md §11 T101) — the directory a person
+   * — the directory a person
    * picked in the remote directory browser after choosing a `remote:` target
    * in `/env`. Meaningless (and never read) unless `exec_env` names a
    * `remote:` target; travels WITH `exec_env` rather than being looked up by
@@ -71,7 +71,7 @@ export interface TuiState {
   exec_workspace?: string
   /**
    * Where the remote directory browser last left off, per exec-target spec
-   * (goals/remote-env.md §3.9) — "every machine remembers its own recents".
+   * — "every machine remembers its own recents".
    * Seeds the NEXT time that same spec is picked in `/env`, so choosing
    * `remote:ssh:box` a second time opens where the first session's workspace
    * was rather than back at that account's home. `remote check`'s `home` (or
@@ -82,8 +82,8 @@ export interface TuiState {
    * The last `nulya ext push` this front end ran for one (package, target)
    * pair — id, the spec it was pushed to, what the kernel said, and when.
    * Deliberately not a standing "is it there" table: a push is answered once,
-   * by the kernel, at the moment it happens (DESIGN §7.4's content addressing
-   * makes a repeat push a free correctness check, not a cost to avoid) — a
+   * by the kernel, at the moment it happens (content addressing makes a
+   * repeat push a free correctness check, not a cost to avoid) — a
    * cached "yes" would be a claim this front end cannot back up the moment
    * either side changes without going through it. `/ext`'s push action shows
    * this as "last time" explicitly, never as present-tense status.
@@ -91,13 +91,13 @@ export interface TuiState {
   remote_pushed?: Record<string, { spec: string; said: string; at: string }>
   /**
    * Agent-definition directories the question has already been put for, by
-   * absolute path, and the ones that were answered yes (tui.md §5.10).
+   * absolute path, and the ones that were answered yes.
    *
    * A definition that arrives with a checkout becomes a SYSTEM PROMPT the moment
-   * somebody delegates to it — the T31 hazard, one directory over — and
+   * somebody delegates to it, and
    * materialising one also writes into this workspace's extension store, which
    * for an empty store is the kernel's own "a local build IS the trust" rule
-   * (DESIGN §9). So the question is asked before any of that can happen, and
+   *. So the question is asked before any of that can happen, and
    * asked once: `asked` is what stops it coming back every morning, `trusted` is
    * the answer it got. The machine's own `~/.nulya/agents` is never asked about,
    * for the same reason the user extension store is not — nothing arrives there
@@ -108,7 +108,7 @@ export interface TuiState {
   /**
    * Extension tools this TUI puts on the face of every session it starts, as
    * stable ids (`ext:<id>/<tool>`) — the `this TUI` state of the pin panel
-   * (tui.md §11, T12). Program state rather than config on purpose: trying a
+   *. Program state rather than config on purpose: trying a
    * tool out should cost nothing and leave nothing in a file somebody else
    * reads. `A` in the panel is what makes one permanent, and that writes the
    * kernel's own `registry.pinned_native_tools` instead.
@@ -126,7 +126,7 @@ export interface TuiState {
    */
   plugins?: Record<string, Record<string, unknown>>
   /**
-   * The sessions sidebar: whether it was up, and how wide (T69).
+   * The sessions sidebar: whether it was up, and how wide.
    *
    * Program state for the same reason the model pick is: a person who pulled
    * the sidebar out yesterday should find it there today without editing a
@@ -149,7 +149,7 @@ export interface TuiState {
    * screen can hold tabs in two directories.
    *
    * What is done with it on the next launch is deliberately narrow: the FIRST
-   * tab is decided exactly as it always was (`--session`, else a draft, T22),
+   * tab is decided exactly as it always was (`--session`, else a draft),
    * and only the tabs BEYOND it come back. So the single-tab screen everybody
    * has is unchanged down to the frame, and the person who left four
    * conversations open in two repositories finds them where they left them.
@@ -194,7 +194,7 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
     }
     const execEnv = record["exec_env"]
     // The bare `ssh:<destination>` exec target was retired 2026-08-30
-    // (goals/remote-env.md §7.1) — `session new` refuses it outright now, so a
+    // — `session new` refuses it outright now, so a
     // value remembered from before that would make every session this front
     // end starts fail at creation. This file is a convenience, not the
     // header, so a spec it can no longer use is simply DROPPED back to
@@ -300,7 +300,7 @@ export function rememberModel(pick: ModelPick, path = tuiStatePath()): void {
   saveTuiState(state, path)
 }
 
-/** The `--pin` list every `session new` from this TUI carries (tui.md §11, T12). */
+/** The `--pin` list every `session new` from this TUI carries. */
 export function sessionPins(path = tuiStatePath()): string[] {
   return loadTuiState(path).session_pins ?? []
 }
@@ -311,7 +311,7 @@ export function rememberSessionPins(pins: readonly string[], path = tuiStatePath
   saveTuiState(state, path)
 }
 
-/** Remember whether the sessions sidebar was up, and how wide (T69). */
+/** Remember whether the sessions sidebar was up, and how wide. */
 export function rememberSidebar(sidebar: { open: boolean; ratio: number }, path = tuiStatePath()): void {
   const state = loadTuiState(path)
   state.sidebar = sidebar
@@ -325,7 +325,7 @@ export function rememberTabs(tabs: readonly { ws: string; session?: string }[], 
   saveTuiState(state, path)
 }
 
-/** Where the next `session new` from this TUI runs its shell (DESIGN §8.1). */
+/** Where the next `session new` from this TUI runs its shell. */
 export function execEnv(path = tuiStatePath()): string {
   return loadTuiState(path).exec_env ?? ""
 }
@@ -333,7 +333,7 @@ export function execEnv(path = tuiStatePath()): string {
 /**
  * The remote workspace that would ride along with `execEnv` as `--workspace`
  * — meaningless (and the caller's to ignore) unless `execEnv` itself names a
- * `remote:` target (goals/remote-env.md §3.9, tui.md §11 T102).
+ * `remote:` target.
  */
 export function execWorkspace(path = tuiStatePath()): string {
   return loadTuiState(path).exec_workspace ?? ""
@@ -367,7 +367,7 @@ export function rememberExecEnv(spec: string, path = tuiStatePath(), workspace?:
 
 /**
  * Where the remote directory browser last left off for `spec` — the seed for
- * the next time that same target is picked (goals/remote-env.md §3.9).
+ * the next time that same target is picked.
  */
 export function remoteCwd(spec: string, path = tuiStatePath()): string | undefined {
   return loadTuiState(path).remote_cwd?.[spec]
@@ -392,7 +392,7 @@ export function rememberPush(id: string, spec: string, said: string, path = tuiS
   saveTuiState(state, path)
 }
 
-/** Remember the permission mode the person is working in (tui.md §5.7). */
+/** Remember the permission mode the person is working in. */
 export function rememberMode(mode: PermissionMode, path = tuiStatePath()): void {
   const state = loadTuiState(path)
   state.mode = mode
@@ -401,7 +401,7 @@ export function rememberMode(mode: PermissionMode, path = tuiStatePath()): void 
 
 /**
  * Remember the answer to the agent-definitions question for one directory.
- * Asked either way, trusted only on a yes (tui.md §5.10).
+ * Asked either way, trusted only on a yes.
  */
 export function rememberAgentsAnswer(dir: string, trusted: boolean, path = tuiStatePath()): void {
   const state = loadTuiState(path)

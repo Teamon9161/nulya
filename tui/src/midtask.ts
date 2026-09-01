@@ -1,9 +1,9 @@
 /**
- * Mid-task messages (tui.md §11, T17).
+ * Mid-task messages.
  *
  * The kernel already delivers a turn appended while a run is in flight:
  * `session append` never takes the writer lease, the deposit lands in the
- * inbox, and the kernel drains it at its next step boundary (DESIGN §3.4).
+ * inbox, and the kernel drains it at its next step boundary.
  * What the model cannot know is HOW the turn arrived — a user message right
  * after tool results reads exactly like a fresh instruction at rest, and
  * models routinely treat one as a signal to drop what they were doing.

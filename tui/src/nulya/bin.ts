@@ -1,6 +1,6 @@
 /**
  * Where the `nulya` binary and the workspace live. The TUI is a driver client
- * over a process boundary (tui.md §0.3), so "which binary" and "which
+ * over a process boundary, so "which binary" and "which
  * workspace" are the two coordinates everything else in `src/nulya/` needs.
  */
 import { existsSync } from "node:fs"

@@ -1,5 +1,5 @@
 /**
- * Agent definitions (tui.md §5.10): the file, the prompt it becomes, and the
+ * Agent definitions: the file, the prompt it becomes, and the
  * ceiling a read-only one runs under.
  *
  * The pure half is the parser and the two policies; the rest runs the real
@@ -29,8 +29,7 @@ import { tempWorkspace, type TempWorkspace } from "./support.ts"
  * A home of this file's own. These tests build the bundled `agent` package, and
  * a bundled package builds into the USER store — which `test/isolate.ts` points
  * at one scratch directory for the whole run. Without this, `/ext`'s assertions
- * in another file would find an `agent` row nobody put there (the same accident
- * T21 records, one package later).
+ * in another file would find an `agent` row nobody put there.
  */
 const shared_home = process.env["NULYA_HOME"]
 
@@ -122,7 +121,7 @@ test("a workspace with no definition files still has the personas the package sh
     const found = usableAgents(await listAgents(bare, pkg))
     expect(found.map((entry) => entry.name).sort()).toEqual(["explore", "general", "orchestrator", "plan"])
     // Exactly one of them may delegate; the rest are leaves, which is what makes
-    // a delegated session carry the `agent` tool or not (DESIGN §7.8).
+    // a delegated session carry the `agent` tool or not.
     const coordinators = found.filter((entry) => entry.agents.length > 0)
     expect(coordinators.map((entry) => entry.name)).toEqual(["orchestrator"])
     expect(coordinators[0]!.max_exchanges).toBeGreaterThan(0)
@@ -181,7 +180,7 @@ test("render writes a definition's body to a file a session can wear, installs n
   // A persona whose pins name a package this workspace does not have renders
   // fine, and hands the pins on as written. Whether they resolve is the
   // kernel's question, asked once, at `session new`: a pin brings its own
-  // package into the session (DESIGN §5.1), so this side no longer derives a
+  // package into the session, so this side no longer derives a
   // `--with` list and no longer has a second opinion about it.
   writeFileSync(join(dir, "needy.md"), "---\nname: needy\npins: [ext:std/read]\n---\nI need std\n")
   const needy = await renderAgent(ws, pkg, "needy")
@@ -197,7 +196,7 @@ test("a read-only agent gets no shell and only tools that declare themselves rea
   // `shell` is refused whatever any table says: without a sandbox nothing can
   // tell `cat foo` from `rm foo`.
   expect(readonlyCeiling("shell", undefined)).toContain("cannot run shell")
-  // A tool that made no claim has not claimed to be read-only (DESIGN §7.2.1).
+  // A tool that made no claim has not claimed to be read-only.
   expect(readonlyCeiling("write", undefined)).toContain("does not declare itself read-only")
   expect(readonlyCeiling("write", false)).toContain("does not declare itself read-only")
   expect(readonlyCeiling("read", true)).toBeNull()

@@ -3,17 +3,16 @@ import { CardFrame } from "./CardFrame.tsx"
 import type { ThinkingItem } from "../../state/session.ts"
 
 /**
- * Reasoning. `assistant.reasoning` is opaque provider bytes kept for replay
- * (DESIGN §3.1), so when no readable text can be recovered the card says
+ * Reasoning. `assistant.reasoning` is opaque provider bytes kept for replay,
+ * so when no readable text can be recovered the card says
  * `reasoning (opaque)` rather than inventing a summary.
  *
  * Folded by default and dim throughout: it is context for what the model did,
- * not something it said (tui.md §1.2 D5).
+ * not something it said.
  *
- * It is a `CardFrame` like every other head line (T26). It used to draw its own
- * — fold marker on the LEFT, where every other card has a glyph, and a toggle on
- * bare `onMouseDown`, so dragging across it to copy the text folded it away.
- * One skeleton, one gesture, one place where either can be fixed.
+ * It is a `CardFrame` like every other head line, rather than drawing its
+ * own fold marker and click handling — one skeleton, one gesture, one place
+ * where either can be fixed.
  */
 export function Thinking(props: { item: ThinkingItem }) {
   const style = useStyle()

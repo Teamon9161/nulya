@@ -1,6 +1,6 @@
 /**
  * Every `nulya session *` call the TUI makes, and the typed parse of the
- * `session step --stream` line protocol (DESIGN §14). This is the ONLY module
+ * `session step --stream` line protocol. This is the ONLY module
  * that spawns the binary; nothing above it knows a flag name or a JSON field.
  */
 import { parseEventLine, type LedgerEvent, type ParentRef, type Usage } from "./ledger.ts"
@@ -24,12 +24,12 @@ export type StreamLine =
   | { stream: "model"; event: "tool_use_input_delta"; index: number; fragment: string }
   | ({ stream: "model"; event: "usage" } & StreamUsage)
   | { stream: "model"; event: "done"; stop: string }
-  /** A transient failure; the kernel re-sends after `delay_ms` (DESIGN §13). */
+  /** A transient failure; the kernel re-sends after `delay_ms`. */
   | { stream: "model"; event: "retry"; attempt: number; max_retries: number; delay_ms: number; error: string }
   | { stream: "tool"; event: "begin"; call_id: string; tool: string }
   | { stream: "tool"; event: "end"; call_id: string; ok: boolean }
   | { stream: "step"; event: "end"; status: StepStatus }
-  /** `--gate`: this call is waiting for a verdict on stdin (DESIGN §14). */
+  /** `--gate`: this call is waiting for a verdict on stdin. */
   | { stream: "gate"; event: "request"; call_id: string; tool: string; args: string }
   | { stream: "run"; event: "done"; steps: number; stopped: StopReason }
   | { stream: "run"; event: "error"; message: string }
@@ -40,7 +40,7 @@ export type StreamLine =
  * One parsed stdout line. The split is exactly the kernel's: a `stream` field
  * means a transient observation, its absence means a ledger event in the same
  * shape `session events` prints. Never filter by `kind` — an event kind added
- * later must still reach the transcript (tui.md §11, T0 reminder 1).
+ * later must still reach the transcript.
  */
 export type StepLine = { kind: "stream"; line: StreamLine } | { kind: "event"; event: LedgerEvent }
 
@@ -178,7 +178,7 @@ export interface NewSessionOptions {
   parent?: { session: string; seq: number }
   /**
    * `--with <id>[@<version>]`, repeatable: bring a BUILT extension version into
-   * this session's composition without activating it (DESIGN §7.5). Membership
+   * this session's composition without activating it. Membership
    * only — skills land in the catalog, system prompts in the system blocks —
    * so this is how a mode or the evolution package is put in front of a model
    * for one session and no other.
@@ -187,13 +187,13 @@ export interface NewSessionOptions {
   /**
    * `--pin ext:<id>/<tool>`, repeatable: put an extension tool on THIS session's
    * native tool face. Unioned with `registry.pinned_native_tools` by the kernel
-   * (DESIGN §5.1) — a union only adds, so this can never take a configured pin
+   * — a union only adds, so this can never take a configured pin
    * away. The TUI's own pin panel writes these from `tui-state.json`.
    */
   pin?: readonly string[]
   /**
    * `--bare`: compose from these flags alone, ignoring the config's standing
-   * `[extensions] with` and `registry.pinned_native_tools` (DESIGN §14). What a
+   * `[extensions] with` and `registry.pinned_native_tools`. What a
    * delegated sub-agent session gets, whose whole capability list is its own
    * definition — `extensions/agent`'s `render` returns it, so the TUI passes
    * through whatever that says rather than deciding here.
@@ -201,7 +201,7 @@ export interface NewSessionOptions {
   bare?: boolean
   /**
    * `--prompt <file>`, repeatable: freeze a file's bytes into THIS session's
-   * system blocks (DESIGN §3, §5). Nothing is installed and nothing is
+   * system blocks. Nothing is installed and nothing is
    * versioned — which is the whole difference from `with`: text that only this
    * session has a use for lives in this session's header, so no later `ext
    * prune` can take it away from a resume. A sub-agent persona is the first
@@ -210,7 +210,7 @@ export interface NewSessionOptions {
   prompt?: readonly string[]
   /**
    * `--env <spec>`: where this session's `shell` commands run — `local` (or
-   * absent), `wsl`, `wsl:<distro>` (DESIGN §8.1), or a `remote:…` spec (§8.2)
+   * absent), `wsl`, `wsl:<distro>`, or a `remote:…` spec (§8.2)
    * that moves the whole workspace. Frozen in the header, so there is no
    * per-step twin: a resume runs the commands where the session says or
    * refuses to run them at all.
@@ -269,7 +269,7 @@ export interface ProfileView {
   /**
    * Where the credential comes from: `config` (the profile's own `api_key` in
    * the user file), `env` (`api_key_env` is set), `file` (the user credential
-   * file answers that same variable name — DESIGN §9.5, the one source a spawned
+   * file answers that same variable name — the one source a spawned
    * process can still reach, since secrets are stripped from every child's
    * environment), `login` (codex auth file), `builtin` (scripted), `none`.
    */
@@ -325,7 +325,7 @@ export interface RegistryView {
 
 /**
  * The merged `[extensions]`, projected for the same reason `[registry]` is:
- * which packages are a member of every session opened here (DESIGN §5.1) is
+ * which packages are a member of every session opened here is
  * not something a front end should read three config files to learn — and one
  * of those layers may hold an inline `api_key`.
  *
@@ -436,7 +436,7 @@ export interface SessionListEntry {
     native_tools: string[]
     /**
      * The per-session system prompts frozen into this session's header
-     * (`session new --prompt`, DESIGN §3): their labels and sizes, never the
+     * (`session new --prompt`): their labels and sizes, never the
      * text — a listing says WHICH session is which. A sub-agent persona is the
      * first thing that shows up here (`agents.ts`).
      */
@@ -453,7 +453,7 @@ const no_usage: Usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 
 
 /**
  * `nulya session list --json` — the kernel's own projection of
- * `.nulya/sessions/`, newest first (DESIGN §14).
+ * `.nulya/sessions/`, newest first.
  *
  * The TUI used to walk those files itself; it no longer does. Composition,
  * parent, cost and verdict are one read here, and the verdict in particular
@@ -507,13 +507,13 @@ export async function sessionOutcome(
 }
 
 /**
- * One row of `nulya task list --json` (DESIGN §6.1 / §14).
+ * One row of `nulya task list --json`.
  *
  * `state` is the kernel's own projection and the TUI does not re-derive any of
  * it: `starting` is a task whose supervisor has not written its status yet and
  * `lost` is one that says `running` while nothing holds its lease — two answers
- * that need the lock and the directory together, which is exactly the kind of
- * thing `/sessions` stopped re-deriving in T8. A task retargeted here by a
+ * that need the lock and the directory together, so this front end never
+ * re-derives them. A task retargeted here by a
  * compaction is listed by the same command (its `notify` names this session), so
  * even "which tasks are mine" is the kernel's answer, not ours.
  */
@@ -532,7 +532,7 @@ export interface TaskEntry {
   /**
    * The `remote:` spec whose machine runs this task, or null/absent for a task
    * on this one (older binaries omit the column entirely). It exists precisely
-   * because `log` is then a path on that machine (DESIGN §8.2).
+   * because `log` is then a path on that machine.
    */
   machine?: string | null
   notify: string | null
@@ -553,7 +553,7 @@ export interface TaskEntry {
 /**
  * Whether anything here should keep waiting on this task. `unreachable` counts
  * as done for the same reason the kernel's `task wait` refuses to hang on one
- * (goals/remote-env.md §6.7): nothing is known and nothing will be learned by
+ *: nothing is known and nothing will be learned by
  * spinning — and for a remote session every poll is a fresh channel, so a
  * status bar counting an unanswerable machine as "running" would pay a connect
  * timeout every few seconds forever. The task itself may well still be running
@@ -567,7 +567,7 @@ export function taskIsDone(task: TaskEntry): boolean {
  * `nulya task list --session <id> --json` — the background tasks of one session.
  *
  * Scoped to a session on purpose: `/tasks` is a view of the tab in front of you,
- * and the workspace-wide answer is `nulya task list` in a terminal (tui.md §5.9).
+ * and the workspace-wide answer is `nulya task list` in a terminal.
  */
 export async function taskList(ws: Workspace, id: string, env?: Record<string, string>): Promise<TaskEntry[]> {
   const result = await run(ws, ["task", "list", "--session", id, "--json"], env)
@@ -584,7 +584,7 @@ export async function taskList(ws: Workspace, id: string, env?: Record<string, s
 
 /**
  * `nulya task kill <task>` — write the kill marker; the supervisor takes the
- * whole process tree down at its next look (DESIGN §6.1). Idempotent, and a task
+ * whole process tree down at its next look. Idempotent, and a task
  * that already finished is told so rather than treated as an error.
  */
 export async function taskKill(ws: Workspace, task: string): Promise<string> {
@@ -601,7 +601,7 @@ export async function taskKill(ws: Workspace, task: string): Promise<string> {
 export async function extBuild(ws: Workspace, path: string, options: { user?: boolean } = {}): Promise<string> {
   const args = ["ext", "build", path]
   // `--user` decides the DESTINATION root, not the source: a draft staged
-  // anywhere can be frozen into the user store (DESIGN §7.4). Which is how a
+  // anywhere can be frozen into the user store. Which is how a
   // persona defined in `~/.nulya/agents` stays on this machine rather than
   // accumulating in whatever workspace happened to run it (`agents.ts`).
   if (options.user) args.push("--user")
@@ -612,8 +612,8 @@ export async function extBuild(ws: Workspace, path: string, options: { user?: bo
 }
 
 /**
- * What `nulya ext seed` reports: what became of each bundled draft in that root
- * (DESIGN §7.8).
+ * What `nulya ext seed` reports: what became of each bundled draft in that
+ * root.
  *
  * Four answers, and the difference between the middle two is the whole point:
  * a draft the binary itself wrote and nobody has touched is carried forward
@@ -636,7 +636,7 @@ export interface SeedReport {
 
 /**
  * `nulya ext seed` — write the extension drafts the BINARY ships into a store
- * root (DESIGN §7.8). Source only: building stays `ext sync`'s job.
+ * root. Source only: building stays `ext sync`'s job.
  *
  * Safe to call on every start: it writes what is missing, refreshes what it
  * wrote itself and nobody has since touched, and never overwrites an edited
@@ -681,7 +681,7 @@ export async function extSeed(
   }
 }
 
-/** One `<id>: …` line of `nulya ext sync` (DESIGN §7.2). */
+/** One `<id>: …` line of `nulya ext sync`. */
 export interface SyncLine {
   id: string
   /** The version that is (or would be) this draft's, or null when unknown. */
@@ -735,7 +735,7 @@ const empty_report: SyncReport = { lines: [], built: 0, already: 0, failed: 0, n
 
 /**
  * Parse `ext sync` output. The kernel prints one line per draft plus a summary;
- * the shapes are fixed (DESIGN §14) and everything the front end shows about a
+ * the shapes are fixed and everything the front end shows about a
  * draft comes from here, so nothing re-derives a version or a state on its own.
  */
 export function parseSyncReport(text: string): SyncReport {
@@ -801,7 +801,7 @@ export interface SyncOptions {
 }
 
 /**
- * `nulya ext sync` — build every draft in a store root (DESIGN §7.2).
+ * `nulya ext sync` — build every draft in a store root.
  *
  * A non-zero exit means at least one draft did not end up with a version, which
  * is per-draft news rather than a failure of the command, so this returns the
@@ -860,7 +860,7 @@ export async function extPrune(
 
 /**
  * `nulya ext trust` — record, once, that this workspace's store may take part in
- * sessions (DESIGN §9). Only ever called after a person has been shown what the
+ * sessions. Only ever called after a person has been shown what the
  * store holds and pressed the key.
  */
 export async function extTrust(ws: Workspace): Promise<string> {
@@ -871,7 +871,7 @@ export async function extTrust(ws: Workspace): Promise<string> {
 
 /**
  * `nulya ext run <id>@<version> <tool> <json>` — one oneshot extension call
- * (DESIGN §7.3/§14). The version is named rather than implied: a package the
+ *. The version is named rather than implied: a package the
  * front end builds for a job of its own is deliberately never activated, so
  * there is no `current` to fall back on.
  *
@@ -892,7 +892,7 @@ export async function extRun(
 /**
  * The one sentence a failed `ext run` said.
  *
- * On the `plain` wire (DESIGN §7.3) a refusal is the tool's message on its
+ * On the `plain` wire a refusal is the tool's message on its
  * stderr and a non-zero exit, which the CLI prints on ITS stdout as
  * `exit <code>`, a `stderr:` line, then the message (and a `stdout:` section
  * after that when the tool printed something before failing). The framing is
@@ -921,7 +921,7 @@ export interface ExtStoreEntry {
   shadowed: boolean
   /**
    * The `standing` word in the contribution marker: the kernel composes this id
-   * into every fresh session for as long as it has a `current` (DESIGN §5.1).
+   * into every fresh session for as long as it has a `current`.
    *
    * This is the EFFECTIVE state, and it comes from the `current` record the
    * activation wrote after verifying the manifest — not from re-reading `apply`
@@ -949,7 +949,7 @@ function standingMarker(fields: readonly string[]): boolean {
 
 /**
  * `nulya ext list` — every extension directory in every store root, in SEARCH
- * order, with the shadowing already decided (DESIGN §7.2).
+ * order, with the shadowing already decided.
  *
  * Root order and "first active holder wins" are kernel policy. The TUI reads
  * the roots it names rather than re-deriving them from a home directory and a
@@ -992,7 +992,7 @@ export interface SkillEntry {
 
 /**
  * `nulya skill list` — the skills contributed by the extensions ACTIVE across
- * the store roots (DESIGN §14). Not this session's catalog: composition froze
+ * the store roots. Not this session's catalog: composition froze
  * at `session new`, and what a `/name` typed now becomes is a turn in whatever
  * session it lands in, so the store's answer is the right one.
  */
@@ -1143,7 +1143,7 @@ export interface RebindResult {
 
 /**
  * `nulya session rebind <id> [--profile P] [--model ID]` — run the REST of this
- * conversation on another model (DESIGN §3.1 / §9.5, goals/model-rebind.md).
+ * conversation on another model.
  *
  * A deposit, not a write: the identity change is a ledger event and reaches the
  * file through the inbox, drained at the next step boundary by the one writer.
@@ -1186,11 +1186,11 @@ export interface FollowHandle {
 /**
  * `nulya session events <id> --since N --follow` — the observer's source.
  *
- * A session has exactly one writer (DESIGN §3.4). When that writer is somebody
+ * A session has exactly one writer. When that writer is somebody
  * else — a driver script, another TUI, a parent session's shell — this is how we
  * watch: a read-only tail that never opens a write handle and never blocks the
  * writer. The granularity is a ledger event, not a delta: deltas exist only on
- * the driver's own stdout (tui.md §5.6).
+ * the driver's own stdout.
  */
 export function sessionFollow(ws: Workspace, id: string, since = 0): FollowHandle {
   const args = ["session", "events", id, "--follow"]
@@ -1219,12 +1219,12 @@ export function sessionFollow(ws: Workspace, id: string, since = 0): FollowHandl
 /**
  * `nulya ext activate` — a CLI action, not a session event. It moves
  * the store's `current` pointer (physics #5) and therefore changes nothing about
- * the session in front of us: composition froze at `session new` (DESIGN §7.5).
+ * the session in front of us: composition froze at `session new`.
  *
  * `session` names a live session's FILE (relative to the workspace), and it is
  * the one thing here that reaches the running conversation: with `NULYA_SESSION`
  * set the kernel deposits a capability note into that session's inbox when the
- * activation takes effect (DESIGN §5.3), so the model learns at its next step
+ * activation takes effect, so the model learns at its next step
  * boundary that a new version is there to run via `ext run`. Nothing else in
  * this panel gets a note — a pin or a deactivation carries no information this
  * session could act on, since its tool face froze at the start.
@@ -1248,7 +1248,7 @@ export async function extSetCurrent(
 /**
  * `nulya ext deactivate [--user] <id>` — clear the `current` pointer, so the
  * NEXT session composes without this extension's skills and system prompts
- * (DESIGN §7.2). The versions all stay; deactivating is a pointer move like
+ *. The versions all stay; deactivating is a pointer move like
  * every other one here (physics #5).
  *
  * Membership, not pins: an extension can be deactivated while a pin still names
@@ -1264,7 +1264,7 @@ export async function extDeactivate(ws: Workspace, id: string, options: { user?:
   return result.stdout.trim()
 }
 
-// ── remote environment (DESIGN §8.2, goals/remote-env.md §3.9) ─────────────
+// ── remote environment ─────────────
 
 /** `nulya remote check --env <spec> --json`: one round trip, answered by whatever agent is on the other end of that channel. */
 export interface RemoteHello {
@@ -1310,7 +1310,7 @@ export interface RemoteEntry {
 
 /**
  * `nulya remote ls --env <spec> [<path>] --json` — one directory's children on
- * the machine `spec` names, read exactly (DESIGN §8.2): a protocol verb
+ * the machine `spec` names, read exactly: a protocol verb
  * rather than a parsed `ls -1p`, because a file name may contain a newline.
  *
  * Throws on refusal, same as `remoteCheck` — `state/dirsource.ts`'s
@@ -1339,7 +1339,7 @@ export async function remoteLs(
 /**
  * `nulya ext push <id>@<version> --env <spec>` — copy that built version into
  * the machine `spec` names, content-addressed and idempotent: pushing what is
- * already there is a no-op the kernel itself reports (DESIGN §7.4). The
+ * already there is a no-op the kernel itself reports. The
  * sentence returned is the kernel's own — "already there" or "pushed" or a
  * refusal — because that sentence is what `/ext`'s push action shows, and a
  * second wording here would be a second answer to what the kernel already
@@ -1359,7 +1359,7 @@ export interface StepHandle {
   exited: Promise<number>
   /** Anything the step wrote to stderr (a stream write failure, say). */
   stderr: Promise<string>
-  /** Ctrl+C's second press: kill the step process (tui.md §1.2 D6). */
+  /** Ctrl+C's second press: kill the step process. */
   kill(): void
 }
 
@@ -1367,14 +1367,14 @@ export interface StepOptions {
   maxSteps?: number
   /**
    * Reasoning effort for this run (`--effort`). A generation option, not part
-   * of the frozen identity (DESIGN §3): omitted means the profile / catalog
+   * of the frozen identity: omitted means the profile / catalog
    * default the kernel resolves itself.
    */
   effort?: string
   /** Extra environment for the child, e.g. NULYA_SCRIPTED_MODE in tests. */
   env?: Record<string, string>
   /**
-   * Answer the kernel's per-call gate (`--gate`, DESIGN §14). Given, the step
+   * Answer the kernel's per-call gate (`--gate`). Given, the step
    * runs gated: every tool call is offered here first and only runs on `allow`.
    * The kernel is blocked on our answer while this promise is pending, which is
    * exactly the point — the model's connection is already closed, so a person
@@ -1389,7 +1389,7 @@ export interface StepOptions {
 
 /**
  * What the kernel offers for approval: one call as the model wrote it, plus
- * what this session FROZE about the tool it names (DESIGN §4).
+ * what this session FROZE about the tool it names.
  */
 export interface GateRequest {
   call_id: string
@@ -1440,7 +1440,7 @@ function gateRequestOf(line: StreamLine): GateRequest | null {
 
 /**
  * `nulya session step <id> --stream`. The TUI owns this subprocess, so its
- * stdout is the live source for the whole step (tui.md §1.2 D2); the session
+ * stdout is the live source for the whole step; the session
  * file stays the durable truth and both agree by construction — the ledger
  * lines in this stream are the very lines the kernel appended.
  */

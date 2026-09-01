@@ -17,11 +17,11 @@ import type { ThinkingDefault } from "../state/settings.ts"
 
 /**
  * The transcript: a sticky-bottom scrollbox, no borders, content capped at
- * `max_width` and left aligned (tui.md §1.2 D1/D9, §6). Cards are keyed by the
+ * `max_width` and left aligned. Cards are keyed by the
  * item key so a streaming turn updates in place instead of being rebuilt.
  *
  * The composition card leads because it is the frame everything else happened
- * inside (tui.md §5.1); it comes from the header, which is not an event, so it
+ * inside; it comes from the header, which is not an event, so it
  * sits outside the item list rather than being faked into it.
  */
 /**
@@ -29,7 +29,7 @@ import type { ThinkingDefault } from "../state/settings.ts"
  * children, but every mounted card still costs layout on every frame, so a
  * 5k-event session would pay for 5000 boxes to draw one screenful. The ledger
  * file keeps the whole history either way, and `history_window = 0` mounts all
- * of it (tui.md §11, T4).
+ * of it.
  */
 export function windowItems(items: readonly TranscriptItem[], window: number): TranscriptItem[] {
   if (window <= 0 || items.length <= window) return items as TranscriptItem[]
@@ -37,7 +37,7 @@ export function windowItems(items: readonly TranscriptItem[], window: number): T
 }
 
 /**
- * What is on screen at all (T43). `thinking = "hidden"` — the default — is not
+ * What is on screen at all. `thinking = "hidden"` — the default — is not
  * "draw an empty card": an item that draws nothing still takes its place in the
  * rhythm, and it would leave the blank row `gapBefore` puts in front of it. So
  * the item leaves the LIST, and everything downstream — the gaps, the browse
@@ -51,7 +51,7 @@ export function visibleItems(items: readonly TranscriptItem[], thinking: Thinkin
 
 /**
  * Blank rows before an item — the transcript's whole vertical rhythm, in one
- * pure function (T26).
+ * pure function.
  *
  * A turn is not a list of events, it is a handful of BEATS: the person says
  * something, the model thinks and answers, the model does a run of things, the
@@ -62,11 +62,11 @@ export function visibleItems(items: readonly TranscriptItem[], thinking: Thinkin
  * all.
  *
  * Thinking used to be welded to the answer under it — same beat, no gap. On
- * screen that was two CARDS with nothing between them (T43): a head line with
+ * screen that was two CARDS with nothing between them: a head line with
  * its own glyph and fold marker, and then a markdown body starting on the very
  * next row. "Belongs to" is already said by the order and by the dim; a beat
  * boundary is what a blank row means everywhere else on this screen, and
- * thinking is one. When it is hidden — the default since T43 — there is no
+ * thinking is one. When it is hidden — the default — there is no
  * second card and nothing to separate.
  */
 export function gapBefore(previous: TranscriptItem | undefined, item: TranscriptItem): number {
@@ -82,7 +82,7 @@ export function gapBefore(previous: TranscriptItem | undefined, item: Transcript
 
 /**
  * ITEMS → ROWS, the whole projection: what is on screen, how much of it is
- * mounted, and which calls have been gathered into a run (T43).
+ * mounted, and which calls have been gathered into a run.
  *
  * One implementation, two callers — the transcript draws these rows and browse
  * mode walks them. Two would be two answers to "is that call on screen", and
@@ -106,7 +106,7 @@ export function transcriptRows(
   }
   // This runs ABOVE the per-row ErrorBoundary, so a throw here takes the whole
   // screen rather than one card — that is how a single malformed tool result
-  // froze the transcript mid-turn (BUGS.md #22). Degrade to ungrouped rows and
+  // froze the transcript mid-turn. Degrade to ungrouped rows and
   // let each card's own fence deal with it.
   try {
     return groupRuns(shown, folds, style.settings.transcript.run_summary)
@@ -149,7 +149,7 @@ export function capabilityPreviousVersions(
 /**
  * How far the scrollbox is from the live end, in rows. Zero means the newest
  * card is on screen; anything else is "somebody is reading back", which is the
- * one thing the status bar has to say differently (tui.md §4.5).
+ * one thing the status bar has to say differently.
  */
 export function rowsBelow(box: ScrollBoxRenderable | null): number {
   if (!box) return 0
@@ -163,7 +163,7 @@ export function Transcript(props: {
   contributions?: Contributions[]
   /** The one tool card whose sweep remains alive until this run settles. */
   highlightedCallId?: string | null
-  /** On a tab with no session yet: what the first message will freeze (T22). */
+  /** On a tab with no session yet: what the first message will freeze. */
   plan?: NextSession
   /**
    * The driver's last failure, verbatim (`SessionSnapshot.error`). Drawn after
@@ -178,7 +178,7 @@ export function Transcript(props: {
   cwd?: string
   /** Clicking the `cwd` row opens the directory browser (§5.3b). */
   onPickCwd?: () => void
-  /** Where a `shell` command would run — the welcome screen's second half (T93). */
+  /** Where a `shell` command would run — the welcome screen's second half. */
   shell?: string
   /** Clicking the `shell` row opens the exec-target picker. */
   onPickEnv?: () => void
@@ -188,13 +188,13 @@ export function Transcript(props: {
   onOpenSession?: (id: string) => void
   /** A `/command` on the welcome screen was clicked: run it as if typed. */
   onCommand?: (command: string) => void
-  /** This launch's tip for the opening screen (T38), chosen once by `App`. */
+  /** This launch's tip for the opening screen, chosen once by `App`. */
   tip?: string
   /** Handed to `App` so PgUp/PgDn and the "more below" hint have something to act on. */
   ref?: (box: ScrollBoxRenderable) => void
 }) {
   /**
-   * THE TRANSCRIPT DOES NOT TAKE THE KEYBOARD (T70).
+   * THE TRANSCRIPT DOES NOT TAKE THE KEYBOARD.
    *
    * `ScrollBoxRenderable` sets `focusable = true` on itself, and OpenTUI's
    * `autoFocus` walks up from whatever a mouse-down hit to the first focusable
@@ -224,7 +224,7 @@ export function Transcript(props: {
   const shown = () => windowItems(drawable(), style.historyWindow)
   const hidden = () => drawable().length - shown().length
   /**
-   * Memoised, and that is load-bearing (T43): the row list is read once per row
+   * Memoised, and that is load-bearing: the row list is read once per row
    * to find the row BEFORE it, so recomputing it inside the loop is quadratic —
    * and each pass parses every call's arguments to decide which card it is. On
    * a 5k-event session the un-memoised version cost 2.2 s for the first frame.
@@ -245,7 +245,7 @@ export function Transcript(props: {
       verticalScrollbarOptions={{
         trackOptions: { foregroundColor: style.theme.hairline, backgroundColor: "transparent" },
       }}
-      // No `maxWidth` here, and that is load-bearing (T96). It used to carry
+      // No `maxWidth` here, and that is load-bearing. It used to carry
       // `style.maxWidth`, meaning to cap the transcript at `transcript.max_width`
       // — which it never did (every card already cuts itself to
       // `min(screen, max_width)`, because this front end cuts its own text
@@ -256,7 +256,7 @@ export function Transcript(props: {
       contentOptions={{ flexDirection: "column", width: "100%", paddingRight: 1 }}
     >
       {/* Only a session that has started has a frozen composition to report; a
-          draft's is still a decision and belongs on the welcome screen (T24). */}
+          draft's is still a decision and belongs on the welcome screen. */}
       <Show when={props.header}>
         <CompositionCard
           header={props.header ?? null}
@@ -275,7 +275,7 @@ export function Transcript(props: {
       {/* An empty session is the one screen with nothing to report; it says
           what this session is and what to do, rather than a blank rectangle.
 
-          Only where there is a composer under it (T72). The welcome screen is
+          Only where there is a composer under it. The welcome screen is
           the composer's invitation — slash commands to run, a directory to
           change, a tip about a key — and a read-only pane watching somebody
           else's delegation can act on none of it. `onCommand` is exactly the
@@ -304,7 +304,7 @@ export function Transcript(props: {
           >
             {/* One boundary per row: a card that cannot draw becomes one line
                 that says so, not a poisoned reactive graph and a frozen
-                screen. Four freezes in a day earned this fence (BUGS.md #17)
+                screen. Four freezes in a day earned this fence
                 — the last one died rendering the ERROR notice. */}
             <ErrorBoundary
               fallback={(error: unknown) => (

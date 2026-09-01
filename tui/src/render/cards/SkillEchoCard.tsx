@@ -5,7 +5,7 @@ import type { SkillEcho } from "../../skills.ts"
 import type { UserItem } from "../../state/session.ts"
 
 /**
- * A `/name` that loaded a skill (`skills.ts`, tui.md §11, T15).
+ * A `/name` that loaded a skill (`skills.ts`).
  *
  * Like compaction's two turns, this is an ordinary `user_text` event — the
  * kernel has no skill-turn concept and is not getting one — so the card is a

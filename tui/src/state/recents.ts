@@ -7,8 +7,8 @@
  * fact ABOUT several workspaces, and `tui-state.json` is a workspace-layer
  * file in every other respect — a project's remembered pins, its sidebar, its
  * mode. The kernel made the same call for the same reason (`trusted-stores.jsonl`
- * is user-layer because a checkout must not be able to sign for itself,
- * DESIGN §9); here it is duller but structurally identical: a list of other
+ * is user-layer because a checkout must not be able to sign for itself);
+ * here it is duller but structurally identical: a list of other
  * directories cannot live inside one of them.
  *
  * Written when a SESSION IS SUCCESSFULLY CREATED, never when a directory is

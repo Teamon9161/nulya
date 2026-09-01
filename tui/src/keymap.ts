@@ -1,8 +1,8 @@
 /**
  * Key bindings, as strings like `ctrl+w` / `escape`. Defaults live here;
- * `tui.toml`'s `[keys]` table overrides individual actions (tui.md §7).
+ * `tui.toml`'s `[keys]` table overrides individual actions.
  *
- * Folding is not in this table (T38). A card opens and closes by clicking its
+ * Folding is not in this table. A card opens and closes by clicking its
  * head line, and from browse mode with `Enter` / `Space` — two ways already,
  * both of which say what they act on. `ctrl+o` was a third that acted on
  * whichever card happened to be last, and `ctrl+shift+o` opened all of them at
@@ -41,14 +41,14 @@ export const default_keys: Record<Action, string> = {
   ext: "f2",
   sessions: "f3",
   model: "f5",
-  // The other half of the model question (tui.md §11, T21). Next to F5 because
+  // The other half of the model question. Next to F5 because
   // the two are read together: what runs, and what could serve it.
   provider: "f6",
-  // The background tasks (tui.md §5.9). After the two model keys because it is
+  // The background tasks. After the two model keys because it is
   // read the same way they are: something the screen can tell you about the
   // session without you having to ask the model.
   tasks: "f7",
-  // The sessions sidebar (T69). In the F-row because it belongs to the same
+  // The sessions sidebar. In the F-row because it belongs to the same
   // family — "show me this" — and, more to the point, because it is the only
   // family that steals nothing: `ctrl+b` is the sidebar key everywhere else,
   // but the composer's textarea already binds it to move-left, and this layer
@@ -62,7 +62,7 @@ export const default_keys: Record<Action, string> = {
   // (the `closeTab` precedent: claim a key only while it means something).
   focusLeft: "ctrl+left",
   focusRight: "ctrl+right",
-  // The other axis, which S1d made reachable rather than theoretical (T72): a
+  // The other axis, which S1d made reachable rather than theoretical: a
   // sub-agent pane splits sideways on a wide terminal and STACKS on a narrow
   // one, so on the terminals where the keyboard is most needed the neighbour
   // is above or below. Same layer, same rule — the four of them are claimed
@@ -75,11 +75,11 @@ export const default_keys: Record<Action, string> = {
   scrollDown: "pagedown",
   // Back to the live end of the transcript, wherever reading left off.
   scrollEnd: "shift+end",
-  // Interrupt-and-deliver (agent-runner ar-t1, tui.md §4.4b/§5): kill the step
-  // this tab is driving and re-step at once, instead of waiting for it to
-  // reach its own next boundary. Ctrl+J cannot be used here: on terminals that
-  // do not report modifiers it is the same byte as the composer's newline
-  // fallback, so Shift+Enter would become Send whenever a step was running.
+  // Interrupt-and-deliver: kill the step this tab is driving and re-step at
+  // once, instead of waiting for it to reach its own next boundary. Ctrl+J
+  // cannot be used here: on terminals that do not report modifiers it is the
+  // same byte as the composer's newline fallback, so Shift+Enter would
+  // become Send whenever a step was running.
   interrupt: "ctrl+g",
 }
 

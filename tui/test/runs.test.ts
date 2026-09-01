@@ -1,5 +1,5 @@
 /**
- * Run summaries (T43, `render/runs.ts`).
+ * Run summaries (`render/runs.ts`).
  *
  * The rules are all in one pure function, so this is where they are pinned:
  * what disappears into a summary line, and — the half that actually matters —
@@ -117,7 +117,7 @@ test("a run says which tools it was, in the order they first appeared", () => {
 
 test("a call the grouping cannot read costs the run summary, not the screen", () => {
   // The projection runs above the per-row ErrorBoundary, so it has to be total
-  // (BUGS.md #22): a ledger from before the kernel fix holds an `output` that
+  //: a ledger from before the kernel fix holds an `output` that
   // is not a string, and every fold rule does string work on it.
   const items = [
     call({ key: "a", tool: "shell", args: '{"command":"ls"}', output: "fine\n[exit 0]" }),

@@ -1,5 +1,5 @@
 /**
- * The first screen of an empty session (tui.md §4.1).
+ * The first screen of an empty session.
  *
  * A session with no events has nothing to show, and a blank rectangle above a
  * blank composer is the moment a person decides a tool is unfinished. So the
@@ -9,9 +9,9 @@
  * a panel.
  *
  * It is not a card: nothing here came from the ledger, and giving it a card
- * frame would put something in the transcript that no event backs. Since T24 it
- * also carries what the NEXT session will freeze, which used to be a composition
- * card in the future tense above it (T22). Two reasons it moved here:
+ * frame would put something in the transcript that no event backs. It
+ * also carries what the NEXT session will freeze. Two reasons it lives here
+ * rather than on a composition card of its own:
  *
  *  - the MODEL was on that card and is also under the composer, three rows
  *    down, where the eye already is while typing. One fact, one place — and the
@@ -35,7 +35,7 @@ import { fit, wrapWords } from "./columns.ts"
 
 /**
  * What the NEXT session will be told, on a tab that has not started one
- * (tui.md §11, T22/T24). It is not a header and it is not frozen — that is the
+ *. It is not a header and it is not frozen — that is the
  * point of showing it: everything on it is still a decision, and `/model`,
  * `/ext` and `/with` are the three that move it.
  *
@@ -50,7 +50,7 @@ export interface NextSession {
 }
 
 /**
- * One of these shows per launch, picked at random (T38, tcode's `TIPS`).
+ * One of these shows per launch, picked at random (tcode's `TIPS`).
  *
  * This is where a keyboard hint belongs. The row under the composer used to
  * carry `Esc cancel · Ctrl+O fold · /help` at all times, which is the worst of
@@ -62,7 +62,7 @@ export interface NextSession {
  * than no tip, because it is the one line a newcomer believes.
  *
  * Built from the glyph set rather than written out, because one of them names a
- * glyph (T70) and this front end has a byte-for-byte ascii fallback for every
+ * glyph and this front end has a byte-for-byte ascii fallback for every
  * one of those (§6.3). A tip that printed `◧` on a terminal that draws `[` would
  * be pointing at a control that is not there.
  */
@@ -90,8 +90,7 @@ function tipsOf(glyphs: Glyphs): string[] {
     // The route that needs no key at all, and therefore the one that works on
     // the terminals where the tip above cannot help.
     "paste or drag the path of a .png or .jpg and the picture goes in, not the path",
-    // Three ways into one pane, in one line, because the report that prompted
-    // T70 was "I never found the sidebar at all". The handle is named as well
+    // Three ways into one pane, in one line. The handle is named as well
     // as pointed at: it is the only one of the three that can be seen without
     // already knowing it is there, and the only one that needs teaching.
     `/sidebar or F8 docks the session list down the left edge · so does the ${glyphs.sidebar} at the start of the line below`,
@@ -115,7 +114,7 @@ export function pickTip(glyphs: Glyphs, random: () => number = Math.random): str
 const openings: Array<[string, string]> = [
   ["/model", "pick what the next session runs on"],
   ["/provider", "endpoints and their keys · add a compatible one"],
-  // Two ways into one list, on the row that is about that list (T70). The rail
+  // Two ways into one list, on the row that is about that list. The rail
   // does not get a row of its own: it would be the same content twice on a
   // screen whose whole job is to be short, and this is the row a person reads
   // when they are looking for their other conversations anyway.
@@ -150,11 +149,11 @@ export function Welcome(props: {
    */
   onPickCwd?: () => void
   /**
-   * Where this session's `shell` commands would run (DESIGN §8.1) — always a
+   * Where this session's `shell` commands would run — always a
    * value, `this machine` included, because on THIS screen that is a decision
    * and not a fact. The status line under it is the opposite case and stays
    * silent about the ordinary answer: there the target is frozen, and a chip
-   * that always said the same thing would not be information (T35).
+   * that always said the same thing would not be information.
    *
    * It is the second half of the pair the `cwd` row starts: where the files
    * are, and where the commands go. A click opens the picker, exactly as the
@@ -179,7 +178,7 @@ export function Welcome(props: {
 
   /**
    * The face the next session would carry. The one builtin is always there and
-   * always first (DESIGN §5.1/§5.2); the pinned ones are the interesting half,
+   * always first; the pinned ones are the interesting half,
    * so only those carry the ⚡. A pin is a stable id (`ext:<ext>/<tool>`) and
    * the tool NAME is what the model calls, so that is what is drawn.
    */
@@ -309,7 +308,7 @@ export function Welcome(props: {
       </For>
       <box height={1} />
       {/* One key or command a launch, where a hint can be read once instead of
-          living forever on the status line (T38). */}
+          living forever on the status line. */}
       <box flexDirection="row" width="100%">
         <text fg={style.theme.accent.evolve} flexShrink={0}>
           {`${style.glyphs.tip} `}

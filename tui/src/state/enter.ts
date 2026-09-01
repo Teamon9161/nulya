@@ -1,12 +1,10 @@
 /**
- * Walking into a workspace: the start-up flow's state machine, without a screen
- * (goals/tui-shell.md §5.3b point 6, tui.md §11 T71).
+ * Walking into a workspace: the start-up flow's state machine, without a screen.
  *
- * S1c moved the checkout questions — the workspace extension store's trust
- * question (DESIGN §9) and the `.nulya/agents` one (tui.md §5.10) — out of
- * `main.tsx`, which ran them once per launch on a bare terminal, and into the
- * screen, which runs them once per DIRECTORY as tabs walk into them. That move
- * turned a sequence into a set of concurrent flows, and the three facts a
+ * The checkout questions — the workspace extension store's trust
+ * question and the `.nulya/agents` one — run once per DIRECTORY, as tabs walk
+ * into them, rather than once per launch: several tabs can be walking into
+ * different directories at once, and the three facts a
  * concurrent version needs are the three things in this file:
  *
  *  - a directory's answer has a `pending` (there is no answer YET, because the

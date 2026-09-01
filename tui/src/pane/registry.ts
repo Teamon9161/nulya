@@ -1,8 +1,8 @@
 /**
- * The surface registry: what a pane can be shown (goals/tui-shell.md §5.1).
+ * The surface registry: what a pane can be shown.
  *
  * A SURFACE is one whole screen's worth of content with an owner — the
- * transcript, `/ext`, `/sessions`, and later a package's own T2 face. The host
+ * transcript, `/ext`, `/sessions`, and later a package's own contributed face. The host
  * mounts panes THROUGH this table rather than through a hardcoded switch, which
  * is what makes §5.1's promise checkable: the built-in screens are the first
  * consumers of the same API a package will use, so the API cannot quietly be
@@ -23,7 +23,7 @@
  *    packages, which cannot install a global listener, will use it.
  *
  * Name collisions follow the store-roots rule used everywhere else in this
- * repository (goals/tui-shell.md §3.3): FIRST HOLDER WINS and the loser is
+ * repository: FIRST HOLDER WINS and the loser is
  * reported rather than silently dropped. The host registers first, so no
  * package can take `host:*` out from under a screen a person has to trust.
  */
@@ -59,7 +59,7 @@ export interface SurfaceDefinition<R> {
    * How chrome names this surface when it has to — a pane title, a picker row.
    * Not drawn anywhere in S1a: with one pane there is nothing to disambiguate,
    * and a title bar over a single pane is a row of pixels saying what the
-   * screen already says (tui.md §6.1 rule 4).
+   * screen already says.
    */
   readonly title: string
   readonly owner: SurfaceOwner

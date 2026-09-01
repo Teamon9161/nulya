@@ -1,5 +1,5 @@
 /**
- * One tab, one directory (goals/tui-shell.md §5.3b, tui.md §11 T71).
+ * One tab, one directory.
  *
  * Two halves, and they are two halves on purpose. The MODEL half needs no
  * terminal and no binary: which rows a directory browser draws at a given path,
@@ -59,7 +59,7 @@ test("the home workspace is one directory below the user layer, and NULYA_HOME m
   const home = homeWorkspaceDir(env)
   // One directory DOWN, never `~/.nulya` itself: collapsing the user layer onto
   // a workspace store is what would make the kernel's trust gate refuse to open
-  // a session at all (DESIGN §9).
+  // a session at all.
   expect(home).toBe(join(sep, "somewhere", ".nulya", "home"))
   expect(home).not.toBe(env.NULYA_HOME)
   expect(isHomeWorkspaceDir(home, env)).toBe(true)
@@ -400,8 +400,7 @@ test("the directory browser draws its sections at 80 and at 120", async () => {
         // The temp paths differ on every run and on every machine, so they are
         // masked before the frame is kept — PADDED to the same number of
         // columns, because a snapshot is here to pin the layout and a mask
-        // that shortened a line would pin a layout nobody ever saw. (T69's
-        // stopped clock, one kind of moving target further.)
+        // that shortened a line would pin a layout nobody ever saw.
         const frame = mask(mask(raw, box, "<dir>"), elsewhere, "<elsewhere>")
         expect(frame).toMatchSnapshot(`browser-${width}`)
       } finally {
@@ -705,7 +704,7 @@ test("a new tab starts in the directory the front tab works in", async () => {
     setup.mockInput.pressEnter()
     await settle(setup, 4)
     // A draft is re-pointed rather than duplicated, so this tab has to become a
-    // session before `+` has a second tab to open (T22).
+    // session before `+` has a second tab to open.
     await setup.mockInput.typeText("hello")
     setup.mockInput.pressEnter()
     await until(() => (loadTuiState(state).tabs ?? [])[0]?.session !== undefined, 40_000)
@@ -771,7 +770,7 @@ test("a remembered tab in another directory comes back beside the launch tab", a
     // DIRECTORY — which is the half a session id alone could never restore.
     await until(() => (loadTuiState(state).tabs ?? []).length === 2, 30_000)
     expect(loadTuiState(state).tabs).toEqual([{ ws: here.dir }, { ws: there.dir, session: id }])
-    // …and the strip is drawn, which it is not for a single tab (T22).
+    // …and the strip is drawn, which it is not for a single tab.
     expect(await settle(setup, 3)).toContain("✕")
   } finally {
     setup.renderer.destroy()
@@ -857,7 +856,7 @@ test("a remembered tab whose session is gone is skipped, not opened into an erro
   try {
     const frame = await settle(setup, 5)
     expect(frame).not.toContain("s-000000000000")
-    // One tab, so the strip is not drawn at all (T22).
+    // One tab, so the strip is not drawn at all.
     expect(loadTuiState(state).tabs).toHaveLength(1)
   } finally {
     setup.renderer.destroy()

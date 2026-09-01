@@ -1,5 +1,5 @@
 /**
- * Skills as slash commands (tui.md §11, T15).
+ * Skills as slash commands.
  *
  * The sentinel round-trip is tcode's `wrap_and_parse_skill_echo_round_trips_
  * through_special_characters` and `ordinary_user_text_is_not_mistaken_for_a_

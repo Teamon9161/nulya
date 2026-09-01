@@ -1,6 +1,6 @@
 /**
- * The shapes the kernel writes: session header (DESIGN §3.4) and the six
- * ledger event kinds (DESIGN §3.1). Nothing outside `src/nulya/` names these
+ * The shapes the kernel writes: session header and the six
+ * ledger event kinds. Nothing outside `src/nulya/` names these
  * fields — everything above consumes the parsed values.
  */
 
@@ -10,7 +10,7 @@ export interface ParentRef {
 }
 
 /**
- * What one step cost (`ledger.Usage`, DESIGN §3.1). The kernel records it on the
+ * What one step cost (`ledger.Usage`). The kernel records it on the
  * assistant event and reports the same four numbers on the stream; a step whose
  * provider said nothing carries none at all, which is why every reader must
  * treat it as absent rather than zero.
@@ -28,8 +28,8 @@ export interface ExtensionRef {
 }
 
 /**
- * One system prompt frozen into the header BY VALUE (`session new --prompt`,
- * DESIGN §3): text whose only life is this session's, so it lives in this file
+ * One system prompt frozen into the header BY VALUE (`session new --prompt`):
+ * text whose only life is this session's, so it lives in this file
  * rather than in an extension version that could be pruned away. `source` is an
  * opaque label — the kernel carries it and never reads it.
  */
@@ -60,7 +60,7 @@ export interface SessionHeader {
   model: string
   model_identity: ModelDescriptor
   /**
-   * WHERE this session's `shell` commands run (DESIGN §8.1): `""` for this
+   * WHERE this session's `shell` commands run: `""` for this
    * host, else `wsl` or `wsl:<distro>`, or a `remote:…` spec (§8.2) that moves
    * the whole workspace rather than just the command. Frozen at
    * `session new --env`, so it is a property of the session and not of whoever
@@ -69,7 +69,7 @@ export interface SessionHeader {
   environment: string
   /**
    * The remote workspace's absolute path, when `environment` names a `remote:`
-   * target (goals/remote-env.md §3.3): the directory this session's `shell`,
+   * target: the directory this session's `shell`,
    * `std` and any other workspace-reading tool run against on that machine.
    * Empty for every other `environment` value, and for any header written
    * before this field existed.
@@ -116,7 +116,7 @@ export type LedgerEvent =
   | { seq: number; origin?: string; kind: "tool_results"; results: ToolResultEntry[] }
   | { seq: number; origin?: string; kind: "capability_note"; id: string; version: string; text: string }
   /**
-   * A background task this session started has ended (DESIGN §3.1 / §6.1). Same
+   * A background task this session started has ended. Same
    * genre as `capability_note`: a fact about the world that reached the ledger
    * through the inbox rather than through a turn, so it carries its own
    * structured columns and the `text` the model actually reads. `task` is the
@@ -125,8 +125,8 @@ export type LedgerEvent =
    */
   | { seq: number; origin?: string; kind: "task_finished"; task: string; exit_code: number; text: string }
   /**
-   * From here on this conversation runs on a different model (DESIGN §3.1,
-   * goals/model-rebind.md). The ONLY event that is not a turn: the model never
+   * From here on this conversation runs on a different model. The ONLY event
+   * that is not a turn: the model never
    * sees it, and what it changes is which reasoning items may still be replayed.
    *
    * `identity` is the RESOLVED descriptor, frozen exactly the way the header's
@@ -260,7 +260,7 @@ export function cancelMarkerOf(output: string): CancelMarker | null {
  * The note body is generated deterministically by `extension/notes.zig` — a
  * `Tools:` section and a `Skills:` section, one `- <name> — <description>` per
  * entry. Pulling the names up into the banner's head line is the whole point of
- * the card (tui.md §4.2): "the agent can now do X" should not need unfolding.
+ * the card: "the agent can now do X" should not need unfolding.
  * A note in a shape this build does not know simply yields no names, and the
  * full text is shown underneath either way.
  */
@@ -288,7 +288,7 @@ export function capabilitySummary(text: string): { tools: string[]; skills: stri
   return { tools, skills }
 }
 
-// --- background tasks (DESIGN §6.1) -----------------------------------------
+// --- background tasks -----------------------------------------
 
 /**
  * The receipt `shell {background: true}` returns instead of an exit code: which
@@ -296,7 +296,7 @@ export function capabilitySummary(text: string): { tools: string[]; skills: stri
  *
  * Recognised by its text, exactly as `[exit N]` is: the ledger records a shell
  * result as one string either way, and replay must draw the same card as the
- * live stream did (tui.md §3). The command can contain newlines, so it runs to
+ * live stream did. The command can contain newlines, so it runs to
  * the `log:` line rather than to the first one.
  */
 export interface BackgroundStart {
@@ -331,7 +331,7 @@ export function backgroundStartOf(output: string): BackgroundStart | null {
 const delegation_started = /running as background task (\S+)/
 
 /**
- * WHICH TASK a completed call started, whoever printed the receipt (T43).
+ * WHICH TASK a completed call started, whoever printed the receipt.
  *
  * Two packages start background tasks and each says so its own way; what the
  * screen needs is the one fact both receipts carry, because the `task_finished`

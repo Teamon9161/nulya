@@ -1,6 +1,6 @@
 /**
  * Per-card fold overrides. The DEFAULT for a card comes from `tui.toml`
- * (tui.md §7); this store only remembers what the user has since toggled, keyed
+ *; this store only remembers what the user has since toggled, keyed
  * by the card's stable key. Nothing here is session truth — it is view state,
  * and it is allowed to be forgotten when the process exits.
  */

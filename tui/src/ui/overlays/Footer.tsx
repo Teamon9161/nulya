@@ -1,5 +1,5 @@
 /**
- * The one line at the bottom of every overlay (tui.md §11, T18).
+ * The one line at the bottom of every overlay.
  *
  * It used to be two or three full sentences of key list, permanently. Three
  * rows of the same dim grey under every panel is both the largest single block

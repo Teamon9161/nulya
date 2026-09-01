@@ -23,7 +23,7 @@ import type { PackageCommandTable } from "../src/packageCommands.ts"
 const style = createStyle(default_settings, {})
 
 test("the box is as tall as what is in it", async () => {
-  // The count behind the growing composer (T26). CJK is two columns wide, so a
+  // The count behind the growing composer. CJK is two columns wide, so a
   // line of it wraps at half the characters — the reason this counts display
   // width rather than `text.length`.
   expect(wrappedRows("", 40)).toBe(1)
@@ -648,11 +648,10 @@ test("a pasted image PATH is the picture; a path to anything else is still text"
 
 
 /**
- * The pending-placeholder fix (tui.md §11 T101, an external review point):
  * `readImage` here is DELAYED on purpose, so the test can move the cursor
- * and keep typing while the disk read is still in flight — exactly the race
- * that used to land `[Image #1]` wherever the cursor happened to be when the
- * promise settled, rather than where the paste gesture actually happened.
+ * and keep typing while the disk read is still in flight — pinning against
+ * the race where `[Image #1]` lands wherever the cursor happens to be when
+ * the promise settles, rather than where the paste gesture actually happened.
  */
 test("an async paste settles at the spot it was pasted, not wherever the cursor ended up while it was in flight", async () => {
   const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])
@@ -711,12 +710,11 @@ test("an async paste settles at the spot it was pasted, not wherever the cursor 
 }, 60_000)
 
 /**
- * The pending-token submit gate (tui.md §11 T105, an external review point
- * on T103): the fix above claims a spot synchronously and settles it later,
- * but nothing used to stop Enter from firing while the spot was still
- * unclaimed — a fast `Ctrl+V` then Enter mailed the literal
- * `[Pasting… #N]` brackets to the model, and by the time the read answered
- * the box was already cleared with nowhere left for the marker to resolve
+ * The pending-token submit gate: the fix above claims a spot synchronously
+ * and settles it later, so Enter must be refused while the spot is still
+ * unclaimed — otherwise a fast `Ctrl+V` then Enter mails the literal
+ * `[Pasting… #N]` brackets to the model, and by the time the read answers
+ * the box is already cleared with nowhere left for the marker to resolve
  * into. `readImage` here is gated on a promise this test resolves by hand,
  * so the race is exact rather than a hope pinned on a `setTimeout`.
  */
@@ -887,10 +885,10 @@ test("an image the model is not catalogued for is refused on the gesture", async
 }, 60_000)
 
 test("the accent lands on the token, not on the wide characters in front of it", async () => {
-  // BUGS #13. Both scanners answer in code points and the renderer counts
-  // display columns, so a CJK prompt in front of a placeholder pulled every
-  // highlight left by one column per character — the accent landed on the
-  // prose and the token it named stayed plain.
+  // Both scanners answer in code points and the renderer counts
+  // display columns, so a CJK prompt in front of a placeholder would pull every
+  // highlight left by one column per character — the accent landing on the
+  // prose while the token it named stays plain.
   const index: ProjectIndex = {
     candidates: () => [{ path: "README.md", kind: "file" }],
     touch: () => {},

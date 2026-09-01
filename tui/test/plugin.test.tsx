@@ -9,12 +9,12 @@
  *
  * Two fixture packages, built once for the whole file:
  *
- *  - `plugin` (a script extension, DESIGN §7.1) declares one tool
+ *  - `plugin` (a script extension) declares one tool
  *    (`echo`) and one skill (`note`), and three commands — one for each verb
  *    (`with` / `run <tool>` / `skill <ref>`). `activation: "on_request"` is
  *    the realistic shape for a package like this: registering it (building +
  *    activating) makes its commands discoverable without putting it in front
- *    of every session on the machine (DESIGN §7.2.1) — `/with-plugin` is the
+ *    of every session on the machine — `/with-plugin` is the
  *    per-session decision.
  *  - `guard` contributes NOTHING but a policy narrowing (`{"readonly": true}`)
  *    — no tools, no runtime needed at all (`Manifest.validate`'s
@@ -109,7 +109,7 @@ beforeAll(async () => {
     join(plugin_dir, "skills", "note", "SKILL.md"),
     "---\nname: note\ndescription: a note the plugin package offers\n---\nRemember: the plugin package is active.\n",
   )
-  // A local build into an EMPTY workspace store auto-trusts it (DESIGN §9) —
+  // A local build into an EMPTY workspace store auto-trusts it —
   // the same precedent `pins.test.ts`'s `notes` fixture and `extensions.test.ts`
   // rely on, so there is no separate `ext trust` call here.
   plugin_version = await extBuild(ws, ".nulya/extensions/plugin")
@@ -141,7 +141,7 @@ afterAll(() => {
  * on the path a person typing the general form by hand would already reach
  * (goals/tui-plugin.md U2 bullet 1): `with` is `startDraft`'s own `--with`
  * move, `run <tool>` is `ext run` naming the version this package is active
- * AT, `skill <ref>` is T15's `skillTurn` with the declared ref standing in for
+ * AT, `skill <ref>` is `skillTurn` with the declared ref standing in for
  * whatever the person typed.
  */
 test("with, run and skill each land on the path a person typing the general form would reach", async () => {

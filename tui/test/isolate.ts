@@ -7,13 +7,13 @@
  * paths (`state/settings.ts`) resolve the user config dir the same way the
  * kernel does — from `NULYA_HOME`, else the real home. Without this, the
  * developer's `~/.nulya` takes part in every assertion: its extension store
- * (`/ext` listed the seeded `evolution` / `guide` next to the test's `lint` and
- * three tests broke the day the store was seeded — tui.md §11, T21), its
+ * (`/ext` would list the seeded `evolution` / `guide` next to the test's
+ * `lint`), its
  * `config.toml` with real keys, its `tui.toml`, `tui-state.json` and the trust
  * journal. The kernel's e2e made the same move (`NULYA_HOME=<ws>/.nulya-test-home`).
  *
  * `codex`'s credential is a file the kernel reads straight off the host home
- * (`~/.codex/auth.json`, DESIGN §9.5) — `NULYA_HOME` does not touch it. On a
+ * (`~/.codex/auth.json`) — `NULYA_HOME` does not touch it. On a
  * machine where `codex login` has actually run, `nulya config show --json`
  * then reports that profile as runnable, which reorders every list built from
  * "the providers that can run" (`/model`'s picker rows put codex ahead of

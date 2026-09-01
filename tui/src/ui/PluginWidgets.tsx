@@ -8,7 +8,7 @@ import type { PluginWidget } from "../plugins/host.ts"
 /**
  * A plugin's persistent row above the composer (tui-plugin U3,
  * `api.registerWidget`) — the same place the declaration layer's `panel: true`
- * projection sits (T39's `PanelStrip`), and above it, because a package that
+ * projection sits (`PanelStrip`), and above it, because a package that
  * ships CODE has superseded its own JSON: the ceiling covers the floor. `App`
  * drops a `panel: true` row whose package registered a widget, so the two
  * never say the same thing twice.

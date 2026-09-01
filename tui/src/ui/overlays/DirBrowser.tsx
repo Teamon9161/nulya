@@ -58,7 +58,7 @@ export function DirBrowser(props: {
    * Where listings and existence checks come from — this machine's disk by
    * default (`dirsource.ts`'s `localDirSource`), or a channel to another one
    * (`remoteDirSource`) when this browser is choosing a `remote:` `/env`
-   * target's workspace rather than this tab's own directory (T101).
+   * target's workspace rather than this tab's own directory.
    */
   source?: DirSource
   /** The standing first row's target and what it says — `no project` locally; meaningless (and omittable) for a remote source, which has no such answer. */

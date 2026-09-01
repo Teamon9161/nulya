@@ -4,7 +4,7 @@
  *
  *   nulya-tui [--session <id>] [--new] [--profile <p>] [--model <id>] [--effort <e>] [--workspace <dir>]
  *
- * With no arguments NOTHING is created (tui.md §11, T22): the screen opens on a
+ * With no arguments NOTHING is created: the screen opens on a
  * draft, and `session new` runs at the first message. Composition freezes when a
  * session is created (physics #2), so creating one here would decide this tab's
  * tools, pins and model before the person has touched anything — and everything
@@ -12,7 +12,7 @@
  *
  * What the draft will run on is `launch.planLaunch`: the flags, else the last
  * pick made in `/model`, else the kernel's default; and if none of those can
- * actually run here, the picker is the first thing on screen (tui.md §1.2 D8).
+ * actually run here, the picker is the first thing on screen.
  */
 import { render } from "@opentui/solid"
 import { openWorkspace, type Workspace } from "./nulya/bin.ts"
@@ -105,20 +105,18 @@ async function main() {
 
   // Before any session exists, because this is the one thing that can stop one
   // from being created: a store that came with the checkout takes part in no
-  // session until someone has looked at it once (DESIGN §9), and a definition
-  // in `.nulya/agents` is a system prompt a checkout wrote (tui.md §5.10).
+  // session until someone has looked at it once, and a definition
+  // in `.nulya/agents` is a system prompt a checkout wrote.
   // Asked here, in the plain terminal, since the alternate screen has not been
-  // entered yet — and asked as ONE question when both need a look (T2,
-  // ext-review-2 §3b): `planCheckout` is what decides whether that is no
+  // entered yet — and asked as ONE question when both need a look:
+  // `planCheckout` is what decides whether that is no
   // question, one of the two unchanged, or the merged one.
   const { projectStore, agentsTrusted } = await askAboutCheckout(ws, settings.extensions.sync_on_start)
 
-  // The drafts the BINARY ships (`ext seed`, DESIGN §7.8) are NOT asked about
-  // any more (tui.md §11, T23): they arrive in the user store — the person's own
-  // directory — with the binary they just ran, three of them are zig builds, and
-  // the question used to hold a bare terminal for a minute with `installing…` as
-  // the only sign of life. It happens behind the screen now, on the status line,
-  // and `/ext` turns any of it off with one key.
+  // The drafts the BINARY ships (`ext seed`) are NOT asked about
+  // any more: they arrive in the user store — the person's own
+  // directory — with the binary they just ran. It happens behind the screen
+  // now, on the status line, and `/ext` turns any of it off with one key.
 
   // Read once, for two readers: the launch plan below, and the status bar's
   // context gauge (only `context_window` is taken from the catalog).
@@ -139,7 +137,7 @@ async function main() {
     guideOn = plan.guideOn
   }
 
-  // Live, because `/settings` writes `tui.toml` (T100): the object handed down
+  // Live, because `/settings` writes `tui.toml`: the object handed down
   // never changes identity, its fields follow the file, and this is the one
   // place that reads the file chain — the screen asks for a reload, it does not
   // build a Settings of its own.
@@ -188,8 +186,8 @@ async function main() {
 
 /**
  * The one start-up question this checkout might need, before the screen
- * exists (T2, ext-review-2 §3b): the workspace extension store (DESIGN §9)
- * and the agent definitions beside it (tui.md §5.10) merged by `planCheckout`
+ * exists: the workspace extension store
+ * and the agent definitions beside it merged by `planCheckout`
  * — nothing to ask, today's question for whichever one side needs it,
  * unchanged, or the merged three-answer one when both do. This function is
  * the only glue: it gathers the two plans, prints `plan.text`, reads a key

@@ -9,16 +9,16 @@ import type { Role } from "../state/attach.ts"
 import type { PermissionMode } from "../approvals.ts"
 
 /**
- * The one line under the composer (tui.md §4.1, §4.5, §11 T22): a standing
+ * The one line under the composer: a standing
  * description of this session — what it runs on, what its face carries, what
  * it has cost, and how it is being driven.
  *
- * It replaced a header line whose subject was the session id — a string a
- * person never reads and cannot use — and it sits under the input box for the
+ * It sits under the input box rather than in a header keyed to the session
+ * id — a string a person never reads and cannot use — for the
  * same reason tcode's does: the model is the answer to "what am I talking to",
  * which is a question you ask while typing, not while scrolling.
  *
- * What is HAPPENING is not here (T38). It moved to its own line above the
+ * What is HAPPENING is not here. It moved to its own line above the
  * composer (`WorkingStatus`), because an activity and a description are read at
  * different rates: this row is read once and then trusted, and a live fact
  * parked at the end of it had the least room and the least contrast on the
@@ -26,20 +26,20 @@ import type { PermissionMode } from "../approvals.ts"
  * was nothing to say) and the keyboard hints, which are now tips on the opening
  * screen — a reminder shown forever stops being read.
  *
- * The running cost went the same way (T42). A total that changes is a live
+ * The running cost went the same way. A total that changes is a live
  * fact, and it belongs on the line that is only there while something is
  * changing it; standing here it was six columns of arithmetic that nobody was
  * reading between steps, and it pushed the model id — the answer to "what am I
  * talking to" — into being cut first on a narrow terminal. `/usage` still has
  * every number, and the context ring still stands here, because that one is not
  * a total but a proportion: how much of what the next request may carry is
- * already spoken for (T82). It is the one chip that opens a panel rather than a
+ * already spoken for. It is the one chip that opens a panel rather than a
  * picker or a view — `ContextPanel`, the same three rows every other decision
  * on this screen is made in.
  */
 export function StatusBar(props: {
   snapshot: SessionSnapshot
-  /** Who holds the writer lease: us, or somebody else (tui.md §5.6). */
+  /** Who holds the writer lease: us, or somebody else. */
   role: Role
   /**
    * The model this tab talks to: the session's frozen identity, or — on a tab
@@ -50,17 +50,17 @@ export function StatusBar(props: {
   effort?: string
   /** Extension tools on the face beside the builtin (`tools 1+N`). */
   tools: number
-  /** The permission mode this TUI answers the kernel's gate with (tui.md §5.7). */
+  /** The permission mode this TUI answers the kernel's gate with. */
   mode?: PermissionMode
   /**
    * Clicking the mode chip: the mouse half of `/mode`, which opens the picker
-   * (tui.md §11, T31). It used to flip the mode straight from here, which is the
+   *. It used to flip the mode straight from here, which is the
    * one gesture that cannot say what the other side is — so the two words had to
    * be explained in a notice on this very line, every time.
    */
   onPickMode?: () => void
   /**
-   * Packages whose system prompt this tab carries (`--with`, T31). Usually
+   * Packages whose system prompt this tab carries (`--with`). Usually
    * empty; when it is not, it is the fact that decides what the model thinks it
    * is, and nothing else on a started session says it once the composition card
    * is folded.
@@ -70,16 +70,16 @@ export function StatusBar(props: {
   onOpenExt?: () => void
   /**
    * Where this session's `shell` commands run, when that is not this host
-   * (DESIGN §8.1) — the frozen spec on a started session, the pending `/env`
+   * — the frozen spec on a started session, the pending `/env`
    * choice on a draft.
    *
-   * Empty for every session anybody has had until now, and then no column is
-   * taken (T35: what has nothing to say does not occupy a slot). When it is
+   * Empty for a session running on this host, and then no column is
+   * taken: what has nothing to say does not occupy a slot. When it is
    * not empty it is the single fact that changes what every command on the
    * screen actually did, so it is worth the width.
    */
   execEnv?: string
-  /** Clicking it: the mouse half of bare `/env`, which opens the picker (T93). */
+  /** Clicking it: the mouse half of bare `/env`, which opens the picker. */
   onPickEnv?: () => void
   hint?: string
   /** Rows of transcript below the viewport: >0 means somebody is reading back. */
@@ -92,14 +92,14 @@ export function StatusBar(props: {
    * than a made-up denominator.
    */
   contextWindow?: number | null
-  /** Clicking the context ring: the mouse half of `/context` (tui.md §11, T82). */
+  /** Clicking the context ring: the mouse half of `/context`. */
   onOpenContext?: () => void
-  /** Clicking the model: the mouse half of `/model` (tui.md §11, T20). */
+  /** Clicking the model: the mouse half of `/model`. */
   onPickModel?: () => void
   /** Clicking the "N more below" marker: the mouse half of Shift+End. */
   onScrollEnd?: () => void
   /**
-   * The sessions sidebar's handle (T69): the standing, clickable way in and out
+   * The sessions sidebar's handle: the standing, clickable way in and out
    * of it, beside `/sidebar` and its key.
    *
    * It leads the line, in the two columns every list row in this front end
@@ -122,16 +122,16 @@ export function StatusBar(props: {
   /** The mouse half of `/cwd`: open the directory browser. */
   onPickCwd?: () => void
   /**
-   * The mouse half of `/settings` (T92): the standing, clickable way into the
+   * The mouse half of `/settings`: the standing, clickable way into the
    * screen that says what this front end is configured to do and which file
    * said so.
    *
    * It closes the line the way the sidebar handle opens it — host chrome at
    * both ends, this session's own facts in between.
    *
-   * A GLYPH, where the handle needed a word. T70's lesson was not "always
-   * spell it out": it was that `◧` names nothing to somebody who has not met
-   * it, so the pane it opened went undiscovered. A gear is the opposite case —
+   * A GLYPH, where the handle needs a word: `◧` names nothing to somebody
+   * who has not met it, so a pane behind it alone would go undiscovered. A
+   * gear is the opposite case —
    * the one icon a person reads as "settings" without being told — and two
    * columns at the end of a line buy what nine did, on every width instead of
    * only past a hundred.
@@ -168,7 +168,7 @@ export function StatusBar(props: {
    */
   const sidebarHandle = () => Boolean(props.onToggleSidebar) && screen().width >= 60
   /**
-   * …and on a wide terminal it says its own name (T70).
+   * …and on a wide terminal it says its own name.
    *
    * A bare `◧` was two columns of a glyph nobody had met, at the one edge of
    * the screen the eye does not sweep, for a pane that had never been on it —
@@ -186,7 +186,7 @@ export function StatusBar(props: {
    * hit than it is to read — and it is two columns rather than the ` · ` the
    * rest of the line joins with, because this is not one of those chips: it is
    * host chrome sitting ahead of everything a package will ever be allowed to
-   * put here (goals/tui-shell.md §4). Air says "different thing"; a joint would
+   * put here. Air says "different thing"; a joint would
    * say "next thing".
    */
   const sidebar_label_width = 100
@@ -203,8 +203,8 @@ export function StatusBar(props: {
    *
    * The two leading columns are air, not a joint: the chips before it are
    * facts about this session and this is not one of them. A ` · ` would say
-   * "next thing"; a gap says "different thing" (T70's reasoning for the
-   * handle's own trailing gap, at the other end of the same line). The
+   * "next thing"; a gap says "different thing" — the same reasoning behind the
+   * handle's own trailing gap, at the other end of the same line. The
    * trailing column is inside the target for the handle's other reason: a
    * control is easier to hit than it is to read.
    */
@@ -236,7 +236,7 @@ export function StatusBar(props: {
    *
    * It used to appear only past 60%, which made the first sight of it the same
    * event as the warning; now the ring is here from the first priced step and
-   * only its COLOUR is news (T82). Absent still means absent: a model the
+   * only its COLOUR is news. Absent still means absent: a model the
    * `[[models]]` catalog does not name has no denominator, and a session that
    * has not been priced has no numerator (§6.1 rule 4).
    */
@@ -274,7 +274,7 @@ export function StatusBar(props: {
   const behindChip = () =>
     (props.behind ?? 0) > 0 ? ` ${style.glyphs.below} ${props.behind} more below · Shift+End` : ""
   /**
-   * `ask` / `unsafe`, at the head of the line (T35).
+   * `ask` / `unsafe`, at the head of the line.
    *
    * It used to sit at the far right, past the cost and the chips, which is
    * where a line puts the things it is willing to lose. This one is the stance
@@ -314,7 +314,7 @@ export function StatusBar(props: {
   /**
    * Being the writer is the ordinary case and the word `driver` was on this
    * line in every session anybody ever had — a chip that is always the same is
-   * not information (T35). Only the exception says itself. The step count goes
+   * not information. Only the exception says itself. The step count goes
    * the same way before there is a session to count steps of.
    */
   const roleChip = () => {
@@ -347,7 +347,7 @@ export function StatusBar(props: {
     // Cut too, not just measured. A model id is as long as whoever named it
     // made it, and a segment that overflows its row does not stop at the edge —
     // it runs into the chips beside it and both become one unreadable word
-    // (`nasknstep 1`, T27).
+    // (`nasknstep 1`).
     const model = fit(modelText(), Math.max(8, budget - right))
     const room = Math.max(0, budget - displayWidth(model) - right)
     // The word alone — the ` · ` in front of it is drawn outside the clickable
@@ -360,8 +360,8 @@ export function StatusBar(props: {
   })
 
   /**
-   * A notice replaces the ordinary status contents for as long as it is up
-   * (T35), but never the sidebar handle: that control must remain available to
+   * A notice replaces the ordinary status contents for as long as it is up,
+   * but never the sidebar handle: that control must remain available to
    * close the rail while any transient feedback is visible.
    *
    * It used to be one more segment competing for the leftovers, which put the
@@ -472,7 +472,7 @@ export function StatusBar(props: {
             {/* An empty segment is not rendered at all: a `<text>` with nothing
                 in it still takes a column, and two of them side by side is how
                 `tools 1+0  · idle` grew the gap that made this line look
-                mis-aligned once the cost chip learned to be absent (T35). */}
+                mis-aligned once the cost chip learned to be absent. */}
             {/* `tools 1+N` is a count of a thing that has a screen — `/ext`'s
                 tools pane is where each one of those N is switched on and off —
                 so it answers to a click, like the model and the mode beside it.
@@ -528,7 +528,7 @@ export function StatusBar(props: {
             </box>
           ) : null}
           {/* What this session is WEARING — a `--with` package's system prompt, the
-              one thing that changes who the model thinks it is (T31). It opens
+              one thing that changes who the model thinks it is. It opens
               `/ext`, where it is turned on and off. */}
           {wearingChip().length > 0 ? (
             <box
@@ -544,7 +544,7 @@ export function StatusBar(props: {
               </text>
             </box>
           ) : null}
-          {/* Where the commands go, when that is not this machine (DESIGN §8.1).
+          {/* Where the commands go, when that is not this machine.
               A click opens the picker, like every other chip on this line that
               names a decision — and the one it opens is about the NEXT session,
               since a started one froze this in its header. */}

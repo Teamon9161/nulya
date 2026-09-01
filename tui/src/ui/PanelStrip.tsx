@@ -6,7 +6,7 @@ import { renderHintOf, type Contributions } from "../nulya/files.ts"
 import type { ToolItem } from "../state/session.ts"
 
 /**
- * `panel: true` (DESIGN §7.2.1, tui-plugin D12): the degraded progress display
+ * `panel: true`: the degraded progress display
  * a front end with no plugin code can still give — the latest call of a
  * declaring tool, projected above the composer whether or not its own card is
  * still on screen. Sits where §4.4b's activity line does (below it, above the

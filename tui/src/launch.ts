@@ -1,16 +1,16 @@
 /**
- * What to start on, decided before the screen exists (tui.md §1.2 D8).
+ * What to start on, decided before the screen exists.
  *
  * The order is: what the command line names > what the user picked last time
  * (`tui-state.json`) > the kernel's active profile. But a choice is only worth
  * starting on if it can run — a profile with no usable credential would freeze
- * a *scripted* session (DESIGN §3), and a person who asked for DeepSeek and got
+ * a *scripted* session, and a person who asked for DeepSeek and got
  * a canned stand-in has been misled. So each candidate is checked against
  * `nulya config show`, and when nothing implicit can run, the session that is
  * created is the honest offline one AND the screen that can fix it opens on top
  * with the reason: the way out is the first thing on screen. Which screen is
  * `guideOn` — `/model` when something else could have run, `/provider` when
- * nothing can (tui.md §11, T21).
+ * nothing can.
  */
 import type { ConfigView } from "./nulya/cli.ts"
 import type { ModelPick } from "./state/tui_state.ts"
@@ -27,7 +27,7 @@ export interface LaunchPlan {
   /** Set when the plan is not what was asked for: open a screen with this line. */
   guide?: string
   /**
-   * Which screen the guide opens (tui.md §11, T21). A list of models is the
+   * Which screen the guide opens. A list of models is the
    * right first screen only when there are models to list: with no usable
    * provider anywhere, the missing credential IS the problem, so the first
    * thing offered is the screen that fixes it — the same order tcode's first

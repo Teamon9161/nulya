@@ -1,5 +1,5 @@
 /**
- * How full the model's context window is (tui.md §4.5, §11 T82) — the ring on
+ * How full the model's context window is — the ring on
  * the row under the composer, and the sections of the panel it opens.
  *
  * Pure functions, for the same reason `WorkingStatus.activityOf` is one: the
@@ -11,7 +11,7 @@
  * counted for the whole prefix of the most recent step (`state/session.ts`),
  * and the denominator is `context_window` for the id this session froze —
  * from the profile's OWN catalog when it has one, the global `[[models]]`
- * list otherwise (`ModelView.modelParamsFor`, DESIGN §9.5; `App.contextWindow`
+ * list otherwise (`ModelView.modelParamsFor`; `App.contextWindow`
  * resolves it before it ever reaches this module). Neither is estimated here:
  * with no catalog entry there is no denominator, and a made-up one would be a
  * meter that reads wrong in a place where the only reason to look is to decide
@@ -21,7 +21,7 @@ import { compactCount, type UsageTotals } from "./session.ts"
 
 /**
  * How much of the window is worth being told about. Three bands rather than a
- * gradient because a colour on this screen means one thing (tui.md §6): dim is
+ * gradient because a colour on this screen means one thing: dim is
  * "this is metadata", amber is "this is going to matter", red is "act".
  */
 export type ContextBand = "calm" | "warn" | "urgent"
@@ -42,7 +42,7 @@ export interface ContextFill {
  * The fill, or null when there is nothing honest to draw: no catalog window for
  * this model, or a session that has not been priced yet (a draft tab, a session
  * reopened but not stepped). Null is what makes the column disappear rather
- * than show a placeholder word (T35's "nothing takes a column").
+ * than show a placeholder word: nothing takes a column.
  */
 export function contextFill(used: number, window: number | null | undefined): ContextFill | null {
   if (!window || window <= 0 || used <= 0) return null
@@ -105,7 +105,7 @@ export interface ContextSection {
  *
  * Every row is a fact somebody could act on. A counter at zero is not one, so
  * it is left out rather than printed as `0` — the same rule the row under the
- * composer follows (T35).
+ * composer follows.
  */
 export function contextSections(usage: UsageTotals, window: number | null | undefined): ContextSection[] {
   const sections: ContextSection[] = []

@@ -14,7 +14,7 @@ import type { OpenPanel } from "../plugins/host.ts"
  *
  *  - the attribution row. `◈ <pkg>` in the picker glyph and the evolve accent
  *    — the same mark the status line uses for a package a session is wearing
- *    (T31) — so a panel can never present itself as the screen speaking. This
+ *    — so a panel can never present itself as the screen speaking. This
  *    is the whole of D4's answer to in-process code: the risk was never new
  *    authority, it was a surface that lies about whose it is.
  *  - the hint row. `Esc close` is true whatever the plugin does with keys
