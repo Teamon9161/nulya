@@ -53,7 +53,8 @@
  *   2.2  optional session `activity`, distinguishing an append in flight from
  *        true idle without changing the existing `status` union.
  *   2.3  optional front-session change observation, so session-scoped panels
- *        can be surfaced again when their tab returns to the front.
+ *        can be surfaced again when their tab returns to the front; the host
+ *        also reports writer-role changes that alter continuation policy.
  *   2.4  optional permission-mode projection and `openTab(..., {wakePending})`;
  *        continuation plugins can match the active driver's explicit policy
  *        and drain a child turn without ever stepping an empty inbox.
@@ -345,8 +346,9 @@ export interface PluginObserve {
   onEvent(cb: (event: LedgerEventView, session: string, source: "live" | "replay") => void): Unsubscribe
   /**
    * The front session changed (including to/from a draft), or its explicit
-   * permission mode changed. Registration also receives the current value once.
-   * Optional for API 2 hosts older than 2.3; mode updates require API 2.4.
+   * writer role or permission mode changed. Registration also receives the
+   * current value once. Optional for API 2 hosts older than 2.3; mode updates
+   * require API 2.4.
    */
   onSession?(cb: (session: SessionView | null) => void): Unsubscribe
   /** The front tab's background tasks, right now. */

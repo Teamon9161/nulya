@@ -41,6 +41,7 @@ import { describeTool } from "../src/render/registry.ts"
 import { extBuild, extSetCurrent, sessionEvents, sessionList } from "../src/nulya/cli.ts"
 import { default_settings } from "../src/state/settings.ts"
 import type { LedgerEvent } from "../src/nulya/ledger.ts"
+import type { SessionView } from "nulya-tui/plugin-api"
 import type { ToolItem } from "../src/state/session.ts"
 import { unsafe_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
@@ -338,6 +339,55 @@ describe("observe", () => {
     host.observe({ kind: "event", event: { seq: 3, kind: "user_text", text: "hello" } as unknown as LedgerEvent }, "s-1")
     expect(rowText()).toContain("streams 2 · events 1")
     expect(rowText()).toContain("source live")
+  }, 60_000)
+
+  test("front-session observers see writer-role and permission-policy changes once", async () => {
+    let session: SessionView | null = null
+    const host = hostWith({ session: () => session })
+    await host.load()
+    const widget = host.widgets().find((row) => row.pkg === "probe")!
+    const rowText = () => {
+      const surface = widget.renderer.render(100)
+      return Array.isArray(surface) ? surface.flat().map((span) => span.text).join("") : ""
+    }
+
+    // Registration reports the current draft/null projection once.
+    expect(rowText()).toContain("sessions 1")
+    expect(rowText()).toContain("observed none")
+
+    host.observeSession(session)
+    expect(rowText()).toContain("sessions 1")
+
+    session = {
+      id: "s-a",
+      model: "scripted",
+      members: [],
+      role: "observer",
+      status: "idle",
+      activity: "idle",
+      permissionMode: "unsafe",
+    }
+    host.observeSession(session)
+    expect(rowText()).toContain("sessions 2")
+    expect(rowText()).toContain("observed s-a/observer/unsafe")
+
+    // Fresh projection objects with the same continuation policy are not
+    // lifecycle changes.
+    session = { ...session, members: [] }
+    host.observeSession(session)
+    expect(rowText()).toContain("sessions 2")
+
+    // Compact's unsafe policy changes when writer ownership changes, even
+    // though the front session and permission mode do not.
+    session = { ...session, role: "driver" }
+    host.observeSession(session)
+    expect(rowText()).toContain("sessions 3")
+    expect(rowText()).toContain("observed s-a/driver/unsafe")
+
+    session = { ...session, permissionMode: "ask" }
+    host.observeSession(session)
+    expect(rowText()).toContain("sessions 4")
+    expect(rowText()).toContain("observed s-a/driver/ask")
   }, 60_000)
 })
 

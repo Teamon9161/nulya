@@ -23,8 +23,10 @@ import type { CardView, Line, PluginApi, PluginKey } from "nulya-tui/plugin-api"
 export function activate(api: PluginApi): void {
   let streams = 0
   let events = 0
+  let sessions = 0
   let cursor = 0
   let eventSource = "none"
+  let frontSession = "none"
 
   api.observe.onStream(() => {
     streams += 1
@@ -33,15 +35,21 @@ export function activate(api: PluginApi): void {
     events += 1
     eventSource = source
   })
+  api.observe.onSession?.((session) => {
+    sessions += 1
+    frontSession = session === null
+      ? "none"
+      : `${session.id}/${session.role}/${session.permissionMode ?? "ask"}`
+  })
 
   // Two rows: the head (always on screen) and a body that folds under it.
   api.registerWidget({
     render: (width: number): Line[] => [
       [
         { text: "probe", token: "accent.evolve" },
-        { text: ` · streams ${streams} · events ${events} · source ${eventSource}`, token: "dim" },
+        { text: ` · streams ${streams} · events ${events} · sessions ${sessions} · source ${eventSource}`, token: "dim" },
       ],
-      [{ text: `width ${width} · session ${api.observe.session()?.id ?? "none"}`, token: "muted" }],
+      [{ text: `width ${width} · session ${api.observe.session()?.id ?? "none"} · observed ${frontSession}`, token: "muted" }],
     ],
   })
 

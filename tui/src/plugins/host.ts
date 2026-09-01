@@ -176,7 +176,7 @@ export interface PluginHost {
   handleKey(key: PluginKey): boolean
   /** Every `--stream` line and ledger event of a step this front end drives. */
   observe(line: StepLine, session: string): void
-  /** Tell plugins that the front session or its explicit permission mode changed. */
+  /** Tell plugins when the front session, its permission mode, or its writer role changed. */
   observeSession(session: SessionView | null): void
   /** Bumped whenever a surface's answer may have changed; surfaces read it. */
   revision: Accessor<number>
@@ -337,7 +337,11 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
     pkg: string
     cb: (event: LedgerEventView, session: string, source: "live" | "replay") => void
   }[] = []
-  const sessionObservers: { pkg: string; cb: (session: SessionView | null) => void }[] = []
+  const sessionObservers: {
+    pkg: string
+    cb: (session: SessionView | null) => void
+    key: string | null
+  }[] = []
   let frontSessionKey: string | null | undefined
   const reportedMatcherFailures = new Set<string>()
   const reportedMatcherConflicts = new Set<string>()
@@ -465,10 +469,11 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
           }
         },
         onSession(cb) {
-          const entry = { pkg, cb }
+          const current = seams.session()
+          const entry = { pkg, cb, key: sessionObservationKey(current) }
           sessionObservers.push(entry)
           try {
-            cb(seams.session())
+            cb(current)
           } catch (error) {
             warn(`${pkg}: onSession threw · ${message(error)}`)
           }
@@ -733,12 +738,15 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
     },
     observeSession(session) {
       // Status/activity churn is delivered by stream observers. Session
-      // observers only need identity plus the explicit policy that changes
-      // whether a continuation waits or follows automatically.
-      const key = session ? `${session.id}\u0000${session.permissionMode ?? ""}` : null
+      // observers need identity plus the two explicit policies that decide
+      // whether a continuation waits, follows automatically, or stays
+      // read-only: permission mode and writer role.
+      const key = sessionObservationKey(session)
       if (frontSessionKey === key) return
       frontSessionKey = key
       for (const observer of [...sessionObservers]) {
+        if (observer.key === key) continue
+        observer.key = key
         try {
           observer.cb(session)
         } catch (error) {
@@ -749,6 +757,12 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
     },
     revision,
   }
+}
+
+function sessionObservationKey(session: SessionView | null): string | null {
+  return session
+    ? `${session.id}\u0000${session.permissionMode ?? ""}\u0000${session.role}`
+    : null
 }
 
 function message(error: unknown): string {

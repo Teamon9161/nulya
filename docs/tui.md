@@ -355,7 +355,7 @@ TUI 的便利流程现在全部属于 `extensions/compact/tui/compact.ts`，宿�
 
 - compact package current + trusted 时，它的 plugin 注册 `/compact [focus]`、handoff preview panel、compact request/context summary user-turn renderer，以及 `/sessions` 的 summary title formatter；plugins 关闭或包加载失败时，ledger 原文照常可读，只是不再有这些便利 UI。
 - host 给每条 event 明确的 `live | replay` 来源。plugin 只关联 **live assistant handoff call + 同 call id 的成功 tool result**；replay 永远不弹 panel、不 fork。call correlation 仍以 session + call id 隔离，但 actionable proposal 是 **每 session 一个槽**：同场更新的成功 handoff supersede 旧 handoff，跨场互不覆盖；进程内保存 `pending → running → done`，成功或明确 dismiss 才 done，临时失败回 pending 可重试，异步完成只在自己仍是该场最新 proposal 时更新。失败、deny、残缺参数都不形成 proposal。前台 session 改变时 host 通知 plugin；切回有 pending proposal 的 session 会重新打开 panel，切走则收起但不 dismiss，所以 pending handoff 始终有重新 follow / dismiss 的入口。
-- handoff follow 服从当前 driver 的明确 permission mode：`ask` 显示 `Enter` follow / `Esc` dismiss 面板，`unsafe` 在 step 真正回到 idle 后自动 follow，让 TUI 与 goal driver 都能跨阶段持续运行。observer 可以看到 proposal，但执行前仍因 `SessionView.role` 被明确拒绝，不能抢 writer lease。API 2.4 以可选 `SessionView.permissionMode` 投影这项只读政策；plugin 不能回答 gate或修改 mode。API 2.2 的 `activity` 继续保证 append/step 在途时绝不 fork。
+- handoff follow 服从当前 driver 的明确 permission mode：`ask` 显示 `Enter` follow / `Esc` dismiss 面板，`unsafe` 在 step 真正回到 idle 后自动 follow，让 TUI 与 goal driver 都能跨阶段持续运行。observer 可以看到 proposal，但执行前仍因 `SessionView.role` 被明确拒绝，不能抢 writer lease；同一 session 在 observer / driver 之间转换也属于 `onSession` 通知，host 不能只按 id + mode 去重，否则 unsafe auto-follow 会停在旧角色上。API 2.4 以可选 `SessionView.permissionMode` 投影这项只读政策；plugin 不能回答 gate或修改 mode。API 2.2 的 `activity` 继续保证 append/step 在途时绝不 fork。Enter 已提交 follow 后，Esc 只收起运行中面板，不取消已开始的 continuation；失败会恢复 pending 并重新呈现，旧 Promise 完成也不能改写 supersede 它的新 proposal。
 - 手工 `/compact` 与 follow 共用一个 `run`：driver + idle 预检 → 调本包冻结版本的 internal `compact` tool（手工传 `focus`，handoff 传那次 assistant event 的 `brief_seq`）→ 解析 child → `openTab(child, {wakePending:true})`。父 tab 保留；child attachment 只在 inbox 确有 summary 时自动排干并继续，空 inbox 绝不裸 step。child composition 卡常驻一行可点击 parent lineage，`/sessions` 也保留尚为 0 event 的 continuation；父 ledger 不复制。
 - `extensions/plan` 的 approve 不再调用宿主专用 compact 动词，而是经通用 `extRunPackage("compact", "compact", {session, brief_file})` 后 `openTab(child, {wakePending:true})`。compact 缺失、未 current、未 build 或 workspace store 未信任时，review panel 和已写 brief 都保留。
 
@@ -3022,3 +3022,12 @@ plugin API 2.3 兼容增加可选 `observe.onSession`，注册时收到当前 fr
 视觉上仍不复制父 ledger：父 tab 保留，child composition 卡在折叠状态也常驻 `previous … · open previous conversation`，点击回父场；有 parent 的 0-event continuation 不再被 `/sessions` 当空壳隐藏。`extensions/handoff` 增加自己的 TUI card plugin，展开后从 ledger 参数完整画 `next_task/done/keep/drop`，live/replay 同形；compact 临时面板不再是唯一入口。
 
 验证：`bun run typecheck`、`bun run compile` 通过；全量 `bun test` 749 pass / 1 skip / 0 fail。验证中发现并按根因修掉三处 harness 内测试问题：gate callback 与已退出 step 竞争时不再向死 pipe 写 verdict；e2e CLI 子进程默认清除测试 runner 继承的 `NULYA_SESSION(_ID)`；lease probe 在 Windows 带锁 open 前先拒绝非普通文件，避免 Zig I/O 把损坏目录变成 `INVALID_PARAMETER` panic。`zig build test` 与绝对 scratch 前缀下、正常继承 harness 环境的 `zig build e2e` 均 exit 0。
+
+
+### T112 · handoff follow 在 writer role 转换与异步关闭时仍可达（2026-09-01）
+
+**内核零改动。** T111 的 continuation policy 同时读取 `SessionView.permissionMode` 与 `SessionView.role`，但 plugin host 的 `observeSession` 去重键只含 session id + mode：同一 tab 从 observer 接管成 driver 时，App 虽重新投影了 session，host 却吞掉通知，`unsafe` proposal 不会开始 auto-follow；反向失去 writer lease 时，等待 idle 的 auto-follow 会退出，也没有 role 通知让 panel 重新出现。去重键现在加入 writer role，仍刻意忽略由 stream observer 与 auto-follow waiter 消化的 status/activity churn。
+
+compact 的 committed 状态也明确成用户可见契约：Enter 已启动 `extRun` 后，Esc 只隐藏运行中 panel，不取消 continuation；成功仍以 `wakePending:true` 打开 driven child，失败恢复 pending 并重新呈现，旧 follow 的 Promise 只能落自己的 proposal key，不能关闭 supersede 它的新 proposal。手工 `/compact` 与 handoff follow 本来共用同一个 `run()`，因此 README 改准为两者都安全排干非空 summary inbox，而不是声称手工命令只打开 child。
+
+回归分两层：`test/plugins.test.tsx` 用真实冻结 fixture 钉注册时初始通知、相同 projection 去重、role-only 与 mode-only 转换；`test/compact.test.ts` 用受控 Promise 钉重复 tab 切换、running 后 Esc 的成功/失败、stale completion，以及 observer ↔ driver 两向转换下的 auto-follow / panel 可达性，并逐次断言 child 的 `wakePending:true`。

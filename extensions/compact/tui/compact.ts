@@ -153,7 +153,7 @@ export function activate(api: PluginApi): void {
       out.push([{ text: clip(line, Math.max(12, width)), token: "muted" }])
     }
     const note = proposal.state === "running"
-      ? "following…"
+      ? "following… · Esc hides this panel; follow continues"
       : proposal.note || "Enter follow into a new tab · Esc dismiss · the call stays either way"
     out.push([{ text: note, token: proposal.state === "pending" && !proposal.note ? "dim" : "warn" }])
     return out

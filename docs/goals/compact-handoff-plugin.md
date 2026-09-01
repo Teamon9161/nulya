@@ -70,7 +70,7 @@ compact 完成后调用现有通用动作 `api.actions.openTab(child)`，不原�
 
 ### D4 · handoff follow 服从 driver 的明确 permission mode
 
-真实的 `/goal` consumer 证明 handoff 是让 driver 跨阶段持续运行的边界，不是第二道人工审批。TUI 的 `ask` 显示 panel：Enter follow，Esc dismiss；`unsafe` 在当前 step 回到 idle 后自动 follow。plugin 只读 `SessionView.permissionMode`，不能回答 gate、改变 mode或绕过 observer/writer lease。这样 mode 的影响范围仍然诚实：它决定当前 driver 是否允许模型在无人确认时继续，包括 continuation。
+真实的 `/goal` consumer 证明 handoff 是让 driver 跨阶段持续运行的边界，不是第二道人工审批。TUI 的 `ask` 显示 panel：Enter follow，Esc dismiss；`unsafe` 在当前 step 回到 idle 后自动 follow。plugin 只读 `SessionView.permissionMode`，不能回答 gate、改变 mode或绕过 observer/writer lease。这样 mode 的影响范围仍然诚实：它决定当前 driver 是否允许模型在无人确认时继续，包括 continuation。`onSession` 必须在同一 session 的 writer role 改变时重新通知，否则 observer → driver 接管不会启动 unsafe follow，driver → observer 也可能留下没有入口的 proposal。follow 已由 Enter 提交后，Esc 只隐藏进度而不取消 continuation；失败重新 surface retry，旧 follow 完成不得改写 supersede 它的新 proposal。
 
 ### D5 · host 不保留 `compact` 专用 action
 
