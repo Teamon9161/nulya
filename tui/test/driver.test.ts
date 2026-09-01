@@ -92,6 +92,48 @@ test("a send joining while the opening tail is draining stays in that opening tu
   }
 }, 120_000)
 
+test("a failed opening append keeps ownership until later queued appends are driven", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  let signalBStarted!: () => void
+  let releaseB!: () => void
+  const bStarted = new Promise<void>((resolve) => { signalBStarted = resolve })
+  const bBarrier = new Promise<void>((resolve) => { releaseB = resolve })
+  const driver = createDriver(ws, id, state, {
+    env: scripted_env,
+    append: async (workspace, session, text, images) => {
+      if (text === "A") throw new Error("A append failed")
+      if (text === "B") {
+        signalBStarted()
+        await bBarrier
+      }
+      await sessionAppend(workspace, session, text, images)
+    },
+  })
+  try {
+    const a = driver.send("A")
+    const b = driver.send("B")
+
+    // The opening owner has failed, but B is still in flight. `idle` here
+    // would let compact fork before B reaches the durable parent inbox.
+    await bStarted
+    await until(() => state.snapshot.error === "A append failed")
+    expect(driver.status()).toBe("sending")
+
+    releaseB()
+    await Promise.all([a, b])
+    await until(() => driver.status() === "idle", 60_000)
+
+    const events = await sessionEvents(ws, id)
+    const userEvents = events.filter((event) => event.kind === "user_text") as Array<{ kind: "user_text"; text: string }>
+    expect(userEvents.map((event) => event.text)).toEqual(["B"])
+    expect(state.pendingCount()).toBe(0)
+  } finally {
+    releaseB()
+    driver.dispose()
+  }
+}, 120_000)
+
 test("an append failure rolls back its optimistic user card and pending count", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)

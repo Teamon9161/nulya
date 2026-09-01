@@ -344,7 +344,14 @@ export function createDriver(
     } catch (error) {
       state.rejectUser(localId)
       reportFailure(state, "driver", error)
-      if (!running) setStatus("idle")
+      if (running) return
+      // This send owns the opening batch, not merely its own append. A later
+      // send may still be queued behind this failed one, so keep `sending`
+      // truthful until the append tail is stable and let the durable inbox
+      // decide whether the batch still needs a step.
+      await drainAppends()
+      if (inboxPending(ws, id)) await drive()
+      else setStatus("idle")
       return
     }
     // Mid-run appends are not interruptions: the kernel drains the inbox at
