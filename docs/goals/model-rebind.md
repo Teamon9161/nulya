@@ -102,7 +102,42 @@ descriptor 说的是「哪个模型、走哪条 wire」，profile 说的是「�
 **投递 id 必须是新的**（`ledger.freshDeliveryName`）：inbox 的文件名就是 exactly-once 键，
 固定名字会让第一次之后的每一次 rebind 都被当成同一件事、在下一次排干时被删掉而永远到不了 ledger。
 
-## 8. 不做的
+## 8. 一轮外部 review 的四条（2026-09-01）
+
+三条真 bug，一条过度承诺。前两条是同一件事的两半：**gate 读到的东西必须是权威的**。
+
+1. **两道 vision 门之间的 TOCTOU。** `--image` 与 `rebind` 守的是同一条规则的两侧，
+   而两条命令都是「读状态 → 判断 → 投递」。同时跑，两边都读到旧状态、都放行，
+   落地的正是它们要拒的那一对（图片 + 看不见图片的模型），下一个 step 边界照单全收。
+   修法**不是**把判断挪到 drain 之后（那时 rebind 已 committed，拒绝只剩「这一场从此走不动」），
+   而是让检查与投递成为一次动作：两条命令在 `<id>.inbox/.deposit.lock` 上排他串行
+   （`cli/session.zig` 的 `depositLease`）。写者只有这两个，串起来这条规则就闭合了；
+   锁在 inbox 里而不是 `<id>.lock` 上——后者是 step 的租约，而每道门都必须在 step 跑着时能工作。
+
+2. **`scanSession` 自己有一个交接窗口。** 它先读 ledger 后读 inbox，
+   而 drain 搬事件的动作是「先 append 进 ledger，再删文件」——于是一条比这次扫描还早就定下的
+   rebind 可以在两处都不在（读完文件之后才 commit、列目录之前就被删），
+   `scanSession` 于是答出一个已经作废的模型，正好毒化它服务的每一个读者。
+   修法是**换读的顺序**：先 inbox 后 ledger，凡扫描开始前已定下的事实两趟必有一趟看得见。
+   代价是次序（ledger 里那条可能比 inbox 里等着的更旧），
+   所以**只有 inbox 一条 rebind 都没有时才采信 committed 的那条**；图片只增不减，两趟都往上加。
+   （不做「再读一段 suffix 直到 tail 稳定」：那要多一次读、循环没有终止保证，
+   而换顺序把窗口从代码里**去掉**而不是再补一层。）
+
+3. **inbox 收得下的必须读得回。** `--image` 允许单图 5 MiB（base64 后 ≈ 6.67 MiB）且可重复，
+   而 `drainInbox` / `scanSession` 只读 4 MiB —— `session append` exit 0 收下一条 durable 事实，
+   然后**每一个** step 边界都排干失败。修法是把它变成一条有名字的不变量
+   `ledger.max_inbox_event_bytes`（32 MiB），**守在唯一的写入点**（`depositEvent` 拒绝并让 CLI 说清楚），
+   两个读点用同一个数。「拒绝一条命令」与「收下一条走不动的事实」不是同一量级的失败。
+
+4. **`freshDeliveryName` 的 ordering 承诺是假的**（注释说 “ordering after every name minted before it”）。
+   lexical 序先看 prefix，所以 `msg-` 与 `rebind-` 之间根本不按投递时间排；
+   同 prefix 下时钟可以回拨、可以重复，重复时决定顺序的是随机 nonce。
+   **契约收成「每次都不同」**（名字就是 exactly-once 键，这才是承重的那一句），
+   顺序如实写成「只有时钟那么好，且没有东西依赖它」；
+   断言 `first < second` 的那条测试随之删掉——它钉的是时钟粒度，不是机制。
+
+## 9. 不做的
 
 - 不做兼容性白名单（§2）；
 - 不做「回头路保留 reasoning」的特例（§3）；

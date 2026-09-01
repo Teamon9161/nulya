@@ -105,7 +105,7 @@ pub fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []con
     if (std.mem.eql(u8, sub, "rebind")) return sessionRebind(alloc, io, rest);
     if (std.mem.eql(u8, sub, "outcome")) return sessionOutcome(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return session_list.sessionList(alloc, io, sliceHasFlag(rest, "--json"));
-    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|outcome|list\n");
+    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|rebind|outcome|list\n");
     return 1;
 }
 
@@ -909,7 +909,15 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         for (images.items) |img| alloc.free(img.data);
         images.deinit(alloc);
     }
+    // …and the gate is held for the whole read-then-deposit, because the other
+    // half of the same rule is a different command (`depositLease`).
+    var lease: ?std.Io.File = null;
+    defer if (lease) |*f| f.close(io);
     if (image_args.items.len != 0) {
+        lease = depositLease(alloc, io, spath) catch {
+            try printErr(io, "session append failed: cannot open this session's inbox\n");
+            return 1;
+        };
         if (!try visionAccepted(alloc, io, spath)) return 1;
         for (image_args.items) |path| {
             const img = loadImage(alloc, io, path) catch |err| {
@@ -926,10 +934,49 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     // process is going right now.
     const name = try ledger.freshDeliveryName(alloc, io, "msg");
     defer alloc.free(name);
-    try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{
+    ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{
         .user_text = .{ .text = text, .images = images.items },
-    });
+    }) catch |err| switch (err) {
+        // The one refusal that comes from the inbox itself rather than a gate:
+        // a turn this large would be accepted and then unreadable at every step
+        // boundary, so the session is left as it was (`max_inbox_event_bytes`).
+        error.InboxEventTooLarge => {
+            try printErrFmt(
+                alloc,
+                io,
+                "session append refused: this turn encodes to more than {d} bytes, which no step could read back; send less text or fewer images\n",
+                .{ledger.max_inbox_event_bytes},
+            );
+            return 1;
+        },
+        else => return err,
+    };
     return 0;
+}
+
+/// The exclusive right to deposit into this session, held across a gate's
+/// read-then-deposit.
+///
+/// Two commands enforce one rule between them — `append --image` refuses a
+/// picture the model in force cannot see, `rebind` refuses a model that cannot
+/// see the pictures already here — and each one READS the session and then
+/// DEPOSITS. Run at the same time, both read the old state, both pass, and the
+/// pair they exist to refuse is exactly what lands. Serializing them makes the
+/// check and the deposit one act, so whichever runs second sees what the first
+/// decided (the pending fact itself: `ledger.scanSession` reads the inbox).
+///
+/// It lives INSIDE the inbox, where the deposits go and where the agent
+/// package's mailbox keeps the same lease for the same reason. Neither the drain
+/// nor a scan looks at anything but `*.json` there, and this is emphatically NOT
+/// the session's `<id>.lock`: that one belongs to `step`, and every gate here
+/// has to work while a step is running.
+fn depositLease(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !std.Io.File {
+    const inbox = try ledger.inboxPath(alloc, spath);
+    defer alloc.free(inbox);
+    try std.Io.Dir.cwd().createDirPath(io, inbox);
+    const lock_rel = try std.fmt.allocPrint(alloc, "{s}{c}.deposit.lock", .{ inbox, std.fs.path.sep });
+    defer alloc.free(lock_rel);
+    return std.Io.Dir.cwd().createFile(io, lock_rel, .{ .truncate = false, .read = true, .lock = .exclusive });
 }
 
 /// The largest image one turn may carry, raw bytes before base64 (the tightest
@@ -1602,6 +1649,24 @@ fn sessionRebind(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         return 1;
     }
 
+    // Before anything is opened or created: a command that names nothing to run
+    // on is a usage error, not a rebind.
+    const model_id = flagValue(args[1..], "--model");
+    const named_profile = flagValue(args[1..], "--profile");
+    if (named_profile == null and model_id == null) {
+        try printErr(io, "session rebind: name what to run — --profile P, --model ID, or both\n");
+        return 1;
+    }
+
+    // Held from before the read until after the deposit: the images gate below
+    // and `session append --image` are two halves of one rule, and each is a
+    // read followed by a deposit (`depositLease`).
+    var lease = depositLease(alloc, io, spath) catch {
+        try printErrFmt(alloc, io, "session rebind failed: cannot open the inbox of '{s}'\n", .{id});
+        return 1;
+    };
+    defer lease.close(io);
+
     var header = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch {
         try printErrFmt(alloc, io, "session rebind failed: cannot read '{s}'\n", .{id});
         return 1;
@@ -1621,12 +1686,7 @@ fn sessionRebind(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     defer scan.deinit();
     const current = scan.identity(header.value);
 
-    const profile = flagValue(args[1..], "--profile") orelse current.profile;
-    const model_id = flagValue(args[1..], "--model");
-    if (flagValue(args[1..], "--profile") == null and model_id == null) {
-        try printErr(io, "session rebind: name what to run — --profile P, --model ID, or both\n");
-        return 1;
-    }
+    const profile = named_profile orelse current.profile;
 
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();

@@ -674,7 +674,10 @@ export function discardIfUntouched(ws: Workspace, id: string): boolean {
   const inbox = siblingPath(ws, id, ".inbox")
   if (existsSync(inbox)) {
     try {
-      if (readdirSync(inbox).length > 0) return false
+      // Deposits only, the same `.json` the kernel drains: the directory also
+      // holds the lock the shell's gates serialize on (DESIGN §3.4), and a lock
+      // nobody is holding says nothing about whether anyone means to use this.
+      if (readdirSync(inbox).some((name) => name.endsWith(".json"))) return false
     } catch {
       return false
     }
