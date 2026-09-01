@@ -58,13 +58,6 @@ pub fn requestCancel(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir
     try workspace.writeFile(io, .{ .sub_path = marker, .data = "" });
 }
 
-fn descriptorsEqual(a: ledger.ModelDescriptor, b: ledger.ModelDescriptor) bool {
-    return std.mem.eql(u8, a.provider, b.provider) and
-        std.mem.eql(u8, a.model, b.model) and
-        std.mem.eql(u8, a.base_url, b.base_url) and
-        std.mem.eql(u8, a.api_key_env, b.api_key_env);
-}
-
 /// If a cancel marker exists for the session, delete it and return true.
 fn consumeCancel(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir, session_path: []const u8) !bool {
     const marker = try ledger.siblingPath(alloc, session_path, ".cancel");
@@ -92,7 +85,7 @@ pub const AgentSession = struct {
     /// identity `model` was built for. Both empty for a session that never
     /// rebinds — `model` is then whatever the shell handed in, forever.
     rebind: ?ModelResolver = null,
-    built_identity: ledger.ModelDescriptor = .{},
+    built: ledger.Identity = .{ .profile = "", .identity = .{} },
 
     /// How to build a running model handle for an identity the ledger names
     /// (goals/model-rebind.md §5).
@@ -243,7 +236,7 @@ pub const AgentSession = struct {
             .extension_roots = opts.extension_roots,
             .durable = .{ .workspace = d.workspace, .session_path = owned_path },
             .rebind = opts.rebind,
-            .built_identity = d.model_identity,
+            .built = .{ .profile = d.model_profile, .identity = d.model_identity },
         };
     }
 
@@ -271,7 +264,7 @@ pub const AgentSession = struct {
             .rebind = opts.rebind,
             // What the shell built from: the header's identity, which is the
             // only one it could have known before reading the events.
-            .built_identity = hdr.model_identity,
+            .built = .{ .profile = hdr.model, .identity = hdr.model_identity },
         };
         // A session that rebound in an earlier process resumes on the model it
         // rebound TO, never on the one its header froze.
@@ -481,10 +474,14 @@ pub const AgentSession = struct {
     /// running handle is only possible for a caller that made one.
     fn applyRebind(self: *AgentSession) !void {
         const wanted = ledger.lastRebind(self.l.view()) orelse return;
-        if (descriptorsEqual(wanted.identity, self.built_identity)) return;
+        // The whole identity, profile included: a rebind that only moves to
+        // another profile reaches the same model through a different
+        // credential, and skipping the rebuild would keep answering it with
+        // the old one (`ledger.identityEqual`).
+        if (ledger.identityEqual(wanted, self.built)) return;
         const resolver = self.rebind orelse return;
         self.model = try resolver.build(resolver.ptr, wanted);
-        self.built_identity = wanted.identity;
+        self.built = wanted;
     }
 
     /// Append one usage event per completed tool call in this step's ledger

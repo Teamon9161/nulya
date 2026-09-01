@@ -79,8 +79,28 @@ resume 走同一条路：壳层按 header 造一个 handle，内核开场发现 
 ## 7. 波及面：读「这一场跑在什么模型上」的每一处
 
 加了第二个冻结点之后，`header.model_identity` 就不再是这个问题的答案。
-唯一真相收在 `ledger.effectiveIdentity`，调用点：`session step` 的 handle 构造与 effort 解析、
-vision gate、`session list --json` 的投影、TUI 的模型 chip。
+
+**committed identity ≠ next-step identity**——两个时刻，两处唯一实现，都在内核：
+
+| 谁问 | 什么时刻 | 答案 |
+|---|---|---|
+| `session step` 的 handle 构造与 effort 解析、`session list --json` | step **里面**（写者，事实都已 committed） | `ledger.effectiveIdentity(header, events)` |
+| `session append --image` 与 `session rebind` 的门、`session new --parent` 继承什么、TUI | step **外面**（读者，与写者并发） | `ledger.scanSession`（header → committed → **pending inbox**） |
+
+外面那一栏为什么必须多看一眼 inbox：一条投递了还没排干的 `model_rebind` 与已经 append 的那条一样是定了的事，
+下一个 step 边界就会应用它。只看 committed 的读者会用一个**马上要离开**的模型作判断——
+于是 pending 的目标模型不支持图片时 `--image` 照放行、
+反悔的第二次 rebind 被答成「已经在这个模型上了」而 pending 的那个照样生效。
+`scanSession` 顺便一次读出「这一场有没有图片」（同一份字节，同一条 crash-tail 规则），
+且**不开 ledger**——`openDurable` 要拿写者租约，而这些门每一个都必须在 step 跑着的时候能工作。
+
+**相等只有一处判据 `ledger.identityEqual`：整个 `Identity`，profile 也在内。**
+descriptor 说的是「哪个模型、走哪条 wire」，profile 说的是「用谁的凭据够得着它」，
+所以只差 profile 的两个身份是**两种被回答的方式**（`kernel` 侧的 `applyRebind` 同样按它决定要不要重建 handle）。
+比得少了，一次真的切换会被读成 no-op——而 no-op 是静默的。
+
+**投递 id 必须是新的**（`ledger.freshDeliveryName`）：inbox 的文件名就是 exactly-once 键，
+固定名字会让第一次之后的每一次 rebind 都被当成同一件事、在下一次排干时被删掉而永远到不了 ledger。
 
 ## 8. 不做的
 

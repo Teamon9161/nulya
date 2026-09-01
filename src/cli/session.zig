@@ -446,15 +446,35 @@ pub fn createSession(
     // parent's profile still carries. Naming either re-resolves the identity
     // against today's config; naming neither takes the parent's frozen
     // descriptor verbatim, which is the compaction case.
-    // An empty one is a legacy header that never recorded a profile: absent, not
+    //
+    // What it continues is the identity IN FORCE, not the one the parent's
+    // header froze (`ledger.scanSession`): a session that was rebound is being
+    // answered by the model it moved to, and a fork of it that quietly went
+    // back to the header would change who the conversation is with without
+    // anyone asking — the exact failure freezing the identity exists to
+    // prevent. It is also the whole reason `extensions/compact` needs to know
+    // nothing about rebinding.
+    // An empty profile is a legacy header that never recorded one: absent, not
     // a profile named "".
-    const parent_profile: ?[]const u8 = if (parent_header) |h|
-        (if (h.value.model.len != 0) h.value.model else null)
+    var parent_now: ?ledger.Identity = null;
+    var parent_scan: ?ledger.SessionScan = null;
+    defer if (parent_scan) |*s| s.deinit();
+    if (parent_header) |h| {
+        const ppath = try launch.sessionPath(alloc, parent.?.session);
+        defer alloc.free(ppath);
+        parent_scan = ledger.scanSession(alloc, io, std.Io.Dir.cwd(), ppath) catch {
+            try printErrFmt(alloc, io, "cannot read parent session '{s}'\n", .{parent.?.session});
+            return null;
+        };
+        parent_now = parent_scan.?.identity(h.value);
+    }
+    const parent_profile: ?[]const u8 = if (parent_now) |n|
+        (if (n.profile.len != 0) n.profile else null)
     else
         null;
-    const inherited: ?ledger.ModelDescriptor = if (parent_header) |h| blk: {
+    const inherited: ?ledger.ModelDescriptor = if (parent_now) |n| blk: {
         if (named_profile != null or model_id != null) break :blk null;
-        break :blk if (h.value.model_identity.provider.len != 0) h.value.model_identity else null;
+        break :blk if (n.identity.provider.len != 0) n.identity else null;
     } else null;
 
     const profile = named_profile orelse parent_profile orelse
@@ -904,12 +924,7 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     // user turn is deposited into the session inbox under a fresh name and
     // appended at the next step boundary — including mid-run, if a step
     // process is going right now.
-    var nonce: [4]u8 = undefined;
-    io.random(&nonce);
-    const name = try std.fmt.allocPrint(alloc, "msg-{d}-{x}", .{
-        std.Io.Timestamp.now(io, .real).toNanoseconds(),
-        std.mem.readInt(u32, &nonce, .little),
-    });
+    const name = try ledger.freshDeliveryName(alloc, io, "msg");
     defer alloc.free(name);
     try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{
         .user_text = .{ .text = text, .images = images.items },
@@ -1021,62 +1036,6 @@ const RebindResolver = struct {
     }
 };
 
-/// A read-only look at a session file, for the shell's own gates.
-///
-/// It does NOT open the ledger: `openDurable` takes the writer lease, and every
-/// caller here is a reader that must work while a step is running (`session
-/// append` and `session rebind` both deposit rather than write, DESIGN §3.4).
-/// So this reads the bytes, honours the same crash-tail rule the listing does,
-/// and answers only the two questions the gates ask: what model is in force, and
-/// does this conversation already hold images.
-const SessionScan = struct {
-    arena: std.heap.ArenaAllocator,
-    rebound: ?ledger.Identity = null,
-    has_images: bool = false,
-
-    fn identity(self: SessionScan, header: ledger.Header) ledger.Identity {
-        return self.rebound orelse .{ .profile = header.model, .identity = header.model_identity };
-    }
-
-    fn deinit(self: *SessionScan) void {
-        self.arena.deinit();
-    }
-};
-
-fn scanSession(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !SessionScan {
-    var scan: SessionScan = .{ .arena = .init(alloc) };
-    errdefer scan.arena.deinit();
-    const a = scan.arena.allocator();
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, spath, a, .unlimited);
-    const clean_end: usize = @intCast(ledger.lastCompleteLineEnd(bytes));
-    var lines = std.mem.splitScalar(u8, bytes[0..clean_end], '\n');
-    var header_seen = false;
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len == 0) continue;
-        if (!header_seen) {
-            header_seen = true;
-            continue;
-        }
-        // The substring tests are a pre-filter so a gate does not decode a whole
-        // transcript; the decoded line's own `kind` is what decides (the same
-        // discipline `session list` follows).
-        const may_be_rebind = std.mem.indexOf(u8, line, "\"kind\":\"model_rebind\"") != null;
-        const may_have_images = !scan.has_images and std.mem.indexOf(u8, line, "\"images\":") != null;
-        if (!may_be_rebind and !may_have_images) continue;
-        const parsed = ledger.parseEventLine(a, line) catch continue;
-        if (std.mem.eql(u8, parsed.value.kind, "user_text")) {
-            if (parsed.value.images) |images| {
-                if (images.len != 0) scan.has_images = true;
-            }
-        }
-        if (std.mem.eql(u8, parsed.value.kind, "model_rebind")) {
-            if (parsed.value.identity) |id| scan.rebound = .{ .profile = parsed.value.profile orelse "", .identity = id };
-        }
-    }
-    return scan;
-}
-
 fn imageSize(io: std.Io, path: []const u8) ?u64 {
     var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
     defer file.close(io);
@@ -1099,8 +1058,10 @@ fn visionAccepted(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !bool
     defer header.deinit();
     // The model in force, not the one the header froze: a rebound session is
     // answered by the model it was rebound TO, so that is the one that has to
-    // claim it accepts images (goals/model-rebind.md §7).
-    var scan = scanSession(alloc, io, spath) catch {
+    // claim it accepts images — including a rebind still in the inbox, which
+    // the very step that would carry this image applies first
+    // (`ledger.scanSession`, goals/model-rebind.md §7).
+    var scan = ledger.scanSession(alloc, io, std.Io.Dir.cwd(), spath) catch {
         try printErr(io, "session append failed: cannot read this session\n");
         return false;
     };
@@ -1647,10 +1608,13 @@ fn sessionRebind(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     };
     defer header.deinit();
 
-    // What it runs on now — the header's identity, or whatever the last rebind
-    // said. Read once, and used both to default the profile and to notice that
-    // this rebind would change nothing.
-    var scan = scanSession(alloc, io, spath) catch {
+    // What the next step runs on — the header's identity, moved by the last
+    // rebind this session has been told about, committed or still in the inbox.
+    // Read once, and used both to default the profile and to notice that this
+    // rebind would change nothing. Asking only the committed events would let a
+    // second rebind be judged against a model already on its way out: "already
+    // runs on A" while a pending B is what the next step will actually use.
+    var scan = ledger.scanSession(alloc, io, std.Io.Dir.cwd(), spath) catch {
         try printErrFmt(alloc, io, "session rebind failed: cannot read '{s}'\n", .{id});
         return 1;
     };
@@ -1707,15 +1671,19 @@ fn sessionRebind(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         }
     }
 
-    if (std.mem.eql(u8, wanted.provider, current.identity.provider) and
-        std.mem.eql(u8, wanted.model, current.identity.model) and
-        std.mem.eql(u8, wanted.base_url, current.identity.base_url))
-    {
+    const target: ledger.Identity = .{ .profile = profile, .identity = wanted };
+    if (ledger.identityEqual(target, current)) {
         try printOut(alloc, io, "{s} already runs on {s}/{s}\n", .{ id, wanted.provider, wanted.model });
         return 0;
     }
 
-    try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, "rebind", .{
+    // A FRESH delivery id, because this is another fact and not the same one
+    // again: the name is the inbox's exactly-once key, so a fixed one would
+    // make every rebind after the first collapse into the one already applied
+    // and vanish at the next drain (`ledger.freshDeliveryName`).
+    const name = try ledger.freshDeliveryName(alloc, io, "rebind");
+    defer alloc.free(name);
+    try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{
         .model_rebind = .{ .profile = profile, .identity = wanted },
     });
     try printOut(alloc, io, "{s} will run on {s}/{s} from its next step\n", .{ id, wanted.provider, wanted.model });

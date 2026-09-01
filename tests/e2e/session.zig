@@ -1857,6 +1857,11 @@ const rebind_config =
     \\model = "demo-1"
     \\
     \\[[provider.profiles]]
+    \\name = "scripted-alt"
+    \\kind = "scripted"
+    \\model = "demo-3"
+    \\
+    \\[[provider.profiles]]
     \\name = "keyless"
     \\kind = "openai"
     \\model = "keyless-1"
@@ -1965,5 +1970,113 @@ test "session cli: rebind moves the rest of a session onto another model, and re
         const bytes = try readSessionFile(alloc, io, ws, id);
         defer alloc.free(bytes);
         try std.testing.expectEqual(after.len, bytes.len);
+    }
+}
+
+test "session cli: every rebind after the first is another fact, and a fork continues on the model in force" {
+    // Three ways the second freezing point can be silently lost, all of them
+    // ending in "the user asked for B and something else answered":
+    // a delivery id that collapses into the first rebind, a decision made
+    // against the committed events while another rebind waits in the inbox,
+    // and a fork that reads the header instead of what is in force.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    try ws.createDirPath(io, "home");
+    try ws.writeFile(io, .{ .sub_path = "home/config.toml", .data = rebind_config });
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    defer alloc.free(home_abs);
+    const env: []const EnvPair = &.{
+        .{ .key = "NULYA_HOME", .value = home_abs },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const new = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" }, env);
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    const Local = struct {
+        fn rebind(a: std.mem.Allocator, i: std.Io, w: std.Io.Dir, exe: []const u8, sid: []const u8, e: []const EnvPair, flag: []const u8, value: []const u8) ![]u8 {
+            const r = try runCliEnvs(a, i, w, &.{ exe, "session", "rebind", sid, flag, value }, e);
+            try std.testing.expectEqual(@as(u8, 0), r.code);
+            return r.stdout;
+        }
+        fn step(a: std.mem.Allocator, i: std.Io, w: std.Io.Dir, exe: []const u8, sid: []const u8, e: []const EnvPair) !void {
+            const appended = try runCliEnvs(a, i, w, &.{ exe, "session", "append", sid, "go" }, e);
+            defer a.free(appended.stdout);
+            try std.testing.expectEqual(@as(u8, 0), appended.code);
+            const stepped = try runCliEnvs(a, i, w, &.{ exe, "session", "step", sid }, e);
+            defer a.free(stepped.stdout);
+            try std.testing.expectEqual(@as(u8, 0), stepped.code);
+        }
+    };
+
+    // Two rebinds with a drain in between. The second one must reach the ledger
+    // too: a fixed delivery id would make it look like the first one all over
+    // again, and the drain would delete it unread.
+    {
+        const first = try Local.rebind(alloc, io, ws, exe_abs, id, env, "--model", "demo-2");
+        defer alloc.free(first);
+        try Local.step(alloc, io, ws, exe_abs, id, env);
+        const second = try Local.rebind(alloc, io, ws, exe_abs, id, env, "--model", "demo-3");
+        defer alloc.free(second);
+        try Local.step(alloc, io, ws, exe_abs, id, env);
+        const bytes = try readSessionFile(alloc, io, ws, id);
+        defer alloc.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model\":\"demo-3\"") != null);
+    }
+
+    // A rebind still in the inbox is what the next step will run on, so the
+    // NEXT rebind is judged against it: going back to demo-3 while demo-4 is
+    // pending is a real change, not "already runs on demo-3".
+    {
+        const pending = try Local.rebind(alloc, io, ws, exe_abs, id, env, "--model", "demo-4");
+        defer alloc.free(pending);
+        const back = try Local.rebind(alloc, io, ws, exe_abs, id, env, "--model", "demo-3");
+        defer alloc.free(back);
+        try std.testing.expect(std.mem.indexOf(u8, back, "will run on") != null);
+        try Local.step(alloc, io, ws, exe_abs, id, env);
+    }
+
+    // Same model, same wire, different profile — a different credential reaches
+    // it, so this moves too.
+    {
+        const moved = try Local.rebind(alloc, io, ws, exe_abs, id, env, "--profile", "scripted-alt");
+        defer alloc.free(moved);
+        try std.testing.expect(std.mem.indexOf(u8, moved, "will run on") != null);
+        try Local.step(alloc, io, ws, exe_abs, id, env);
+        const listed = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" }, env);
+        defer alloc.free(listed.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "scripted-alt") != null);
+    }
+
+    // A fork continues the conversation, so it continues with whoever is having
+    // it — not with the identity the parent's header froze and left behind.
+    {
+        const parent_ref = try std.fmt.allocPrint(alloc, "{s}:1", .{id});
+        defer alloc.free(parent_ref);
+        const forked = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", parent_ref }, env);
+        defer alloc.free(forked.stdout);
+        try std.testing.expectEqual(@as(u8, 0), forked.code);
+        const child = std.mem.trim(u8, forked.stdout, " \r\n");
+        const bytes = try readSessionFile(alloc, io, ws, child);
+        defer alloc.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model\":\"scripted-alt\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "demo-3") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "demo-1") == null);
     }
 }
