@@ -866,10 +866,12 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 ///
 /// `--force` does not lift the three refusals that are not judgments: a step
 /// writing this session, a deposit in flight, a background task of it still
-/// running. The first two are LOCKS, and a lock can only be answered by TAKING
-/// it — probing guesses wrong exactly when it matters, while another process
-/// sits between its own check and its deposit. `ledger.pruneSession` holds both
-/// leases across every check and the removal.
+/// running. All three are answered under LOCKS, and a lock can only be answered
+/// by TAKING it — probing guesses wrong exactly when it matters, while another
+/// process sits between its own check and its write. So this command takes
+/// BOTH of the session's leases itself, asks the third question under them, and
+/// hands them to `ledger.pruneSessionLeased`, which holds them across the
+/// counting and the removal.
 ///
 /// Exit 0 means one thing only: it is gone because this command removed it.
 fn sessionPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -898,13 +900,36 @@ fn sessionPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     const spath = try launch.sessionPath(alloc, session_id);
     defer alloc.free(spath);
 
-    // Asked BEFORE the leases: answering it means reading every task directory
-    // (and for a remote session, asking another machine), which must not happen
-    // while holding a session's writer lease.
-    //
-    // The check-then-act window that leaves is acceptable: a task can only
-    // appear for this session through a `step` or a `task run` naming it, and
-    // the first is refused by the writer lease below.
+    if (!sessionExists(io, spath)) {
+        try printErrFmt(alloc, io, "no such session '{s}'\n", .{session_id});
+        return 1;
+    }
+
+    // Both leases, taken HERE rather than inside `pruneSession`, because the
+    // question below has to be settled under them: they are what freezes the
+    // session's lifetime, and a task can start down either of the two paths
+    // they cover (`task run` takes the deposit lease across its spawn; an
+    // in-step `shell {background:true}` is covered by its step's writer lease).
+    // Asking first and locking after leaves exactly the window where both
+    // commands report success and the session is gone from under a running
+    // supervisor.
+    var leases = ledger.acquireSessionLeases(alloc, io, std.Io.Dir.cwd(), spath) catch |err| switch (err) {
+        error.DepositInFlight => {
+            try printErrFmt(alloc, io, "session prune refused: something is writing into '{s}' right now\n", .{session_id});
+            return 1;
+        },
+        error.SessionBusy => {
+            try printErrFmt(alloc, io, "session prune refused: a step is running '{s}'\n", .{session_id});
+            return 1;
+        },
+        else => return err,
+    };
+    defer leases.close(io);
+
+    // Under both leases, and it deposits nothing on the way past
+    // (`liveTaskFor`) — a reading verb collects a far machine's finished
+    // reports as it goes, and doing that here would wait for a lease this
+    // process is holding.
     if (try task_cli.liveTaskFor(alloc, io, session_id)) |live| {
         defer alloc.free(live);
         try printErrFmt(
@@ -916,17 +941,9 @@ fn sessionPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
         return 1;
     }
 
-    const report = ledger.pruneSession(alloc, io, std.Io.Dir.cwd(), spath, .{ .force = force }) catch |err| switch (err) {
+    const report = ledger.pruneSessionLeased(alloc, io, std.Io.Dir.cwd(), spath, .{ .force = force }, &leases) catch |err| switch (err) {
         error.NoSuchSession => {
             try printErrFmt(alloc, io, "no such session '{s}'\n", .{session_id});
-            return 1;
-        },
-        error.SessionBusy => {
-            try printErrFmt(alloc, io, "session prune refused: a step is running '{s}'\n", .{session_id});
-            return 1;
-        },
-        error.DepositInFlight => {
-            try printErrFmt(alloc, io, "session prune refused: something is depositing into '{s}' right now\n", .{session_id});
             return 1;
         },
         error.HasEvents => {
@@ -960,6 +977,12 @@ fn sessionPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     };
 
     try printOut(alloc, io, "pruned {s}\n", .{session_id});
+    // The same rule as the scratch tree above, for the same reason: past the
+    // commit point the session IS gone, so what would not go is a note here and
+    // not a verdict.
+    if (report.leftovers) {
+        try printErrFmt(alloc, io, "note: some files of '{s}' could not be removed\n", .{session_id});
+    }
     if (force and (report.events != 0 or report.deposits != 0)) {
         // The journals are deliberately not in this count: an outcome or usage
         // row is evidence about something that happened, and it stays.

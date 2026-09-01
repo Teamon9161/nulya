@@ -892,40 +892,15 @@ fn depositName(alloc: std.mem.Allocator, session_id: []const u8, slot: []const u
     return std.fmt.allocPrint(alloc, "task-{s}-{s}", .{ session_id, slot });
 }
 
-/// Move an undrained deposit from one session's inbox to another's. False when
-/// there was nothing to move — which is the ordinary case once the owning
-/// session has already stepped.
-///
-/// The other way a `task_finished` reaches an inbox, so it obeys the same rule
-/// as a deposit: the destination's lease is held across "does that session
-/// still exist" and the rename, which keeps `session prune` from removing one
-/// in between. A destination that is gone is `error.NoSuchSession` and the file
-/// stays where it is.
+/// Move an undrained deposit between two sessions named by ID — the paths are
+/// this layer's business, both inboxes' leases are the ledger's
+/// (`ledger.moveDeposit`).
 fn moveDeposit(alloc: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8, name: []const u8) !bool {
     const from_path = try launch.sessionPath(alloc, from);
     defer alloc.free(from_path);
     const to_path = try launch.sessionPath(alloc, to);
     defer alloc.free(to_path);
-    const from_inbox = try ledger.inboxPath(alloc, from_path);
-    defer alloc.free(from_inbox);
-    const to_inbox = try ledger.inboxPath(alloc, to_path);
-    defer alloc.free(to_inbox);
-
-    const src = try std.fmt.allocPrint(alloc, "{s}{c}{s}.json", .{ from_inbox, std.fs.path.sep, name });
-    defer alloc.free(src);
-    const dst = try std.fmt.allocPrint(alloc, "{s}{c}{s}.json", .{ to_inbox, std.fs.path.sep, name });
-    defer alloc.free(dst);
-
-    const cwd = std.Io.Dir.cwd();
-    cwd.access(io, src, .{}) catch return false;
-    var lease = try ledger.acquireDepositLease(alloc, io, cwd, to_path, .block);
-    defer lease.close(io);
-    cwd.access(io, to_path, .{}) catch return error.NoSuchSession;
-    // A second look under the lease: the source may have been drained while this
-    // waited for it, and then there is nothing to move after all.
-    cwd.access(io, src, .{}) catch return false;
-    try cwd.rename(src, cwd, dst, io);
-    return true;
+    return ledger.moveDeposit(alloc, io, std.Io.Dir.cwd(), from_path, to_path, name, .block);
 }
 
 // ── Tasks on another machine ────────────────────────────────────────────────
@@ -1088,6 +1063,11 @@ const FarAnswer = union(enum) {
 ///
 /// `host_dir` is the task's directory on THIS machine — where `notify` and
 /// `delivered` live. The returned bytes belong to `arena`.
+///
+/// `deliver` false asks the state and nothing else. Depositing is a caller's
+/// business, not a reader's: `session prune` asks this question while holding a
+/// deposit lease, and delivering into that very session would then wait for a
+/// lease this process itself is holding.
 fn pollAndDeliver(
     alloc: std.mem.Allocator,
     arena: std.mem.Allocator,
@@ -1098,10 +1078,12 @@ fn pollAndDeliver(
     slot: []const u8,
     host_dir: []const u8,
     full: []const u8,
+    deliver: bool,
 ) !FarAnswer {
     const snap = remote.pollTaskOn(ch, cwd, full) catch return .unreached;
     const status_bytes = try arena.dupe(u8, snap.status);
     const answer: FarAnswer = .{ .status = .{ .bytes = status_bytes, .lease_held = snap.lease_held } };
+    if (!deliver) return answer;
     if (snap.report.len == 0 or status_bytes.len == 0) return answer;
     if (markerPresent(alloc, io, host_dir, delivered_file)) return answer;
 
@@ -1185,6 +1167,9 @@ fn scopeOf(only: ?[]const u8) Scope {
 /// session started and retargeted elsewhere still writes into a directory under
 /// this session's scratch tree, which is what prune is about to remove. `done`
 /// and `lost` rows do not block — nothing is writing there any more.
+///
+/// The one reading path that deposits NOTHING, because its caller asks while
+/// holding the session's leases.
 pub fn liveTaskFor(alloc: std.mem.Allocator, io: std.Io, session_id: []const u8) !?[]u8 {
     var arena_state: std.heap.ArenaAllocator = .init(alloc);
     defer arena_state.deinit();
@@ -1286,6 +1271,25 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     };
     defer lenv.deinit();
 
+    // Held from here across the start: what this command creates is a
+    // supervisor and a directory under this session's scratch tree that it
+    // writes into for as long as it runs, and `session prune` removes that
+    // tree. So "this session exists" and "a task of it exists" have to become
+    // true as ONE act under the lease prune settles its own "is anything alive
+    // under here" question below: either it sees the task and refuses, or this
+    // re-check finds the session gone.
+    var lease = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
+        try printErrFmt(alloc, io, "task run failed: cannot open the inbox of '{s}'\n", .{session_id});
+        return 1;
+    };
+    defer lease.close(io);
+    // Under the lease, because waiting for it is a moment in which the session
+    // can have been pruned.
+    std.Io.Dir.cwd().access(io, spath, .{}) catch {
+        try printErrFmt(alloc, io, "no such session '{s}'\n", .{session_id});
+        return 1;
+    };
+
     const start = lenv.handle().startShellTask(alloc, .{
         .command = command,
         .cwd = run_cwd,
@@ -1338,7 +1342,7 @@ const RowRef = struct {
 /// machine cannot open is no evidence the task does not exist. That fault
 /// propagates as an error instead, so `task list`/`status`/`wait` fail loudly
 /// rather than reporting a confident lie.
-fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef) !?Row {
+fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef, deliver: bool) !?Row {
     if (try far.isRemote(ref.session)) {
         var row: Row = .{
             .full = ref.full,
@@ -1351,7 +1355,7 @@ fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef) !?Row {
         };
         const ch = (try far.channelFor(ref.session)) orelse return row;
         const cwd = try far.cwdFor(ref.session);
-        const answer = pollAndDeliver(far.alloc, arena, io, ch, cwd, ref.session, ref.slot, ref.dir, ref.full) catch
+        const answer = pollAndDeliver(far.alloc, arena, io, ch, cwd, ref.session, ref.slot, ref.dir, ref.full, deliver) catch
             FarAnswer.unreached;
         const outcome = switch (answer) {
             .unreached => return row,
@@ -1415,6 +1419,13 @@ const Scope = union(enum) {
 fn collectRows(arena: std.mem.Allocator, io: std.Io, far: *Far, scope: Scope) ![]Row {
     var rows: std.ArrayList(Row) = .empty;
     const cwd = std.Io.Dir.cwd();
+    // Reading verbs collect a far machine's finished reports on the way past;
+    // `touches` does not, because its one asker is `session prune`, which asks
+    // while holding the leases such a report would have to be deposited under.
+    const deliver = switch (scope) {
+        .touches => false,
+        else => true,
+    };
 
     var scratch = cwd.openDir(io, launch.scratch_dir, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return rows.toOwnedSlice(arena),
@@ -1464,7 +1475,7 @@ fn collectRows(arena: std.mem.Allocator, io: std.Io, far: *Far, scope: Scope) ![
                 .slot = try arena.dupe(u8, slot_entry.name),
                 .dir = dir,
                 .notify = notify,
-            })) orelse continue;
+            }, deliver)) orelse continue;
             try rows.append(arena, row);
         }
     }
@@ -1722,7 +1733,7 @@ fn lookupRow(arena: std.mem.Allocator, io: std.Io, far: *Far, name: []const u8) 
         .slot = ref.slot,
         .dir = ref.dir,
         .notify = try readNotify(arena, io, ref.dir),
-    });
+    }, true);
 }
 
 /// `wait` has three answers so one call can branch a driver three ways: 0 =

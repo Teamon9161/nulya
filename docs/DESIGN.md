@@ -230,7 +230,9 @@ session 文件**只有一个写者**：`createDurable` / `openDurable` 打开时
 
 **投递锁的纪律**：写 inbox 的每一个人都拿 `<id>.inbox/.deposit.lock`——缺省 `depositEvent` 自己拿，只有已经持锁跨越"先读后投"的调用方走 `depositEventLeased`（重复拿会自己死锁自己）。它是 **inbox 自己**的并发原语而不是某个 CLI helper 的私有约定，新的投递者不必*记得*遵守它。配套的另一半：**每次投递都在锁下重新确认 session 文件还在**（不在就 `NoSuchSession`，一个字节都不写），所以 `session prune`（§14）"什么都没有才删"这句话一直到删完为止都成立——否则一个 supervisor 可以正卡在自己的写 `.tmp` 与 rename 之间，最后留下一条没有 session 的 durable 事实。
 
-**锁顺序**：没有任何地方先拿写者租约再拿投递锁（`step` 从不投递）；唯一同时握两把的 `ledger.pruneSession` 先拿投递锁，写者租约用 non-blocking。
+**它同时是 session lifetime 冻结的一半**：不只"要投一条事件"的人拿它，**要在这一场底下开一个长命写者**的人也拿——`nulya task run` 跨越"这场还在吗"与 spawn 全程持它，因为 supervisor 会往 `.nulya/scratch/<id>/` 里写到它跑完为止，而那棵树正是 prune 要删的。另一半是写者租约：任务的第二条起法是 step 里的 `shell {background:true}`，那条由它那一步已经持着的写者租约盖住。两把一起才是冻结（`ledger.SessionLeases`），所以 `session prune` **两把都自己拿**、在两把下面问"这一场底下还有活着的任务吗"，再把它们交给 `ledger.pruneSessionLeased`（`depositEvent` / `depositEventLeased` 那对的同一种分法）。只拿一把、或者先问后锁，都只是把窗口改窄：两条命令双双返回成功，而系统里已经没有那个 task 所属的 session。配套的一条：prune 持锁时问的那趟投影**一个字节都不投递**（`liveTaskFor`），否则它会等一把自己正握着的锁。
+
+**锁顺序**：没有任何地方先拿写者租约再拿投递锁（`step` 从不投递）；唯一同时握两把的 `ledger.acquireSessionLeases` 先拿投递锁，写者租约用 non-blocking。同时握**两个 session** 的投递锁的只有 `ledger.moveDeposit`（retarget 把一条没排干的 `task_finished` 从 A 的 inbox 搬到 B 的）：它按 **session 路径序**拿，不按调用方向拿——否则 `A→B` 与 `B→A` 各握着对方在等的那一把。搬家写的是**两个** inbox，所以两把都要：只拿目的地那把的话，prune 一边持着 A 的锁清点 A 还剩什么、一边有人把 A 的投递搬走了，"持锁即冻结"就不成立。
 
 #### 应用 exactly-once，投递 at-least-once
 
@@ -1542,9 +1544,11 @@ nulya                                            ← 无参数：同 `nulya help
 
 **唯一一个删 session 的动词。** 缺省只删得掉什么都没记下的那种（header 一行、没有事件——那不是 ledger，只是一个名字；physics #1 管的是历史，这里没有历史），前端自动调的就是这一档；`--force` 连**有历史**的一起删。只收一个 id、永远不收 pattern（"这一场不值得留"是判断）。
 
-**它是个动词而不是前端自己 unlink**，因为「能不能删」有两条判据是**锁**（有人在 `step` / 有人正在投递），而锁只能靠**拿**来回答、不能靠看：探测锁的前端恰好在最要紧的那一刻猜错——另一个进程正卡在它自己的 check 与 deposit 之间。
+**它是个动词而不是前端自己 unlink**，因为「能不能删」的三条判据都要在**锁**下回答（有人在 `step` / 有人正在投递 / 底下还有活着的后台任务），而锁只能靠**拿**来回答、不能靠看：探测锁的前端恰好在最要紧的那一刻猜错——另一个进程正卡在它自己的 check 与 deposit 之间。
 
-机制在内核（`ledger.pruneSession`：哪些文件构成一场 session、两把租约的编排、两个计数；typed error `NoSuchSession` / `SessionBusy` / `DepositInFlight` / `HasEvents` / `HoldsDeposits`），检查与删除全程持两把租约（deposit lease 用 non-blocking：「有人正在投递」是答案不是队列）。它拿的那把是 **inbox 的**租约，投递者一个不落地都持它（§3.4）：supervisor 送回的 `task_finished`、`ext activate` 的 capability note，与一条排队的 turn 一样是「别动这场 session」的理由。
+机制在内核（`ledger.pruneSessionLeased`：哪些文件构成一场 session、两把租约的编排、两个计数；typed error `NoSuchSession` / `SessionBusy` / `DepositInFlight` / `HasEvents` / `HoldsDeposits`），检查与删除全程持两把租约（deposit lease 用 non-blocking：「有人正在投递」是答案不是队列）。其中一把是 **inbox 的**租约，投递者一个不落地都持它（§3.4）：supervisor 送回的 `task_finished`、`ext activate` 的 capability note，与一条排队的 turn 一样是「别动这场 session」的理由。**两把租约由壳层先拿**，因为「还有没有活着的后台任务」只有壳层答得出（要读遍每个 task 目录、远端还要问另一台机器），而两条起任务的路各被其中一把盖住（§3.4），所以那个答案在删除发生之前不会翻篇。
+
+**它在哪一刻 commit**：删掉 session 文件那一刻。在此之前的任何失败都是 refusal，一个字节不动；这之后没有回滚可言（别的进程读到的「没了」就是这个文件的不在场），所以后续 sidecar / inbox / scratch 的清理**只报不抛**——`PruneReport.leftovers` 与一句 `note:`，exit 仍是 0。一场 session 不能有两套完成语义。
 
 **`--force` 掀不动的三条**（它管的是这一场*握着*什么，不是谁正握着它）：有人在 `step`（写者租约）· 有正在飞的投递 · 这一场还有活着的后台任务（壳层用 `task list` 那同一份投影问，refusal 点名 `nulya task kill <task>`；`done`/`lost` 不拦——它们的目录随 scratch 一起走）。
 

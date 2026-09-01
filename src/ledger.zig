@@ -1043,7 +1043,7 @@ pub fn depositEvent(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, sess
 pub const DepositWait = enum { block, fail_fast };
 
 /// The exclusive right to deposit into this session's inbox. Held by EVERY
-/// writer of the inbox, for two rules:
+/// writer of the inbox, for three rules:
 ///
 ///   * A gate that READS the session and then deposits must be one act.
 ///     `append --image` refuses a picture the model in force cannot see, and
@@ -1055,32 +1055,92 @@ pub const DepositWait = enum { block, fail_fast };
 ///     write. `pruneSession` removes one only while holding this and the writer
 ///     lease; every deposit re-checks the session under this lease
 ///     (`depositEventLeased`), closing the window from the other side.
+///   * Nor between the check and the START of something long-lived under it: a
+///     background task's supervisor writes into the session's scratch tree for
+///     as long as it runs, and `nulya task run` holds this across "does this
+///     session exist" and the spawn. Together with the writer lease — which
+///     covers the other way a task starts, from inside a step — that makes the
+///     pair the session's lifetime freeze (`SessionLeases`).
 ///
 /// It lives INSIDE the inbox, and is emphatically NOT the session's `.lock`:
 /// that one belongs to `step`, and every gate above must work while a step runs.
 /// Neither the drain nor a scan looks at anything but `*.json` there.
 ///
 /// LOCK ORDER: nothing takes the writer lease and then this one (`step` never
-/// deposits); `pruneSession`, the one place both are held, takes this one first
-/// and the writer lease non-blocking.
+/// deposits); `acquireSessionLeases`, the one place both are held, takes this
+/// one first and the writer lease non-blocking. Two of THESE at once is
+/// `moveDeposit` alone, in session-path order.
 pub fn acquireDepositLease(
     alloc: std.mem.Allocator,
     io: std.Io,
     base: std.Io.Dir,
     session_path: []const u8,
     wait: DepositWait,
-) !std.Io.File {
+) !Lease {
     const inbox = try inboxPath(alloc, session_path);
     defer alloc.free(inbox);
     try base.createDirPath(io, inbox);
     const lock_rel = try depositLockPath(alloc, session_path);
     defer alloc.free(lock_rel);
-    return base.createFile(io, lock_rel, .{
+    return .{ .file = try base.createFile(io, lock_rel, .{
         .truncate = false,
         .read = true,
         .lock = .exclusive,
         .lock_nonblocking = wait == .fail_fast,
-    });
+    }) };
+}
+
+/// A held lease, either of a session's two. Closing it releases the lease;
+/// closing it twice is a no-op, which is what lets a callee release it at the
+/// one moment it may (a lock file cannot be unlinked while its opener holds it)
+/// without taking the handle away from the caller's `defer`.
+pub const Lease = struct {
+    file: std.Io.File,
+    open: bool = true,
+
+    pub fn close(self: *Lease, io: std.Io) void {
+        if (!self.open) return;
+        self.file.close(io);
+        self.open = false;
+    }
+};
+
+/// BOTH of a session's leases, held at once.
+///
+/// Only under the pair does "nothing is alive under this session" stay true
+/// long enough to act on, because a long-lived writer under a session's scratch
+/// tree can be started down either of two paths: `nulya task run` takes the
+/// deposit lease across it, and an in-step `shell {background:true}` is covered
+/// by the writer lease its step is holding. A caller that answers that question
+/// under one of them alone has only narrowed the window it is racing.
+///
+/// The order is fixed here rather than remembered at each site: deposit lease
+/// first, writer lease non-blocking. Nothing in the system takes the writer
+/// lease and then a deposit lease (`step` never deposits), so this is the only
+/// place the two are held at once.
+pub const SessionLeases = struct {
+    deposits: Lease,
+    writer: Lease,
+
+    pub fn close(self: *SessionLeases, io: std.Io) void {
+        self.writer.close(io);
+        self.deposits.close(io);
+    }
+};
+
+/// Take both of a session's leases: `error.DepositInFlight` when somebody is
+/// inside its inbox, `error.SessionBusy` when a step is writing it. Neither is
+/// a queue to join — both are answers.
+pub fn acquireSessionLeases(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    session_path: []const u8,
+) !SessionLeases {
+    var deposits = try leaseOrRefuse(alloc, io, base, session_path, .fail_fast);
+    errdefer deposits.close(io);
+    const writer = try acquireWriterLease(alloc, io, base, session_path);
+    return .{ .deposits = deposits, .writer = .{ .file = writer } };
 }
 
 /// `<inbox>/.deposit.lock`.
@@ -1111,10 +1171,86 @@ pub fn depositEventLeased(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir
 
     const tmp_rel = try std.fmt.allocPrint(alloc, "{s}{c}{s}.tmp", .{ inbox, std.fs.path.sep, name });
     defer alloc.free(tmp_rel);
-    const final_rel = try std.fmt.allocPrint(alloc, "{s}{c}{s}.json", .{ inbox, std.fs.path.sep, name });
+    const final_rel = try depositFilePath(alloc, session_path, name);
     defer alloc.free(final_rel);
     try base.writeFile(io, .{ .sub_path = tmp_rel, .data = out.written() });
     try base.rename(tmp_rel, base, final_rel, io);
+}
+
+/// Move the undrained deposit `name` from one session's inbox to another's —
+/// the second way a fact reaches an inbox, and the only way one leaves an inbox
+/// without being drained. False when there was nothing to move, which is the
+/// ordinary case once the owning session has stepped.
+///
+/// It is a WRITE OF BOTH INBOXES, so it holds BOTH leases: the destination's,
+/// like every depositor, and the source's, because "having the lease means this
+/// inbox does not change under me" is what `pruneSession` counts on when it
+/// lists what a session still holds. Taken in path order, never in call order:
+/// two moves in opposite directions would otherwise each hold what the other
+/// waits for.
+///
+/// Under the leases: a destination session that is gone is `error.NoSuchSession`
+/// and the file stays where it is; a source deposit drained in the meantime is
+/// `false`.
+pub fn moveDeposit(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    from_session_path: []const u8,
+    to_session_path: []const u8,
+    name: []const u8,
+    wait: DepositWait,
+) !bool {
+    // One session: there is nowhere to move to, and taking its lease twice
+    // would deadlock on the second.
+    if (std.mem.eql(u8, from_session_path, to_session_path)) return false;
+
+    const src = try depositFilePath(alloc, from_session_path, name);
+    defer alloc.free(src);
+    const dst = try depositFilePath(alloc, to_session_path, name);
+    defer alloc.free(dst);
+
+    // Before any lock: the common answer is "nothing to move", and it costs
+    // nobody the leases to say so.
+    base.access(io, src, .{}) catch return false;
+
+    const first_is_src = std.mem.lessThan(u8, from_session_path, to_session_path);
+    const first = if (first_is_src) from_session_path else to_session_path;
+    const second = if (first_is_src) to_session_path else from_session_path;
+
+    var first_lease = try leaseOrRefuse(alloc, io, base, first, wait);
+    defer first_lease.close(io);
+    var second_lease = try leaseOrRefuse(alloc, io, base, second, wait);
+    defer second_lease.close(io);
+
+    base.access(io, to_session_path, .{}) catch return error.NoSuchSession;
+    // A second look under the lease: the source may have been drained while
+    // this waited for it, and then there is nothing to move after all.
+    base.access(io, src, .{}) catch return false;
+    try base.rename(src, base, dst, io);
+    return true;
+}
+
+/// `acquireDepositLease` with the caller's `fail_fast` spelled as the refusal
+/// every reader of one already knows.
+fn leaseOrRefuse(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    session_path: []const u8,
+    wait: DepositWait,
+) !Lease {
+    return acquireDepositLease(alloc, io, base, session_path, wait) catch |err| switch (err) {
+        error.WouldBlock => error.DepositInFlight,
+        else => err,
+    };
+}
+
+/// `<inbox>/<name>.json` — where one deposited event lands.
+fn depositFilePath(alloc: std.mem.Allocator, session_path: []const u8, name: []const u8) ![]u8 {
+    const inbox = try inboxPath(alloc, session_path);
+    defer alloc.free(inbox);
+    return std.fmt.allocPrint(alloc, "{s}{c}{s}.json", .{ inbox, std.fs.path.sep, name });
 }
 
 /// The largest one deposited event may be, encoded.
@@ -1243,11 +1379,18 @@ pub const PruneReport = struct {
     events: usize,
     /// Deposits waiting in the inbox that no step ever drained.
     deposits: usize,
+    /// Something that belongs to this session is still on disk: the session
+    /// itself was removed (that is what a report at all means), and one of the
+    /// files that only served it would not go. A note for the caller, never an
+    /// error — see the commit point in `pruneSessionLeased`.
+    leftovers: bool = false,
 };
 
 /// Remove the session at `session_path` (relative to `base`) — the session file
 /// and every sibling that is part of it (`.cancel`, both lease files, the inbox)
-/// — or refuse and leave every byte where it is.
+/// — or refuse and leave every byte where it is. A refusal is total; once the
+/// session file is gone the call has COMMITTED, and a sibling that will not go
+/// is reported in `leftovers` rather than raised.
 ///
 /// The two facts that forbid removal are LOCKS (a step writing it, a deposit in
 /// flight), and a lock can only be answered by TAKING it: a caller that probes
@@ -1256,6 +1399,9 @@ pub const PruneReport = struct {
 /// under BOTH leases, and the inbox lease is the one every depositor takes — a
 /// supervisor delivering a task report is as much a reason to leave a session
 /// alone as a queued turn is.
+///
+/// A caller with a lock-shaped question of its own asks it under the same pair
+/// and calls `pruneSessionLeased`.
 ///
 /// NOT here: which sessions deserve removing (a judgment; the caller names one
 /// id), and anything outside the session's own files. Journal rows about a
@@ -1273,30 +1419,38 @@ pub fn pruneSession(
     opts: PruneOptions,
 ) !PruneReport {
     base.access(io, session_path, .{}) catch return error.NoSuchSession;
+    var leases = try acquireSessionLeases(alloc, io, base, session_path);
+    defer leases.close(io);
+    return pruneSessionLeased(alloc, io, base, session_path, opts, &leases);
+}
 
-    // Both leases, in the order that cannot deadlock: nothing in the system
-    // takes the writer lease and then a deposit lease (`step` never deposits),
-    // so this is the only place the two are held at once.
-    var deposits = acquireDepositLease(alloc, io, base, session_path, .fail_fast) catch |err| switch (err) {
-        error.WouldBlock => return error.DepositInFlight,
-        else => return err,
-    };
-    var deposits_open = true;
-    defer if (deposits_open) deposits.close(io);
-
-    var writer = try acquireWriterLease(alloc, io, base, session_path);
-    var writer_open = true;
-    defer if (writer_open) writer.close(io);
-
+/// `pruneSession` for a caller that ALREADY holds this session's leases — and
+/// holds them because it had a question of its own to settle under them.
+///
+/// The pair is what freezes a session's LIFETIME (`SessionLeases`): with both
+/// held, no new background task can appear under this session by either path.
+/// The question that needs them — "is a task of this session still running?" —
+/// is the caller's to answer, because reading every task directory (and, for a
+/// remote session, asking another machine) is not something the ledger does.
+/// Which is exactly why the leases have to be takeable from outside.
+///
+/// They are closed by this call when the session goes; the caller's own `defer`
+/// covers every other path (closing twice is a no-op).
+pub fn pruneSessionLeased(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    session_path: []const u8,
+    opts: PruneOptions,
+    leases: *SessionLeases,
+) !PruneReport {
     // Asked again under the leases: another prune could have finished in
     // between, and taking the deposit lease recreated the inbox it just removed.
     // Best effort on the way out — the session is already gone.
     base.access(io, session_path, .{}) catch {
-        writer.close(io);
-        writer_open = false;
+        leases.writer.close(io);
         deleteSibling(alloc, io, base, session_path, ".lock") catch {};
-        deposits.close(io);
-        deposits_open = false;
+        leases.deposits.close(io);
         removeInbox(alloc, io, base, session_path, &.{}) catch {};
         return error.NoSuchSession;
     };
@@ -1319,20 +1473,30 @@ pub fn pruneSession(
         if (names.len != 0) return error.HoldsDeposits;
     }
 
-    // The session file FIRST: its absence is what every other process reads as
-    // "gone", and depositors re-check it under the lease this still holds. Then
-    // each lease is closed before its own file is removed — Windows will not
-    // unlink an open file, and here the opener is us.
+    // THE COMMIT POINT. Up to here every failure is a refusal that leaves every
+    // byte where it is; the session file's absence is what every other process
+    // reads as "gone", and no filesystem can put it back. So nothing after this
+    // line may fail the call: what is left over is reported, not raised — one
+    // completion rule for the whole session, the one the caller's scratch tree
+    // already follows.
     try base.deleteFile(io, session_path);
-    try deleteSibling(alloc, io, base, session_path, ".cancel");
-    writer.close(io);
-    writer_open = false;
-    try deleteSibling(alloc, io, base, session_path, ".lock");
-    deposits.close(io);
-    deposits_open = false;
-    try removeInbox(alloc, io, base, session_path, names);
 
-    return .{ .events = events, .deposits = names.len };
+    // Each lease is closed before its own file is removed — Windows will not
+    // unlink an open file, and here the opener is us.
+    var leftovers = false;
+    deleteSibling(alloc, io, base, session_path, ".cancel") catch {
+        leftovers = true;
+    };
+    leases.writer.close(io);
+    deleteSibling(alloc, io, base, session_path, ".lock") catch {
+        leftovers = true;
+    };
+    leases.deposits.close(io);
+    removeInbox(alloc, io, base, session_path, names) catch {
+        leftovers = true;
+    };
+
+    return .{ .events = events, .deposits = names.len, .leftovers = leftovers };
 }
 
 /// Remove the deposit lock, the deposits this prune counted, and then the inbox
@@ -2067,6 +2231,83 @@ test "pruneSession removes what a session is made of, and refuses history unless
         try std.testing.expectError(error.SessionBusy, pruneSession(alloc, io, tmp.dir, spath, .{ .force = true }));
         try tmp.dir.access(io, spath, .{});
     }
+
+    // The lease is the caller's to hold: `session prune` takes it, settles "is
+    // a background task alive under this session" under it, and only then hands
+    // it over — so a task cannot appear between the answer and the removal.
+    {
+        const spath = "leased.jsonl";
+        var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "leased" });
+        l.deinit();
+
+        var held = try acquireSessionLeases(alloc, io, tmp.dir, spath);
+        defer held.close(io);
+        _ = try pruneSessionLeased(alloc, io, tmp.dir, spath, .{}, &held);
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, spath, .{}));
+    }
+}
+
+test "pruneSession commits at the session file: what will not go afterwards is reported, not raised" {
+    // Past that delete there is no rollback — the session's absence is what
+    // every other process already reads as "gone" — so one completion rule
+    // holds for the whole session: refuse everything, or finish and say what
+    // was left. A directory where `.cancel` belongs is the portable way to make
+    // one of those removals fail.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spath = "stuck.jsonl";
+
+    var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "stuck" });
+    l.deinit();
+    try tmp.dir.createDirPath(io, "stuck.cancel");
+    try tmp.dir.writeFile(io, .{ .sub_path = "stuck.cancel/keep", .data = "" });
+
+    const report = try pruneSession(alloc, io, tmp.dir, spath, .{});
+    try std.testing.expect(report.leftovers);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, spath, .{}));
+    try tmp.dir.access(io, "stuck.cancel", .{});
+}
+
+test "moveDeposit takes BOTH inboxes' leases, and moves only what is still there" {
+    // The source is written too, so "holding this lease means this inbox does
+    // not change under me" — what `pruneSession` counts on while it lists what
+    // a session holds — has to be true for the source as well.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var a = try createDurable(alloc, io, tmp.dir, "a.jsonl", .{ .session = "a" });
+    a.deinit();
+    var b = try createDurable(alloc, io, tmp.dir, "b.jsonl", .{ .session = "b" });
+    b.deinit();
+    try depositEvent(alloc, io, tmp.dir, "a.jsonl", "task-a-t1", .{ .task_finished = .{ .task = "a/t1", .exit_code = 0, .text = "done" } });
+
+    // Somebody is inside the SOURCE inbox: not a queue to join for a caller
+    // that asked to be told instead.
+    {
+        var held = try acquireDepositLease(alloc, io, tmp.dir, "a.jsonl", .block);
+        defer held.close(io);
+        try std.testing.expectError(
+            error.DepositInFlight,
+            moveDeposit(alloc, io, tmp.dir, "a.jsonl", "b.jsonl", "task-a-t1", .fail_fast),
+        );
+    }
+    try tmp.dir.access(io, "a.inbox/task-a-t1.json", .{});
+
+    try std.testing.expect(try moveDeposit(alloc, io, tmp.dir, "a.jsonl", "b.jsonl", "task-a-t1", .block));
+    try tmp.dir.access(io, "b.inbox/task-a-t1.json", .{});
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "a.inbox/task-a-t1.json", .{}));
+
+    // Nothing left to move, and nowhere to move it to.
+    try std.testing.expect(!try moveDeposit(alloc, io, tmp.dir, "a.jsonl", "b.jsonl", "task-a-t1", .block));
+    try std.testing.expectError(
+        error.NoSuchSession,
+        moveDeposit(alloc, io, tmp.dir, "b.jsonl", "gone.jsonl", "task-a-t1", .block),
+    );
+    try tmp.dir.access(io, "b.inbox/task-a-t1.json", .{});
 }
 
 test "the inbox lease is exclusive, and a deposit into a session that is gone is refused" {

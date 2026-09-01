@@ -264,7 +264,7 @@ Store and scope:
   Without the flag it takes only one that recorded nothing and holds nothing —
   a `session new` nobody ever spoke into. `--force` takes its events and any
   queued turns as well, and says how many it took. Neither form removes one that
-  is being stepped, that something is depositing into, or that still has a
+  is being stepped, that something else is writing into, or that still has a
   running background task (it names the task; `nulya task kill <task>` first).
   What goes with it: the session file, its siblings, and `.nulya/scratch/<id>/`.
   What stays: the journal rows (a verdict is evidence about something that
