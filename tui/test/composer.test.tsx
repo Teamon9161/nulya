@@ -351,6 +351,47 @@ test("an `@` lists project paths, ↑↓ picks one and Tab writes the path in", 
   }
 }, 60_000)
 
+test("picking a directory keeps the `@` menu open, so a nested path can be reached", async () => {
+  const index: ProjectIndex = {
+    candidates: () => [
+      { path: "docs", kind: "directory" },
+      { path: "docs/goals", kind: "directory" },
+      { path: "docs/goals/ground.md", kind: "file" },
+    ],
+    touch: () => {},
+    size: () => 120,
+  }
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer onSubmit={() => {}} references={index} />
+      </StyleContext.Provider>
+    ),
+    { width: 90, height: 14 },
+  )
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.typeText("see @docs")
+    await settle(setup, 3)
+
+    // A directory is a step, not an answer: the token stays open and the menu
+    // now offers what is inside it.
+    setup.mockInput.pressTab()
+    let frame = await settle(setup, 3)
+    expect(frame).toContain("Tab inserts the path")
+    expect(frame).toContain("@goals/")
+
+    setup.mockInput.pressTab()
+    setup.mockInput.pressTab()
+    frame = await settle(setup, 3)
+    expect(frame).toContain("see @docs/goals/ground.md")
+    // A file IS an answer, so that token is closed and the menu is down.
+    expect(frame).not.toContain("Tab inserts the path")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
 test("Shift+Enter inserts a newline instead of submitting", async () => {
   const sent: string[] = []
   const setup = await testRender(
@@ -844,3 +885,53 @@ test("an image the model is not catalogued for is refused on the gesture", async
     setup.renderer.destroy()
   }
 }, 60_000)
+
+test("the accent lands on the token, not on the wide characters in front of it", async () => {
+  // BUGS #13. Both scanners answer in code points and the renderer counts
+  // display columns, so a CJK prompt in front of a placeholder pulled every
+  // highlight left by one column per character — the accent landed on the
+  // prose and the token it named stayed plain.
+  const index: ProjectIndex = {
+    candidates: () => [{ path: "README.md", kind: "file" }],
+    touch: () => {},
+    size: () => 12,
+  }
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer onSubmit={() => {}} references={index} />
+      </StyleContext.Provider>
+    ),
+    { width: 70, height: 10 },
+  )
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.typeText("请看这段：[Pasted text #1] 还有 @README.md 谢谢")
+    await settle(setup, 4)
+    const painted = accented(setup.captureSpans(), style.theme.accent.user)
+    expect(painted).toContain("[Pasted text #1]")
+    expect(painted).toContain("@README.md")
+    // Nothing wide is lit: the prose in front of the tokens is prose.
+    expect(painted).not.toMatch(/[一-鿿]/)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+/**
+ * Everything drawn in `color`, joined. The composer's own furniture — its
+ * border and the `›` in front of the buffer — is drawn in the accent too, so
+ * it is dropped: what is left is what the highlights lit.
+ */
+function accented(frame: { lines: { spans: { text: string; fg: { r: number; g: number; b: number } }[] }[] }, color: string): string {
+  const want = [1, 3, 5].map((at) => Number.parseInt(color.slice(at, at + 2), 16))
+  const furniture = new RegExp(`[${style.glyphs.user}│─╭╮╰╯|+-]`, "g")
+  let out = ""
+  for (const line of frame.lines) {
+    for (const span of line.spans) {
+      const rgb = [span.fg.r, span.fg.g, span.fg.b].map((value) => Math.round(value * 255))
+      if (rgb.every((value, at) => Math.abs(value - want[at]!) <= 1)) out += span.text
+    }
+  }
+  return out.replace(furniture, " ").replace(/\s+/g, " ").trim()
+}

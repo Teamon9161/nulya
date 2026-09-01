@@ -1,5 +1,5 @@
 import { For, Show, createMemo } from "solid-js"
-import { useScreen, useStyle } from "../theme.ts"
+import { useBodyWidth, useStyle } from "../theme.ts"
 import { CardFrame, sizeNote } from "./CardFrame.tsx"
 import { backgroundStartOf, splitShellOutput } from "../../nulya/ledger.ts"
 import { backgroundNote, taskNamed, useTasks } from "../../state/tasks.ts"
@@ -73,12 +73,17 @@ export function ShellCard(props: { item: ToolItem; presentation: ToolPresentatio
   )
 }
 
-/** The complete invocation, hard-wrapped so expanding never loses its tail. */
+/**
+ * The complete invocation, hard-wrapped so expanding never loses its tail —
+ * at THIS PANE's width (`useBodyWidth`, BUGS.md #10/#17), because each wrapped
+ * line is its own `height={1}` row and a row laid out wider than the column it
+ * lands in loses its tail instead of reflowing.
+ */
 function ShellCommand(props: { command: string }) {
   const style = useStyle()
-  const screen = useScreen()
+  const body = useBodyWidth()
   // CardFrame and its open body consume six columns before this text starts.
-  const room = () => Math.max(8, Math.min(screen().width, style.maxWidth) - 6)
+  const room = () => Math.max(8, Math.min(body(), style.maxWidth) - 6)
   const lines = createMemo(() => hardWrapLines(props.command, room()))
   return (
     <box flexDirection="column" width="100%">

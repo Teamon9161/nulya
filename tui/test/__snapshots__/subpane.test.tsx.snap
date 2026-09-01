@@ -3,7 +3,7 @@
 exports[`a wide terminal puts the delegation beside the conversation that made it 1`] = `
 "                                                                        │ ⤷ ###################### · observing         ✕
 ▎ session · ---------------- · frozen composition                     ▸ │                                               
-▎ model    scripted/scripted-demo · tools 1+0                           │ ▎ session · ---------------- · frozen       ▸ 
+▎ model    scripted/scripted-demo · tools 1+0                           │ ▎ session · ----------------                ▸ 
                                                                         │ ▎ model    scripted/scripted-demo · tools 1+0 
 ● spawning a sub-session                                                │                                               
                                                                         │ ▎ what did the delegate find                  

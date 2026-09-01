@@ -85,9 +85,11 @@ export function StatusBar(props: {
   /** Rows of transcript below the viewport: >0 means somebody is reading back. */
   behind?: number
   /**
-   * The model's context window, from the `[[models]]` catalog. Absent whenever
-   * the catalog does not say — an unlisted model id, a bare endpoint — and then
-   * no fullness is shown at all rather than a made-up denominator.
+   * The model's context window, already resolved by the caller (a profile's
+   * own catalog first, the global `[[models]]` list otherwise —
+   * `ModelView.modelParamsFor`). Absent whenever neither says — an unlisted
+   * model id, a bare endpoint — and then no fullness is shown at all rather
+   * than a made-up denominator.
    */
   contextWindow?: number | null
   /** Clicking the context ring: the mouse half of `/context` (tui.md §11, T82). */

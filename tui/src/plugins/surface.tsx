@@ -1,5 +1,5 @@
 import { For, Index, createMemo } from "solid-js"
-import { useScreen, useStyle, type Style } from "../render/theme.ts"
+import { useBodyWidth, useStyle, type Style } from "../render/theme.ts"
 import type { DiffSurface, Line, Surface, ThemeToken } from "nulya-tui/plugin-api"
 
 /**
@@ -54,9 +54,17 @@ export function tokenColor(style: Style, token: ThemeToken | undefined): string 
  * How many columns a surface has, given the indent it is drawn at. The same
  * `maxWidth` clamp every card obeys, so a plugin's rows line up with the
  * transcript's rather than running to the edge of a wide terminal.
+ *
+ * `available` is the columns the surface is drawn INTO — a transcript pane's
+ * width for a card, the terminal for a panel above the composer. Callers get
+ * it from `useBodyWidth()`, which answers both (BUGS.md #10/#17). Telling a
+ * plugin it has more columns than its pane does is not a cosmetic error: the
+ * rows come back that wide and `Rows` draws each in a `height={1}` box, so the
+ * overflow is never painted and the plugin's own wrapping happened in the
+ * wrong place.
  */
-export function surfaceWidth(style: Style, screenWidth: number, indent: number): number {
-  return Math.max(8, Math.min(screenWidth, style.maxWidth) - indent)
+export function surfaceWidth(style: Style, available: number, indent: number): number {
+  return Math.max(8, Math.min(available, style.maxWidth) - indent)
 }
 
 export interface DiffStat {
@@ -170,13 +178,13 @@ export function PluginCardSurface(props: {
   pkg: string
 }) {
   const style = useStyle()
-  const screen = useScreen()
+  const body = useBodyWidth()
   const indent = () => props.indent ?? 2
 
   const drawn = createMemo((): { rows: Line[]; diff: DiffSurface | null; cut: number; failed: string | null } => {
     void props.revision
     try {
-      const value = props.render(surfaceWidth(style, screen().width, indent()))
+      const value = props.render(surfaceWidth(style, body(), indent()))
       const diff = diffSurfaceOf(value)
       if (diff) return { rows: [], diff, cut: 0, failed: null }
       const rows = Array.isArray(value) ? value : []
@@ -216,13 +224,13 @@ function PluginRows(props: {
   pkg: string
 }) {
   const style = useStyle()
-  const screen = useScreen()
+  const body = useBodyWidth()
   const indent = () => props.indent ?? 2
 
   const drawn = createMemo((): { rows: Line[]; cut: number; failed: string | null } => {
     void props.revision
     try {
-      const rows = props.render(surfaceWidth(style, screen().width, indent()))
+      const rows = props.render(surfaceWidth(style, body(), indent()))
       const cap = props.maxRows ?? rows.length
       return { rows: rows.slice(0, cap), cut: Math.max(0, rows.length - cap), failed: null }
     } catch (error) {

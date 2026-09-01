@@ -9,10 +9,13 @@
  *
  * The number itself is not ours. `usage.lastPrompt` is what the provider
  * counted for the whole prefix of the most recent step (`state/session.ts`),
- * and the denominator is the `[[models]]` catalog's `context_window` for the id
- * this session froze. Neither is estimated here: with no catalog entry there is
- * no denominator, and a made-up one would be a meter that reads wrong in a
- * place where the only reason to look is to decide whether to `/compact`.
+ * and the denominator is `context_window` for the id this session froze —
+ * from the profile's OWN catalog when it has one, the global `[[models]]`
+ * list otherwise (`ModelView.modelParamsFor`, DESIGN §9.5; `App.contextWindow`
+ * resolves it before it ever reaches this module). Neither is estimated here:
+ * with no catalog entry there is no denominator, and a made-up one would be a
+ * meter that reads wrong in a place where the only reason to look is to decide
+ * whether to `/compact`.
  */
 import { compactCount, type UsageTotals } from "./session.ts"
 

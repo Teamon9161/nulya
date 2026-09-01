@@ -1095,6 +1095,54 @@ export async function sessionCancel(ws: Workspace, id: string): Promise<void> {
   if (result.code !== 0) fail("session cancel failed", result)
 }
 
+/** What `session rebind` said, in the kernel's own words. */
+export interface RebindResult {
+  /** Its one line on stdout: `<id> will run on <provider>/<model> from its next step`. */
+  said: string
+  /**
+   * What it printed on stderr — the costs of the move, one per line: a cold
+   * prompt cache when the provider changed, and reasoning recorded before now
+   * no longer being replayed. Empty when nothing changed (already on it).
+   */
+  costs: string[]
+}
+
+/**
+ * `nulya session rebind <id> [--profile P] [--model ID]` — run the REST of this
+ * conversation on another model (DESIGN §3.1 / §9.5, goals/model-rebind.md).
+ *
+ * A deposit, not a write: the identity change is a ledger event and reaches the
+ * file through the inbox, drained at the next step boundary by the one writer.
+ * So this works on a session whose step is running right now, and on one
+ * somebody else is driving — the same reason `session outcome` and
+ * `session append` can be called from here.
+ *
+ * Three gates live in the KERNEL (credential, vision when the ledger already
+ * holds images, and "already on it"), and every one of them answers with a
+ * sentence that names the config key or the command that fixes it. Nothing here
+ * re-decides any of that: a refusal is thrown with the kernel's whole text as
+ * `CliError.detail`, and the costs above are carried out verbatim too.
+ */
+export async function sessionRebind(
+  ws: Workspace,
+  id: string,
+  pick: { profile?: string; model?: string },
+  env?: Record<string, string>,
+): Promise<RebindResult> {
+  const args = ["session", "rebind", id]
+  if (pick.profile) args.push("--profile", pick.profile)
+  if (pick.model) args.push("--model", pick.model)
+  const result = await run(ws, args, env)
+  if (result.code !== 0) fail("session rebind failed", result)
+  return {
+    said: result.stdout.trim(),
+    costs: result.stderr
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0),
+  }
+}
+
 export interface FollowHandle {
   /** Ledger events as they are appended by whoever holds the writer lease. */
   events: AsyncGenerator<LedgerEvent>

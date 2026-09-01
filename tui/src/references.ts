@@ -211,6 +211,13 @@ export interface ReferenceMatch {
   /** What the menu shows — a basename, unless two candidates share one. */
   label: string
   description: string
+  /**
+   * What was picked. A directory is not an answer, it is a step: accepting one
+   * has to leave the token open so the menu can offer what is inside it, which
+   * is the difference between `@docs/` completing to `@docs/goals/ground.md`
+   * and completing to nothing at all (`Composer.tsx`'s `acceptReference`).
+   */
+  kind: ReferenceKind
 }
 
 /**
@@ -252,6 +259,7 @@ export function referenceCompletions(
       replacement: referenceMarker(path),
       label: referenceMarker(label),
       description: candidate.kind === "file" ? `file${bytes === null ? "" : ` · ${formatBytes(bytes)}`}` : "directory",
+      kind: candidate.kind,
     }
   })
 }

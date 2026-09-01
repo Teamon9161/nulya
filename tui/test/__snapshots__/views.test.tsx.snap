@@ -8,8 +8,8 @@ exports[`/help lists the bindings that are actually in force 1`] = `
                                    browse when idle                                                 
  f2                                /ext — the extension store                                       
  f3                                /sessions — the session store                                    
- f5                                /model — the models that can run; Enter starts a session on      
-                                   one                                                              
+ f5                                /model — the models that can run; Enter moves this session       
+                                   onto one, or starts one                                          
  f6                                /provider — endpoints and their keys; Enter on a ready one       
                                    goes to its models                                               
  f7                                /tasks — background commands still running, their logs, k to     
@@ -53,7 +53,7 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  drag over text                    select it; releasing copies it to the clipboard                  
                                                                                                     
  slash commands                                                                                     
- /model                            pick the model the next session runs on                          
+ /model                            pick the model this conversation runs on                         
  /mode [ask|unsafe]                ask before every tool call, or run them all unreviewed; no       
                                    argument opens the picker                                        
  /provider                         endpoints and their keys                                         

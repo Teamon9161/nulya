@@ -238,7 +238,7 @@ test("Enter on a ready provider goes to /model landed on its first model; on a k
     setup.mockInput.pressKey("k")
     await settle(setup, 2)
     setup.mockInput.pressEnter()
-    await until(() => setup.captureCharFrame().includes("what the next session runs on"), 10_000)
+    await until(() => setup.captureCharFrame().includes("model · what "), 10_000)
     const frame = await settle(setup, 3)
     expect(frame).toMatch(/▾ DeepSeek V4 Flash/)
     // And it is a models screen: no keys, no endpoints, no way back by accident.

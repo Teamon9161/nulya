@@ -2,7 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, onMount } from "soli
 import type { KeyEvent, MouseEvent, PasteEvent, TextareaRenderable } from "@opentui/core"
 import { MouseButton, SyntaxStyle } from "@opentui/core"
 import { useScreen, useStyle } from "../render/theme.ts"
-import { columnWidth, displayWidth, fit, squeeze, wrapWords } from "./columns.ts"
+import { columnWidth, displayWidth, fit, squeeze, toHighlightRanges, wrapWords } from "./columns.ts"
 import { pointer } from "./pointer.ts"
 import { builtin_names, completions } from "../commands.ts"
 import {
@@ -337,10 +337,14 @@ export function Composer(props: {
   /**
    * Accent the tokens that stand for something: `@markers` that resolve to a
    * real path, and folded-paste placeholders. Redrawn from scratch on every
-   * change, because the ranges are character offsets into a buffer that just
-   * moved and keeping the old ones would light up the wrong words. An `@` in
-   * front of an unrecognised word stays ordinary prose — that is what makes the
-   * accent mean "this one resolves" rather than "you typed an at-sign".
+   * change, because the ranges are offsets into a buffer that just moved and
+   * keeping the old ones would light up the wrong words. An `@` in front of an
+   * unrecognised word stays ordinary prose — that is what makes the accent mean
+   * "this one resolves" rather than "you typed an at-sign".
+   *
+   * Both scanners answer in code points, which is not what the renderer counts;
+   * `toHighlightRanges` (`ui/columns.ts`) is the one place that translation
+   * happens, so neither source has to know what the buffer indexes in.
    */
   const paintTokens = () => {
     if (!area) return
@@ -353,7 +357,7 @@ export function Composer(props: {
     if (spans.length === 0) return
     const paint = referenceAccent()
     if (!area.syntaxStyle) area.syntaxStyle = paint.style
-    for (const range of spans) {
+    for (const range of toHighlightRanges(text, spans)) {
       area.addHighlightByCharRange({ start: range.start, end: range.end, styleId: paint.id })
     }
   }
@@ -705,12 +709,18 @@ export function Composer(props: {
   /**
    * Put a chosen path in place of the token being typed. The `@path` is all
    * that goes in — the file's contents are the model's to fetch (D5).
+   *
+   * A file is an answer and gets the trailing space that starts the next word.
+   * A directory is not: it is one level of the path, and the space would close
+   * the token and take the menu down with it, so picking `@docs/` used to be
+   * the end of the road rather than the way to `@docs/goals/ground.md`. Left
+   * open, the very next keystroke — or `Tab` again — completes inside it.
    */
   const acceptReference = (match: ReferenceMatch, start: number, end: number): void => {
     if (!area) return
     area.setSelection(start, end)
     area.deleteSelection()
-    area.insertText(`${match.replacement} `)
+    area.insertText(match.kind === "directory" ? match.replacement : `${match.replacement} `)
     sync()
   }
 

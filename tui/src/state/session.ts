@@ -14,7 +14,7 @@
  */
 import { createStore, produce } from "solid-js/store"
 import { startedTaskOf, taskReportOf } from "../nulya/ledger.ts"
-import type { LedgerEvent, SessionHeader, ToolCall, Usage } from "../nulya/ledger.ts"
+import type { LedgerEvent, ModelDescriptor, SessionHeader, ToolCall, Usage } from "../nulya/ledger.ts"
 import type { StreamLine, StepStatus, StopReason } from "../nulya/cli.ts"
 
 export type ToolRunState = "pending" | "running" | "done"
@@ -108,6 +108,28 @@ export interface TaskItem extends ItemBase {
   text: string
 }
 
+/**
+ * From here on, this conversation runs on another model (`model_rebind`,
+ * DESIGN §3.1). Drawn as a plain divider: the model never sees this event — the
+ * kernel deliberately projects no turn for it — but the person reading the
+ * transcript is looking at two different models' words above and below the
+ * line, which is exactly the kind of fact a transcript exists to keep.
+ *
+ * `note` is what the kernel said WHEN the switch was made (its costs, verbatim)
+ * and is only ever set on the provisional item that `noteRebind` puts up at
+ * that moment. Those sentences are addressed to the person making the change,
+ * not to whoever replays the session later, so the committed item — the one a
+ * replay produces — carries only the fact.
+ */
+export interface RebindItem extends ItemBase {
+  kind: "rebind"
+  /** The provider profile named, and the wire/model it resolved to. */
+  profile: string
+  provider: string
+  model: string
+  note: string
+}
+
 /** An event kind this build does not know: kept, shown raw, never dropped. */
 export interface UnknownItem extends ItemBase {
   kind: "unknown"
@@ -122,6 +144,7 @@ export type TranscriptItem =
   | ToolItem
   | CapabilityItem
   | TaskItem
+  | RebindItem
   | UnknownItem
 
 export interface UsageTotals {
@@ -234,6 +257,34 @@ export interface SessionSnapshot {
   error: string | null
   /** Structured retry timing for a live countdown; null for every ordinary error. */
   retry: RetryNotice | null
+  /**
+   * Where this session was moved to, or null while it is still on what its
+   * header froze. Never read directly — `runningModel` below is the accessor.
+   */
+  rebind: RunningModel | null
+}
+
+/**
+ * What a session runs on NOW (goals/model-rebind.md §7).
+ *
+ * A model is frozen at `session new`, but the freeze point is a CHAIN: each
+ * `model_rebind` event appends another one, and the one in force is the last.
+ * The kernel says this once (`ledger.effectiveIdentity`) and reports it on
+ * `session list --json`; this is the front end's single answer, derived from
+ * the events it already applies rather than from a second scan of the file.
+ */
+export interface RunningModel {
+  /** The provider profile name (the header's `model` field). */
+  profile: string
+  /** The resolved model id. */
+  model: string
+}
+
+export function runningModel(snapshot: SessionSnapshot): RunningModel | null {
+  if (snapshot.rebind) return snapshot.rebind
+  const header = snapshot.header
+  if (!header) return null
+  return { profile: header.model, model: header.model_identity.model }
 }
 
 export interface SessionState {
@@ -249,6 +300,14 @@ export interface SessionState {
   enqueueUser(text: string, imageCount?: number): string
   /** Remove one optimistic turn after its own append failed. Committed turns are never touched. */
   rejectUser(localId: string): void
+  /**
+   * A `session rebind` the kernel accepted (goals/model-rebind.md): the event
+   * is in the inbox and lands at the next step boundary, so this echoes it the
+   * way `enqueueUser` echoes a deposited turn — the chips read the new model
+   * immediately, and the card carries what the kernel said about the costs
+   * until its own `model_rebind` event replaces it.
+   */
+  noteRebind(to: RunningModel & { provider: string }, note: string): void
   pendingCount(): number
   setError(message: string | null): void
   /**
@@ -286,6 +345,7 @@ export const no_snapshot: SessionSnapshot = {
   highlightedToolCallId: null,
   error: null,
   retry: null,
+  rebind: null,
 }
 
 /**
@@ -303,6 +363,24 @@ function firstProvisionalIndex(items: TranscriptItem[]): number {
   return at
 }
 
+/**
+ * The three strings a rebind card shows, read defensively off an event that a
+ * newer kernel — or a corrupt line — may not have written the way this build
+ * expects. A missing field costs a word on the card, never the card.
+ */
+function rebindFactOf(
+  profile: unknown,
+  identity: unknown,
+): { kind: "rebind"; profile: string; provider: string; model: string } {
+  const descriptor = (identity ?? {}) as Partial<ModelDescriptor>
+  return {
+    kind: "rebind",
+    profile: typeof profile === "string" ? profile : "",
+    provider: typeof descriptor.provider === "string" ? descriptor.provider : "",
+    model: typeof descriptor.model === "string" ? descriptor.model : "",
+  }
+}
+
 export function createSessionState(id: string): SessionState {
   const [snapshot, setSnapshot] = createStore<SessionSnapshot>({
     id,
@@ -316,6 +394,7 @@ export function createSessionState(id: string): SessionState {
     highlightedToolCallId: null,
     error: null,
     retry: null,
+    rebind: null,
   })
 
   // Bumped at every step boundary so provisional keys of one step never collide
@@ -324,6 +403,9 @@ export function createSessionState(id: string): SessionState {
   // Local optimistic ids must remain unique even when a failed append is
   // removed and retried within the same millisecond.
   let localUser = 0
+  // Same, for an announced rebind: two in a row within one millisecond must
+  // still be two keys.
+  let localRebind = 0
 
   /**
    * Calls the gate waved through on its own (T65), by id rather than by item.
@@ -355,7 +437,11 @@ export function createSessionState(id: string): SessionState {
     for (let i = draft.items.length - 1; i >= 0; i--) {
       const item = draft.items[i]!
       if (item.seq !== null) return
-      if (item.kind !== "user") draft.items.splice(i, 1)
+      // Queued user turns and an announced rebind are kept for the same reason:
+      // each is waiting for its OWN event out of the inbox, not for this step's.
+      // A rebind asked for mid-step is drained at the boundary AFTER the one
+      // running, which is later than this.
+      if (item.kind !== "user" && item.kind !== "rebind") draft.items.splice(i, 1)
     }
   }
 
@@ -560,6 +646,21 @@ export function createSessionState(id: string): SessionState {
           insertCommitted(draft, [
             { key: `e${seq}`, seq, kind: "task", task: finished.task, exitCode: finished.exit_code, text: finished.text },
           ])
+          break
+        }
+        case "model_rebind": {
+          const moved = event as Extract<LedgerEvent, { kind: "model_rebind" }>
+          const to = rebindFactOf(moved.profile, moved.identity)
+          // The provisional card `noteRebind` put up when the person asked for
+          // this is the same switch, now written down — so it steps aside for
+          // its own committed form rather than standing beside it.
+          for (let i = draft.items.length - 1; i >= 0; i--) {
+            const item = draft.items[i]!
+            if (item.seq !== null) break
+            if (item.kind === "rebind") draft.items.splice(i, 1)
+          }
+          draft.rebind = { profile: to.profile, model: to.model }
+          insertCommitted(draft, [{ key: `e${seq}`, seq, ...to, note: "" }])
           break
         }
         default: {
@@ -771,6 +872,20 @@ export function createSessionState(id: string): SessionState {
           (item) => item.key === localId && item.kind === "user" && item.seq === null && item.queued,
         )
         if (at >= 0) draft.items.splice(at, 1)
+      })
+    },
+    noteRebind(to, note) {
+      edit((draft) => {
+        draft.rebind = { profile: to.profile, model: to.model }
+        draft.items.push({
+          key: `rebind:${Date.now()}:${localRebind++}`,
+          seq: null,
+          kind: "rebind",
+          profile: to.profile,
+          provider: to.provider,
+          model: to.model,
+          note,
+        })
       })
     },
     pendingCount() {

@@ -1,5 +1,5 @@
 import { For, createMemo } from "solid-js"
-import { useScreen, useStyle } from "../theme.ts"
+import { useBodyWidth, useStyle } from "../theme.ts"
 import { hardWrapLines } from "../../ui/columns.ts"
 import type { CapabilityItem } from "../../state/session.ts"
 
@@ -10,13 +10,17 @@ import type { CapabilityItem } from "../../state/session.ts"
  * the extension and the newly available tools/skills. Version ids appear only
  * where they disambiguate the activation or version change; raw invoke/load
  * commands stay out of the default story.
+ *
+ * Wrapped at this pane's width (`useBodyWidth`, BUGS.md #10/#17): each line is
+ * its own `height={1}` row, so a tool description laid out wider than the
+ * column it lands in is cut off rather than continued.
  */
 export function CapabilityBanner(props: { item: CapabilityItem; previousVersion?: string | null }) {
   const style = useStyle()
-  const screen = useScreen()
+  const body = useBodyWidth()
   const details = createMemo(() => capabilityDetails(props.item.text))
   const title = () => capabilityTitle(props.item.id, props.item.version, props.previousVersion ?? null)
-  const room = () => Math.max(16, Math.min(screen().width, style.maxWidth) - 4)
+  const room = () => Math.max(16, Math.min(body(), style.maxWidth) - 4)
   const lines = createMemo(() => {
     const rows: string[] = []
     if (props.previousVersion && props.previousVersion !== props.item.version) {

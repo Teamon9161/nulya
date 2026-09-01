@@ -3031,3 +3031,47 @@ plugin API 2.3 兼容增加可选 `observe.onSession`，注册时收到当前 fr
 compact 的 committed 状态也明确成用户可见契约：Enter 已启动 `extRun` 后，Esc 只隐藏运行中 panel，不取消 continuation；成功仍以 `wakePending:true` 打开 driven child，失败恢复 pending 并重新呈现，旧 follow 的 Promise 只能落自己的 proposal key，不能关闭 supersede 它的新 proposal。手工 `/compact` 与 handoff follow 本来共用同一个 `run()`，因此 README 改准为两者都安全排干非空 summary inbox，而不是声称手工命令只打开 child。
 
 回归分两层：`test/plugins.test.tsx` 用真实冻结 fixture 钉注册时初始通知、相同 projection 去重、role-only 与 mode-only 转换；`test/compact.test.ts` 用受控 Promise 钉重复 tab 切换、running 后 Esc 的成功/失败、stale completion，以及 observer ↔ driver 两向转换下的 auto-follow / panel 可达性，并逐次断言 child 的 `wakePending:true`。
+
+
+### T113 · BUGS #13：输入框的蓝色高亮换算到渲染器真正在数的那把尺子（2026-09-01）
+
+**内核零改动。** `Composer.paintTokens` 把两个来源的区间直接喂给 `addHighlightByCharRange`：`paste.ts` 的 `placeholderRanges`（`[Pasted text #N]`）与 `references.ts` 的 `knownReferenceRanges`（`@path`），两者都答**码点**下标。而那个 API 名字里的 "char" 不是字符——拿真 textarea 用 `captureSpans` 逐列点亮实测出来的索引空间是**显示列**，且**换行不占列**：`你好abc` 里的 `abc` 点在 4..7 而不是码点的 2..5；`ab\ncd` 里的 `cd` 是 2..4 而不是 3..5；`𝐀ab`（一个码点、两个 UTF-16 单元、一列）里的 `ab` 是 1..3，所以也不是 UTF-16；软换行不加任何偏移。于是一段中文 prompt 后面的占位符，每个中文字都让高亮左移一列——蓝色落在前面的散文上，被点名的 token 自己反倒是白的（复现出来正是 `段：[Pasted tex]`）。
+
+修法是**一处纯函数** `toHighlightRanges`（`src/ui/columns.ts`——三种"长度"的纪律本来就住在那个文件），码点区间 → 渲染器的列空间，两个来源都经过它，`paintTokens` 里不为任何一种来源写第二份换算；宽度仍只有 `charWidth`/`displayWidth` 这一套表。一次走查建好前缀表，全部区间共用。**如实记录的一处偏差**：字面 tab 在 buffer 里占它自己固定的格数而 `displayWidth` 给 1，同一行上 tab 后面的区间会差这个量——tab 只能经由短到不折叠的粘贴进草稿，为它编码渲染器的一个私有默认值不划算。
+
+回归两层：`test/columns.test.ts` 钉那三条实测（外加"区间起点 == 它前面那段文字占的列数"这条性质，覆盖中文/换行/emoji/非 BMP 窄字符）；`test/composer.test.tsx` 打一段中文 + 占位符 + `@path`，从 `captureSpans` 取所有 accent 色的格子，断言点亮的是两个 token 且没有一个宽字符。两条都在把换算改回码点（旧行为）时验证过会红。`bun run typecheck` 通过，全量 `bun test` 764 pass / 0 fail。
+
+
+### T114 · BUGS #12：`/model` 在一场已经开始的 session 上真的换（2026-09-01）
+
+**内核零改动**（`session rebind` 与第六种 ledger 事件 `model_rebind` 已由内核侧落地，见 DESIGN §3.1/§9.5 与 `docs/goals/model-rebind.md`）。这一条只做前端那一半。
+
+**`/model` 的语义从「选下一场跑什么」变成「这场对话跑什么」**，一个手势两个落点：draft tab 一字不变（Enter 只写草稿、不起进程、不落文件——T22），已经有 session 的 tab 走 `nulya session rebind`，**本场**带着完整历史从下一步起换人回答。从前这里只能在旁边开第二个 draft，那在「身份创建时冻死」的世界里是唯一诚实的动作；内核把冻结点从一个变成一串之后，这个屏幕终于可以说人一直以为它在说的那句话。effort 照旧跟着走（它从来不是冻的）。overlay 的标题与 footer 因此按 `live` 分两句，`ModelView` 的文件头注释重写。
+
+**拒绝与代价都不在前端重写。** 三道门（凭据 · 已有图片时新模型要主张 vision · 已经在这个模型上）住在内核，每一句都点名要改的 config 键或命令；`chooseModel` 只把 `CliError.detail` 原样交给 transcript 的 `ErrorNotice`（那里有多行的地方，状态栏那一行装不下），成功时把内核 stderr 的两句代价原样挂在那条分隔线下面。前端**不**重新判断「这个模型能不能跑」。
+
+**「这一场跑在什么模型上」收成一处** `state/session.ts` 的 `runningModel(snapshot)`：`snapshot.rebind ?? header`，而 `snapshot.rebind` 由已经在跑的那条事件应用路径维护（`applyInto` 的 `model_rebind` 分支），**不是**在前端再扫一遍 ledger 找最后一条。状态栏 chip、`/model` 的 `current`、context window 量表、tab 标题、plugin 契约的 `session.model` 五个读点全部改读它；`CompositionCard` 的 model 行**故意不动**——那张卡说的是 header 冻的东西，也就是紧贴它下面那些 turn 的作者，改了会把每一条历史 turn 记到新模型头上。
+
+**第六种事件在前端画成一行朴素的分隔**（新 `render/cards/RebindCard.tsx` + `TranscriptItem` 的 `rebind`）。判断依据：它对模型不可见（内核刻意不给它 Turn），但对人是硬事实——线上面和线下面是两个模型说的话，而 transcript 存在的意义正是留住这种事。安全性本来就有（`parseEventLine` 的未知 kind 兜底 + `UnknownCard`），但那会把一行 JSON 摆在对话中间。`session rebind` 返回后**先乐观回显**（`noteRebind`，与 T27 的 user turn 回显同一条纪律：事件在 inbox 里、下一个 step 边界才落盘，chip 不能等一整步），内核自己的 `model_rebind` 到达时把那条 provisional 换掉；`dropInFlight` 因此与 queued user turn 一样放过它——两者都在等自己那条 inbox 事件，不是等这一步的。
+
+测试：`test/model.test.tsx` 五条——reducer 两条（事件移动 `runningModel` 并画线；乐观回显被自己的 ledger 事件替换，不留两条）· `sessionRebind` 对真二进制两条（成功时 stdout 一行 + stderr 两句代价原样带出；被拒时 `CliError.detail` 带着内核整句话，且什么都没动——`session list` 仍报旧模型）· App 两条（live tab 上 Enter 触发 rebind：**不新开 session**、chip 当场跟上、step 之后那条线变成 ledger 的且只有一条；被拒时把内核的话画在屏幕上，断言的词是从 CLI 自己那句话里取的最长词，措辞变了两边一起变）。顺带三处小修：`ensureSession` 的 `setRefusal(null)` 提到 early return **之前**（refusal 的生命周期是「到下一次尝试为止」，而在已开始的 tab 上下一次尝试就是说话——被拒的 `/model` 不该在整段对话里挂着）· `/help` 与命令表里 `/model` 的一句话、`/sessions` 空态那句「a session freezes its model and tools at birth」按新语义改准 · 四处按 `/model` 标题措辞钉死的断言收成与 tab 类型无关的 `model · what `。`bun run typecheck` 通过，全量 `bun test` 771 pass / 0 fail。
+
+### T115 · BUGS #10 的续扫：一张卡的宽度是它那一栏的，不是整个终端的（2026-09-01）
+
+**内核零改动，只动 `tui/`。** #10 的现象（"复制的大段 md 粘贴后很多没展示，但发给模型的正常"）在 `UserTurn` 上的根因是 T73/BUGS #17 那条老规则的一处漏网：换行宽度取自 `useScreen()`（整个终端）而不是 `useBodyWidth()`（这张卡实际所在的那一栏）。换行后的每一行由自己的 `height={1}` 盒子绘制，OpenTUI **不会**把过宽的行折到下一行——多出来的部分根本不画。所以开着侧边栏或分屏时，屏幕丢内容而 ledger 与模型都是完整的，这个不对称就是 #10 的全部症状。
+
+这次把这一类**扫干净**（`src/render/` 下 `useScreen()` 归零）。改成 `useBodyWidth()` 的八处，各自的损失形状：
+
+- **`UserTurn`**（#10 本身）· **`ShellCard`** 的 `ShellCommand` · **`CapabilityBanner`** —— 三处都是 `hardWrapLines` 进 `height={1}` 行，过宽即丢尾。
+- **`ErrorNotice`** —— 同一形状的 `wrapWords`，而它的注释本来就写着"失败是屏幕上唯一必须读全的东西"。
+- **`CompositionCard`** —— `valueWidth()` 喂 `ui/Fact` 的 `wrapWords`（同样丢尾），`title()` 那句"整段整段地让、而不是被切"在按终端算的宽度下失效：sub-agent 分栏里它挑了最长那一形，再被 flex 切成 `session · … · frozen`，正好丢掉说明这张卡是什么的那个词。
+- **`CardFrame`**（含 `ActionRow`）—— 头行是 `fit()` 切的不是折的，按终端切完再被栏边缘 clip，先没的是行尾的 note 与折叠标记，也就是"发生了什么"那一半。
+- **`PluginToolCard`** / **`PluginUserTurnCard`** / **`plugins/surface.tsx`**（`PluginSurface`、`PluginCardSurface`）—— 这几处传下去的是一个**数字**，别人的 renderer 拿它决定自己在哪里断行；给成终端宽度，回来的每一行都对这一栏太长。`PluginUserTurnCard` 尤其要紧：compact / handoff 带过来的整段上下文正是从这张卡进屏幕的。`surfaceWidth` 的参数因此从 `screenWidth` 改名 `available`。
+
+**留着 `useScreen()` 的（判据：它画出来的行有没有被放进一个受限宽度的容器）**：`ui/PluginPanel.tsx`、`ui/PluginWidgets.tsx`、`ui/PanelStrip.tsx`（借 `CardFrame`）以及状态栏、tab 条、各 picker 与 overlay —— 它们全是 `PaneHost` 的**兄弟**、在那个 `flexDirection: column` 的整宽列里，侧边栏与分屏都不缩它们。`BodyWidthContext` 只包着 `Transcript`（`App` 的 portal 与 `SubAgentPane` 的分栏两处提供），所以 `CardFrame` / `PluginSurface` 这些**两边都用**的组件改成 `useBodyWidth()` 之后，在 transcript 外它自动落回终端宽度——与从前逐位相同。
+
+测试 `test/panewidth.test.tsx` 三条，钉的是机制不是行数或断点：① 一个 `pane=44` / `terminal=110` 的 `Transcript`（user turn + shell + capability + error 四张卡）**没有一行超过 44 列**；② 窄栏折行**一个字符都不丢**；③ plugin renderer 被告知的宽度 ≤ 栏宽。把 `useBodyWidth` 临时改成无条件读 `useScreen()`（即旧行为）后，①③ 变红（`Received: 100`），②不变——它守的是反方向。
+
+快照只churn了一处且正是修复本身：`subpane.test.tsx` 的分栏帧里，右栏 composition 头行从被切的 `session · ---------------- · frozen` 变成整段让掉的 `session · ----------------`，即 `title()` 注释承诺的行为。`bun run typecheck` 通过。
+
+**合并时补的一处**：T114 的 `RebindCard` 是这次扫除分叉之后才出现的卡，同样画在 transcript 里、同样按终端宽度算 `room()` —— 一并改成 `useBodyWidth()`。这条规则的检验方式因此写成"`src/render/` 下 `useScreen()` 归零"而不是一张文件名单：名单会被下一张新卡绕过。

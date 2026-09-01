@@ -1,5 +1,20 @@
 /**
- * `/model` (F5): pick the model the next session runs on. Nothing else.
+ * `/model` (F5): pick the model this conversation runs on. Nothing else.
+ *
+ * Two things can be in front of a person, and Enter means the same sentence for
+ * both — "run on that from here". On a DRAFT tab, "from here" is its first
+ * message: nothing is created, the pick is what will be frozen. On a tab that
+ * already has a session, `App.chooseModel` runs `nulya session rebind` and THIS
+ * session moves — history intact, from its next step on (BUGS.md #12,
+ * goals/model-rebind.md). Until the kernel grew that verb, a model was frozen
+ * once and for all and this screen could only ever open a second draft beside
+ * the session it was asked about; the freeze is now a chain of points rather
+ * than a single one, so the screen says what a person always read into it.
+ *
+ * What it does NOT do is re-decide any of the kernel's three gates (credential,
+ * vision when the transcript already holds images, already-on-it). Their words
+ * name the config key or the command that fixes them, and they reach the screen
+ * verbatim.
  *
  * Four shapes, and the fourth is the one tcode had all along (tui.md §11,
  * T5 → T6 → T20 → T21). T5 was a flat table of every (profile, model): seven
@@ -26,10 +41,8 @@
  * effective config chain once, so nothing here re-derives profiles or guesses
  * which key a profile needs.
  *
- * A model is frozen into a session at creation (physics #2), so "switch model"
- * is always "new session on that model" (`App` decides whether that replaces a
- * fresh untouched tab or opens a second one). Effort is not frozen — it is a
- * per-step generation option — so `/effort` can also change it in place.
+ * Effort is not frozen either way — it is a per-step generation option — so it
+ * rides along with whatever Enter does here, and `/effort` changes it alone.
  *
  * Every line on this screen is laid out by us and never by the terminal: cells
  * are cut to their column, sentences are broken at their ` · ` joints, and the
@@ -60,20 +73,33 @@ export interface PickerRow {
 }
 
 /**
- * The models of one profile, as rows with their effort dials.
+ * A model id's parameters, as the endpoint that actually serves it describes
+ * them — the profile's OWN catalog first, and only then the global
+ * `[[models]]` list. The same id can be two different models: `gpt-5.6-sol`
+ * on a ChatGPT subscription has 258k of context and an `xhigh` rung on its
+ * ladder, while the public API's entry for that id says 1.05M and stops at
+ * `high`. An id-keyed catalog cannot say which one a given profile means
+ * (DESIGN §9.5), so whoever actually serves the row is the honest source.
  *
- * A row's parameters come from the profile's OWN catalog first and only then
- * from the global `[[models]]` list. The same id can be two different models:
- * `gpt-5.6-sol` on a ChatGPT subscription has 258k of context and an `xhigh`
- * rung on its ladder, while the public API's entry for that id says 1.05M and
- * stops at `high`. Whoever actually serves the row is the honest source, so the
- * endpoint's own answer wins wherever it gives one (`ProfileView.catalog`).
+ * This is the ONE place that fallback happens. Both the picker's rows
+ * (`modelRows`, below) and the status bar's context gauge (`App.contextWindow`)
+ * call it, so a subscribed model's real window is never quietly overridden by
+ * the public-API number that happens to share its id — that mismatch was
+ * `docs/BUGS.md` #8: the gauge read the global list only, the picker already
+ * read this way.
  */
+export function modelParamsFor(
+  models: readonly ModelParams[],
+  profile: ProfileView,
+  modelId: string,
+): ModelParams | null {
+  return profile.catalog?.find((m) => m.id === modelId) ?? models.find((m) => m.id === modelId) ?? null
+}
+
+/** The models of one profile, as rows with their effort dials. */
 export function modelRows(config: ConfigView, profile: ProfileView): PickerRow[] {
-  const own = new Map((profile.catalog ?? []).map((m) => [m.id, m]))
-  const byId = new Map(config.models.map((m) => [m.id, m]))
   return modelIdsOf(profile).map((model) => {
-    const params = own.get(model) ?? byId.get(model) ?? null
+    const params = modelParamsFor(config.models, profile, model)
     return { profile, model, params, slots: [AUTO, ...(params?.efforts ?? [])] }
   })
 }
@@ -174,6 +200,13 @@ export function ModelView(props: {
   ws: Workspace
   /** What the front tab runs on, so the list can mark it and start its dial there. */
   current: ModelPick | null
+  /**
+   * The front tab already has a session, so Enter MOVES it (`session rebind`)
+   * rather than settling what its first message will start. The only thing this
+   * changes here is the wording: one screen, one gesture, and the difference is
+   * whose "from here" it is.
+   */
+  live?: boolean
   /** A line under the title: why the picker opened by itself, if it did. */
   notice?: string
   /**
@@ -252,11 +285,14 @@ export function ModelView(props: {
    */
   const footer = (): { brief: string; more: string[] } => {
     if (empty()) return { brief: "Enter · p opens /provider · Esc close", more: ["r reload"] }
+    const enter = props.live ? "Enter moves this session" : "Enter starts a session"
     return {
-      brief: "↑↓ model · ←→ effort · Enter starts a session · Esc close",
+      brief: `↑↓ model · ←→ effort · ${enter} · Esc close`,
       more: [
         "j/k and h/l do the same · r reload · /provider (F6) is where keys and endpoints are",
-        "the effort dial is per step, not frozen · click a row to select it, again to start on it",
+        props.live
+          ? "the history comes along; the prompt cache starts cold when the provider changes"
+          : "the effort dial is per step, not frozen · click a row to select it, again to start on it",
       ],
     }
   }
@@ -413,7 +449,10 @@ export function ModelView(props: {
   return (
     <box flexDirection="column" width="100%" flexGrow={1} flexShrink={1} paddingLeft={1} paddingRight={1}>
       <text fg={style.theme.accent.evolve} height={1}>
-        {fit(`${style.glyphs.picker} model · what the next session runs on`, inner())}
+        {fit(
+          `${style.glyphs.picker} model · what ${props.live ? "this session runs on from here" : "the next session runs on"}`,
+          inner(),
+        )}
       </text>
       <For each={noticeLines()}>
         {(line) => (

@@ -263,7 +263,7 @@ test("a package cannot take a built-in name away, even by declaring it", async (
     expect(frame).not.toContain("with        shadow")
     // The model overlay itself opened — the built-in's real effect, not just
     // the absence of the package's.
-    expect(frame).toContain("what the next session runs on")
+    expect(frame).toContain("model · what ")
   } finally {
     setup.renderer.destroy()
   }

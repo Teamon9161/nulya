@@ -511,7 +511,7 @@ test("the model is a click target wherever it is written: the line under the com
     ),
     { width: 100, height: 30 },
   )
-  const picker = "model · what the next session runs on"
+  const picker = "model · what "
   try {
     await until(() => setup.captureCharFrame().includes("frozen composition"), 15_000)
     const frame = await settle(setup, 4)

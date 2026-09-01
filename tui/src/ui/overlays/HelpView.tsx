@@ -24,7 +24,7 @@ const actions: Array<[Action, string]> = [
   ["cancel", "cancel the step (kernel stops at its next step boundary) · browse when idle"],
   ["ext", "/ext — the extension store"],
   ["sessions", "/sessions — the session store"],
-  ["model", "/model — the models that can run; Enter starts a session on one"],
+  ["model", "/model — the models that can run; Enter moves this session onto one, or starts one"],
   ["provider", "/provider — endpoints and their keys; Enter on a ready one goes to its models"],
   ["tasks", "/tasks — background commands still running, their logs, k to stop one"],
   ["sidebar", "/sidebar — the session list, docked beside the transcript"],

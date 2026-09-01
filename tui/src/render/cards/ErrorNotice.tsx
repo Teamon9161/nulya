@@ -1,6 +1,6 @@
 import { For, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 import type { RetryNotice as RetryNoticeState } from "../../state/session.ts"
-import { useScreen, useStyle } from "../theme.ts"
+import { useBodyWidth, useStyle } from "../theme.ts"
 import { wrapWords } from "../../ui/columns.ts"
 
 /** The glyph column every line hangs off, so continuations line up under the text. */
@@ -29,11 +29,15 @@ export function retryNoticeText(retry: RetryNoticeState, now: number): string {
  *
  * Wrapped by us, one `<text>` per line, for the reason `ui/Fact` is written the
  * way it is: OpenTUI does not wrap an over-wide flex row, it SHRINKS it — which
- * ate the space after the glyph and cut words mid-way.
+ * ate the space after the glyph and cut words mid-way. And wrapped at THIS
+ * PANE's width (`useBodyWidth`, BUGS.md #10/#17), for the same reason: a
+ * failure is the one thing on screen that has to be readable in full, and a
+ * width borrowed from the whole terminal is exactly how the end of every line
+ * of it goes missing when the sidebar is open.
  */
 export function ErrorNotice(props: { text: string; retry?: RetryNoticeState | null }) {
   const style = useStyle()
-  const screen = useScreen()
+  const body = useBodyWidth()
   const [now, setNow] = createSignal(Date.now())
 
   // A retry notice is the only transient error whose words change while it is
@@ -45,7 +49,7 @@ export function ErrorNotice(props: { text: string; retry?: RetryNoticeState | nu
     onCleanup(() => clearInterval(timer))
   })
 
-  const room = () => Math.max(20, Math.min(screen().width, style.maxWidth) - gutter - 1)
+  const room = () => Math.max(20, Math.min(body(), style.maxWidth) - gutter - 1)
   const text = () => props.retry ? retryNoticeText(props.retry, now()) : props.text
   const lines = createMemo(() =>
     text()

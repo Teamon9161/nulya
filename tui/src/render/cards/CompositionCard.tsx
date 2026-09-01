@@ -1,5 +1,5 @@
 import { Show, createMemo, createSignal } from "solid-js"
-import { useScreen, useStyle } from "../theme.ts"
+import { useBodyWidth, useStyle } from "../theme.ts"
 import { lifted, onClick } from "../../ui/rows.ts"
 import { Fact } from "../../ui/Fact.tsx"
 import { displayWidth, fit } from "../../ui/columns.ts"
@@ -39,11 +39,14 @@ const label_width = 9
  * record (`ui/Welcome.tsx`, T24).
  *
  * The model row answers to a click when `onPickModel` is given: it opens
- * `/model`. That is not "change this session's model" — that is frozen
- * (physics #2) — but the place where the next session's is chosen, which is what
- * a person reaching for the model line means. Rendered without the callback (a
- * test, a card on its own) the row is inert and does not light up: a highlight on
- * a row that does nothing when pressed would be a lie (tui.md §11, T18).
+ * `/model`, which on a started session now MOVES it (`session rebind`,
+ * goals/model-rebind.md). What this row keeps saying is the header's identity —
+ * the model that answered the turns directly beneath this card. A later switch
+ * is a rule drawn in the transcript where it happened (`RebindCard`), and the
+ * bottom line is where "right now" is said; a record whose top line silently
+ * renamed itself would misattribute every turn under it. Rendered without the
+ * callback (a test, a card on its own) the row is inert and does not light up: a
+ * highlight on a row that does nothing when pressed would be a lie (T18).
  */
 export function CompositionCard(props: {
   header: SessionHeader | null
@@ -52,7 +55,10 @@ export function CompositionCard(props: {
   onOpenSession?: (id: string) => void
 }) {
   const style = useStyle()
-  const screen = useScreen()
+  // This pane's columns, not the terminal's (`useBodyWidth`, BUGS.md #10/#17):
+  // `Fact` wraps into `height={1}` rows, which lose their tail rather than
+  // reflowing when they are laid out wider than the column they land in.
+  const body = useBodyWidth()
   const folds = useFolds()
   const [overModel, setOverModel] = createSignal(false)
   const [overHead, setOverHead] = createSignal(false)
@@ -144,7 +150,7 @@ export function CompositionCard(props: {
    * has lost the word that says what the card is.
    */
   const title = () => {
-    const room = Math.max(8, Math.min(screen().width, style.maxWidth) - 3)
+    const room = Math.max(8, Math.min(body(), style.maxWidth) - 3)
     const stamp = created()
     const forms = stamp.length > 0 ? [`session · ${stamp} · frozen composition`, `session · ${stamp}`] : []
     for (const form of [...forms, "session · frozen composition", "session"]) {
@@ -167,7 +173,7 @@ export function CompositionCard(props: {
 
   const gutter = () => ({ text: `${style.glyphs.bar} `, fg: style.theme.accent.evolve })
   /** What a value has left after the left rule and the label column. */
-  const valueWidth = () => Math.max(8, Math.min(screen().width, style.maxWidth) - 2 - label_width)
+  const valueWidth = () => Math.max(8, Math.min(body(), style.maxWidth) - 2 - label_width)
 
   return (
     <box flexDirection="column" width="100%" marginTop={1}>

@@ -14,6 +14,7 @@ import { ToolCard } from "./ToolCard.tsx"
 import { ApprovalPrompt, AutoAllowedMark } from "./ApprovalPrompt.tsx"
 import { CapabilityBanner } from "./CapabilityBanner.tsx"
 import { TaskFinishedCard } from "./TaskFinishedCard.tsx"
+import { RebindCard } from "./RebindCard.tsx"
 import { useStyle } from "../theme.ts"
 import type { TranscriptItem, UnknownItem } from "../../state/session.ts"
 import type { Contributions } from "../../nulya/files.ts"
@@ -124,6 +125,11 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
           and the call that started it has already said what it is. */}
       <Match when={props.item.kind === "task"}>
         <TaskFinishedCard item={props.item as Extract<TranscriptItem, { kind: "task" }>} />
+      </Match>
+      {/* Not a turn at all: the boundary between two models answering the same
+          conversation (goals/model-rebind.md). */}
+      <Match when={props.item.kind === "rebind"}>
+        <RebindCard item={props.item as Extract<TranscriptItem, { kind: "rebind" }>} />
       </Match>
       <Match when={props.item.kind === "unknown"}>
         <UnknownCard item={props.item as UnknownItem} />

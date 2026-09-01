@@ -1,5 +1,5 @@
 import { createMemo } from "solid-js"
-import { useScreen, useStyle } from "../theme.ts"
+import { useBodyWidth, useStyle } from "../theme.ts"
 import { CardFrame, sizeNote } from "./CardFrame.tsx"
 import { PluginCardSurface, diffStat, diffSurfaceOf, surfaceWidth } from "../../plugins/surface.tsx"
 import type { PluginCard } from "../../plugins/host.ts"
@@ -28,7 +28,11 @@ export function PluginToolCard(props: {
   revision: number
 }) {
   const style = useStyle()
-  const screen = useScreen()
+  // The columns the body actually has (`useBodyWidth`, BUGS.md #10/#17). This
+  // number is handed to somebody else's renderer, so it is also the width the
+  // plugin wraps its own text at — get it from the terminal and every row it
+  // returns is too long for the pane, and `Rows` clips rather than reflows.
+  const body = useBodyWidth()
   const view = () => ({
     tool: props.item.tool,
     args: props.item.args,
@@ -41,7 +45,7 @@ export function PluginToolCard(props: {
     void props.revision
     try {
       return {
-        surface: props.card.renderer.render(view(), surfaceWidth(style, screen().width, 0)),
+        surface: props.card.renderer.render(view(), surfaceWidth(style, body(), 0)),
         failed: null as string | null,
       }
     } catch (error) {

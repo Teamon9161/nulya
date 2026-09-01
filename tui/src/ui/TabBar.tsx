@@ -2,6 +2,7 @@ import { For, Show, createSignal } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { onClick, createHover, lifted } from "./rows.ts"
 import { displayWidth, fit } from "./columns.ts"
+import { runningModel } from "../state/session.ts"
 import type { Tab } from "../state/tabs.ts"
 
 /**
@@ -25,8 +26,10 @@ export function tabLabels(tabs: readonly Tab[]): string[] {
       const bring = tab.bring()
       return `${pick?.model || pick?.profile || "new"}${bring ? ` · ${bring.id}` : ""} (new)`
     }
-    const header = tab.state.snapshot.header
-    return header?.model_identity.model || header?.model || tab.id
+    // What it runs on NOW, not what its header froze: a session moved with
+    // `/model` is a different tab to look at (`runningModel`).
+    const now = runningModel(tab.state.snapshot)
+    return now?.model || now?.profile || tab.id
   })
   return base.map((label, index) => {
     const twins = base.filter((other) => other === label).length

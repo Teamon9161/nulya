@@ -1,5 +1,5 @@
 import { For, createMemo } from "solid-js"
-import { useScreen, useStyle } from "../theme.ts"
+import { useBodyWidth, useStyle } from "../theme.ts"
 import { hardWrapLines } from "../../ui/columns.ts"
 import type { UserItem } from "../../state/session.ts"
 
@@ -8,17 +8,29 @@ import type { UserItem } from "../../state/session.ts"
  * typed is shown as typed, newlines and all. A mid-task message (midtask.ts)
  * renders through here too — `text` is then the folded body and `badge` says
  * how it arrived, while the ledger keeps the full sentinel.
+ *
+ * THE WRAP WIDTH IS THE PANE'S, NOT THE TERMINAL'S (`useBodyWidth`, BUGS.md
+ * #10/#17). Each wrapped row here is painted by its own `height={1}` box, so a
+ * row written wider than the column it sits in does not push a second row —
+ * the surplus is simply not on screen, and long messages read as "most of it
+ * is missing". `useScreen()` answers with the whole terminal, which is the
+ * wrong number the moment the transcript shares the screen with the sidebar or
+ * another pane; the pane tree's own number is what `AssistantTurn` already
+ * wraps at, and the two cards have to agree or one exchange draws in two
+ * different columns.
  */
 export function UserTurn(props: { item: UserItem; text?: string; badge?: string }) {
   const style = useStyle()
-  const screen = useScreen()
+  const column = useBodyWidth()
   const body = () => {
     const images = props.item.imageCount ? `${props.item.imageCount} image${props.item.imageCount === 1 ? "" : "s"}` : null
     const suffix = [props.badge, images, props.item.queued ? "queued" : null].filter(Boolean).join(" · ")
     const text = props.text ?? props.item.text
     return suffix.length > 0 ? (text.length > 0 ? `${text} · ${suffix}` : suffix) : text
   }
-  const room = () => Math.max(12, Math.min(screen().width, style.maxWidth) - 5)
+  // − 2 the glyph column, − 2 the transcript's padding, − 1 the scrollbar's:
+  // `AssistantTurn`'s arithmetic, so both halves of an exchange share a margin.
+  const room = () => Math.max(12, Math.min(column(), style.maxWidth) - 5)
   const lines = createMemo(() => hardWrapLines(body(), room()))
   return (
     <box flexDirection="column" width="100%">

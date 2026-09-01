@@ -1,5 +1,5 @@
 import { Index, Show, createContext, createMemo, createSignal, useContext, type Accessor, type JSX } from "solid-js"
-import { shimmerColor, useFrame, useScreen, useStyle } from "../theme.ts"
+import { shimmerColor, useBodyWidth, useFrame, useStyle } from "../theme.ts"
 import { displayWidth, fit } from "../../ui/columns.ts"
 import { lifted, onClick } from "../../ui/rows.ts"
 import { useFolds } from "../../state/folds.ts"
@@ -85,7 +85,7 @@ export function CardFrame(props: {
   const style = useStyle()
   const folds = useFolds()
   const browse = useBrowse()
-  const screen = useScreen()
+  const body = useBodyWidth()
   const frame = useFrame()
   const contextualActive = useContext(CardActivityContext)
   const [hovered, setHovered] = createSignal(false)
@@ -112,8 +112,15 @@ export function CardFrame(props: {
    * and it is the part that says something went wrong); the head gives up
    * columns first, because the beginning of a path or a command is the half
    * worth reading.
+   *
+   * Measured in THIS PANE's columns (`useBodyWidth`, BUGS.md #10/#17). The head
+   * is cut, not wrapped, so a cut computed against the whole terminal leaves a
+   * row that the pane then clips — the note and the fold marker at the end of
+   * it, the parts that say what happened, are the first things to go. Outside
+   * a transcript (`ui/PanelStrip.tsx`) there is no pane and this is the screen,
+   * which is what it always was.
    */
-  const room = () => Math.min(screen().width, style.maxWidth) - 2 - 2 - (props.foldable ? 2 : 0)
+  const room = () => Math.min(body(), style.maxWidth) - 2 - 2 - (props.foldable ? 2 : 0)
   const note = () => fit(props.chip ?? "", Math.max(0, Math.floor(room() / 2)))
   const plainHead = () => (props.headParts ? props.headParts.map((part) => part.text).join("") : props.head)
   const head = () => fit(plainHead(), Math.max(4, room() - (note().length > 0 ? displayWidth(note()) + 4 : 0)))
@@ -226,11 +233,11 @@ export function CardFrame(props: {
  */
 function ActionRow(props: { action: { text: string; onPress: () => void } }) {
   const style = useStyle()
-  const screen = useScreen()
+  const body = useBodyWidth()
   const [hovered, setHovered] = createSignal(false)
   const click = onClick(() => props.action.onPress())
   /** Cut like every other row: a session id is long and a wrapped link is two rows. */
-  const room = () => Math.max(8, Math.min(screen().width, style.maxWidth) - 6)
+  const room = () => Math.max(8, Math.min(body(), style.maxWidth) - 6)
   return (
     <box
       paddingLeft={2}

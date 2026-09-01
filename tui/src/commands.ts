@@ -53,7 +53,7 @@ export interface Command {
 }
 
 export const commands: Command[] = [
-  { name: "/model", what: "pick the model the next session runs on" },
+  { name: "/model", what: "pick the model this conversation runs on" },
   {
     name: "/mode",
     args: "[ask|unsafe]",

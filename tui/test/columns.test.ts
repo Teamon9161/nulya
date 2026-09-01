@@ -6,7 +6,7 @@
  * uses them.
  */
 import { expect, test } from "bun:test"
-import { charWidth, columnWidth, displayWidth, fit, squeeze, wrapWords } from "../src/ui/columns.ts"
+import { charWidth, columnWidth, displayWidth, fit, squeeze, toHighlightRanges, wrapWords } from "../src/ui/columns.ts"
 
 test("displayWidth counts columns, not characters and not bytes", () => {
   // `·` is two bytes and one column — measuring it wrong is what shifts a
@@ -99,4 +99,33 @@ test("squeeze: columns keep what they asked for, or the widest gives up cells fi
   expect(floor).toEqual([8, 6, 4, 8])
   // A column below its minimum is raised to it, not left where it was.
   expect(squeeze([2, 2], [8, 6], 100)).toEqual([8, 6])
+})
+
+test("a code-point range becomes the display columns the renderer highlights in", () => {
+  // The four measurements behind `toHighlightRanges`, taken against a real
+  // OpenTUI textarea (`captureSpans`, one column lit at a time): columns, not
+  // code points, not UTF-16 units, and a newline occupying nothing.
+  expect(toHighlightRanges("\u4f60\u597dabc", [{ start: 2, end: 5 }])).toEqual([{ start: 4, end: 7 }])
+  expect(toHighlightRanges("ab\ncd", [{ start: 3, end: 5 }])).toEqual([{ start: 2, end: 4 }])
+  expect(toHighlightRanges("\u{1D400}ab", [{ start: 1, end: 3 }])).toEqual([{ start: 1, end: 3 }])
+
+  // And the property those cases are instances of: whatever stands in front of
+  // a token, the range points at the token — its start is what the text before
+  // it occupies, its width is the token's own.
+  const token = "[Pasted text #1]"
+  const columnsOf = (text: string) => displayWidth(text.replace(/\n/g, ""))
+  for (const prefix of ["", "\u8bf7\u770b\u8fd9\u6bb5\uff1a", "\u7b2c\u4e00\u884c\n\u7b2c\u4e8c\u884c\uff1a", "\u{1F642} emoji \u524d\u7f00 ", "\u{1D400}"]) {
+    const text = `${prefix}${token} tail`
+    const start = [...prefix].length
+    expect(toHighlightRanges(text, [{ start, end: start + [...token].length }])).toEqual([
+      { start: columnsOf(prefix), end: columnsOf(prefix) + columnsOf(token) },
+    ])
+  }
+
+  // Every range in one call; nothing asked for, nothing walked.
+  expect(toHighlightRanges("\u770b ab cd", [{ start: 2, end: 4 }, { start: 5, end: 7 }])).toEqual([
+    { start: 3, end: 5 },
+    { start: 6, end: 8 },
+  ])
+  expect(toHighlightRanges("\u770b\u770b", [])).toEqual([])
 })

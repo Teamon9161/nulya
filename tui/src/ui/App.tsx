@@ -37,7 +37,7 @@ import { ExtView } from "./overlays/ExtView.tsx"
 import { HelpView } from "./overlays/HelpView.tsx"
 import { SettingsView } from "./overlays/SettingsView.tsx"
 import { UsageView } from "./overlays/UsageView.tsx"
-import { ModelView } from "./overlays/ModelView.tsx"
+import { ModelView, modelParamsFor } from "./overlays/ModelView.tsx"
 import { ProviderView } from "./overlays/ProviderView.tsx"
 import { TasksView } from "./overlays/TasksView.tsx"
 import { BodyWidthContext, ScreenContext, FrameContext, StyleContext, useScreen, useStyle, type Style } from "../render/theme.ts"
@@ -120,7 +120,7 @@ import { wrapApprovalNote } from "../approvalnote.ts"
 import { createProjectIndex } from "../references.ts"
 import { createSkillTable, skillTurn, splitSlash } from "../skills.ts"
 import { describeTool } from "../render/registry.ts"
-import { no_snapshot, smoothUsageTotals, usageLabel, type UsageTotals } from "../state/session.ts"
+import { no_snapshot, runningModel, smoothUsageTotals, usageLabel, type UsageTotals } from "../state/session.ts"
 import type { NextSession } from "./Welcome.tsx"
 import {
   CliError,
@@ -129,6 +129,7 @@ import {
   isVerdict,
   remoteCheck,
   sessionOutcome,
+  sessionRebind,
   verdicts,
   type ModelView as ModelParams,
   type ProfileView,
@@ -241,15 +242,19 @@ export interface AppProps {
   /** Where the TUI remembers its last pick; tests point it elsewhere. */
   statePath?: string
   /**
-   * The `[[models]]` catalog, read once at launch. Only `context_window` is
-   * used, for the status bar's fullness gauge; without it the gauge simply does
-   * not appear, which is why this is optional rather than loaded here.
+   * The global `[[models]]` catalog, read once at launch. Only `context_window`
+   * is used, for the status bar's fullness gauge (via `modelParamsFor`, which
+   * prefers a profile's own catalog over this list) — without either, the
+   * gauge simply does not appear, which is why this is optional rather than
+   * loaded here.
    */
   models?: ModelParams[]
   /**
-   * The profiles, as `config show --json` projects them. Only one field is read:
-   * a profile's default model id, so a draft that names a profile and no model
-   * can still say which model the session will actually run on.
+   * The profiles, as `config show --json` projects them. Two fields are read:
+   * a profile's default model id (so a draft that names a profile and no model
+   * can still say which model the session will actually run on), and — via
+   * `modelParamsFor` — a profile's own `catalog`, when the front tab's frozen
+   * identity is on a profile that reports one (codex today, DESIGN §9.5).
    */
   profiles?: ProfileView[]
   /**
@@ -1978,12 +1983,19 @@ export function App(props: AppProps) {
     return { model, accepted: catalog.find((entry) => entry.id === model)?.vision ?? false }
   }
 
-  /** The model the front tab talks to: frozen on a session, chosen on a draft. */
+  /**
+   * The model the front tab talks to: chosen on a draft, and on a session the
+   * one IN FORCE — its header's, or whatever the last `model_rebind` moved it
+   * to (`runningModel`, the single place that answers this). A frozen identity
+   * is still frozen; there is simply a chain of freeze points now, and reading
+   * only the header would leave this line naming a model that has stopped
+   * answering (goals/model-rebind.md §7).
+   */
   const modelName = (): string => {
     const here = tab()
     if (here.kind === "draft") return modelOf(here.pick())
-    const header = snapshot().header
-    return header?.model_identity.model || header?.model || ""
+    const now = runningModel(snapshot())
+    return now ? now.model || now.profile : ""
   }
 
   /**
@@ -2105,14 +2117,25 @@ export function App(props: AppProps) {
   }
 
   /**
-   * The front tab's context window, when the catalog names one. The model id is
-   * the key — not the profile — since a window is a property of the model,
-   * whoever serves it (DESIGN §9.5).
+   * The front tab's context window, when a catalog names one — from the FROZEN
+   * header, never from the picker's pending selection (a session's identity
+   * does not move after creation, physics #2).
+   *
+   * The profile matters as much as the model id: the same id can mean two
+   * different windows depending on who serves it (DESIGN §9.5 — a ChatGPT
+   * subscription's `gpt-5.6-sol` is not the public API's), so this reads
+   * `modelParamsFor` — the one place that per-profile-catalog-first,
+   * global-`[[models]]`-fallback lookup happens, also used by `/model`'s rows.
+   * Before this shared function existed, the gauge read the global list only
+   * and disagreed with the picker on the same session (`docs/BUGS.md` #8).
    */
   const contextWindow = (): number | null => {
-    const id = snapshot().header?.model_identity.model
-    if (!id) return null
-    return props.models?.find((m) => m.id === id)?.context_window ?? null
+    const now = runningModel(snapshot())
+    const id = now?.model
+    if (!now || !id) return null
+    const profile = props.profiles?.find((p) => p.name === now.profile)
+    if (!profile) return props.models?.find((m) => m.id === id)?.context_window ?? null
+    return modelParamsFor(props.models ?? [], profile, id)?.context_window ?? null
   }
 
   /** What the front tab runs on, in the picker's terms. */
@@ -2122,19 +2145,65 @@ export function App(props: AppProps) {
       const pick = here.pick()
       return pick ? { ...pick, effort: here.effort() } : null
     }
-    const header = snapshot().header
-    if (!header) return null
-    return { profile: header.model, model: header.model_identity.model || undefined, effort: here.effort() }
+    const now = runningModel(snapshot())
+    if (!now) return null
+    return { profile: now.profile, model: now.model || undefined, effort: here.effort() }
+  }
+
+  /**
+   * What `/model` does with the row somebody pressed Enter on (BUGS.md #12,
+   * goals/model-rebind.md).
+   *
+   * Two answers, because there are two things in front of a person. A DRAFT has
+   * no session yet, so the pick is simply what its first message will freeze —
+   * unchanged since T22. A session that already exists is MOVED: `session
+   * rebind` deposits a `model_rebind` event and everything from the next step on
+   * is answered by the new model, with this conversation's whole history intact.
+   * Opening a second draft beside it — what this used to do — was the only
+   * honest move while a session's identity was frozen once and for all; the
+   * kernel now freezes a chain, so "switch model" finally means what it says.
+   *
+   * The effort dial rides along either way: it is a per-step generation option,
+   * never frozen, so it takes hold on the tab in front of us with no ceremony.
+   */
+  const chooseModel = async (pick: ModelPick) => {
+    const here = live()
+    if (!here) return startDraft(pick)
+    setRefusal(null)
+    try {
+      const moved = await sessionRebind(here.ws, here.id, { profile: pick.profile, ...(pick.model ? { model: pick.model } : {}) })
+      here.setEffort(pick.effort)
+      // The event is in the inbox, not yet in the ledger — the kernel drains it
+      // at the next step boundary. Echoing it here is the same move a just-sent
+      // user turn gets (T27): the chips read the new model straight away, and
+      // the announcement carries the kernel's own words about what the switch
+      // costs until its `model_rebind` event arrives and replaces it.
+      here.state.noteRebind(
+        { profile: pick.profile, model: pick.model ?? modelOf(pick), provider: "" },
+        moved.costs.join("\n"),
+      )
+      rememberModel(pick, props.statePath)
+      closeOverlay()
+      setGuide(null)
+      setNotice(moved.said || `${here.id} · ${modelOf(pick)} from its next step`)
+    } catch (error) {
+      // Verbatim, and with room to be read: the kernel's three gates
+      // (credential, vision, already-there) each answer with the config key or
+      // the command that fixes it, and nothing here re-decides or re-words any
+      // of them.
+      closeOverlay()
+      setRefusal(error instanceof CliError ? error.detail : error instanceof Error ? error.message : String(error))
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
   }
 
   /**
    * Choose what the next session runs on, and remember it as the last pick.
    *
    * Nothing is created here. On a draft this only rewrites the draft — no
-   * process, no file — and on a started session it opens a NEW draft beside it,
-   * because a session's model is frozen (physics #2) and the honest way to
-   * "switch model" has always been a new session. Which now costs nothing until
-   * there is something to say.
+   * process, no file. A started session no longer comes through here from
+   * `/model` (see `chooseModel`); `/new` and `/evolve` still do, and for them
+   * "beside it, as a draft" is the whole point.
    *
    * `pick` undefined means "the last pick, else the kernel's default" — what a
    * bare `/new` does. `bring` is the `--with` member `/evolve` and `/mode` put
@@ -2201,8 +2270,12 @@ export function App(props: AppProps) {
    */
   const ensureSession = async (): Promise<SessionTab | null> => {
     const here = tab()
-    if (here.kind === "session") return here
+    // Before the early return: a refusal's lifetime is "until the next
+    // attempt", and on a started tab the next attempt is saying something —
+    // a refused `/model` must not stay on screen through the rest of the
+    // conversation.
     setRefusal(null)
+    if (here.kind === "session") return here
     try {
       const extras = await sessionExtras(here.ws)
       const tab = await tabs.materialize(here, extras)
@@ -2361,13 +2434,13 @@ export function App(props: AppProps) {
   const pluginSession = () => {
     const here = live()
     if (!here) return null
-    const header = here.state.snapshot.header
+    const now = runningModel(here.state.snapshot)
     const activity = here.attach.status()
     const pluginStatus: "idle" | "stepping" | "canceling" =
       activity === "stepping" || activity === "canceling" ? activity : "idle"
     return {
       id: here.id,
-      model: header?.model_identity.model || header?.model || "",
+      model: now?.model || now?.profile || "",
       members: here.contributions().map((c) => ({ id: c.id, version: c.version, tools: [...c.tools] })),
       role: here.attach.role(),
       status: pluginStatus,
@@ -4460,13 +4533,14 @@ export function App(props: AppProps) {
     model: () => (
       <ModelView
         // The tab's directory: config has a project layer, so which profiles
-        // and models exist is a question about a checkout, and the pick starts
-        // a draft in this tab.
+        // and models exist is a question about a checkout, and the pick lands
+        // on this tab — as its draft, or as a rebind of its session.
         ws={ws()}
         current={currentPick()}
+        live={live() !== null}
         notice={guide() ?? undefined}
         focusProfile={focusProfile()}
-        onPick={(pick) => startDraft(pick)}
+        onPick={(pick) => void chooseModel(pick)}
         onNotice={setNotice}
         onOpenProviders={() => openOverlay("provider")}
         onClose={closeOverlay}

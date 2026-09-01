@@ -22,6 +22,7 @@ import {
   ModelView,
   initialSlot,
   labelOf,
+  modelParamsFor,
   modelRows,
   pickableRows,
   pickerRows,
@@ -32,9 +33,9 @@ import { planLaunch } from "../src/launch.ts"
 import { loadTuiState, rememberModel, saveTuiState } from "../src/state/tui_state.ts"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
-import { createSessionState } from "../src/state/session.ts"
+import { createSessionState, runningModel } from "../src/state/session.ts"
 import { sessionExists } from "../src/nulya/files.ts"
-import { sessionList, sessionNew } from "../src/nulya/cli.ts"
+import { CliError, sessionList, sessionNew, sessionRebind } from "../src/nulya/cli.ts"
 import { App } from "../src/ui/App.tsx"
 import type { ModelPick } from "../src/state/tui_state.ts"
 import {
@@ -131,6 +132,33 @@ test("a profile's own catalog beats the global one: the same id is a different m
   // The label is the same in both, which is exactly why the parameters have to
   // be right: nothing else on the row would give the difference away.
   expect(labelOf(codex!)).toBe(labelOf(api!))
+})
+
+test("modelParamsFor: the one lookup the picker and the status bar gauge both call (docs/BUGS.md #8)", () => {
+  const codexWithCatalog = {
+    ...fake.profiles[2]!,
+    catalog: [
+      {
+        id: "gpt-5.6-sol",
+        label: "GPT-5.6 Sol",
+        efforts: ["low", "medium", "high", "xhigh"],
+        default_effort: "high",
+        context_window: 258_400,
+        vision: false,
+      },
+    ],
+  }
+  // A profile with its own entry for this id: that entry wins over the global
+  // list even though the global list also names it (with a different window).
+  expect(modelParamsFor(fake.models, codexWithCatalog, "gpt-5.6-sol")?.context_window).toBe(258_400)
+  // No entry in the profile's own catalog for this id: falls back to the
+  // global `[[models]]` list.
+  const globalFlash = fake.models.find((m) => m.id === "deepseek-v4-flash")!
+  expect(modelParamsFor(fake.models, codexWithCatalog, "deepseek-v4-flash")).toEqual(globalFlash)
+  // A profile with no catalog of its own at all: same fallback.
+  expect(modelParamsFor(fake.models, fake.profiles[1]!, "deepseek-v4-flash")).toEqual(globalFlash)
+  // Named nowhere, by either: null, not a guess.
+  expect(modelParamsFor(fake.models, codexWithCatalog, "no-such-model")).toBeNull()
 })
 
 test("pickableRows: only the providers that can run — plus the one in force, whatever its state", () => {
@@ -464,7 +492,7 @@ test("tui-state remembers the last pick, tolerates absence and garbage, and is o
   }
 })
 
-test("picking in /model writes the draft, not a session; on a started tab it opens a second draft", async () => {
+test("picking in /model writes the draft, not a session", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nulya-tui-state-"))
   const statePath = join(dir, "tui-state.json")
   const before = (await sessionList(ws)).length
@@ -479,7 +507,7 @@ test("picking in /model writes the draft, not a session; on a started tab it ope
     // is its model whether or not this machine has a key in its environment.
     await setup.mockInput.typeText("/model")
     setup.mockInput.pressEnter()
-    await until(() => setup.captureCharFrame().includes("model · what the next session"), 15_000)
+    await until(() => setup.captureCharFrame().includes("model · what "), 15_000)
     for (let i = 0; i < 40; i++) setup.mockInput.pressKey("j")
     await settle(setup, 2)
     expect(setup.captureCharFrame()).toMatch(/▾ scripted-demo/)
@@ -489,20 +517,6 @@ test("picking in /model writes the draft, not a session; on a started tab it ope
     await until(() => setup.captureCharFrame().includes("starts when you send a message"), 15_000)
     expect(loadTuiState(statePath).model).toEqual({ profile: "scripted", model: "scripted-demo", effort: undefined })
     expect((await sessionList(ws)).length).toBe(before)
-
-    // Now start it, and pick again: this time a SECOND tab appears — still a
-    // draft, so the store has exactly the one session the message created.
-    await setup.mockInput.typeText("probe")
-    setup.mockInput.pressEnter()
-    await until(async () => (await sessionList(ws)).length === before + 1, 60_000)
-    await setup.mockInput.typeText("/model")
-    setup.mockInput.pressEnter()
-    await until(() => setup.captureCharFrame().includes("model · what the next session"), 15_000)
-    for (let i = 0; i < 40; i++) setup.mockInput.pressKey("j")
-    await settle(setup, 2)
-    setup.mockInput.pressEnter()
-    await until(() => setup.captureCharFrame().includes("scripted-demo (new)"), 15_000)
-    expect((await sessionList(ws)).length).toBe(before + 1)
   } finally {
     setup.renderer.destroy()
     rmSync(dir, { recursive: true, force: true })
@@ -561,10 +575,12 @@ test("a guide opens the picker first, with the reason on screen and the composer
     { width: 120, height: 24 },
   )
   try {
-    await until(() => setup.captureCharFrame().includes("model · what the next session"), 15_000)
+    // The guide's own reason is the signal that the picker is up: the title
+    // depends on whether this tab has a session (it does — Enter would rebind
+    // it), and that is not what this test is about.
+    await until(() => setup.captureCharFrame().includes("openai has no API key"), 15_000)
     const frame = await settle(setup, 3)
-    expect(frame).toContain("model · what the next session runs on")
-    expect(frame).toContain("openai has no API key")
+    expect(frame).toContain("scripted-demo")
     // j moves the picker; nothing is typed into the composer.
     setup.mockInput.pressKey("j")
     await settle(setup, 2)
@@ -608,3 +624,193 @@ test("a guide can open on /provider instead, when there is no model anywhere to 
     setup.renderer.destroy()
   }
 }, 60_000)
+
+// --- rebind: /model on a session that already exists (BUGS.md #12) ----------
+//
+// The kernel grew `session rebind` (goals/model-rebind.md): a `model_rebind`
+// event is deposited into the inbox, drained at the next step boundary, and the
+// identity in force from then on is the one it names. What is tested here is the
+// front end's half — that Enter on a live tab MOVES that session instead of
+// opening a draft, that the kernel's own sentences reach the screen, and that
+// the chips read the model that is actually answering.
+
+/**
+ * A session frozen on a real provider, so there is somewhere to move it FROM.
+ * `deepseek` needs a key at creation and at every step's handle construction —
+ * never on the wire, because nothing here talks to it: the rebind puts the
+ * session on the offline stand-in, and that is what any step runs.
+ */
+async function deepseekSession(): Promise<{ id: string; restore: () => void }> {
+  const had = process.env["DEEPSEEK_API_KEY"]
+  process.env["DEEPSEEK_API_KEY"] = "test-key-not-used-on-any-wire"
+  const id = await sessionNew(ws, { profile: "deepseek" })
+  return {
+    id,
+    restore: () => {
+      if (had === undefined) delete process.env["DEEPSEEK_API_KEY"]
+      else process.env["DEEPSEEK_API_KEY"] = had
+    },
+  }
+}
+
+test("a model_rebind event moves what the session runs on, and draws a rule where it happened", () => {
+  const state = createSessionState("s-1")
+  state.setHeader({
+    kind: "header",
+    v: 1,
+    session: "s-1",
+    parent: null,
+    model: "deepseek",
+    model_identity: { provider: "openai", model: "deepseek-v4-pro", base_url: "", api_key_env: "" },
+    environment: "",
+    remote_workspace: "",
+    created: "",
+    composition: { active: [], native_tools: [], prompts: [] },
+  })
+  expect(runningModel(state.snapshot)).toEqual({ profile: "deepseek", model: "deepseek-v4-pro" })
+
+  state.applyEvents([
+    {
+      seq: 1,
+      kind: "model_rebind",
+      profile: "anthropic",
+      identity: { provider: "anthropic", model: "claude-opus-5", base_url: "", api_key_env: "" },
+    },
+  ])
+  expect(runningModel(state.snapshot)).toEqual({ profile: "anthropic", model: "claude-opus-5" })
+  const rule = state.snapshot.items.filter((item) => item.kind === "rebind")
+  expect(rule.length).toBe(1)
+  expect(rule[0]).toMatchObject({ seq: 1, provider: "anthropic", model: "claude-opus-5" })
+})
+
+test("the announcement made when the switch was asked for is replaced by its own ledger event", () => {
+  const state = createSessionState("s-2")
+  state.noteRebind({ profile: "scripted", model: "scripted-demo", provider: "" }, "a cost the kernel named")
+  expect(runningModel(state.snapshot)).toEqual({ profile: "scripted", model: "scripted-demo" })
+  expect(state.snapshot.items.filter((item) => item.kind === "rebind").length).toBe(1)
+
+  state.applyEvents([
+    {
+      seq: 7,
+      kind: "model_rebind",
+      profile: "scripted",
+      identity: { provider: "scripted", model: "scripted-demo", base_url: "", api_key_env: "" },
+    },
+  ])
+  const rule = state.snapshot.items.filter((item) => item.kind === "rebind")
+  expect(rule.length).toBe(1)
+  expect(rule[0]!.seq).toBe(7)
+})
+
+test("sessionRebind carries the kernel's own words out — the confirmation and both costs", async () => {
+  const { id, restore } = await deepseekSession()
+  try {
+    const moved = await sessionRebind(ws, id, { profile: "scripted" })
+    expect(moved.said).toContain(id)
+    // Two costs on stderr: a cold prefix cache (the provider changed) and the
+    // reasoning recorded before now no longer being replayed.
+    expect(moved.costs.length).toBe(2)
+  } finally {
+    restore()
+  }
+}, 60_000)
+
+test("a rebind the kernel refuses throws with its whole sentence, and nothing is moved", async () => {
+  const { id, restore } = await deepseekSession()
+  try {
+    restore()
+    delete process.env["DEEPSEEK_API_KEY"]
+    const failed = await sessionRebind(ws, id, { profile: "deepseek", model: "deepseek-v4-pro" }).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(failed).toBeInstanceOf(CliError)
+    expect((failed as CliError).detail).toContain("deepseek")
+    // The refusal is the whole of it: no event was deposited, so the session is
+    // still on what its header froze.
+    const listed = (await sessionList(ws)).find((row) => row.id === id)
+    expect(listed?.model).toBe("deepseek")
+  } finally {
+    restore()
+  }
+}, 60_000)
+
+test("/model on a started session rebinds it: no second session, and the chips follow", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nulya-tui-state-"))
+  const statePath = join(dir, "tui-state.json")
+  const { id, restore } = await deepseekSession()
+  const state = createSessionState(id)
+  const before = (await sessionList(ws)).length
+  const setup = await testRender(
+    () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} created statePath={statePath} />,
+    { width: 120, height: 24 },
+  )
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.typeText("/model")
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("model · what this session runs on"), 15_000)
+    // Down to the last row: `scripted` is the last profile in default.toml and
+    // the one provider that always runs.
+    for (let i = 0; i < 40; i++) setup.mockInput.pressKey("j")
+    await settle(setup, 2)
+    setup.mockInput.pressEnter()
+
+    await until(() => state.snapshot.rebind?.model === "scripted-demo", 20_000)
+    // A rebind is not a new session — that was the old answer to "switch model".
+    expect((await sessionList(ws)).length).toBe(before)
+    // And the bottom line names what is answering now, not what the header froze.
+    await until(() => statusLine(setup).includes("scripted-demo"), 20_000)
+
+    // Step it: the deposited event is drained at the boundary and the rule in
+    // the transcript becomes the ledger's own, exactly once.
+    await setup.mockInput.typeText("probe")
+    setup.mockInput.pressEnter()
+    await until(() => state.snapshot.lastStopped !== null, 60_000)
+    expect(state.snapshot.error).toBeNull()
+    const rule = state.snapshot.items.filter((item) => item.kind === "rebind")
+    expect(rule.length).toBe(1)
+    expect(rule[0]!.seq).not.toBeNull()
+  } finally {
+    setup.renderer.destroy()
+    restore()
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 120_000)
+
+test("a refused rebind is shown as the kernel wrote it, and the session stays where it was", async () => {
+  const { id, restore } = await deepseekSession()
+  const state = createSessionState(id)
+  const setup = await testRender(
+    () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} created />,
+    { width: 120, height: 24 },
+  )
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.typeText("/model")
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("model · what this session runs on"), 15_000)
+    // The picker read the config once, on mount, with the key in place. Taking
+    // it away now is exactly the case this front end must not try to answer for
+    // itself: the row still looks runnable here, and the kernel is the one that
+    // knows it is not.
+    restore()
+    delete process.env["DEEPSEEK_API_KEY"]
+    for (let i = 0; i < 40; i++) setup.mockInput.pressKey("k")
+    await settle(setup, 2)
+    setup.mockInput.pressEnter()
+
+    // The kernel's sentence, not one of ours: the assertion is taken from what
+    // the CLI itself says, so a reworded refusal moves both halves together.
+    const refusal = await sessionRebind(ws, id, { profile: "deepseek" }).then(
+      () => "",
+      (error: unknown) => (error instanceof CliError ? error.detail : String(error)),
+    )
+    const longest = refusal.split(/[\s'`]+/).reduce((a, b) => (b.length > a.length ? b : a), "")
+    await until(() => setup.captureCharFrame().includes(longest), 20_000)
+    expect(state.snapshot.rebind).toBeNull()
+  } finally {
+    setup.renderer.destroy()
+    restore()
+  }
+}, 120_000)

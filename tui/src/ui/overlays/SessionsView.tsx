@@ -1049,7 +1049,7 @@ export function SessionsView(props: {
         <Show when={rows().length === 0 && !notice()}>
           <text fg={style.theme.muted}>{fit("no sessions in this workspace yet", inner())}</text>
           <text fg={style.theme.dim}>
-            {fit("n starts one · a session freezes its model and tools at birth · nothing is ever deleted", inner())}
+            {fit("n starts one · a session freezes its tools at birth · nothing is ever deleted", inner())}
           </text>
         </Show>
       </scrollbox>

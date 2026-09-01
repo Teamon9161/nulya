@@ -132,6 +132,52 @@ export function fit(text: string, width: number): string {
   return `${kept}…`
 }
 
+export interface CharRange {
+  start: number
+  end: number
+}
+
+/**
+ * Code-point ranges translated into the index space OpenTUI highlights in.
+ *
+ * `addHighlightByCharRange` is named for characters and does not count them.
+ * Measured against the real buffer (a textarea, `captureSpans`, one column lit
+ * at a time), its offsets are DISPLAY COLUMNS, with newlines contributing
+ * nothing:
+ *
+ *   - `你好abc` — `abc` lights up at 4..7, not at the code points 2..5. Two
+ *     columns per CJK character, so every code-point offset behind one lands
+ *     early, which is how a paste after a line of Chinese put the accent on
+ *     the prose in front of it instead of on `[Pasted text #N]` (BUGS #13).
+ *   - `ab\ncd` — `cd` is 2..4, not 3..5: a newline occupies no column.
+ *   - `𝐀ab` (one code point, two UTF-16 units, one column) — `ab` is 1..3, so
+ *     the space is not UTF-16 either.
+ *   - Soft wrapping adds nothing: a token past the wrap point keeps the offset
+ *     its unwrapped line gives it.
+ *
+ * A literal tab is the one known divergence: the buffer gives it a fixed cell
+ * count of its own and `displayWidth` gives it one, so a range behind a tab on
+ * the same line is off by that difference. Narrow enough (a tab reaches the
+ * draft only inside a paste short enough not to be folded away) that encoding
+ * a private default of the renderer's would cost more than it buys.
+ *
+ * Every range at once because they share the one walk: the endpoints are read
+ * out of a prefix table rather than re-measured per range.
+ */
+export function toHighlightRanges(text: string, ranges: readonly CharRange[]): CharRange[] {
+  if (ranges.length === 0) return []
+  // `columns[i]` is where code point `i` starts; the extra last entry is the end.
+  const columns: number[] = []
+  let used = 0
+  for (const ch of text) {
+    columns.push(used)
+    if (ch !== "\n") used += charWidth(ch.codePointAt(0) ?? 0)
+  }
+  columns.push(used)
+  const column = (offset: number) => columns[Math.min(Math.max(offset, 0), columns.length - 1)]!
+  return ranges.map((range) => ({ start: column(range.start), end: column(range.end) }))
+}
+
 /** The joint these sentences are written with: ` · ` between whole phrases. */
 const joint = " · "
 

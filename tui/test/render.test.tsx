@@ -20,7 +20,9 @@ import { diffStat } from "../src/plugins/surface.tsx"
 import { describeTool } from "../src/render/registry.ts"
 import type { PluginCard } from "../src/plugins/host.ts"
 import { App } from "../src/ui/App.tsx"
-import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
+import { UserTurn } from "../src/render/cards/UserTurn.tsx"
+import { displayWidth } from "../src/ui/columns.ts"
+import { BodyWidthContext, StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
 import { TasksContext } from "../src/state/tasks.ts"
 import { NavigateContext } from "../src/state/navigate.ts"
@@ -501,6 +503,46 @@ test("user and assistant turns", async () => {
   expect(frame).toContain("● Reading")
   expect(frame).toContain("· queued")
   expect(frame).toMatchSnapshot()
+})
+
+/**
+ * BUGS.md #10: a long paste showed up with most of it missing.
+ *
+ * A user turn's rows are painted one per `height={1}` box, so a row wrapped
+ * WIDER than the column it sits in does not spill onto a second row — the
+ * surplus is simply never drawn. The wrap width therefore has to be the pane's
+ * (`useBodyWidth`), not the terminal's: with the sidebar open or the tab split,
+ * those are different numbers, and the card was asking the terminal.
+ *
+ * CJK is what made it loud rather than what caused it — two columns per
+ * character means half as many characters survive the cut — so the text here is
+ * mixed on purpose: the property is "nothing is dropped", at any width.
+ */
+test("a user turn wraps at its pane's width, not the terminal's", async () => {
+  const pane = 44
+  const text = [
+    "第一段：这里是一段足够长的中文说明文字，用来把一行撑过窄栏的宽度。",
+    "const pending = new Map<string, Proposal>()",
+    "第二段：中英文混排 handoff proposal 的语义，仍然要一个字都不丢。",
+  ].join("\n")
+  const item: TranscriptItem = { key: "paste-1", seq: 7, kind: "user", text, queued: false }
+  const frame = await frameOfNode(
+    () => (
+      <BodyWidthContext.Provider value={() => pane}>
+        <box flexDirection="column" width={pane}>
+          <UserTurn item={item} />
+        </box>
+      </BodyWidthContext.Provider>
+    ),
+    120,
+    24,
+  )
+  const rows = frame.split("\n").map((row) => row.replace(/^\s*▎ ?/, "").trimEnd())
+  const squeeze = (value: string) => value.replace(/\s+/g, "")
+  expect(squeeze(rows.join(""))).toContain(squeeze(text))
+  // …and it stayed inside its column while doing it: a row that overflows is
+  // exactly the row whose tail was lost above.
+  for (const row of rows) expect(displayWidth(row)).toBeLessThanOrEqual(pane)
 })
 
 test("a skill echo folds back to the `/name args` that was typed", async () => {

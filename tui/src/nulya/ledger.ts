@@ -1,5 +1,5 @@
 /**
- * The shapes the kernel writes: session header (DESIGN §3.4) and the five
+ * The shapes the kernel writes: session header (DESIGN §3.4) and the six
  * ledger event kinds (DESIGN §3.1). Nothing outside `src/nulya/` names these
  * fields — everything above consumes the parsed values.
  */
@@ -124,6 +124,24 @@ export type LedgerEvent =
    * `nulya task` verb takes.
    */
   | { seq: number; origin?: string; kind: "task_finished"; task: string; exit_code: number; text: string }
+  /**
+   * From here on this conversation runs on a different model (DESIGN §3.1,
+   * goals/model-rebind.md). The ONLY event that is not a turn: the model never
+   * sees it, and what it changes is which reasoning items may still be replayed.
+   *
+   * `identity` is the RESOLVED descriptor, frozen exactly the way the header's
+   * is — so "what is running" is the last one of these, or the header when
+   * there is none (`state/session.ts`'s `runningModel`, the one place that
+   * answers it here).
+   */
+  | {
+      seq: number
+      origin?: string
+      kind: "model_rebind"
+      /** The provider PROFILE name, as the header's `model` field is. */
+      profile: string
+      identity: ModelDescriptor
+    }
   /**
    * A kind this build does not know. New event kinds must survive: the reader
    * keeps them, and the render registry decides what (if anything) to draw.
