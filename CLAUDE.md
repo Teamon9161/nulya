@@ -111,7 +111,7 @@ Zig 0.16（新 `std.Io` API）。发布版加 `-Dembed-toolchain -Dzig-archive=<
 
 ## 工作约定
 
-- **注释只写代码说不出来的东西**（契约：`docs/goals/comments.md`）。写：不变量与顺序、非显然的取舍、外部约束、格式契约。不写：复述代码、为什么没写成另一种样子、某段代码曾经是什么样、以及**任何文档指针**。**代码不引用文档，文档引用代码**——`nulya src` 的读者打不开 docs，`DESIGN §8.1` 对他是悬空指针；一条注释若离开那个 §x 就不成立，说明事实还没写出来，把事实写进去、指针删掉。模块头 **≤ 15 行**（例外只有 `extension/protocol.zig` 与 `environment/remote/protocol.zig`——它们的头就是被打印出去的规格）。一条规则只说一次，在它定义的地方；重复三遍说明该抽出一个有名字的东西。设计论证归 commit message 与 `docs/goals/`，不进源文件。代码注释英文，docs 中文；测试与模块同文件（`test "..."`）。
+- **注释只写代码说不出来的东西**（契约：`docs/goals/comments.md`）。写：不变量与顺序、非显然的取舍、外部约束、格式契约。不写：复述代码、为什么没写成另一种样子、某段代码曾经是什么样、以及**任何文档指针**。**代码不引用文档，文档引用代码**——`nulya src` 的读者打不开 docs，`DESIGN §8.1` 对他是悬空指针；一条注释若离开那个 §x 就不成立，说明事实还没写出来，把事实写进去、指针删掉。模块头 **≤ 15 行**；例外是**契约模块**——一个模块的头如果就是被打印出去、由第三方照着实现的规格，它可以更长，但只写规格、不写规格的辩护（今天有三个：`extension/protocol.zig`、`environment/remote/protocol.zig`、`extensions/agent/src/external.zig`）。一条规则只说一次，在它定义的地方；重复三遍说明该抽出一个有名字的东西。设计论证归 commit message 与 `docs/goals/`，不进源文件。代码注释英文，docs 中文；测试与模块同文件（`test "..."`）。
 - **不加第二个 builtin tool**（`shell` 是唯一那个；`edit` 已搬进 `extensions/std`）；**不在 session 中途改 `tools[]`**；**不给 tool ledger**（需要对话的东西是 subagent，不是 tool）。
 - 新增 kernel 概念前先问一句：**这是 substrate 还是 intelligence？** 是 intelligence 就放 kernel 之上。
 - **内核只长 substrate，不长便利。** 往 `src/` 加东西前问：把它删掉，八条 physics 哪一条会失效？一条都不会 → 它不是内核。落点优先级：extension / skill（agent 自己造）> `cli.zig` / `launch.zig` 这类外壳 > kernel 模块。std 能做的不手写（`std.json` 类型化编解码、`union(enum)`）；一个字段只写不读、一个动词没有语义、一个决定在多层各做一遍、一个读者拿着写句柄——都是该删或该收的信号。

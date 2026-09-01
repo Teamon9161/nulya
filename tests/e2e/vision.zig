@@ -101,7 +101,7 @@ test "session append --image: the catalog gate refuses a model that does not cla
         const run = try runCli(alloc, io, ws, &argv);
         defer alloc.free(run.stdout);
         try std.testing.expectEqual(@as(u8, 1), run.code);
-        try std.testing.expectEqualStrings("", run.stdout); // stdout stays clean (DESIGN §14)
+        try std.testing.expectEqualStrings("", run.stdout); // stdout stays clean
         const err_text = try runCliStderr(alloc, io, ws, &argv, &.{});
         defer alloc.free(err_text);
         try std.testing.expect(std.mem.indexOf(u8, err_text, "scripted-demo") != null);

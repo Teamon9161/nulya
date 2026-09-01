@@ -1597,7 +1597,7 @@ test "session cli: --prompt freezes a file's bytes into the header, blocks land 
     }
 }
 
-test "session cli: --prompt refuses a file whose name is not valid UTF-8, before a session exists (goals/review-fork-remote.md §2)" {
+test "session cli: --prompt refuses a file whose name is not valid UTF-8, before a session exists" {
     // The `.source` label is `std.fs.path.stem(path)`, computed from the argv
     // path string itself and written into the same header JSON the prompt's
     // text is — so it needs the same guarantee: `std.json.Stringify` writes a
