@@ -1846,3 +1846,124 @@ test "session new: a profile whose credential resolves nowhere refuses instead o
     defer alloc.free(scripted.stdout);
     try std.testing.expectEqual(@as(u8, 0), scripted.code);
 }
+
+const rebind_config =
+    \\[provider]
+    \\active_profile = "scripted"
+    \\
+    \\[[provider.profiles]]
+    \\name = "scripted"
+    \\kind = "scripted"
+    \\model = "demo-1"
+    \\
+    \\[[provider.profiles]]
+    \\name = "keyless"
+    \\kind = "openai"
+    \\model = "keyless-1"
+    \\base_url = "https://keyless.example/v1"
+    \\api_key_env = "NULYA_E2E_ABSENT_KEY"
+    \\
+;
+
+test "session cli: rebind moves the rest of a session onto another model, and refuses what it cannot honour" {
+    // goals/model-rebind.md: the header still freezes one identity and is never
+    // rewritten — the change is an appended event, deposited like a user turn
+    // and drained at the next step boundary, so the transcript continues in the
+    // same file on a different model.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    try ws.createDirPath(io, "home");
+    try ws.writeFile(io, .{ .sub_path = "home/config.toml", .data = rebind_config });
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    defer alloc.free(home_abs);
+    const env: []const EnvPair = &.{
+        .{ .key = "NULYA_HOME", .value = home_abs },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const new = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" }, env);
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    {
+        const appended = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "append", id, "hello" }, env);
+        defer alloc.free(appended.stdout);
+        try std.testing.expectEqual(@as(u8, 0), appended.code);
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", id }, env);
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(u8, 0), stepped.code);
+    }
+
+    // A profile whose credential does not resolve cannot take the conversation
+    // over: the same refusal `session new` gives, and nothing is deposited.
+    {
+        const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "rebind", id, "--profile", "keyless" }, env);
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        const bytes = try readSessionFile(alloc, io, ws, id);
+        defer alloc.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "model_rebind") == null);
+    }
+
+    // Naming a model this profile can serve is accepted — and lands in the
+    // INBOX, not the session file: the one writer is still the only writer.
+    {
+        const ok = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "rebind", id, "--model", "demo-2" }, env);
+        defer alloc.free(ok.stdout);
+        try std.testing.expectEqual(@as(u8, 0), ok.code);
+        const bytes = try readSessionFile(alloc, io, ws, id);
+        defer alloc.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "model_rebind") == null);
+    }
+
+    // The next step drains it, keeps every earlier turn, and goes on.
+    const before = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(before);
+    {
+        const appended = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "append", id, "again" }, env);
+        defer alloc.free(appended.stdout);
+        try std.testing.expectEqual(@as(u8, 0), appended.code);
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", id }, env);
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(u8, 0), stepped.code);
+    }
+    const after = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(after);
+    try std.testing.expect(std.mem.startsWith(u8, after, before));
+    try std.testing.expect(std.mem.indexOf(u8, after, "\"kind\":\"model_rebind\"") != null);
+    // The header still says what this session was CREATED on…
+    try std.testing.expect(std.mem.indexOf(u8, after, "\"model\":\"demo-1\"") != null);
+
+    // …and the projection every reader uses says what it runs on NOW.
+    {
+        const listed = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" }, env);
+        defer alloc.free(listed.stdout);
+        try std.testing.expectEqual(@as(u8, 0), listed.code);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "demo-2") != null);
+    }
+
+    // Asking for the model it is already on changes nothing, and says so.
+    {
+        const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "rebind", id, "--model", "demo-2" }, env);
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 0), again.code);
+        const bytes = try readSessionFile(alloc, io, ws, id);
+        defer alloc.free(bytes);
+        try std.testing.expectEqual(after.len, bytes.len);
+    }
+}

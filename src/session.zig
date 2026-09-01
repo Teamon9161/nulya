@@ -58,6 +58,13 @@ pub fn requestCancel(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir
     try workspace.writeFile(io, .{ .sub_path = marker, .data = "" });
 }
 
+fn descriptorsEqual(a: ledger.ModelDescriptor, b: ledger.ModelDescriptor) bool {
+    return std.mem.eql(u8, a.provider, b.provider) and
+        std.mem.eql(u8, a.model, b.model) and
+        std.mem.eql(u8, a.base_url, b.base_url) and
+        std.mem.eql(u8, a.api_key_env, b.api_key_env);
+}
+
 /// If a cancel marker exists for the session, delete it and return true.
 fn consumeCancel(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir, session_path: []const u8) !bool {
     const marker = try ledger.siblingPath(alloc, session_path, ".cancel");
@@ -81,11 +88,41 @@ pub const AgentSession = struct {
     /// cross-process capability-note inbox each step (DESIGN §3, §5.3).
     durable: ?DurableRef = null,
     total_usage: provider.Usage = .{},
+    /// How to build a handle for an identity the ledger names, and which
+    /// identity `model` was built for. Both empty for a session that never
+    /// rebinds — `model` is then whatever the shell handed in, forever.
+    rebind: ?ModelResolver = null,
+    built_identity: ledger.ModelDescriptor = .{},
+
+    /// How to build a running model handle for an identity the ledger names
+    /// (goals/model-rebind.md §5).
+    ///
+    /// The kernel decides WHEN a session is running on the wrong model — that is
+    /// a fact it reads off the ledger — and knows nothing about how to construct
+    /// one, which needs config, credentials and a provider table that live in
+    /// the shell. So the shell hands in a callback, exactly as it hands in
+    /// `composition.ExecTargetProbe`: the kernel calls it at the two moments the
+    /// answer can change (opening a session whose ledger already rebound, and
+    /// draining a rebind at a step boundary) and never at any other.
+    ///
+    /// The returned handle has to outlive the session; the shell owns it.
+    pub const ModelResolver = struct {
+        ptr: *anyopaque,
+        /// The whole `(profile, identity)` the ledger recorded: the descriptor
+        /// says what to run and the profile name is what a credential in config
+        /// is filed under, exactly as at session creation.
+        build: *const fn (ptr: *anyopaque, wanted: ledger.Identity) anyerror!provider.Model,
+    };
 
     pub const Options = struct {
         model: provider.Model,
         step_ctx: loop.StepContext,
         model_options: provider.Options = .{},
+        /// Set by a shell that supports `session rebind`. Without it a rebind
+        /// event still projects (the reasoning behind it stops being replayed —
+        /// that is the kernel's own rule) but the handle stays as built, so a
+        /// caller that cannot swap models is never handed one it did not make.
+        rebind: ?ModelResolver = null,
         /// Store roots to search, in order (DESIGN §7.2). The default is the
         /// workspace root alone; a CLI adds the user root and any trusted
         /// `extensions.paths` at the session-setup boundary.
@@ -205,6 +242,8 @@ pub const AgentSession = struct {
             .model_options = opts.model_options,
             .extension_roots = opts.extension_roots,
             .durable = .{ .workspace = d.workspace, .session_path = owned_path },
+            .rebind = opts.rebind,
+            .built_identity = d.model_identity,
         };
     }
 
@@ -220,7 +259,7 @@ pub const AgentSession = struct {
         const owned_path = try alloc.dupe(u8, d.session_path);
         errdefer alloc.free(owned_path);
 
-        return .{
+        var s: AgentSession = .{
             .alloc = alloc,
             .l = l,
             .composition = comp,
@@ -229,7 +268,15 @@ pub const AgentSession = struct {
             .model_options = opts.model_options,
             .extension_roots = opts.extension_roots,
             .durable = .{ .workspace = d.workspace, .session_path = owned_path },
+            .rebind = opts.rebind,
+            // What the shell built from: the header's identity, which is the
+            // only one it could have known before reading the events.
+            .built_identity = hdr.model_identity,
         };
+        // A session that rebound in an earlier process resumes on the model it
+        // rebound TO, never on the one its header froze.
+        try s.applyRebind();
+        return s;
     }
 
     pub fn deinit(self: *AgentSession) void {
@@ -416,7 +463,28 @@ pub const AgentSession = struct {
             // consumed here, at the boundary, and this step reports `.canceled`.
             if (try consumeCancel(self.alloc, io, d.workspace, d.session_path)) return error.Canceled;
             try ledger.drainInbox(self.alloc, io, &self.l, d.workspace, d.session_path);
+            // A drained rebind takes effect for THIS step: the boundary is where
+            // the identity may change, and the model has not been asked anything
+            // yet (goals/model-rebind.md §5).
+            try self.applyRebind();
         }
+    }
+
+    /// Run on the model the ledger names, not the one the shell happened to
+    /// build. Called at the two moments the answer can change — reopening a
+    /// session whose ledger already rebound, and draining one at a step boundary
+    /// — so both paths are the same rule rather than two.
+    ///
+    /// Without a resolver the handle stays as built. That is deliberate: the
+    /// projection's half (reasoning from before the rebind is no longer
+    /// replayed) is the kernel's own and always applies, while swapping a
+    /// running handle is only possible for a caller that made one.
+    fn applyRebind(self: *AgentSession) !void {
+        const wanted = ledger.lastRebind(self.l.view()) orelse return;
+        if (descriptorsEqual(wanted.identity, self.built_identity)) return;
+        const resolver = self.rebind orelse return;
+        self.model = try resolver.build(resolver.ptr, wanted);
+        self.built_identity = wanted.identity;
     }
 
     /// Append one usage event per completed tool call in this step's ledger

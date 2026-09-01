@@ -51,6 +51,7 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
         "--with",         "--pin",      "--parent",     "--prompt",   "session step",
         "--max-steps",    "--effort",   "--stream",     "--gate",     "session events",
         "session cancel", "outcome",    "session list", "--image",    "config show",
+        "session rebind",
         "config refresh", "skill load", "src",          "toolchain",  "help",
         "demo",           "task run",   "task list",    "wait",       "retarget",
         "--running",      "journal append", "journal read", "remote check",
@@ -80,8 +81,11 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // things that must not read as one; `ext push`, +1 — a new verb, and the one
     // way an extension reaches a machine that has no toolchain and no checkout,
     // while `ext build --target` paid nothing because a flag on an existing verb
-    // belongs on that verb's line).
-    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 61);
+    // belongs on that verb's line; `session rebind`, +3 — a new verb, and its two
+    // continuation lines are the two things nobody can guess from the name: the
+    // transcript survives while the reasoning behind the switch does not, and a
+    // different provider is paid for in a cold cache).
+    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 64);
 
     // The two flag spellings a terminal user reaches for reach the same text.
     for ([_][]const u8{ "--help", "-h" }) |flag| {

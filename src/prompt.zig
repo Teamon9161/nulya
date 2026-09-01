@@ -134,23 +134,35 @@ pub fn project(alloc: std.mem.Allocator, events: []const ledger.Event) !PromptIR
 /// Project the ledger into what a provider may be sent.
 ///
 /// The ledger holds the FACT (what the model emitted); this holds what is legal
-/// to replay. The one place the two differ is a reply cut off by `max_tokens`:
-/// its calls are recorded verbatim, torn arguments and all, and are made
-/// replayable HERE — an incomplete JSON value becomes `{}`, because replaying a
-/// torn prefix into a provider's `input` would 400 every later request of the
-/// session (DESIGN §4). Doing it in the projection rather than before the append
-/// keeps both properties: the line still says what the model produced, and
-/// nothing unsendable ever reaches a wire.
+/// to replay. There are two places the two differ, and both are here for the
+/// same reason — the line keeps saying what happened, and nothing unsendable
+/// ever reaches a wire:
+///
+///   1. A reply cut off by `max_tokens` has its calls recorded verbatim, torn
+///      arguments and all; an incomplete JSON value becomes `{}`, because
+///      replaying a torn prefix into a provider's `input` would 400 every later
+///      request of the session (DESIGN §4).
+///   2. `reasoning` is opaque and belongs to the model that produced it, so
+///      after a `model_rebind` the turns from before it keep their reasoning in
+///      the ledger and lose it here (goals/model-rebind.md §3). A rebind itself
+///      projects to nothing at all: the model does not read that it was swapped.
+///      This is what makes changing model mid-session safe without the kernel
+///      holding any opinion about which models are compatible (physics #8).
 pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const SystemBlock, events: []const ledger.Event) !PromptIR {
     var total_calls: usize = 0;
     var total_results: usize = 0;
+    // The one event kind that is not a turn, so the array below is exactly the
+    // size it will be filled to — `deinit` frees what was allocated, not a
+    // shorter view of it.
+    var rebinds: usize = 0;
     for (events) |event| switch (event) {
         .assistant => |as| total_calls += as.calls.len,
         .tool_results => |results| total_results += results.len,
+        .model_rebind => rebinds += 1,
         else => {},
     };
 
-    const turns = try alloc.alloc(Turn, events.len);
+    const turns = try alloc.alloc(Turn, events.len - rebinds);
     errdefer alloc.free(turns);
     const call_storage = try alloc.alloc(ToolCall, total_calls);
     errdefer alloc.free(call_storage);
@@ -159,28 +171,46 @@ pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const System
 
     var call_at: usize = 0;
     var result_at: usize = 0;
-    for (events, turns) |event, *turn| switch (event) {
-        .user_text => |u| turn.* = .{ .user_text = .{ .text = u.text, .images = u.images } },
-        .assistant => |as| {
-            const calls = call_storage[call_at..][0..as.calls.len];
-            call_at += calls.len;
-            const truncated = as.stop_reason == .max_tokens;
-            for (as.calls, calls) |src, *dst| dst.* = .{
-                .id = src.id,
-                .tool = src.tool,
-                .args_json = if (truncated and !try std.json.validate(alloc, src.args_json)) "{}" else src.args_json,
-            };
-            turn.* = .{ .assistant = .{ .reasoning = as.reasoning, .text = as.text, .calls = calls } };
-        },
-        .tool_results => |results| {
-            const projected = result_storage[result_at..][0..results.len];
-            result_at += projected.len;
-            for (results, projected) |src, *dst| dst.* = .{ .call_id = src.call_id, .ok = src.ok, .output = src.output };
-            turn.* = .{ .tool_results = projected };
-        },
-        .capability_note => |note| turn.* = .{ .capability_note = note.text },
-        .task_finished => |t| turn.* = .{ .task_finished = t.text },
-    };
+    var turn_at: usize = 0;
+    // Everything before the identity in force ran on a different model, so its
+    // reasoning is no longer ours to replay.
+    const floor = ledger.reasoningFloor(events);
+    for (events, 0..) |event, index| {
+        // Not a turn: it changes which reasoning may be replayed and nothing the
+        // model reads. Skipped BEFORE a slot is taken — `turns` is exactly as
+        // long as the turns there will be, and the common case is a rebind
+        // sitting at the very end (deposited, drained, about to be stepped).
+        if (event == .model_rebind) continue;
+        const turn = &turns[turn_at];
+        switch (event) {
+            .user_text => |u| turn.* = .{ .user_text = .{ .text = u.text, .images = u.images } },
+            .assistant => |as| {
+                const calls = call_storage[call_at..][0..as.calls.len];
+                call_at += calls.len;
+                const truncated = as.stop_reason == .max_tokens;
+                for (as.calls, calls) |src, *dst| dst.* = .{
+                    .id = src.id,
+                    .tool = src.tool,
+                    .args_json = if (truncated and !try std.json.validate(alloc, src.args_json)) "{}" else src.args_json,
+                };
+                turn.* = .{ .assistant = .{
+                    .reasoning = if (index < floor) "" else as.reasoning,
+                    .text = as.text,
+                    .calls = calls,
+                } };
+            },
+            .tool_results => |results| {
+                const projected = result_storage[result_at..][0..results.len];
+                result_at += projected.len;
+                for (results, projected) |src, *dst| dst.* = .{ .call_id = src.call_id, .ok = src.ok, .output = src.output };
+                turn.* = .{ .tool_results = projected };
+            },
+            .capability_note => |note| turn.* = .{ .capability_note = note.text },
+            .task_finished => |t| turn.* = .{ .task_finished = t.text },
+            .model_rebind => unreachable, // skipped above
+        }
+        turn_at += 1;
+    }
     return .{
         .system_blocks = system_blocks,
         .turns = turns,
@@ -253,6 +283,40 @@ test "PromptIR turns extend by prefix on append" {
     defer p2.deinit(alloc);
 
     try std.testing.expect(isStablePrefix(p1.turns, p2.turns));
+}
+
+test "a rebind is not a turn, and the reasoning behind it stops being replayed" {
+    // goals/model-rebind.md §3: reasoning is opaque and belongs to the model
+    // that produced it, so a session that changed model keeps every turn and
+    // hands the new model none of the old model's thinking. Everything else
+    // about the transcript — its text, its calls, its results — is untouched:
+    // that is what makes changing model mid-session possible at all.
+    const alloc = std.testing.allocator;
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+
+    try l.append(.{ .user_text = .{ .text = "hi" } });
+    try l.append(.{ .assistant = .{ .reasoning = "[{\"before\":1}]", .text = "old model", .calls = &.{} } });
+    try l.append(.{ .model_rebind = .{ .profile = "anthropic", .identity = .{ .provider = "anthropic", .model = "claude-sonnet-5" } } });
+    try l.append(.{ .assistant = .{ .reasoning = "[{\"after\":1}]", .text = "new model", .calls = &.{} } });
+
+    const p = try project(alloc, l.view());
+    defer p.deinit(alloc);
+
+    // Four events, three turns: the rebind itself is nothing the model reads.
+    try std.testing.expectEqual(@as(usize, 3), p.turns.len);
+    // …including when it is the LAST event, which is the ordinary case: the
+    // deposit is drained at a step boundary and the step projects immediately.
+    try l.append(.{ .model_rebind = .{ .profile = "openai", .identity = .{ .provider = "openai", .model = "gpt-5.6-sol" } } });
+    const trailing = try project(alloc, l.view());
+    defer trailing.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 3), trailing.turns.len);
+    for (trailing.turns) |turn| if (turn == .assistant) try std.testing.expectEqualStrings("", turn.assistant.reasoning);
+    try std.testing.expectEqualStrings("old model", p.turns[1].assistant.text);
+    try std.testing.expectEqualStrings("", p.turns[1].assistant.reasoning);
+    try std.testing.expectEqualStrings("[{\"after\":1}]", p.turns[2].assistant.reasoning);
+    // The ledger still holds what actually happened; only the projection moved.
+    try std.testing.expectEqualStrings("[{\"before\":1}]", l.view()[1].assistant.reasoning);
 }
 
 test "assistant reasoning rides on its own turn, ahead of that turn's text and calls" {

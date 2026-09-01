@@ -161,7 +161,72 @@ pub const Event = union(enum) {
         exit_code: u8,
         text: []const u8,
     },
+    /// From here on, this session runs on a different model (DESIGN §3.4, §9.5;
+    /// goals/model-rebind.md).
+    ///
+    /// The header freezes ONE identity, and a header cannot be rewritten
+    /// (physics #1), so a change of identity is an APPEND like everything else
+    /// that changes what the model sees (physics #3). `identity` is the already
+    /// RESOLVED descriptor, frozen exactly as the header's is and for the same
+    /// reason — whoever asked for the change resolved it against config with the
+    /// credential in hand, so what runs is still what was frozen; there is now
+    /// simply more than one point where freezing happened. `profile` is the
+    /// profile NAME, kept for the same display / effort lookup the header keeps
+    /// its own for.
+    ///
+    /// It is NOT a turn: `prompt.zig` gives it no `Turn`, because the model has
+    /// no more business reading that it was swapped than it has reading its own
+    /// `stop_reason`. What it DOES change is what may still be replayed — an
+    /// assistant turn's `reasoning` is opaque, provider-owned and model-locked,
+    /// so everything recorded before the last rebind stops being projected
+    /// (goals/model-rebind.md §3). That is the whole mechanism: the ledger keeps
+    /// every fact, and the projection hands back only what is legal to send.
+    model_rebind: struct {
+        profile: []const u8 = "",
+        identity: ModelDescriptor,
+    },
 };
+
+/// Which model this session runs on NOW: the last `model_rebind`, or the
+/// header's frozen identity when there has been none (goals/model-rebind.md §7).
+///
+/// The one answer to that question. A second freezing point is only safe while
+/// every reader agrees where to look, so nothing outside this function may ask
+/// `header.model_identity` what a session is running on — it answers what the
+/// session STARTED on, which is a different question and, after a rebind, a
+/// wrong answer to this one.
+pub const Identity = struct { profile: []const u8, identity: ModelDescriptor };
+
+pub fn effectiveIdentity(header: Header, events: []const Event) Identity {
+    return lastRebind(events) orelse .{ .profile = header.model, .identity = header.model_identity };
+}
+
+/// The last `model_rebind`, or null when this session still runs on what its
+/// header froze — which is every session that never rebound, and every session
+/// written before rebinding existed.
+pub fn lastRebind(events: []const Event) ?Identity {
+    var at = events.len;
+    while (at > 0) {
+        at -= 1;
+        if (events[at] == .model_rebind) {
+            const r = events[at].model_rebind;
+            return .{ .profile = r.profile, .identity = r.identity };
+        }
+    }
+    return null;
+}
+
+/// How many events precede the identity in force — the index the projection
+/// stops replaying `reasoning` before (goals/model-rebind.md §3). Zero when the
+/// session never rebound, which is every session that existed before this did.
+pub fn reasoningFloor(events: []const Event) usize {
+    var at = events.len;
+    while (at > 0) {
+        at -= 1;
+        if (events[at] == .model_rebind) return at + 1;
+    }
+    return 0;
+}
 
 pub const Ledger = struct {
     alloc: std.mem.Allocator,
@@ -301,6 +366,15 @@ fn cloneEvent(a: std.mem.Allocator, e: Event) !Event {
             .task = try a.dupe(u8, t.task),
             .exit_code = t.exit_code,
             .text = try a.dupe(u8, t.text),
+        } },
+        .model_rebind => |r| .{ .model_rebind = .{
+            .profile = try a.dupe(u8, r.profile),
+            .identity = .{
+                .provider = try a.dupe(u8, r.identity.provider),
+                .model = try a.dupe(u8, r.identity.model),
+                .base_url = try a.dupe(u8, r.identity.base_url),
+                .api_key_env = try a.dupe(u8, r.identity.api_key_env),
+            },
         } },
     };
 }
@@ -827,6 +901,12 @@ pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
             try jw.write(t.exit_code);
             try writeField(jw, "text", t.text);
         },
+        .model_rebind => |r| {
+            try jw.write("model_rebind");
+            try writeField(jw, "profile", r.profile);
+            try jw.objectField("identity");
+            try jw.write(r.identity);
+        },
     }
 }
 
@@ -874,6 +954,11 @@ pub const WireEvent = struct {
     /// other kind.
     task: ?[]const u8 = null,
     exit_code: ?u8 = null,
+    /// The profile name and resolved descriptor of a `model_rebind` (see
+    /// `Event.model_rebind`); absent on every other kind. The domain type is
+    /// the wire type, exactly as `usage` and `images` are.
+    profile: ?[]const u8 = null,
+    identity: ?ModelDescriptor = null,
 };
 
 pub const WireCall = struct {
@@ -930,6 +1015,15 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
             .id = w.id orelse return error.CorruptLedger,
             .version = w.version orelse return error.CorruptLedger,
             .text = w.text orelse return error.CorruptLedger,
+        } };
+    }
+    if (std.mem.eql(u8, w.kind, "model_rebind")) {
+        // The descriptor is required and the profile is not: a session can be
+        // rebound to a model without naming a profile, but a rebind that does
+        // not say what to run is not a rebind.
+        return .{ .model_rebind = .{
+            .profile = w.profile orelse "",
+            .identity = w.identity orelse return error.CorruptLedger,
         } };
     }
     if (std.mem.eql(u8, w.kind, "task_finished")) {
@@ -1160,6 +1254,13 @@ fn expectEventsEqual(a: []const Event, b: []const Event) !void {
                 try std.testing.expectEqual(t.exit_code, y.task_finished.exit_code);
                 try std.testing.expectEqualStrings(t.text, y.task_finished.text);
             },
+            .model_rebind => |r| {
+                try std.testing.expectEqualStrings(r.profile, y.model_rebind.profile);
+                try std.testing.expectEqualStrings(r.identity.provider, y.model_rebind.identity.provider);
+                try std.testing.expectEqualStrings(r.identity.model, y.model_rebind.identity.model);
+                try std.testing.expectEqualStrings(r.identity.base_url, y.model_rebind.identity.base_url);
+                try std.testing.expectEqualStrings(r.identity.api_key_env, y.model_rebind.identity.api_key_env);
+            },
         }
     }
 }
@@ -1248,6 +1349,11 @@ test "a header from a future ledger version is refused, not read as v1" {
     try std.testing.expectEqual(format_version, ours.value.v);
 }
 
+/// How many events `writeSampleEvents` writes — a name so the round-trip tests
+/// below say "all of them" instead of restating a number that changes whenever
+/// the alphabet grows one more kind.
+const sample_event_count = 5;
+
 fn writeSampleEvents(l: *Ledger) !void {
     try l.append(.{ .user_text = .{ .text = "hi" } });
     try l.append(.{ .assistant = .{
@@ -1259,6 +1365,32 @@ fn writeSampleEvents(l: *Ledger) !void {
     } });
     try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "one\n[exit 0]" }} });
     try l.append(.{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "note text" } });
+    try l.append(.{ .model_rebind = .{
+        .profile = "anthropic",
+        .identity = .{ .provider = "anthropic", .model = "claude-sonnet-5", .base_url = "https://api.anthropic.com", .api_key_env = "ANTHROPIC_API_KEY" },
+    } });
+}
+
+test "the model a session runs on is the last rebind, or the header when there is none" {
+    const alloc = std.testing.allocator;
+    var l = Ledger.init(alloc);
+    defer l.deinit();
+    const header: Header = .{ .model = "openai", .model_identity = .{ .provider = "openai", .model = "gpt-4o-mini" } };
+
+    // No rebind: the header, and nothing before it to stop replaying.
+    try l.append(.{ .user_text = .{ .text = "hi" } });
+    try std.testing.expectEqualStrings("gpt-4o-mini", effectiveIdentity(header, l.view()).identity.model);
+    try std.testing.expectEqual(@as(usize, 0), reasoningFloor(l.view()));
+    try std.testing.expect(lastRebind(l.view()) == null);
+
+    try l.append(.{ .model_rebind = .{ .profile = "anthropic", .identity = .{ .provider = "anthropic", .model = "claude-sonnet-5" } } });
+    try l.append(.{ .assistant = .{ .reasoning = "[{}]", .text = "after", .calls = &.{} } });
+    // The last one wins, and everything before it is behind the floor.
+    try l.append(.{ .model_rebind = .{ .profile = "openai", .identity = .{ .provider = "openai", .model = "gpt-5.6-sol" } } });
+    const now = effectiveIdentity(header, l.view());
+    try std.testing.expectEqualStrings("openai", now.profile);
+    try std.testing.expectEqualStrings("gpt-5.6-sol", now.identity.model);
+    try std.testing.expectEqual(l.view().len, reasoningFloor(l.view()));
 }
 
 test "assistant reasoning is stored opaquely, round-trips, and is optional on the wire" {
@@ -1535,12 +1667,12 @@ test "durable create then open replays a block-identical ledger with monotonic s
         var l = try createDurable(alloc, io, tmp.dir, "s.jsonl", sample_header);
         defer l.deinit();
         try writeSampleEvents(&l);
-        try std.testing.expectEqual(@as(usize, 4), l.len());
+        try std.testing.expectEqual(@as(usize, sample_event_count), l.len());
     }
 
     // Reopen in a fresh ledger: header and every event survive verbatim.
     var reopened = try openDurable(alloc, io, tmp.dir, "s.jsonl");
-    try std.testing.expectEqual(@as(usize, 4), reopened.len());
+    try std.testing.expectEqual(@as(usize, sample_event_count), reopened.len());
     try std.testing.expectEqualStrings("s-test", reopened.header().?.session);
     try std.testing.expectEqualStrings("ext:web.search/web_search", reopened.header().?.composition.native_tools[0]);
     try std.testing.expect(reopened.containsNote("demo", "v-aaaa"));
@@ -1551,7 +1683,7 @@ test "durable create then open replays a block-identical ledger with monotonic s
     const raw = try tmp.dir.readFileAlloc(io, "s.jsonl", alloc, .unlimited);
     defer alloc.free(raw);
     try std.testing.expect(std.mem.indexOf(u8, raw, "\"seq\":1,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, raw, "\"seq\":4,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, raw, std.fmt.comptimePrint("\"seq\":{d},", .{sample_event_count})) != null);
 
     // Appending after reopen continues the seq sequence and persists. Close this
     // writer before the next opens — the lease permits only one writer at a time.
@@ -1561,9 +1693,8 @@ test "durable create then open replays a block-identical ledger with monotonic s
 
     var third = try openDurable(alloc, io, tmp.dir, "s.jsonl");
     defer third.deinit();
-    try std.testing.expectEqual(@as(usize, 5), third.len());
     try std.testing.expectEqual(reopened_events, third.len());
-    try std.testing.expectEqualStrings("again", third.view()[4].user_text.text);
+    try std.testing.expectEqualStrings("again", third.view()[sample_event_count].user_text.text);
 }
 
 test "openDurable drops a torn final line and truncates it" {

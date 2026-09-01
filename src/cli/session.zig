@@ -102,6 +102,7 @@ pub fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []con
     if (std.mem.eql(u8, sub, "step")) return sessionStep(alloc, io, rest);
     if (std.mem.eql(u8, sub, "events")) return sessionEvents(alloc, io, rest);
     if (std.mem.eql(u8, sub, "cancel")) return sessionCancel(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "rebind")) return sessionRebind(alloc, io, rest);
     if (std.mem.eql(u8, sub, "outcome")) return sessionOutcome(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return session_list.sessionList(alloc, io, sliceHasFlag(rest, "--json"));
     try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|outcome|list\n");
@@ -973,6 +974,109 @@ fn printImageRefusal(alloc: std.mem.Allocator, io: std.Io, path: []const u8, err
     }
 }
 
+/// Builds the model a `model_rebind` names, and keeps every handle it built
+/// alive for as long as this process steps (goals/model-rebind.md §5).
+///
+/// The kernel says WHEN (it read the ledger); this says HOW, because building
+/// one needs config, a credential and the provider table — none of which the
+/// kernel has. Handles are heap-allocated because `ModelHolder.model()` hands
+/// out a pointer into the holder: the list has to keep addresses, not values.
+/// Nothing is freed early — a swapped-away provider may still be draining its
+/// last response, and a step process is short.
+const RebindResolver = struct {
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    cfg: *const config.Config,
+    cache_key: []const u8,
+    holders: std.ArrayList(*launch.ModelHolder) = .empty,
+
+    fn build(ptr: *anyopaque, wanted: ledger.Identity) anyerror!provider.Model {
+        const self: *RebindResolver = @ptrCast(@alignCast(ptr));
+        // The same credential order the header's identity gets on every step:
+        // the profile's own key first, then the env var the descriptor names,
+        // then the file (`launch.credentialSource` says it once).
+        const inline_key = if (self.cfg.provider.findProfile(wanted.profile)) |p| p.api_key else null;
+        const holder = try self.alloc.create(launch.ModelHolder);
+        errdefer self.alloc.destroy(holder);
+        holder.* = try launch.buildFromDescriptor(self.alloc, self.io, wanted.identity, self.env, .{
+            .cache_key = self.cache_key,
+            .inline_key = inline_key,
+        });
+        errdefer holder.deinit();
+        try self.holders.append(self.alloc, holder);
+        return holder.model();
+    }
+
+    fn resolver(self: *RebindResolver) session.AgentSession.ModelResolver {
+        return .{ .ptr = self, .build = build };
+    }
+
+    fn deinit(self: *RebindResolver) void {
+        for (self.holders.items) |holder| {
+            holder.deinit();
+            self.alloc.destroy(holder);
+        }
+        self.holders.deinit(self.alloc);
+    }
+};
+
+/// A read-only look at a session file, for the shell's own gates.
+///
+/// It does NOT open the ledger: `openDurable` takes the writer lease, and every
+/// caller here is a reader that must work while a step is running (`session
+/// append` and `session rebind` both deposit rather than write, DESIGN §3.4).
+/// So this reads the bytes, honours the same crash-tail rule the listing does,
+/// and answers only the two questions the gates ask: what model is in force, and
+/// does this conversation already hold images.
+const SessionScan = struct {
+    arena: std.heap.ArenaAllocator,
+    rebound: ?ledger.Identity = null,
+    has_images: bool = false,
+
+    fn identity(self: SessionScan, header: ledger.Header) ledger.Identity {
+        return self.rebound orelse .{ .profile = header.model, .identity = header.model_identity };
+    }
+
+    fn deinit(self: *SessionScan) void {
+        self.arena.deinit();
+    }
+};
+
+fn scanSession(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !SessionScan {
+    var scan: SessionScan = .{ .arena = .init(alloc) };
+    errdefer scan.arena.deinit();
+    const a = scan.arena.allocator();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, spath, a, .unlimited);
+    const clean_end: usize = @intCast(ledger.lastCompleteLineEnd(bytes));
+    var lines = std.mem.splitScalar(u8, bytes[0..clean_end], '\n');
+    var header_seen = false;
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        if (!header_seen) {
+            header_seen = true;
+            continue;
+        }
+        // The substring tests are a pre-filter so a gate does not decode a whole
+        // transcript; the decoded line's own `kind` is what decides (the same
+        // discipline `session list` follows).
+        const may_be_rebind = std.mem.indexOf(u8, line, "\"kind\":\"model_rebind\"") != null;
+        const may_have_images = !scan.has_images and std.mem.indexOf(u8, line, "\"images\":") != null;
+        if (!may_be_rebind and !may_have_images) continue;
+        const parsed = ledger.parseEventLine(a, line) catch continue;
+        if (std.mem.eql(u8, parsed.value.kind, "user_text")) {
+            if (parsed.value.images) |images| {
+                if (images.len != 0) scan.has_images = true;
+            }
+        }
+        if (std.mem.eql(u8, parsed.value.kind, "model_rebind")) {
+            if (parsed.value.identity) |id| scan.rebound = .{ .profile = parsed.value.profile orelse "", .identity = id };
+        }
+    }
+    return scan;
+}
+
 fn imageSize(io: std.Io, path: []const u8) ?u64 {
     var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
     defer file.close(io);
@@ -993,7 +1097,15 @@ fn visionAccepted(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !bool
         return false;
     };
     defer header.deinit();
-    const model_id = header.value.model_identity.model;
+    // The model in force, not the one the header froze: a rebound session is
+    // answered by the model it was rebound TO, so that is the one that has to
+    // claim it accepts images (goals/model-rebind.md §7).
+    var scan = scanSession(alloc, io, spath) catch {
+        try printErr(io, "session append failed: cannot read this session\n");
+        return false;
+    };
+    defer scan.deinit();
+    const model_id = scan.identity(header.value).identity.model;
 
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
@@ -1251,9 +1363,13 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     defer holder.deinit();
 
     // Effort is a generation option, not identity (DESIGN §3): the driver may
-    // set it per step; otherwise the profile / catalog default applies.
-    const effort = flagValue(args[1..], "--effort") orelse
-        cfg.defaultEffort(hdr.value.model, hdr.value.model_identity.model);
+    // set it per step; otherwise the profile / catalog default applies. Which
+    // profile's default is settled below, once the ledger has said which model
+    // this session is actually on (a rebind moves it, §9.5).
+    const effort_flag = flagValue(args[1..], "--effort");
+
+    var rebinder: RebindResolver = .{ .alloc = alloc, .io = io, .env = &host, .cfg = &cfg, .cache_key = id };
+    defer rebinder.deinit();
 
     // Workspace-relative, and deliberately so: a spill is written through the
     // environment's `putWorkspaceFile`, so this one string is the path on
@@ -1269,12 +1385,29 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
             .observer = if (stream) |s| s.observer() else null,
             .gate = if (gate) |g| g.gate() else null,
         },
-        .model_options = .{ .effort = effort },
         .extension_roots = ext_roots,
-    }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath }) catch |err| {
-        return stepFail(alloc, io, stream, "session open failed: {s}", .{@errorName(err)});
+        .rebind = rebinder.resolver(),
+    }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath }) catch |err| switch (err) {
+        // The session rebound to a model this machine cannot run right now. The
+        // header's credential was fine (it built above) — this one is not, and
+        // saying which is the difference between "fix your key" and "fix which
+        // key".
+        error.MissingCredential => {
+            return stepFail(alloc, io, stream, "session '{s}' was rebound to a model whose credential is not available here; refusing to run (no silent fallback)", .{id});
+        },
+        error.ProviderUnavailable => {
+            return stepFail(alloc, io, stream, "session '{s}' was rebound to a provider this build cannot construct", .{id});
+        },
+        else => return stepFail(alloc, io, stream, "session open failed: {s}", .{@errorName(err)}),
     };
     defer sess.deinit();
+
+    // What this session is on NOW, which is the header's identity until a
+    // `model_rebind` says otherwise (goals/model-rebind.md §7). A rebind drained
+    // later in this same run keeps this process's effort default — effort is a
+    // per-step option and the next process reads the new one.
+    const now = ledger.effectiveIdentity(hdr.value, sess.l.view());
+    sess.model_options = .{ .effort = effort_flag orelse cfg.defaultEffort(now.profile, now.identity.model) };
 
     const before = sess.l.len();
     if (stream) |s| {
@@ -1476,6 +1609,124 @@ fn sessionCancel(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     // between steps of a run already going, or at the start of the next `step`.
     try session.requestCancel(alloc, io, std.Io.Dir.cwd(), spath);
     try printOut(alloc, io, "cancel requested for {s}\n", .{id});
+    return 0;
+}
+
+/// `nulya session rebind <id> [--profile P] [--model ID]` — run the rest of this
+/// conversation on a different model (DESIGN §3.4, §9.5; goals/model-rebind.md).
+///
+/// It is a DEPOSIT, not a write: the identity change is an event, and events
+/// from other processes reach the ledger through the inbox, drained at the next
+/// step boundary by the one writer. So a session that is mid-step can be rebound
+/// too — it simply takes effect on the step after the one running, and the
+/// single-writer rule never bends.
+///
+/// Three gates, all here in the shell and all before the deposit — facts, not
+/// judgements (goals/model-rebind.md §6). Whether a given model is a GOOD idea
+/// for this conversation is nobody's business but the person asking.
+fn sessionRebind(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len < 1) {
+        try printErr(io, "usage: nulya session rebind <id> [--profile P] [--model ID]\n");
+        return 1;
+    }
+    const id = args[0];
+    if (!launch.isValidSessionId(id)) {
+        try printErr(io, "invalid session id\n");
+        return 1;
+    }
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+    if (!sessionExists(io, spath)) {
+        try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
+        return 1;
+    }
+
+    var header = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch {
+        try printErrFmt(alloc, io, "session rebind failed: cannot read '{s}'\n", .{id});
+        return 1;
+    };
+    defer header.deinit();
+
+    // What it runs on now — the header's identity, or whatever the last rebind
+    // said. Read once, and used both to default the profile and to notice that
+    // this rebind would change nothing.
+    var scan = scanSession(alloc, io, spath) catch {
+        try printErrFmt(alloc, io, "session rebind failed: cannot read '{s}'\n", .{id});
+        return 1;
+    };
+    defer scan.deinit();
+    const current = scan.identity(header.value);
+
+    const profile = flagValue(args[1..], "--profile") orelse current.profile;
+    const model_id = flagValue(args[1..], "--model");
+    if (flagValue(args[1..], "--profile") == null and model_id == null) {
+        try printErr(io, "session rebind: name what to run — --profile P, --model ID, or both\n");
+        return 1;
+    }
+
+    var host = try environment.hostEnvironMap(alloc);
+    defer host.deinit();
+    var cfg = try config.load(alloc, io, &host);
+    defer cfg.deinit();
+
+    const profile_cfg = cfg.provider.findProfile(profile) orelse {
+        try printErrFmt(alloc, io, "no such profile '{s}' (see `nulya config show`)\n", .{profile});
+        return 1;
+    };
+    // Gate 1 — the credential. The same refusal `session new` gives, for the
+    // same reason: a rebind that silently became the offline stand-in would be
+    // a conversation quietly answered by nobody.
+    if (!launch.credentialAvailable(alloc, io, profile_cfg, &host)) {
+        try printErrFmt(alloc, io, "profile '{s}' has no credential, so this session cannot be moved to it (see `nulya config show`)\n", .{profile});
+        return 1;
+    }
+    const wanted = launch.resolveDescriptor(alloc, io, cfg.provider, &host, profile, model_id);
+
+    // Gate 2 — vision. The pictures are already in this ledger and every later
+    // step replays them, so a model that does not claim to accept images cannot
+    // take this conversation over. Same catalog, same "no entry = no claim =
+    // refusal" as `session append --image` (§14).
+    if (scan.has_images) {
+        var claims_vision = false;
+        var listed = false;
+        for (cfg.models) |m| {
+            if (!std.mem.eql(u8, m.id, wanted.model)) continue;
+            listed = true;
+            claims_vision = m.vision;
+        }
+        if (!claims_vision) {
+            var paths = try config.ConfigPaths.init(alloc, &host);
+            defer paths.deinit(alloc);
+            if (listed) {
+                try printErrFmt(alloc, io, "session rebind refused: this session holds images and model '{s}' is not marked as accepting them\n", .{wanted.model});
+            } else {
+                try printErrFmt(alloc, io, "session rebind refused: this session holds images and nothing claims '{s}' accepts them\n", .{wanted.model});
+            }
+            try printVisionHint(alloc, io, wanted.model, paths.user);
+            return 1;
+        }
+    }
+
+    if (std.mem.eql(u8, wanted.provider, current.identity.provider) and
+        std.mem.eql(u8, wanted.model, current.identity.model) and
+        std.mem.eql(u8, wanted.base_url, current.identity.base_url))
+    {
+        try printOut(alloc, io, "{s} already runs on {s}/{s}\n", .{ id, wanted.provider, wanted.model });
+        return 0;
+    }
+
+    try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, "rebind", .{
+        .model_rebind = .{ .profile = profile, .identity = wanted },
+    });
+    try printOut(alloc, io, "{s} will run on {s}/{s} from its next step\n", .{ id, wanted.provider, wanted.model });
+    // Both costs, said once, because neither is visible from the outside: the
+    // provider's prefix cache starts cold, and the reasoning recorded before
+    // this point belongs to the model that produced it and is no longer replayed
+    // (goals/model-rebind.md §3).
+    if (!std.mem.eql(u8, wanted.provider, current.identity.provider)) {
+        try printErr(io, "  a different provider means a cold prompt cache: the next step pays for the whole prefix again\n");
+    }
+    try printErr(io, "  reasoning recorded before now is kept in the ledger and no longer replayed\n");
     return 0;
 }
 

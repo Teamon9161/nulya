@@ -225,6 +225,9 @@ pub const session_usage =
     \\                                                    live model/tool lines, --gate asks stdin to allow each tool call
     \\  nulya session events <id> [--since N] [--follow]  read-only tail of the event log
     \\  nulya session cancel <id>                         request cancel at the next step boundary
+    \\  nulya session rebind <id> [--profile P] [--model ID]
+    \\                                                    run the rest of this session on another model from its next step; the transcript
+    \\                                                    stays, the reasoning recorded before it does not, and a cold prompt cache is the cost
     \\  nulya session outcome <id> <success|partial|failure> [--note <text>] [--seq N]
     \\                                                    record how a session turned out (a journal, never the session file)
     \\  nulya session list [--json]                       every session here: composition, cost, latest verdict

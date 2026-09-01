@@ -86,7 +86,7 @@ Ledger ──projection──▶ PromptIR { system_blocks, turns }
 
 ## 3. Ledger（`ledger.zig`）
 
-### 3.1 数据模型（当前 alphabet，仅 5 种）
+### 3.1 数据模型（当前 alphabet，仅 6 种）
 
 ```
 user_text        { text, images: []Image{media_type, data} }            ← images 为空 = 纯文本 turn
@@ -94,9 +94,14 @@ assistant        { reasoning, text, calls: []ToolCall{id, tool, args_json}, usag
 tool_results     []ToolResultEntry{call_id, ok, output, spill_path?, presentation?} ← 一条事件 = 一整批；presentation 是 UI-only JSON 字符串，不投影给模型
 capability_note  { id, version, text }                                  ← 中途新增能力的宣告（§5.3）
 task_finished    { task, exit_code, text }                              ← 后台命令跑完了（§6.1）
+model_rebind     { profile, identity: ModelDescriptor }                 ← 从这里起换一个模型跑（§9.5）
 ```
 
-事件字母表**可加不可改**：现有五种保留原字段。`seq` 是文件落盘时的 envelope 字段（§3.4），不属于事件负载。
+事件字母表**可加不可改**：现有六种保留原字段。`seq` 是文件落盘时的 envelope 字段（§3.4），不属于事件负载。
+
+**`model_rebind`：唯一一种不是 turn 的事件。** header 冻一个模型身份而 header 不可改写（physics #1），所以"换模型"只能是一次 append（physics #3）。`identity` 是**已解析的** descriptor，与 header 里那一列同形同哲学——谁发起谁解析、credential-aware，所以"跑的 == 冻结的"仍然成立，只是冻结点从一个变成了一串；`profile` 是 profile 名，用途与 header 的 `model` 一样（显示与 effort 查询）。**有效身份 = 最后一条 `model_rebind`，没有就是 header 的**（`ledger.effectiveIdentity`，唯一实现）。
+
+它**不投影成任何 turn**：模型不需要读到自己被换掉了，正如它不读自己的 `stop_reason`。它改变的是**哪些 reasoning 还能回放**——`assistant.reasoning` 是 provider 不透明、且**绑在产出它的那个模型上**的（§13），所以投影把最后一次 rebind **之前**的每一条 reasoning 换成 `""`（ledger 里原样留着：ledger 存事实，投影只交出可以合法回放的东西，与 `max_tokens` 的 torn-args 规则同一处、同一个理由）。这条规则就是全部机制——内核因此**不需要持有任何"哪些模型互相兼容"的知识**（physics #8），而"该不该换成这个模型"是人的判断。投递与执行见 §9.5 的 `session rebind`。
 
 **`task_finished` 与 `capability_note` 同 genre：跨进程到达的、关于环境的事实。** `shell {background:true}` 起的那条命令活得过起它的那个 step 进程（§6.1），结束时由它的 supervisor 把这条事件投进 session 的 inbox，写者在下一个 step 边界排干（§3.4），投影成又一条 user-role turn。`task` 是全名 `<session-id>/t<N>`、`exit_code` 是 supervisor 看到的直接子进程退出码、`text` 是模型读的全文；**只投影 `text`**（`task` / `exit_code` 是给读者与前端的结构化事实，与 note 的 `id` / `version` 同理——模型要读的东西已经在 `text` 里了）。落盘的行**必须两列都在**：缺任一列是 `CorruptLedger` 而不是默认值——"哪个任务"与"它怎么了"都不是从文本里派生得出来的。
 
@@ -155,6 +160,8 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 - **composition + 模型身份冻结进 header。** header 的 `composition.active` 记录本场**每个成员 extension** 的具体版本——activate 来的**和** `session new --with` 带进来的（§14），键名 `active` 是 v1 wire 遗留（那时成员只能来自 activate），下次升 header schema 版本时一起改名；每条 ref 还有一个可空列 `exec_version`（缺省 `""`，老 header 读回空、header `v` 仍是 1——`usage?` / `images` / `environment` 同一条纪律），只在**这一场的工具跑在另一台机器上**且该包是 `compiled` 时非空：那时**成员身份**是 `(id, v_host)`（manifest / prompt / skills / `ext run` 说的是它），而**服务调用的**是为那台机器的 target 建的兄弟版本。两列而不是一列的理由见 §8.2；`native_tools` 是被选为 native 的 tool 稳定 id（两根轴分开：冻结版本 ≠ 进模型工具面）。`prompts` 是 `session new --prompt <file>` 冻进来的 **per-session system prompt 的字节本身**（`{source, text}`，缺省空表；这个字段之前写的老 header 读回空，所以 header `v` 仍是 1）——**冻字节而不是冻引用**：一段只对这一场有意义的文本，家在 session 文件里（与 `model_identity` 同一条理由），冻路径会漂、经 store 则 resume 与 `ext prune` 耦合。`source` 是**内核从不解释**的标签，原样进 `PromptIR` 的 block source，谁写的谁定义它的含义（`extensions/agent` 的 `agent-<name>` 就是这样一条包内的写/读约定）。还有创建时**解析后的模型身份** `model_identity`（`provider` / 具体 `model` / `base_url` / `api_key_env`——`model` 字段本身只是 profile 别名，供显示与 effort 查询）。任何进程 `openDurable` 重开时都用 header 重建 composition（`composition.initFrozen`：读那些冻结版本、把 `native_tools` 当 pin），**绝不重扫 `current`、绝不重排 usage journal**——每个 `session step` 进程都看到**同一** composition，中途 `activate` 也移不动它（§5.1、§7.5、physics #2）。replay 时模型看到的一切 = header + events 的纯函数。header 还记 `nulya{version, kernel_hash}`（build 的版本串 + kernel system prompt 与 builtin 定义的 hash，`composition.kernelHash`）——**纯 provenance**：这两样是**二进制的**编译期常量却进了本场冻结的 model-visible 状态（§5.1、§7.5），升级 nulya 就会在既有 session 底下换掉它们，而 header 原本无从指认；记下来只是让它可见，resume 时对不上就在 stderr 警告一行照跑（不拒绝、不改任何东西），空 stamp = 这个字段之前写的老 header = unknown，永不警告。
 - **`environment` 冻的是"这一场的 `shell` 命令跑在哪"**（§8.1 的 exec target spec：`""` = 本机、`wsl`、`wsl:<distro>`，或 §8.2 的 `remote:…` 一族；`session new --env` 决定一次，这个字段之前写的老 header 读回 `""`，header `v` 仍是 1）。它**不投影给模型**，冻它的理由与 `model_identity` 一样而与缓存无关：一份转录只在产出它的那台机器上才有意义。`session step` 因此没有 `--env`，只读 header；目标不可达就与 `MissingCredential` 一样响亮失败，绝不改在本机跑。
 - **模型身份创建时冻结、resume 不可变（physics #2/#5）。** 模型解析**只有一处决定**：`launch.resolveDescriptor(prov, env, profile)` 在**创建**时把 profile 解析成 `model_identity`，运行用的 handle 也**只从这个 descriptor** 构建（`launch.buildFromDescriptor`）——所以"实际跑的" == "header 冻结的"，不存在 fork。`resolveDescriptor` 是 **credential-aware** 的：openai profile 若 `api_key_env` 在环境里解析不出 credential，创建时就冻结成 scripted（因为那正是会跑的东西）；此后 config 改动**永不**改变已有 session 的模型。resume 时 `session step` 用 header 的 `model_identity` 重建**恰好那个**模型，只从 `api_key_env` 重解 credential——**不存密钥**，也**没有静默 fallback**：openai session 的密钥不在了就 `MissingCredential` 显式拒跑。**durable credential 只以 `api_key_env` 引用**；inline `api_key` 无法在 resume 时从环境恢复（否则又让 session 依赖 mutable config），因此不参与 durable openai 身份。`provider==""` 的旧 header 当 scripted 处理。
+
+  **唯一一种合法的改变是 append 一条 `model_rebind`**（§3.1、§9.5 的 `nulya session rebind`，goals/model-rebind.md）：header 仍然不可改写，冻结点变成一串，而"跑的 == 冻结的"逐字不变——每条 rebind 冻的同样是**已解析的** descriptor，`session step` 用它重建**恰好那个**模型、只重解 credential，credential 不在了同样 `MissingCredential` 显式拒跑。三道门都在壳层、都在投递之前（凭据 · 已有图片时新模型必须主张 vision · step 边界由 inbox 排干天然保证），内核核心不知道它们存在。代价说在明处：换 provider = 前缀缓存作废，而 rebind 之前的 reasoning 从此不再回放（§3.1）。
 - **resume。** `openDurable` 读回 header + 每条完整事件行；被截断的**最后一行**（写到一半崩溃）丢弃并把文件截回最后一条完整行，坏的**中间**行或乱序 `seq` 则是硬错误（`CorruptLedger`）。崩在 assistant-with-calls 之后（合法但未闭合的 batch）由 `completeInterruptedToolBatch` 在下一步补齐（§4）。
 - **一场 session 的旁车清单**（都由 id 派生，都不是 session 文件本身）：`<id>.lock`（单写者租约）· `<id>.inbox/`（跨进程事件投递）· `<id>.cancel`（取消标记）· `.nulya/scratch/<id>/tool-output/`（`emit` 的落盘，§4）· `.nulya/scratch/<id>/tasks/t<N>/`（后台任务，§6.1：`status.json` / `output.log` / `.lock` / `kill` / `notify`）。后两者同在 `scratch/<id>/` 下是有意的——一场 session 的全部副产品是一棵子树，`rm -rf .nulya/scratch/<id>` 一次清干净。
 - **单写者租约 + inbox 目录 + cancel 标记。** session 文件**只有一个写者**：`createDurable` / `openDurable` 打开时**原子获取兄弟 `<id>.lock` 上的排他 advisory 锁**（`lock_nonblocking`），第二个写者的打开立刻 `SessionBusy` 失败，而不是去抢同一 offset；锁随句柄生命周期持有、进程崩溃时由 OS 释放（无 stale 锁）。锁挂在专用 `<id>.lock` 上、**不挂在 session 文件本身**——Windows 上文件自身的锁是强制性的会挡住读者，锁 sidecar 则让 `readHeader` / `session events` 的读永不被挡。其他任何进程都不写主文件，只往兄弟路径投递：跨进程**事件**（`ext activate` 在 `NULYA_SESSION` 存在时的 `capability_note`，§5.3；driver 的 `session append` 的 `user_text`）一事件一文件写进 `<id>.inbox/`（`ledger.depositEvent`：先写 `.tmp` 再 rename，排干端永不读到半个文件），由写者在 step 边界（`prepareStep`）按文件名序排干进主文件。**同一次 drain 中连续的 `user_text` 合成一个 user turn**：文本按 FIFO 以空行连接、图片保持同序；非用户事件保持独立并切断合并批次。这样一次边界收到几条 queued 消息，provider 只看到一条完整指令，不会只追第一条。**cancel 请求**是 `<id>.cancel` 标记（`session.requestCancel`），同样在 step 边界消费。
@@ -1070,6 +1077,12 @@ nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[
                                                            **没有 `--env`**：命令跑在哪由 header 说了算（§8.1），够不着就响亮失败
           | events <id> [--since N] [--follow]           ← 只读 tail 原始事件行（follow 轮询）
           | cancel <id>                                  ← 写 cancel 标记，下一 step 边界消化
+          | rebind <id> [--profile P] [--model ID]       ← 这一场从下一步起换个模型跑（§3.1、§9.5）：把一条 `model_rebind` **投进 inbox**
+                                                           （不是第二个写者——正在 step 的 session 也能被 rebind，下一步生效）
+                                                           两个 flag 至少给一个；缺省 profile = 这一场当前那个
+                                                           三道门，都在投递之前：凭据解析不到 → 拒；ledger 里已有图片而新模型没主张
+                                                           `vision = true` → 拒并指路 config；已经在这个模型上 → 说一句、不写事件
+                                                           说出两项代价：换 provider = 前缀缓存作废，rebind 之前的 reasoning 不再回放
           | outcome <id> <success|partial|failure> [--note <text>] [--seq N]
                                                          ← 记一条 verdict 进 outcome journal（§3.3）；只写 journal
           | list [--json]                                ← `.nulya/sessions/` 的只读投影（composition / 事件数 / usage / episode / verdict）

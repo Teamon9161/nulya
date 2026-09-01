@@ -257,9 +257,20 @@ Store and scope:
   user turn. `step` runs to the end of a turn or its budget. `events` tails the
   log. `cancel` asks it to stop at the next step boundary. `outcome` records a
   verdict. `list` projects them all.
-- Only `step` writes the session file. `append` and `cancel` deposit into
-  sibling files that the next step boundary drains, so both work on a session
-  another process is currently running.
+- Only `step` writes the session file. `append`, `cancel` and `rebind` deposit
+  into sibling files that the next step boundary drains, so all three work on a
+  session another process is currently running.
+- `nulya session rebind <id> [--profile P] [--model ID]` runs the REST of a
+  session on a different model. The header still freezes one identity and is
+  still never rewritten — the change is an appended event, and the identity in
+  force is the last one appended. The transcript is kept in full; what is not
+  replayed afterwards is the `reasoning` recorded before the rebind, because
+  that is opaque and belongs to the model that produced it. Two costs worth
+  knowing: a different provider means a cold prompt cache, and it refuses
+  outright if the credential does not resolve, or if the session already holds
+  images and the new model's `[[models]]` entry does not say `vision = true`.
+  Which models are worth switching between is your call, not the kernel's: it
+  holds no compatibility table.
 - `nulya session new --parent <id>:<seq>` forks: a new file continuing an
   existing one. Compaction and handover are both this. Composition is not
   inherited — pass `--with` and `--pin` again if the fork needs them. `--env`
