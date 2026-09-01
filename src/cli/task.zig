@@ -928,6 +928,13 @@ fn depositName(alloc: std.mem.Allocator, session_id: []const u8, slot: []const u
 /// Move an undrained deposit from one session's inbox to another's. False when
 /// there was nothing to move — which is the ordinary case once the owning
 /// session has already stepped.
+///
+/// The other way a `task_finished` reaches an inbox, so it obeys the same rule
+/// as a deposit: the destination's lease is held across "does that session still
+/// exist" and the rename, which is what keeps `session discard` from removing
+/// one in between (`ledger.acquireDepositLease`). A destination that is gone is
+/// `error.NoSuchSession` and the file stays where it is — nothing is left behind
+/// for a reader that will never exist.
 fn moveDeposit(alloc: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8, name: []const u8) !bool {
     const from_path = try launch.sessionPath(alloc, from);
     defer alloc.free(from_path);
@@ -945,7 +952,12 @@ fn moveDeposit(alloc: std.mem.Allocator, io: std.Io, from: []const u8, to: []con
 
     const cwd = std.Io.Dir.cwd();
     cwd.access(io, src, .{}) catch return false;
-    try cwd.createDirPath(io, to_inbox);
+    var lease = try ledger.acquireDepositLease(alloc, io, cwd, to_path, .block);
+    defer lease.close(io);
+    cwd.access(io, to_path, .{}) catch return error.NoSuchSession;
+    // A second look under the lease: the source may have been drained while this
+    // waited for it, and then there is nothing to move after all.
+    cwd.access(io, src, .{}) catch return false;
     try cwd.rename(src, cwd, dst, io);
     return true;
 }
@@ -1149,14 +1161,20 @@ fn pollAndDeliver(
     defer parsed.deinit();
     if (parsed.value.state != .done) return answer;
 
-    try depositReport(alloc, io, .{
+    depositReport(alloc, io, .{
         .dir = host_dir,
         .session_id = session_id,
         .slot = slot,
         .full = full,
         .exit_code = parsed.value.exit_code orelse 1,
         .text = snap.report,
-    });
+    }) catch |err| switch (err) {
+        // The session it reports into was discarded. That machine answered
+        // perfectly well, so this is not `unreached` — there is simply nobody
+        // to deliver to, and writing `delivered` would say otherwise.
+        error.NoSuchSession => return answer,
+        else => return err,
+    };
     // Only after the deposit landed: a marker written first would lose the
     // report if this process died between the two.
     const marker = try std.fs.path.join(alloc, &.{ host_dir, delivered_file });
@@ -1915,7 +1933,10 @@ fn taskRetarget(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     // (`docs/goals/review-fork-remote.md`). So: move first, and only mark the
     // notify pointer when there was something to move.
     if (row.state == .done) {
-        const moved = try moveDeposit(arena, io, if (row.notify) |n| n else from, to, name);
+        const moved = moveDeposit(arena, io, if (row.notify) |n| n else from, to, name) catch |err| switch (err) {
+            error.NoSuchSession => return retargetLostTarget(alloc, io, to),
+            else => return err,
+        };
         if (moved) {
             const tmp = try std.fs.path.join(arena, &.{ row.dir, ".notify.tmp" });
             const final = try std.fs.path.join(arena, &.{ row.dir, notify_file });
@@ -1933,10 +1954,21 @@ fn taskRetarget(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     const final = try std.fs.path.join(arena, &.{ row.dir, notify_file });
     try cwd.writeFile(io, .{ .sub_path = tmp, .data = to });
     try cwd.rename(tmp, cwd, final, io);
-    const moved = try moveDeposit(arena, io, if (row.notify) |n| n else from, to, name);
+    const moved = moveDeposit(arena, io, if (row.notify) |n| n else from, to, name) catch |err| switch (err) {
+        error.NoSuchSession => return retargetLostTarget(alloc, io, to),
+        else => return err,
+    };
 
     try printOut(alloc, io, "{s} -> {s}{s}\n", .{ row.full, to, if (moved) " (result moved)" else "" });
     return 0;
+}
+
+/// The destination was there when this command checked for it and gone by the
+/// time it held the lease to move into it: the same answer as that check, one
+/// race later.
+fn retargetLostTarget(alloc: std.mem.Allocator, io: std.Io, to: []const u8) !u8 {
+    try printErrFmt(alloc, io, "no such session '{s}'\n", .{to});
+    return 1;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

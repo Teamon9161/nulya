@@ -121,11 +121,20 @@ test "noteText is deterministic and names every invocation" {
 
 const session_rel = ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "s.jsonl";
 
+/// A deposit goes into a session that EXISTS (`ledger.depositEventLeased`
+/// refuses one that does not), so the tests below put a file where the ledger
+/// they drain into would have written one.
+fn touchSession(io: std.Io, dir: std.Io.Dir) !void {
+    try dir.createDirPath(io, comptime std.fs.path.dirname(session_rel).?);
+    try dir.writeFile(io, .{ .sub_path = session_rel, .data = "" });
+}
+
 test "a deposited note is drained into the ledger and is idempotent" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    try touchSession(io, tmp.dir);
 
     const version = try writeVersion(alloc, io, tmp.dir, "demo", test_manifest);
     defer alloc.free(version);
@@ -158,6 +167,7 @@ test "activating a new version deposits a new note with all tools" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    try touchSession(io, tmp.dir);
 
     const first = try writeVersion(alloc, io, tmp.dir, "demo", test_manifest);
     defer alloc.free(first);
@@ -189,6 +199,7 @@ test "a deposited skill-only note announces its skills" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    try touchSession(io, tmp.dir);
 
     const skill_manifest =
         \\{"schema":"nulya.extension/v2","id":"finance","contributes":{"skills":["skills/risk-parity"]}}

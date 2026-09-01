@@ -901,13 +901,14 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         return 1;
     }
 
-    // Held from here to the deposit (`depositLease`). Three things need it: the
-    // images gate below reads the session and then deposits, and so does the
-    // OTHER half of that same rule in `session rebind`; the delivery id is
-    // minted from what is already waiting, so two appends racing would otherwise
-    // be able to take the same queue position; and `session discard` may not
-    // take the session away between the check below and the deposit.
-    var lease = depositLease(alloc, io, spath, .block) catch {
+    // Held from here to the deposit (`ledger.acquireDepositLease`). Three
+    // things need it: the images gate below reads the session and then
+    // deposits, and so does the OTHER half of that same rule in
+    // `session rebind`; the delivery id is minted from what is already waiting,
+    // so two appends racing would otherwise be able to take the same queue
+    // position; and `session discard` may not take the session away between the
+    // check below and the deposit.
+    var lease = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
         try printErr(io, "session append failed: cannot open this session's inbox\n");
         return 1;
     };
@@ -945,7 +946,7 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     // process is going right now.
     const name = try ledger.freshDeliveryName(alloc, io, std.Io.Dir.cwd(), spath, "msg");
     defer alloc.free(name);
-    ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{
+    ledger.depositEventLeased(alloc, io, std.Io.Dir.cwd(), spath, name, .{
         .user_text = .{ .text = text, .images = images.items },
     }) catch |err| switch (err) {
         // The one refusal that comes from the inbox itself rather than a gate:
@@ -982,7 +983,11 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 /// I read byte 0 of it?) is guessing, and its guess is wrong exactly when it
 /// matters: while another process sits between its check and its deposit. Here
 /// the checks and the removal happen under both leases, so "nothing holds this"
-/// is true for as long as it takes to act on it.
+/// is true for as long as it takes to act on it — and the lease it takes is the
+/// INBOX's, held by every depositor there is (`ledger.acquireDepositLease`),
+/// not an agreement between two commands: a supervisor delivering a task report
+/// and an activation depositing a capability note are as much a reason to leave
+/// a session alone as a queued turn is.
 ///
 /// Exit 0 means one thing only: it is gone because this command removed it.
 /// Every refusal — no such session, a step running, a queued turn, a deposit in
@@ -1008,7 +1013,7 @@ fn sessionDiscard(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8
     // Both leases, in the order that cannot deadlock: nothing in the system
     // takes the writer lease and then a deposit lease (`step` never deposits),
     // so this is the only place the two are held at once.
-    var deposits = depositLease(alloc, io, spath, .fail_fast) catch |err| switch (err) {
+    var deposits = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .fail_fast) catch |err| switch (err) {
         error.WouldBlock => {
             try printErrFmt(alloc, io, "session discard refused: something is depositing into '{s}' right now\n", .{id});
             return 1;
@@ -1061,7 +1066,7 @@ fn sessionDiscard(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8
     try deleteIfPresent(io, try ledger.siblingPath(alloc, spath, ".lock"), alloc);
     deposits.close(io);
     deposits_open = false;
-    try deleteIfPresent(io, try depositLockPath(alloc, spath), alloc);
+    try deleteIfPresent(io, try ledger.depositLockPath(alloc, spath), alloc);
     const inbox = try ledger.inboxPath(alloc, spath);
     defer alloc.free(inbox);
     // Whatever is left in there arrived after the checks above, and belongs to
@@ -1081,7 +1086,7 @@ fn deleteIfPresent(io: std.Io, path: []u8, alloc: std.mem.Allocator) !void {
 
 /// Is a drainable event waiting in this session's inbox? Only `*.json` counts —
 /// the directory also holds the deposit lease, which is not a fact about the
-/// session (`depositLease`).
+/// session (`ledger.acquireDepositLease`).
 fn inboxHoldsDeposit(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !bool {
     const inbox = try ledger.inboxPath(alloc, spath);
     defer alloc.free(inbox);
@@ -1095,50 +1100,6 @@ fn inboxHoldsDeposit(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !b
         if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".json")) return true;
     }
     return false;
-}
-
-/// Whether taking the deposit lease waits for whoever has it.
-///
-/// The commands that deposit WAIT: they are here to add a fact, and the other
-/// holder is about to finish. `session discard` does NOT: it is here to take a
-/// session away, so "somebody is depositing right now" is an answer, not a
-/// queue to join.
-const Wait = enum { block, fail_fast };
-
-/// The exclusive right to deposit into this session, held across a gate's
-/// read-then-deposit.
-///
-/// Two commands enforce one rule between them — `append --image` refuses a
-/// picture the model in force cannot see, `rebind` refuses a model that cannot
-/// see the pictures already here — and each one READS the session and then
-/// DEPOSITS. Run at the same time, both read the old state, both pass, and the
-/// pair they exist to refuse is exactly what lands. Serializing them makes the
-/// check and the deposit one act, so whichever runs second sees what the first
-/// decided (the pending fact itself: `ledger.scanSession` reads the inbox).
-///
-/// It lives INSIDE the inbox, where the deposits go and where the agent
-/// package's mailbox keeps the same lease for the same reason. Neither the drain
-/// nor a scan looks at anything but `*.json` there, and this is emphatically NOT
-/// the session's `<id>.lock`: that one belongs to `step`, and every gate here
-/// has to work while a step is running.
-fn depositLease(alloc: std.mem.Allocator, io: std.Io, spath: []const u8, wait: Wait) !std.Io.File {
-    const inbox = try ledger.inboxPath(alloc, spath);
-    defer alloc.free(inbox);
-    try std.Io.Dir.cwd().createDirPath(io, inbox);
-    const lock_rel = try depositLockPath(alloc, spath);
-    defer alloc.free(lock_rel);
-    return std.Io.Dir.cwd().createFile(io, lock_rel, .{
-        .truncate = false,
-        .read = true,
-        .lock = .exclusive,
-        .lock_nonblocking = wait == .fail_fast,
-    });
-}
-
-fn depositLockPath(alloc: std.mem.Allocator, spath: []const u8) ![]u8 {
-    const inbox = try ledger.inboxPath(alloc, spath);
-    defer alloc.free(inbox);
-    return std.fmt.allocPrint(alloc, "{s}{c}.deposit.lock", .{ inbox, std.fs.path.sep });
 }
 
 /// The largest image one turn may carry, raw bytes before base64 (the tightest
@@ -1822,8 +1783,8 @@ fn sessionRebind(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 
     // Held from before the read until after the deposit: the images gate below
     // and `session append --image` are two halves of one rule, and each is a
-    // read followed by a deposit (`depositLease`).
-    var lease = depositLease(alloc, io, spath, .block) catch {
+    // read followed by a deposit (`ledger.acquireDepositLease`).
+    var lease = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
         try printErrFmt(alloc, io, "session rebind failed: cannot open the inbox of '{s}'\n", .{id});
         return 1;
     };
@@ -1911,7 +1872,7 @@ fn sessionRebind(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     // and vanish at the next drain (`ledger.freshDeliveryName`).
     const name = try ledger.freshDeliveryName(alloc, io, std.Io.Dir.cwd(), spath, "rebind");
     defer alloc.free(name);
-    try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{
+    try ledger.depositEventLeased(alloc, io, std.Io.Dir.cwd(), spath, name, .{
         .model_rebind = .{ .profile = profile, .identity = wanted },
     });
     try printOut(alloc, io, "{s} will run on {s}/{s} from its next step\n", .{ id, wanted.provider, wanted.model });

@@ -1158,3 +1158,69 @@ test "background task: a result that landed before the fork follows the conversa
     // describing a running task are two different questions.
     try std.testing.expect(std.mem.indexOf(u8, child_file, "Background tasks still running") == null);
 }
+
+test "background task: a report for a session that was discarded is refused, not left in an inbox" {
+    // The window the inbox's deposit lease exists to close, driven for real. A
+    // supervisor is a depositor like any other: `session discard` takes that
+    // lease and the writer lease before it removes anything, and every deposit
+    // re-checks the session under the same lease — so a report for a session
+    // that is gone is refused rather than left as a durable fact in an inbox
+    // nobody will ever drain.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    const exe = (try nulyaExe(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const id = try newSession(alloc, io, ws, exe);
+    defer alloc.free(id);
+
+    const d = try dialect(alloc, io);
+    const hold = "hold-t1";
+    try takeHold(io, ws, hold);
+    const lingering = try holdCommand(alloc, d, hold, "ORPHANED");
+    defer alloc.free(lingering);
+    {
+        const started = try runCli(alloc, io, ws, &.{ exe, "task", "run", "--session", id, "--", lingering });
+        defer alloc.free(started.stdout);
+        try std.testing.expectEqual(@as(u8, 0), started.code);
+    }
+    try std.testing.expect(try waitUntilRunning(alloc, io, ws, exe, id));
+
+    // Nothing recorded, nothing queued: a running task is not a reason to keep
+    // a session that holds no history, so this succeeds.
+    {
+        const gone = try runCli(alloc, io, ws, &.{ exe, "session", "discard", id });
+        defer alloc.free(gone.stdout);
+        try std.testing.expectEqual(@as(u8, 0), gone.code);
+    }
+    try releaseHold(io, ws, hold);
+
+    // Waited out on the supervisor's own record — the `task` verbs read the
+    // owner session's header to learn which machine it runs on, and that header
+    // is what was just removed.
+    var done = false;
+    var tries: usize = 0;
+    while (tries < wait_tries) : (tries += 1) {
+        const bytes = statusBytes(alloc, io, ws, id, "t1") catch |err| switch (err) {
+            error.FileNotFound => "",
+            else => return err,
+        };
+        defer if (bytes.len != 0) alloc.free(bytes);
+        if (std.mem.indexOf(u8, bytes, "\"state\":\"done\"") != null) {
+            done = true;
+            break;
+        }
+        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    }
+    try std.testing.expect(done);
+
+    try std.testing.expect((try inboxDeposit(alloc, io, ws, id, id, "t1")) == null);
+    // And it stayed discarded: a late deposit does not resurrect a session.
+    const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+    defer alloc.free(spath);
+    try std.testing.expectError(error.FileNotFound, ws.access(io, spath, .{}));
+}

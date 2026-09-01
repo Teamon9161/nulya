@@ -173,7 +173,37 @@ descriptor 说的是「哪个模型、走哪条 wire」，profile 说的是「�
    两条投递命令都在拿到锁之后再确认一次 session 文件还在。
    前端那一大坨跨平台的「我猜现在能不能删」随之删除。
 
-## 10. 不做的
+## 10. 第三轮 review 的两条（2026-09-01）
+
+1. **deposit lease 沉进 ledger，成为 inbox 的并发原语（P1）。** 上一轮把锁放对了层
+   （CLI 拿锁，而不是前端猜锁），但那把锁仍是 `cli/session.zig` 的私有约定，
+   而 inbox 的投递者不止 `append` / `rebind` 两个：`extension/notes.zig` 的
+   `capability_note` 与 `cli/task.zig` 的 `task_finished` 都直接 `depositEvent`。
+   于是窗口仍在——`discard` 拿两把租约、看见 inbox 里没有 `*.json`、删掉 session，
+   而一个 supervisor 正卡在自己的 `write .tmp` 与 `rename` 之间，
+   最后留下一条没有 session 的 durable 事实。而且这不是纯理论：
+   compact 的顺序是 create child → retarget → append summary，
+   中间那一段 child 还是 header-only，却已经是未来 `task_finished` 的合法目标。
+
+   修法按 review 的建议：**锁跟 `depositEvent` 放在一起**。
+   `ledger.acquireDepositLease` / `depositLockPath` / `DepositWait` 移进 `ledger.zig`，
+   **缺省的 `depositEvent` 自己拿锁**（新投递者不必*记得*遵守），
+   已经握着锁跨越「先读后投」的两条命令走 `depositEventLeased`（重复拿会自己死锁自己）。
+   配套的另一半是**在锁下重新确认 session 还在**（`NoSuchSession`，一个字节都不写）：
+   锁让 `discard` 的检查与删除成为一次动作，这个确认让删掉之后才到达的投递不留下孤儿事实。
+   `task retarget` 的 `moveDeposit` 是 `task_finished` 进 inbox 的另一条路，守同一条规则
+   （目标场的租约 + 同一次确认）。锁顺序写在 `acquireDepositLease` 的文档里：
+   没有任何地方先拿写者租约再拿它（`step` 从不投递），
+   唯一同时握两把的 `discard` 先拿它、写者租约用 non-blocking。
+
+2. **delivery id 的契约措辞与 128 位 nonce（P3）。** `freshDeliveryName` 只扫当前 inbox、
+   不扫历史 origin，所以「distinct on every call」对**已排干**的名字是抗碰撞而不是证明。
+   两条都做了：nonce 从 32 位提到 128 位（风险落到可以忽略），
+   文档改成如实说出作用域——按构造成立的是「这个 inbox 里」，
+   对排干过的名字靠的是随机尾巴。要数学意义上的唯一得引入 durable sequence，
+   而「活得过排干的状态」正是这里刻意没有的东西（同 §9.2 的理由）。
+
+## 11. 不做的
 
 - 不做兼容性白名单（§2）；
 - 不做「回头路保留 reasoning」的特例（§3）；

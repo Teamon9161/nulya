@@ -1091,7 +1091,88 @@ pub fn inboxPath(alloc: std.mem.Allocator, session_path: []const u8) ![]u8 {
 ///
 /// An event too large to be read back is refused HERE (`InboxEventTooLarge`),
 /// before a byte is written: see `max_inbox_event_bytes`.
+///
+/// Deposits under the inbox's own lease (`acquireDepositLease`) — that is what
+/// makes this the entry point a NEW depositor should reach for: the rule is the
+/// inbox's, not any one command's, so obeying it cannot depend on remembering
+/// to. A caller already holding the lease across a read-then-deposit calls
+/// `depositEventLeased` instead (taking it twice would deadlock against
+/// itself).
 pub fn depositEvent(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8, name: []const u8, e: Event) !void {
+    var lease = try acquireDepositLease(alloc, io, base, session_path, .block);
+    defer lease.close(io);
+    return depositEventLeased(alloc, io, base, session_path, name, e);
+}
+
+/// Whether taking the deposit lease waits for whoever holds it.
+///
+/// A depositor WAITS: it is here to add a fact, and the other holder is about
+/// to finish. `session discard` does NOT: it is here to take a session away, so
+/// "somebody is depositing right now" is an answer, not a queue to join.
+pub const DepositWait = enum { block, fail_fast };
+
+/// The exclusive right to deposit into this session's inbox.
+///
+/// Held by every writer of the inbox, for two rules that are the inbox's own
+/// rather than any one command's:
+///
+///   * A gate that READS the session and then deposits must be one act.
+///     `append --image` refuses a picture the model in force cannot see, and
+///     `rebind` refuses a model that cannot see the pictures already here; run
+///     at the same time, both read the old state, both pass, and the pair they
+///     exist to refuse is exactly what lands. The same goes for a delivery id,
+///     which is minted from what is already waiting (`freshDeliveryName`).
+///   * A session may not be taken away between a depositor's check and its
+///     write. `session discard` removes a session only while holding this and
+///     the writer lease, so "nothing holds this" stays true for as long as it
+///     takes to act on it; every deposit re-checks the session under the lease
+///     (`depositEventLeased`), which closes the window from the other side.
+///
+/// It lives INSIDE the inbox, where the deposits go and where the agent
+/// package's mailbox keeps the same lease for the same reason. Neither the drain
+/// nor a scan looks at anything but `*.json` there, and this is emphatically NOT
+/// the session's `.lock`: that one belongs to `step`, and every gate above has
+/// to work while a step is running.
+///
+/// Lock order: nothing takes the writer lease and then this one (`step` never
+/// deposits), and `discard` — the one place both are held — takes this one
+/// first and the writer lease non-blocking, so neither direction can wait on
+/// the other.
+pub fn acquireDepositLease(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    session_path: []const u8,
+    wait: DepositWait,
+) !std.Io.File {
+    const inbox = try inboxPath(alloc, session_path);
+    defer alloc.free(inbox);
+    try base.createDirPath(io, inbox);
+    const lock_rel = try depositLockPath(alloc, session_path);
+    defer alloc.free(lock_rel);
+    return base.createFile(io, lock_rel, .{
+        .truncate = false,
+        .read = true,
+        .lock = .exclusive,
+        .lock_nonblocking = wait == .fail_fast,
+    });
+}
+
+/// `<inbox>/.deposit.lock`. Public because the one command that removes a
+/// session removes this too.
+pub fn depositLockPath(alloc: std.mem.Allocator, session_path: []const u8) ![]u8 {
+    const inbox = try inboxPath(alloc, session_path);
+    defer alloc.free(inbox);
+    return std.fmt.allocPrint(alloc, "{s}{c}.deposit.lock", .{ inbox, std.fs.path.sep });
+}
+
+/// `depositEvent` for a caller that ALREADY holds the deposit lease.
+pub fn depositEventLeased(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8, name: []const u8, e: Event) !void {
+    // Under the lease, so it is not a guess: `session discard` cannot remove a
+    // session between here and the rename below, and one already removed gets
+    // no durable fact deposited for a reader that will never exist.
+    base.access(io, session_path, .{}) catch return error.NoSuchSession;
+
     const inbox = try inboxPath(alloc, session_path);
     defer alloc.free(inbox);
 
@@ -1135,7 +1216,14 @@ pub const max_inbox_event_bytes: usize = 32 << 20;
 /// capability note names itself `note-<id>-<version>` so a redeposit collapses
 /// into the one event, while a user turn and a rebind are new facts every time
 /// and must never collapse. Getting that wrong is silent: the second deposit is
-/// deleted at the next drain and never reaches the ledger.
+/// deleted at the next drain and never reaches the ledger. Distinct by
+/// construction only within one inbox: the stamp is stepped past what is
+/// WAITING there, and a name already drained is gone from the directory. Against
+/// a drained one it is a collision resistance argument, not a proof — a clock
+/// that steps back onto an old stamp AND a 128-bit nonce that repeats — which
+/// is why the tail is wide rather than merely random. A stricter promise would
+/// need durable state of its own, and durable state that outlives the drain is
+/// what this deliberately does not have.
 ///
 /// **Sorting after every name still waiting in this inbox under the same
 /// prefix**, because `drainInbox` applies files in filename order — the name is
@@ -1174,12 +1262,12 @@ pub fn freshDeliveryName(
         // the comparison never reaches the random tail.
         if (seen >= stamp and seen < max_stamp) stamp = seen + 1;
     }
-    var nonce: [4]u8 = undefined;
+    var nonce: [16]u8 = undefined;
     io.random(&nonce);
     return std.fmt.allocPrint(alloc, "{s}-{d:0>19}-{x}", .{
         prefix,
         stamp,
-        std.mem.readInt(u32, &nonce, .little),
+        std.mem.readInt(u128, &nonce, .little),
     });
 }
 
@@ -1841,6 +1929,9 @@ test "a delivery id is distinct, and sorts after what is already waiting" {
     defer tmp.cleanup();
     const spath = "s.jsonl";
 
+    var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
+    defer l.deinit();
+
     const first = try freshDeliveryName(alloc, io, tmp.dir, spath, "rebind");
     defer alloc.free(first);
     const second = try freshDeliveryName(alloc, io, tmp.dir, spath, "rebind");
@@ -1856,6 +1947,43 @@ test "a delivery id is distinct, and sorts after what is already waiting" {
     const other = try freshDeliveryName(alloc, io, tmp.dir, spath, "msg");
     defer alloc.free(other);
     try std.testing.expect(std.mem.lessThan(u8, other, "msg-9000000000000000000"));
+}
+
+test "the inbox lease is exclusive, and a deposit into a session that is gone is refused" {
+    // Both halves of the rule the lease carries: a depositor and `session
+    // discard` cannot both be inside it, and a deposit re-checks the session
+    // there — so removing one and depositing into it cannot interleave into a
+    // durable fact nobody will ever drain.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spath = "s.jsonl";
+
+    var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
+
+    {
+        var held = try acquireDepositLease(alloc, io, tmp.dir, spath, .block);
+        defer held.close(io);
+        // What `session discard` asks, and the answer that makes it refuse.
+        try std.testing.expectError(
+            error.WouldBlock,
+            acquireDepositLease(alloc, io, tmp.dir, spath, .fail_fast),
+        );
+    }
+
+    l.deinit();
+    try tmp.dir.deleteFile(io, spath);
+    try std.testing.expectError(
+        error.NoSuchSession,
+        depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{ .text = "too late" } }),
+    );
+    var dir = try tmp.dir.openDir(io, "s.inbox", .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        try std.testing.expect(!std.mem.endsWith(u8, entry.name, ".json"));
+    }
 }
 
 test "identityEqual covers the profile, not just the descriptor" {
