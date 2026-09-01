@@ -728,6 +728,10 @@ const TestCtx = struct {
         self.arena = .init(std.testing.allocator);
         self.env = try std.testing.environ.createMap(self.arena.allocator());
         self.tmp = std.testing.tmpDir(.{});
+        // A repository root, for the reason spelled out in `glob.zig`'s fixture:
+        // otherwise an ancestor `.gitignore` outside the fixture decides what
+        // this walk can see.
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".git", .data = "" });
         const n = try self.tmp.dir.realPath(std.testing.io, &self.cwd_buf);
         self.ctx = .{
             .alloc = self.arena.allocator(),

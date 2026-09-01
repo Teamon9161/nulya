@@ -135,6 +135,17 @@ const TestCtx = struct {
         self.arena = .init(std.testing.allocator);
         self.env = try std.testing.environ.createMap(self.arena.allocator());
         self.tmp = std.testing.tmpDir(.{});
+        // The fixture is a repository root, because the walk it drives loads the
+        // ignore files of every directory from the nearest `.git` above down to
+        // base (`walk.loadAncestors`). Without this marker the answers depend on
+        // where `std.testing.tmpDir` happened to land — `.zig-cache/tmp` under
+        // whichever directory `zig build` was invoked from — so a fixture that
+        // writes `node_modules/` gets different results in a checkout whose
+        // ancestor `.gitignore` already hides that name. A file rather than a
+        // directory (`hasGit` takes either, as git does for worktrees): a `.git`
+        // DIRECTORY here would also be walked and pruned, which is a fact about
+        // the fixture leaking into every prune note these tests assert.
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".git", .data = "" });
         const n = try self.tmp.dir.realPath(std.testing.io, &self.cwd_buf);
         self.ctx = .{
             .alloc = self.arena.allocator(),
