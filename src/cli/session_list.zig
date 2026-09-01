@@ -157,18 +157,15 @@ fn readSessionView(
     prompts: *PromptIndex,
 ) !SessionView {
     const bytes = try dir.readFileAlloc(io, file_name, a, .unlimited);
-    const clean_end: usize = @intCast(ledger.lastCompleteLineEnd(bytes));
 
-    var lines = std.mem.splitScalar(u8, bytes[0..clean_end], '\n');
+    var lines = ledger.completeLines(bytes);
     var header: ?ledger.OwnedHeader = null;
     var events: usize = 0;
     var total: ledger.Usage = .{};
     var first_user_text: []const u8 = "";
     var rebound: ?ledger.Identity = null;
 
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len == 0) continue;
+    while (lines.next()) |line| {
         if (header == null) {
             header = try ledger.parseHeaderLine(a, line);
             continue;

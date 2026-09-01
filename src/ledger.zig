@@ -216,31 +216,32 @@ pub fn identityEqual(a: Identity, b: Identity) bool {
         std.mem.eql(u8, a.identity.api_key_env, b.identity.api_key_env);
 }
 
+/// Index of the last `.model_rebind` event, or null when there has been none.
+/// The one backward scan both `lastRebind` and `reasoningFloor` need.
+fn lastRebindIndex(events: []const Event) ?usize {
+    var at = events.len;
+    while (at > 0) {
+        at -= 1;
+        if (events[at] == .model_rebind) return at;
+    }
+    return null;
+}
+
 /// The last `model_rebind`, or null when this session still runs on what its
 /// header froze — which is every session that never rebound, and every session
 /// written before rebinding existed.
 pub fn lastRebind(events: []const Event) ?Identity {
-    var at = events.len;
-    while (at > 0) {
-        at -= 1;
-        if (events[at] == .model_rebind) {
-            const r = events[at].model_rebind;
-            return .{ .profile = r.profile, .identity = r.identity };
-        }
-    }
-    return null;
+    const at = lastRebindIndex(events) orelse return null;
+    const r = events[at].model_rebind;
+    return .{ .profile = r.profile, .identity = r.identity };
 }
 
 /// How many events precede the identity in force — the index the projection
 /// stops replaying `reasoning` before (goals/model-rebind.md §3). Zero when the
 /// session never rebound, which is every session that existed before this did.
 pub fn reasoningFloor(events: []const Event) usize {
-    var at = events.len;
-    while (at > 0) {
-        at -= 1;
-        if (events[at] == .model_rebind) return at + 1;
-    }
-    return 0;
+    const at = lastRebindIndex(events) orelse return 0;
+    return at + 1;
 }
 
 pub const Ledger = struct {
@@ -770,6 +771,28 @@ fn firstNonBlank(it: *std.mem.SplitIterator(u8, .scalar)) ?[]const u8 {
     return null;
 }
 
+/// Iterates the complete (non-torn), non-blank lines of a ledger/session byte
+/// buffer: drop the torn tail (`lastCompleteLineEnd`), split on `\n`, trim,
+/// skip blanks. Several readers share exactly this walk. Skipping the header
+/// line (line 1, when present) is left to the caller — some readers decode it
+/// differently than the rest, and some only want it counted.
+pub const CompleteLines = struct {
+    it: std.mem.SplitIterator(u8, .scalar),
+
+    pub fn next(self: *CompleteLines) ?[]const u8 {
+        while (self.it.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t\r");
+            if (line.len != 0) return line;
+        }
+        return null;
+    }
+};
+
+pub fn completeLines(bytes: []const u8) CompleteLines {
+    const end: usize = @intCast(lastCompleteLineEnd(bytes));
+    return .{ .it = std.mem.splitScalar(u8, bytes[0..end], '\n') };
+}
+
 /// Parse one event line and append it to `l` (in-memory only — the ledger is not
 /// yet durable during replay). Validates that `seq` matches the position.
 fn replayEventLine(l: *Ledger, line: []const u8) !void {
@@ -1218,12 +1241,9 @@ pub const max_inbox_event_bytes: usize = 32 << 20;
 /// and must never collapse. Getting that wrong is silent: the second deposit is
 /// deleted at the next drain and never reaches the ledger. Distinct by
 /// construction only within one inbox: the stamp is stepped past what is
-/// WAITING there, and a name already drained is gone from the directory. Against
-/// a drained one it is a collision resistance argument, not a proof — a clock
-/// that steps back onto an old stamp AND a 128-bit nonce that repeats — which
-/// is why the tail is wide rather than merely random. A stricter promise would
-/// need durable state of its own, and durable state that outlives the drain is
-/// what this deliberately does not have.
+/// WAITING there, and a name already drained is gone from the directory.
+/// Against a drained one it is a collision-resistance argument (a 128-bit
+/// nonce), not a proof.
 ///
 /// **Sorting after every name still waiting in this inbox under the same
 /// prefix**, because `drainInbox` applies files in filename order — the name is
@@ -1236,18 +1256,14 @@ pub const max_inbox_event_bytes: usize = 32 << 20;
 /// need no such care: anything still waiting is applied after all of them, and
 /// both `drainInbox` and `scanSession` are built on that.
 ///
-/// Not defended: two mints racing each other (their order is not anybody's
-/// intent — and the two commands where it WOULD be, `append --image` and
-/// `rebind`, serialize on the inbox's deposit lease anyway), and order ACROSS
-/// prefixes, which is the prefix's order rather than time's. The latter is
-/// cosmetic — a rebind is not a turn at all, and a note or a finished task
-/// landing on the other side of a message only moves two turns past each other.
+/// Not defended: two mints racing each other (the two commands where that would
+/// matter, `append --image` and `rebind`, serialize on the inbox's deposit
+/// lease — `acquireDepositLease`), and order ACROSS prefixes, which is the
+/// prefix's order rather than time's and is cosmetic here (a rebind is not a
+/// turn at all).
 ///
-/// Why not carry ordering somewhere else and leave this a pure id: a second
-/// channel means a second piece of durable state, and a counter over a
-/// directory that empties on every drain reuses numbers — which is precisely
-/// how a reused name silently becomes "the same fact again" (the agent
-/// package's mailbox learned this one the hard way).
+/// Why these scopes and not a stronger uniqueness proof or a separate ordering
+/// channel: goals/model-rebind.md §8, §9, §10.
 pub fn freshDeliveryName(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1276,6 +1292,14 @@ pub fn freshDeliveryName(
 /// costs is the ordering step above (the id is still distinct).
 const max_stamp: u64 = 9_999_999_999_999_999_999;
 
+/// True for exactly the inbox entries that count as one deposited fact: a
+/// `.json` file. The lease file (`.deposit.lock`) and anything else living
+/// alongside the deposits is not this — `drainInbox`, `scanInbox` and
+/// `latestWaitingStamp` all filter on it.
+fn isInboxDeposit(kind: anytype, name: []const u8) bool {
+    return kind == .file and std.mem.endsWith(u8, name, ".json");
+}
+
 /// The newest stamp among the names this prefix already has waiting, or null
 /// when the inbox holds none (or does not exist). A name this cannot read a
 /// stamp out of is skipped: it is either a foreign name or one from a shape
@@ -1297,11 +1321,61 @@ fn latestWaitingStamp(
     var newest: ?u64 = null;
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+        if (!isInboxDeposit(entry.kind, entry.name)) continue;
         const stamp = stampOf(entry.name, prefix) orelse continue;
         if (newest == null or stamp > newest.?) newest = stamp;
     }
     return newest;
+}
+
+/// Whether a drainable event is waiting in this session's inbox. Only `*.json`
+/// counts — the directory also holds the deposit lease, which is not a fact
+/// about the session (`acquireDepositLease`).
+pub fn inboxHoldsDeposit(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) !bool {
+    const inbox = try inboxPath(alloc, session_path);
+    defer alloc.free(inbox);
+    var dir = base.openDir(io, inbox, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (isInboxDeposit(entry.kind, entry.name)) return true;
+    }
+    return false;
+}
+
+/// Every deposited `.json` in this inbox, sorted in the order `drainInbox`
+/// applies them — lexical by filename, which is the queue position
+/// (`freshDeliveryName`). A missing inbox directory reads as empty, not an
+/// error. Names are allocated with `alloc`: a plain allocator's caller frees
+/// each name and the returned slice, an arena's caller lets `deinit` do it.
+fn listInboxDeposits(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) ![][]u8 {
+    const inbox = try inboxPath(alloc, session_path);
+    defer alloc.free(inbox);
+    var dir = base.openDir(io, inbox, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return &.{},
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var names: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (names.items) |n| alloc.free(n);
+        names.deinit(alloc);
+    }
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (!isInboxDeposit(entry.kind, entry.name)) continue;
+        try names.append(alloc, try alloc.dupe(u8, entry.name));
+    }
+    std.mem.sort([]u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return names.toOwnedSlice(alloc);
 }
 
 /// `<prefix>-<stamp>-<nonce>.json` → `stamp`.
@@ -1326,27 +1400,17 @@ pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io
     const inbox = try inboxPath(alloc, session_path);
     defer alloc.free(inbox);
 
+    const names = try listInboxDeposits(alloc, io, base, session_path);
+    defer {
+        for (names) |n| alloc.free(n);
+        alloc.free(names);
+    }
+
     var dir = base.openDir(io, inbox, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
     defer dir.close(io);
-
-    var names: std.ArrayList([]u8) = .empty;
-    defer {
-        for (names.items) |n| alloc.free(n);
-        names.deinit(alloc);
-    }
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
-        try names.append(alloc, try alloc.dupe(u8, entry.name));
-    }
-    std.mem.sort([]u8, names.items, {}, struct {
-        fn lessThan(_: void, a: []u8, b: []u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.lessThan);
 
     var batch_arena: std.heap.ArenaAllocator = .init(alloc);
     defer batch_arena.deinit();
@@ -1358,7 +1422,7 @@ pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io
     var batch_origins: std.ArrayList([]const u8) = .empty;
     defer batch_origins.deinit(alloc);
 
-    for (names.items) |name| {
+    for (names) |name| {
         if (l.containsOrigin(name)) {
             try dir.deleteFile(io, name);
             continue;
@@ -1532,23 +1596,13 @@ pub fn scanSession(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, sessi
 /// Every deposited body still waiting, in the order the drain will apply it.
 fn scanInbox(scan: *SessionScan, a: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) !void {
     const inbox = try inboxPath(a, session_path);
+    const names = try listInboxDeposits(a, io, base, session_path); // arena-allocated; nothing to free here
     var dir = base.openDir(io, inbox, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
     defer dir.close(io);
-    var names: std.ArrayList([]u8) = .empty;
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
-        try names.append(a, try a.dupe(u8, entry.name));
-    }
-    std.mem.sort([]u8, names.items, {}, struct {
-        fn lessThan(_: void, x: []u8, y: []u8) bool {
-            return std.mem.lessThan(u8, x, y);
-        }
-    }.lessThan);
-    for (names.items) |name| {
+    for (names) |name| {
         // A file that vanished between the listing and here was drained by the
         // writer; the ledger pass is where it turns up.
         const body = dir.readFileAlloc(io, name, a, .limited(max_inbox_event_bytes)) catch continue;
@@ -1559,11 +1613,9 @@ fn scanInbox(scan: *SessionScan, a: std.mem.Allocator, io: std.Io, base: std.Io.
 /// Every committed line, in ledger order, minus the torn tail replay drops too.
 fn scanLedger(scan: *SessionScan, a: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) !void {
     const bytes = try base.readFileAlloc(io, session_path, a, .unlimited);
-    var lines = std.mem.splitScalar(u8, bytes[0..@intCast(lastCompleteLineEnd(bytes))], '\n');
+    var lines = completeLines(bytes);
     var header_seen = false;
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len == 0) continue;
+    while (lines.next()) |line| {
         if (!header_seen) {
             header_seen = true;
             continue;

@@ -1041,16 +1041,14 @@ fn sessionDiscard(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8
         return 1;
     };
     defer alloc.free(bytes);
-    var lines = std.mem.splitScalar(u8, bytes[0..@intCast(ledger.lastCompleteLineEnd(bytes))], '\n');
+    var lines = ledger.completeLines(bytes);
     var complete: usize = 0;
-    while (lines.next()) |raw| {
-        if (std.mem.trim(u8, raw, " \t\r").len != 0) complete += 1;
-    }
+    while (lines.next()) |_| complete += 1;
     if (complete > 1) {
         try printErrFmt(alloc, io, "session discard refused: '{s}' has recorded events\n", .{id});
         return 1;
     }
-    if (try inboxHoldsDeposit(alloc, io, spath)) {
+    if (try ledger.inboxHoldsDeposit(alloc, io, std.Io.Dir.cwd(), spath)) {
         try printErrFmt(alloc, io, "session discard refused: a turn is queued for '{s}' and no step has drained it\n", .{id});
         return 1;
     }
@@ -1082,24 +1080,6 @@ fn deleteIfPresent(io: std.Io, path: []u8, alloc: std.mem.Allocator) !void {
         error.FileNotFound => {},
         else => return err,
     };
-}
-
-/// Is a drainable event waiting in this session's inbox? Only `*.json` counts —
-/// the directory also holds the deposit lease, which is not a fact about the
-/// session (`ledger.acquireDepositLease`).
-fn inboxHoldsDeposit(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !bool {
-    const inbox = try ledger.inboxPath(alloc, spath);
-    defer alloc.free(inbox);
-    var dir = std.Io.Dir.cwd().openDir(io, inbox, .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    defer dir.close(io);
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".json")) return true;
-    }
-    return false;
 }
 
 /// The largest image one turn may carry, raw bytes before base64 (the tightest
