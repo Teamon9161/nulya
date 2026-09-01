@@ -1,24 +1,18 @@
 //! The wire half of `plan`: this call's arguments in on stdin, its answer out
 //! on stdout, and the vocabulary the three tools answer in.
 //!
-//! The wire is `plain` (DESIGN §7.3, contract at the top of
-//! `src/extension/protocol.zig`): stdin is the arguments as one JSON object, the
-//! tool's name is `NULYA_TOOL` in the environment, and there is no envelope to
-//! read or write. Lifted from `extensions/agent/src/rpc.zig` (itself from
-//! `extensions/std`), which is the same contract — several tools in one binary
-//! dispatched on that name. The copy is deliberate and is not a missing
-//! abstraction: a package's `src/` tree is frozen into its own content-addressed
-//! version (DESIGN §7.4), so there is no place two packages could share a file
-//! from without inventing one.
+//! The wire is `plain` (contract at the top of `src/extension/protocol.zig`):
+//! stdin is the arguments as one JSON object, the tool's name is `NULYA_TOOL`
+//! in the environment, and there is no envelope to read or write. A package's
+//! `src/` tree is frozen into its own content-addressed version, so there is
+//! no place two packages could share this module from without inventing one
+//! — this is a deliberate copy of `extensions/agent/src/rpc.zig`.
 //!
-//! Two shapes of answer, on purpose:
-//!   - `text`   → stdout, verbatim, exit 0. `propose` and `todo` answer in the
-//!                sentence the model should read; `approve` prints JSON, which a
-//!                DRIVER parses — one wire carries both, because stdout is just
-//!                bytes.
-//!   - `failed` → stderr, then exit 1. The host folds it into a failed tool
-//!                result (`ok=false`) whose text is `exit 1` and that message, so
-//!                the message IS the teaching text.
+//! Two shapes of answer: `text` → stdout, verbatim, exit 0 (`propose`/`todo`
+//! answer in the sentence the model should read; `approve` prints JSON for a
+//! DRIVER to parse — one wire carries both); `failed` → stderr, then exit 1
+//! (the host folds it into a failed tool result whose text is `exit 1` and
+//! that message).
 
 const std = @import("std");
 

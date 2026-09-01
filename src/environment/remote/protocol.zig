@@ -1,11 +1,5 @@
 //! The remote channel's frame protocol — what the host and a `nulya remote
-//! serve` on the other machine say to each other (DESIGN §8.1,
-//! `docs/goals/remote-env.md` §3.4).
-//!
-//! The contract is stated here, at the top of the module that implements it, so
-//! `nulya src environment/remote/protocol.zig` prints the rules AND the code
-//! that keeps them — the `extension/protocol.zig` precedent, and the reason
-//! there is no second document to drift from.
+//! serve` on the other machine say to each other.
 //!
 //! ── The frame ───────────────────────────────────────────────────────────────
 //!
@@ -18,9 +12,9 @@
 //! The header is JSON because a captured channel should be readable by a human.
 //! The payload is RAW because it carries arbitrary bytes — a command, a
 //! command's stdout — and a JSON string cannot: `std.json.Stringify` writes
-//! invalid UTF-8 as an array of numbers, which is exactly how a session file
-//! once stopped being a session file (BUGS #22). Length-prefixed bytes are
-//! exact for every byte sequence, and cost no encoding.
+//! invalid UTF-8 as an ARRAY OF NUMBERS, so a frame carrying arbitrary bytes in
+//! a JSON string stops being the shape it claims to be. Length-prefixed bytes
+//! are exact for every byte sequence, and cost no encoding.
 //!
 //! ── The verbs ───────────────────────────────────────────────────────────────
 //!
@@ -59,7 +53,7 @@
 //!     {"ok":true,"bytes":L}           task-poll: `TaskSnapshot`, as JSON
 //!     {"ok":false,"message":"…"}
 //!
-//! ── A background task over there (goals/remote-env.md §4 Phase 4) ───────────
+//! ── A background task over there ────────────────────────────────────────────
 //!
 //! `start-task` asks the agent to start `nulya task supervise` on ITS machine —
 //! the same binary, the same role, the same `Tree` around the command — with the
@@ -72,17 +66,16 @@
 //! it with the same function (`launch.sessionTasksDir`), against its own
 //! workspace. That is why there are three task verbs rather than "write an empty
 //! file at this path": a task is a name here, and the host does not spell
-//! directories on another machine (goals/remote-env.md §3.3).
+//! directories on another machine.
 //!
 //! **The report comes back by being FETCHED, not pushed.** There are no
 //! unsolicited frames (rule 1), and the far supervisor could not deposit anyway:
 //! the session file is on the host. So it leaves its report next to its log, and
 //! whichever host verb next asks (`task list`, `task wait`, a `session step`)
 //! turns it into the `task_finished` the session's inbox already understands.
-//! The mechanism a driver sees is unchanged — an inbox event, not a second kind
-//! of file to learn (CLAUDE.md's working rule).
+//! What a driver sees is an inbox event, not a second kind of file to learn.
 //!
-//! ── Running an extension over there (goals/remote-env.md §3.1) ──────────────
+//! ── Running an extension over there ─────────────────────────────────────────
 //!
 //! `run-extension` names an IDENTITY — `(id, version, tool)` — and never a path.
 //! The agent picks the entry variant for ITS OS, verifies that version against
@@ -96,7 +89,7 @@
 //! plus that stderr), so the model reads it and the usage journal records a
 //! truthful `ok=false`, rather than the whole step failing.
 //!
-//! ── Pushing an extension version (`nulya ext push`, DESIGN §7.4) ────────────
+//! ── Pushing an extension version (`nulya ext push`) ─────────────────────────
 //!
 //! The three `store-*` verbs are one sequence, and they are three rather than
 //! one because a version is a TREE and a frame carries one payload:
@@ -151,20 +144,18 @@
 //!  5. **Nothing on this channel carries a credential.** There is no field for
 //!     one, the host never forwards its environment map, and the agent builds
 //!     its children's environment from ITS OWN host environment through the
-//!     same `isSecretKey` denylist (physics #6, run on both machines by the
-//!     same code). The remote side of a nulya session never needs an API key:
-//!     the model connection stays on the host.
+//!     same `isSecretKey` denylist (one implementation, run on both machines).
+//!     The remote side of a nulya session never needs an API key: the model
+//!     connection stays on the host.
 //!
 //!  6. **Nothing that grows with what the far machine holds rides in a header.**
 //!     A header is bounded (`max_header_bytes`) because the other side reads it
 //!     with one delimited read into one buffer; a payload is not. So a listing,
 //!     a command, a command's output and a file's bytes are all payload, and
 //!     `encodeRequest` / `encodeReply` REFUSE a header over the bound rather
-//!     than write a frame the peer cannot read. That refusal is the rule's
-//!     enforcement, not a comment asking future verbs to remember it: a listing
-//!     of a thousand 255-byte names is a quarter of a megabyte, and carrying it
-//!     in the header once made a perfectly ordinary directory able to kill the
-//!     channel.
+//!     than write a frame the peer cannot read — that refusal is the rule's
+//!     enforcement. A listing of a thousand 255-byte names is a quarter of a
+//!     megabyte, well past `max_header_bytes`.
 
 const std = @import("std");
 
@@ -175,13 +166,10 @@ const std = @import("std");
 /// v2: `list-dir` answers its entries as a payload instead of a header field
 /// (rule 6), and `put-file` became a real verb instead of a refusal.
 ///
-/// The three `store-*` verbs, and later the three task verbs, arrived WITHOUT a
-/// bump — the rule working
-/// rather than an exception to it: no existing frame changed meaning, and an
-/// older agent asked for one answers the `unknown` sentence naming what it does
-/// know. A push against such a machine therefore fails with a sentence about
-/// that machine's build — the outcome a version number could only have produced
-/// earlier and less precisely, at the cost of breaking every other verb too.
+/// Adding a verb is not a bump: no existing frame changes meaning, and an older
+/// agent asked for one answers the `unknown` sentence naming what it does know,
+/// so the caller fails with a sentence about that machine's build instead of
+/// breaking every other verb too.
 pub const version: u32 = 2;
 
 /// The longest header line either side will read before refusing. Headers are
@@ -270,8 +258,7 @@ pub const Request = struct {
     nulya: []const u8 = "",
     /// `run-shell` and `put-file`: the session's workspace, as the AGENT's
     /// machine spells it. `"."` means that machine's workspace, which is where
-    /// the agent was started — the host never translates a path
-    /// (goals/remote-env.md §3.3).
+    /// the agent was started — the host never translates a path.
     cwd: []const u8 = "",
     /// `list-dir`: the directory to list. `put-file`: the destination, relative
     /// to `cwd` and spelled with `/` — it is the very string the model reads in
@@ -285,18 +272,17 @@ pub const Request = struct {
     max_output_bytes: usize = 0,
     /// `store-stat` and `run-extension`: which extension, and which immutable
     /// version of it. The two later verbs of a push name neither — the agent has
-    /// exactly one open push, and a second spelling of "which one" is a second
-    /// thing to drift.
+    /// exactly one open push.
     id: []const u8 = "",
     version: []const u8 = "",
     /// `run-extension`: the tool name that version's frozen manifest declares.
     /// It becomes `NULYA_TOOL` on the far side, derived there together with the
     /// argument variables — one implementation of that rule, two machines.
     tool: []const u8 = "",
-    /// The session these commands belong to, by IDENTITY (`NULYA_SESSION_ID`,
-    /// DESIGN §5.3). Never the session FILE's path: that names a file on the
-    /// host, and a package over there handed one would be told a lie. The id is
-    /// true on any machine, which is exactly why the two were split.
+    /// The session these commands belong to, by IDENTITY (`NULYA_SESSION_ID`).
+    /// Never the session FILE's path: that names a file on the host, and a
+    /// package over there handed one would be told a lie. The id is true on any
+    /// machine, which is why the two are separate variables.
     session: []const u8 = "",
     /// The three task verbs: which background task, by its FULL name
     /// `<sid>/t<N>` — the one the model reads in its receipt. Not a directory:
@@ -416,10 +402,9 @@ const json_opts: std.json.ParseOptions = .{ .allocate = .alloc_always, .ignore_u
 /// Encode a header line, newline included. The caller writes the payload (if
 /// any) straight after it.
 ///
-/// Framing safety is not a convention here, it is a property of the encoder:
-/// `std.json` escapes a newline inside any string, so no field value — a
-/// command's text, a path, a diagnostic — can end the header line early. The
-/// unit test below pins that rather than trusting it.
+/// Framing safety is a property of the encoder: `std.json` escapes a newline
+/// inside any string, so no field value — a command's text, a path, a
+/// diagnostic — can end the header line early.
 ///
 /// The encoder also enforces rule 6: a line over `max_header_bytes` is refused
 /// instead of written, because the reader on the other side takes a header with

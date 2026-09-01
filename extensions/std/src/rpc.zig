@@ -1,29 +1,24 @@
 //! The wire half of `std`: this call's arguments in on stdin, its answer out on
 //! stdout, and the small vocabulary every tool answers in.
 //!
-//! The wire (DESIGN §7.3, contract at the top of `src/extension/protocol.zig`):
-//! stdin is the arguments as one JSON object, the tool's name is `NULYA_TOOL` in
-//! the environment, and there is no envelope to read or write. A tool never
-//! touches stdio itself: `main.zig` reads, dispatches on that name, and prints
-//! whatever `Outcome` comes back.
+//! The wire (plain, contract at the top of `src/extension/protocol.zig`):
+//! stdin is the arguments as one JSON object, the tool's name is `NULYA_TOOL`
+//! in the environment, and there is no envelope to read or write. A tool
+//! never touches stdio itself: `main.zig` reads, dispatches on that name, and
+//! prints whatever `Outcome` comes back.
 //!
-//! Two shapes of answer, on purpose:
-//!   - `text`   → stdout, verbatim, exit 0. The host hands those bytes to the
-//!                model unchanged, so a file's contents or a search listing
-//!                arrive as plain text — the same way a builtin's output would.
-//!   - `failed` → stderr, then exit 1. The host folds it into a failed tool
-//!                result (`ok=false`, and the usage journal records it so),
-//!                shown as `exit 1` followed by that message. The message IS the
-//!                teaching text: what went wrong and how to succeed next call.
-//!
-//! One shape for every failure, deliberately: a missing argument, an unknown
-//! tool name and a file that is not there all reach the model as one sentence.
-//! The error codes these used to carry reached it as a number nobody read.
+//! Two shapes of answer: `text` → stdout, verbatim, exit 0 (the host hands
+//! those bytes to the model unchanged); `failed` → stderr, then exit 1 (the
+//! host folds it into a failed tool result, shown as `exit 1` followed by
+//! that message — the message IS the teaching text: what went wrong and how
+//! to succeed next call). One shape for every failure, deliberately: a
+//! missing argument, an unknown tool name and a file that is not there all
+//! reach the model as one sentence.
 
 const std = @import("std");
 
-/// What one call knows about the world (DESIGN §7.6: arguments, a sanitized
-/// environment, and the working directory — nothing else).
+/// What one call knows about the world: arguments, a sanitized environment,
+/// and the working directory — nothing else.
 pub const Ctx = struct {
     /// One arena for the whole process; a call reads a few files and prints
     /// one response, so nothing is freed individually.

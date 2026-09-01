@@ -1,67 +1,26 @@
-//! `plan` — planning mode as a package (goals/tui-plugin.md U4, the first of the
-//! two consumers that the declaration layer and the plugin host were built for).
+//! `plan` — planning mode as a package: a system prompt describing what this
+//! session is for, a `policy` that narrows what it may do while worn, three
+//! tools (`propose`, `todo`, `approve`), and a front-end module. The kernel
+//! enforces none of it: every part is a declaration a driver chooses to
+//! honour, and whether a session wears this package is the person's own call.
 //!
-//! **What the package is.** A system prompt that says what this session is for,
-//! a `policy` that narrows what it may do while it is worn, three tools, and a
-//! front-end module (`tui/plan.ts`). `/plan` puts it on, and the manifest does
-//! not have to say so: a driver derives that command from the shape of a
-//! package whose contribution is a prompt (tui.md §11 T49). The
-//! kernel enforces none of it (DESIGN §7.2.1): every part is a declaration that
-//! a driver chooses to honour, and whether a session wears this package at all
-//! is the person's own decision, said in config or on one `session new`.
-//!
-//! **The three tools.**
-//!
-//!   `propose {plan_md}`  the model recording the plan it arrived at. The plan
-//!                        text IS the argument, so it lands in the ledger —
-//!                        which is the whole point: the conversation is the
-//!                        record, and a review panel is only a lens on it. The
-//!                        tool writes nothing and answers "recorded, end your
-//!                        turn" (goals/tui-plugin.md D7, `handoff`'s shape).
-//!   `todo {items}`       the checklist the model is working through, declared
-//!                        `render: "checklist"` + `panel: true` so a front end
-//!                        with no plugin loaded still shows progress (D12).
-//!                        Also writes nothing: the call is the record.
-//!   `approve {…}`        `surface: "internal"`. The one tool here that touches
-//!                        the disk: it renders an approved plan into
-//!                        `.nulya/handoffs/<session>-<n>.md` and returns the
-//!                        path, which the front end hands to `compact --arg
-//!                        brief_file=…` to fork into a session that carries the
-//!                        plan and NOT this persona. It is the only writer of
-//!                        that directory now — `extensions/handoff` used to
-//!                        share it and no longer writes anything at all.
-//!
-//! **Why `approve` writes a file rather than forking.** The same division
-//! `handoff` keeps (DESIGN §11): `session new --parent` is called from exactly
-//! one place in this repository, `extensions/compact`. A brief on disk is a
-//! proposal that has not changed the conversation yet; forking is the driver's
-//! act, and the driver here is a person pressing a key.
-//!
-//! **Why the review is not a blocking call.** A tool that waited for a person to
-//! read a plan would put a step process on their reading speed under a 600 s
-//! ceiling it cannot raise, and would hang any driver with nobody watching.
-//! Instead the comments come back as an ordinary user turn — append-only, so a
-//! revision round costs one cache-cheap increment — and a front end with no
-//! plugin degrades to a person typing their comments, which is the same thing.
-//!
-//! **Why compiled Zig rather than a script.** Identical to `handoff` and
-//! `agent`: a plan and a checklist to validate before either is on the record,
-//! and a brief to write. `sh` has no JSON reader, Windows has neither `jq` nor a
-//! guaranteed python, and one manifest carries one `interpreter`.
+//! `propose` and `todo` write nothing — the call itself, with its arguments,
+//! lands in the ledger, and that IS the record. `approve` is the one tool
+//! here that touches disk: it renders an approved plan into a brief file and
+//! returns the path, which a front end forks a fresh session from (`session
+//! new --parent` has exactly one caller in this repository,
+//! `extensions/compact`) — keeping the fork itself a driver act. Review is
+//! not a blocking call either: comments come back as an ordinary user turn,
+//! append-only, rather than tying up a step on a person's reading speed.
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
 
 /// Where an approved plan lands: a brief a new session can start from, which is
-/// what `compact --arg brief_file=` starts.
-///
-/// The name is historical — `extensions/handoff` used to write here too, and
-/// stopped, because its brief was always the arguments of its own call and the
-/// ledger already had them. This one is different in the way that matters: the
-/// plan a person approved is not byte-for-byte any single call's arguments (it
-/// is the revision they said yes to, after a review), so there is something to
-/// render and somewhere to put it. Whether that stays true is an open question
-/// — a `plan_seq` branch in `compact` would fold this one in too.
+/// what `compact --arg brief_file=` starts. The plan a person approved is not
+/// byte-for-byte any single call's arguments (it is the revision they said
+/// yes to, after a review), so there is something to render and somewhere to
+/// put it.
 const handoff_dir = ".nulya/handoffs";
 
 /// What `propose` answers with. The model has just been told the plan is on the
@@ -111,10 +70,9 @@ fn dispatch(alloc: std.mem.Allocator, io: std.Io, name: []const u8, arguments: s
 
 // ── propose ────────────────────────────────────────────────────────────────
 
-/// Check the plan and hand it back to the conversation. Nothing is written: the
-/// call is already in the ledger with the plan in its arguments, which is the
-/// only copy that should exist (physics #3 — what the model must see lives in
-/// the ledger, everything else is a view).
+/// Check the plan and hand it back to the conversation. Nothing is written:
+/// the call is already in the ledger with the plan in its arguments, which is
+/// the only copy that should exist.
 fn propose(alloc: std.mem.Allocator, args: std.json.ObjectMap) !rpc.Outcome {
     const plan = rpc.trimmedField(args, "plan_md");
     if (plan.len == 0) {
@@ -215,9 +173,9 @@ fn approve(alloc: std.mem.Allocator, io: std.Io, args: std.json.ObjectMap) !rpc.
         return rpc.refuse(alloc, "approve needs {{\"session\": \"<id>\", \"plan_md\": \"…\"}}.", .{});
     }
     // The id becomes part of a file name, so it has to be one component. Not a
-    // security boundary (this tool has the caller's authority either way,
-    // DESIGN §9) — it is the difference between a clear refusal and a file
-    // written somewhere nobody will look for it.
+    // security boundary (this tool has the caller's authority either way) —
+    // it is the difference between a clear refusal and a file written
+    // somewhere nobody will look for it.
     if (std.mem.indexOfAny(u8, session, "/\\:") != null or std.mem.eql(u8, session, "..")) {
         return rpc.refuse(alloc, "'{s}' is not a session id; pass the id, not a path.", .{session});
     }

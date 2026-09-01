@@ -1,11 +1,10 @@
-//! The extension lifecycle end to end (DESIGN §7): scaffold, build into an
+//! The extension lifecycle end to end: scaffold, build into an
 //! immutable version, activate, run — compiled and script kind alike — plus the
 //! store-root search that decides WHICH copy of an id is in effect, where a
 //! build lands, and the extensions this repo itself ships.
 //!
-//! Delegation — the bundled `agent` package and every runner that can hold one —
-//! used to live at the end of this file and is now `agent.zig`, a test binary of
-//! its own (`zig build e2e-agent`).
+//! Delegation — the bundled `agent` package and every runner that can hold one
+//! — lives in `agent.zig`, a test binary of its own (`zig build e2e-agent`).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -85,9 +84,8 @@ test "a cross build is another version of the same package, and it says which ma
     }
 
     // Same source, same compiler, different machine: a DIFFERENT version, side
-    // by side under the same id. That is the whole shape of per-target support —
-    // no new store layout and no new seal field, because the target has been part
-    // of a compiled version's identity since DESIGN §7.4 was written.
+    // by side under the same id. No new store layout and no new seal field — the
+    // target has been part of a compiled version's identity all along.
     try std.testing.expect(!std.mem.eql(u8, here.version, there.version));
 
     const version_rel = try std.fs.path.join(alloc, &.{ "crossed", "versions", there.version });
@@ -120,23 +118,19 @@ test "a cross build is another version of the same package, and it says which ma
 
 // The property `exec_version` and `ext push` rest on: one version id names one
 // COMPILE, not merely one pair of words. `ext build` and `ext build --target
-// <this host>` record the same id — they always did, since the id hashes the two
-// words — so the id alone was never evidence of anything. The bytes are.
+// <this host>` record the same id — the id hashes the two words, so it was
+// never evidence of anything on its own. The bytes are.
 //
 // A single store cannot show both at once (the second build finds the first and
-// answers `already_built`), which is precisely how the two invocations stayed
-// invisible while ids never left a store. So the frozen version is removed
-// between the two builds: same store, same paths, same compiler, and the only
-// remaining difference is the invocation under test.
+// answers `already_built`), so the frozen version is removed between the two
+// builds: same store, same paths, same compiler, and the only remaining
+// difference is the invocation under test.
 //
-// **Linux hosts only**, because byte equality has to be a property of the object
-// format before it can be a property of this rule. Two identical `zig build-exe`
-// runs produce identical ELF, and PE that differs in 21 bytes — a COFF
-// TimeDateStamp and the debug directory's PDB GUID, both stamped per link
-// (measured, Zig 0.16). Asserting equal bytes on such a host would be asserting
-// something the linker never promised, and the failure would say nothing about
-// targets. What the rule itself is, is `target.effectiveTriple`, and its whole
-// truth table is a unit test next to it.
+// **Linux hosts only**: two identical `zig build-exe` runs produce identical
+// ELF, but PE differs in 21 bytes — a COFF TimeDateStamp and the debug
+// directory's PDB GUID, both stamped per link (measured, Zig 0.16) — so byte
+// equality is not a property PE ever promised. The rule itself is
+// `target.effectiveTriple`, with its own truth table as a unit test next to it.
 test "a build that names this host's own target is the same build as one that names none — same id AND same bytes" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -293,7 +287,7 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
 
     // 4. `ext run`: invoke the built binary through the Environment seam — the
     //    same path a live agent uses: stdin is the arguments object, stdout is
-    //    the result verbatim, so there is no envelope to decode (DESIGN §7.1).
+    // the result verbatim, so there is no envelope to decode.
     var ws_real: [std.fs.max_path_bytes]u8 = undefined;
     const ws_real_len = try ws.realPath(io, &ws_real);
     const ws_path = ws_real[0..ws_real_len];
@@ -302,7 +296,7 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
 
     // The seam is handed an IDENTITY; finding the file that version means, and
     // checking it against its own seal, is the environment's job — the same one
-    // it does on a remote agent (goals/remote-env.md §3.1).
+    // it does on a remote agent.
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_roots = support.workspace_store_roots });
     defer lenv.deinit();
 
@@ -687,9 +681,9 @@ test "extension store: a member named by a workspace session resolves in root or
     const roots: []const []const u8 = &.{ ".nulya/extensions", user_root_abs };
 
     // A session that NAMES both gets both (the store's contents reach nobody on
-    // their own, DESIGN §5.1): the user-wide extension's skill is in the
-    // catalog, and `shared` resolves to the workspace copy — first root wins, so
-    // a workspace version shadows a user-wide one of the same id.
+    // their own): the user-wide extension's skill is in the catalog, and
+    // `shared` resolves to the workspace copy — first root wins, so a workspace
+    // version shadows a user-wide one of the same id.
     const named: []const composition.WithRef = &.{ .{ .id = "user-wide" }, .{ .id = "shared" } };
     var comp = try composition.SessionComposition.init(alloc, io, ws_path, roots, .{ .with = named });
     defer comp.deinit(alloc);
@@ -895,7 +889,7 @@ test "cli: activating into the user store from inside a session says so on stder
         defer alloc.free(expected);
         try std.testing.expect(std.mem.indexOf(u8, stderr, expected) != null);
         // What it does NOT say any more, because it is no longer true: activating
-        // composes nothing (DESIGN §5.1). Only `[extensions] with` and `--with`
+        // composes nothing. Only `[extensions] with` and `--with`
         // put a package's prompt in front of a session.
         try std.testing.expect(std.mem.indexOf(u8, stderr, "every future session") == null);
     }
@@ -914,12 +908,11 @@ test "cli: activating into the user store from inside a session says so on stder
 }
 
 test "cli: a system prompt's declared position orders the extension band, and a resume rebuilds the same bytes from the frozen manifests" {
-    // DESIGN §5.6. `position` is package-authored metadata frozen with the rest
-    // of the manifest, so the two paths that build system blocks — fresh
-    // composition at `session new` and frozen composition at resume — have to
-    // agree without either of them recording an order anywhere. Deliberately
-    // adversarial to the old rule (member id order): the package that must come
-    // FIRST is the one that sorts LAST.
+    // `position` is package-authored metadata frozen with the rest of the
+    // manifest, so the two paths that build system blocks — fresh composition at
+    // `session new` and frozen composition at resume — agree without either of
+    // them recording an order anywhere. Deliberately adversarial to the old
+    // rule (member id order): the package that must come FIRST sorts LAST.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1036,8 +1029,8 @@ test "cli: a system prompt's declared position orders the extension band, and a 
 }
 
 test "cli: a workspace store that arrived with a checkout is refused until `ext trust`; one this machine built is trusted by birth" {
-    // DESIGN §9. `.nulya/extensions` is checkout content AND the first store root,
-    // so cloning a repo used to be enough to put its active versions into every
+    // `.nulya/extensions` is checkout content AND the first store root, so
+    // cloning a repo used to be enough to put its active versions into every
     // session composed here. The whole chain, on the real binary:
     //
     //   a store placed WITHOUT any local nulya CLI (== what `git clone` delivers)
@@ -1076,7 +1069,7 @@ test "cli: a workspace store that arrived with a checkout is refused until `ext 
     // Simulate the checkout: a real, valid, ACTIVE version in the workspace store,
     // put there without the CLI ever running — the library build + activate is
     // byte-for-byte what a clone would carry. A data package contributing a system
-    // prompt, the contribution with the widest blast radius (DESIGN §7.5), and one
+    // prompt, the contribution with the widest blast radius, and one
     // that needs no toolchain.
     const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "prompts.demo";
     try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
@@ -1184,7 +1177,7 @@ test "cli: a workspace store that arrived with a checkout is refused until `ext 
     // And now sessions start again. The gate is about the STORE — whether this
     // root may supply versions at all — so it is what stood between the checkout
     // and every session here, named or not. Composing the package is still a
-    // second, separate decision (DESIGN §5.1): a plain session has no member…
+    // second, separate decision: a plain session has no member…
     {
         const ok = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
         defer alloc.free(ok.stdout);
@@ -1233,7 +1226,7 @@ test "cli: a workspace store that arrived with a checkout is refused until `ext 
         try std.testing.expectEqual(@as(u8, 0), activated.code);
 
         // No prompt anywhere in between: the loop that builds and activates its own
-        // capability is the harness working (DESIGN §9).
+        // capability is the harness working.
         const after = try runCli(alloc, io, ws2, &.{ exe_abs, "session", "new", "--profile", "scripted" });
         defer alloc.free(after.stdout);
         try std.testing.expectEqual(@as(u8, 0), after.code);
@@ -1242,11 +1235,11 @@ test "cli: a workspace store that arrived with a checkout is refused until `ext 
 
 test "cli: a build that fails to compile leaves no ghost extension in ext list" {
     // `<id>/.lock` is the writer lease, and `Store.lease` creates `<id>/` to hold
-    // it — before the compile that may still fail. A failed compile deletes its
-    // half-built version but not that directory, so the very first build of an
-    // extension whose source does not compile (routine while an agent is writing
-    // one) leaves a directory containing nothing but the lock. It is a lock
-    // location, not an extension, and `ext list` must not invent one from it.
+    // it before the compile that may still fail. A failed compile deletes its
+    // half-built version but not that directory, so the first build of a
+    // source that does not compile leaves a directory containing nothing but
+    // the lock — a lock location, not an extension, and `ext list` must not
+    // invent one from it.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1713,7 +1706,7 @@ test "bundled handoff: a session that pins ext:handoff/handoff exposes it native
 
     // Built, never activated: `--with` makes it a member of THIS session, and
     // its one tool is `surface: auto`, so membership alone is what puts it on
-    // the model's face (DESIGN §5.1). No pin — a pin would be refused, because
+    // the model's face. No pin — a pin would be refused, because
     // only `manual` tools take one.
     const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", ref });
     defer alloc.free(new.stdout);
@@ -1751,12 +1744,11 @@ test "bundled handoff: a session that pins ext:handoff/handoff exposes it native
 }
 
 test "bundled compact: brief=latest renders the fork's brief from the last ACCEPTED handoff call in the old ledger, and refuses cleanly when there is none" {
-    // The other half of `handoff` no longer writing anything (DESIGN §11): the
-    // brief is the call's arguments, so the tool that carries it reads them out
-    // of the ledger. What is pinned here is which call is taken (the last one
-    // the kernel accepted — a refused brief is not a proposal), that the old
-    // session is left untouched, and that having no handoff at all is an answer
-    // rather than a crash.
+    // The other half of `handoff` no longer writing anything: the brief is the
+    // call's arguments, so the tool that carries it reads them out of the
+    // ledger. Pinned here: which call is taken (the last one the kernel
+    // accepted), that the old session is left untouched, and that having no
+    // handoff at all is an answer rather than a crash.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1825,7 +1817,7 @@ test "bundled compact: brief=latest renders the fork's brief from the last ACCEP
 
     // ④ A handoff call the kernel did NOT accept is not a proposal. The call is
     //    in the ledger like every call is — a gate denial is an ordinary
-    //    `ok=false` result (DESIGN §4) — and forking on it would carry over a
+    // `ok=false` result — and forking on it would carry over a
     //    brief somebody just said no to.
     {
         const denied_id = blk: {
@@ -1910,15 +1902,13 @@ test "bundled compact: brief=latest renders the fork's brief from the last ACCEP
 }
 
 test "bundled ground: render answers a context file carrying this directory's own instructions but not a subdirectory's, and that file composes into a session as a frozen inline prompt" {
-    // `docs/goals/ground.md`. Two things are being pinned, and neither is the
-    // wording of a section. First, WHICH instruction files a rendered context
-    // may carry: root down to cwd, never below. That is the whole region — the
-    // deeper layers are read by the model when the work reaches them, because
-    // delivering them mechanically would mean a second package holding a copy
-    // of this one's policy (goals/ground.md §4). Second, that what `render`
-    // answers is a path a driver
-    // can hand straight to `session new --prompt`, which is the whole of how
-    // this package reaches a session.
+    // Two things are being pinned here. First, WHICH instruction files a
+    // rendered context may carry: root down to cwd, never below — deeper layers
+    // are read by the model when the work reaches them, so delivering them
+    // mechanically would mean a second package holding a copy of this one's
+    // policy. Second, that what `render` answers is a path a driver can hand
+    // straight to `session new --prompt`, which is the whole of how this
+    // package reaches a session.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1970,9 +1960,9 @@ test "bundled ground: render answers a context file carrying this directory's ow
     }
 
     // …and the answer is a path `session new` takes, landing in the frozen
-    // header as an inline prompt whose `source` is the file's stem (DESIGN
-    // §5.6) — which this package names after itself, so a session says who put
-    // the block there.
+    // header as an inline prompt whose `source` is the file's stem — which
+    // this package names after itself, so a session says who put the block
+    // there.
     const created = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--prompt", written_at });
     defer alloc.free(created.stdout);
     try std.testing.expectEqual(@as(u8, 0), created.code);
@@ -2466,7 +2456,7 @@ fn writeSkillDraft(
     try ws.writeFile(io, .{ .sub_path = skill_rel, .data = skill_md });
 }
 
-// ── M5b: per-step usage on the assistant event (DESIGN §3.1) ────────────────
+// ── M5b: per-step usage on the assistant event ────────────────
 
 /// A script entry, PowerShell and POSIX sh: drain stdin, print one line. Its
 /// stdout IS the result, so the tests below assert on that exact sentence.
@@ -2555,7 +2545,7 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> pinn
     defer alloc.free(version);
     // Built but not active: `<id>` has nothing to run, `<id>@<version>` runs
     // exactly that frozen version — the CLI path a `--with greeter@<v>` session
-    // takes (DESIGN §14).
+    // takes.
     {
         const bare = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", "greeter", "greet", "{}" });
         defer alloc.free(bare.stdout);
@@ -2661,7 +2651,7 @@ test "manifest surface: the frozen version keeps what the draft declared, and an
     try std.testing.expectEqual(manifest_mod.Surface.manual, frozen.tools[1].surfaceOf());
     try std.testing.expectEqual(manifest_mod.Surface.internal, frozen.tools[2].surfaceOf());
     // Silence survives as silence in the FILE — the kernel writes nothing in —
-    // while the reading of it is `auto` (DESIGN §7.2.1).
+    // while the reading of it is `auto`.
     try std.testing.expect(frozen.tools[3].surface == null);
     try std.testing.expectEqual(manifest_mod.Surface.auto, frozen.tools[3].surfaceOf());
     // And the kernel acts on it: only the `manual` tool takes a pin, while
@@ -2926,7 +2916,7 @@ test "bundled plan and ask: propose, todo and ask record without writing anythin
     //    session's permission stance was" stays answerable afterwards), and
     //    `propose` / `todo` are on the model's face because they are
     //    `surface: auto` and this session is a member — while `approve`, which
-    //    is `internal`, is not (DESIGN §5.1).
+    // is `internal`, is not.
     const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", plan_ref });
     defer alloc.free(new.stdout);
     try std.testing.expectEqual(@as(u8, 0), new.code);
@@ -2952,7 +2942,7 @@ test "bundled plan and ask: propose, todo and ask record without writing anythin
 
         // `shell` plus the two `surface: auto` tools. `approve` is `internal`
         // and stays off the face however the package is composed — that is the
-        // whole of the second axis (DESIGN §5.1).
+        // whole of the second axis.
         try std.testing.expectEqual(@as(usize, 3), sess.composition.tools.tools.len);
         try std.testing.expect(sess.composition.tools.lookup("propose") != null);
         try std.testing.expect(sess.composition.tools.lookup("todo") != null);

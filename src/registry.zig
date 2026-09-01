@@ -1,9 +1,9 @@
 //! The tool registry.
 //!
-//! In the immutable kernel there is exactly ONE builtin tool: shell (DESIGN §6).
+//! In the immutable kernel there is exactly ONE builtin tool: shell.
 //! Everything else the AI grows as an extension: selected tools are exposed
 //! natively this session through `SessionComposition` pins, and every other
-//! extension capability is invoked through `nulya ext run` (DESIGN §5, §7).
+//! extension capability is invoked through `nulya ext run`.
 //! A session receives a frozen `ToolSetSnapshot` through `SessionComposition`;
 //! execution never queries a live registry mid-step.
 
@@ -16,7 +16,7 @@ const builtins = [_]tool.Tool{
 };
 
 /// Permanent model-facing tool slots (shell). The tool budget always reserves
-/// these before any extension tool is promoted (DESIGN §6).
+/// these before any extension tool is promoted.
 pub const builtin_count: usize = builtins.len;
 
 /// A snapshot rejects two ways of colliding. Both are logical-identity clashes,
@@ -95,7 +95,7 @@ test "snapshot freezes builtin table for lookup" {
     try std.testing.expectEqual(@as(usize, 1), snap.tools.len);
     try std.testing.expect(snap.lookup("shell") != null);
     // `edit` is not a builtin: it is a tool of the bundled `std` extension and
-    // arrives, if at all, as a pinned extra (DESIGN §6, §7.8).
+    // arrives, if at all, as a pinned extra.
     try std.testing.expect(snap.lookup("edit") == null);
     try std.testing.expect(snap.lookup("nope") == null);
 }

@@ -1,21 +1,16 @@
-//! A session's frozen header — the first line of its ledger file (DESIGN §3.4).
+//! A session's frozen header — the first line of its ledger file.
 //!
 //! Two readers in this package need it: which persona a session is wearing
 //! (`defs.wornPersona`) and what model the parent runs on
-//! (`main.parentIdentity`). There was a third — the read-only allow-list a
-//! delegation's gate answered from — until the kernel started putting each
-//! tool's frozen `readonly` claim on the gate request itself (DESIGN §4), which
-//! is the same fact from the place that owns it. One implementation, because
-//! the interesting part is a NUMBER and it must not be guessed twice:
+//! (`main.parentIdentity`). One implementation, because the interesting part is a
+//! NUMBER that must not be guessed twice:
 //!
-//! Since `session new --prompt` freezes per-session system prompts into the
-//! header by value (DESIGN §5.6), a header line is as long as the text a person
-//! wrote — the kernel caps a system prompt at 2 MB. A fixed stack buffer smaller
-//! than that does not truncate: `Reader.takeDelimiter` returns
-//! `error.StreamTooLong` and reads NOTHING, so a caller that treats an error as
-//! "no header" silently loses the whole answer. That is what makes it dangerous
-//! — a slightly longer persona turns a working delegation into one whose every
-//! tool call is refused, with nothing in any log to say why.
+//! `session new --prompt` freezes per-session system prompts into the header BY
+//! VALUE, so a header line is as long as the text a person wrote — the kernel
+//! caps a system prompt at 2 MB. A fixed buffer smaller than that does not
+//! truncate: `Reader.takeDelimiter` returns `error.StreamTooLong` and reads
+//! NOTHING, so a caller treating an error as "no header" silently loses the whole
+//! answer.
 
 const std = @import("std");
 

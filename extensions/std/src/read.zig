@@ -1,19 +1,18 @@
 //! `read` — a text file, verbatim and self-paginating, with the freshness
-//! short-circuit. Port of tcode `fs/read.rs` minus images. Every number and
-//! every sentence the model sees is tcode's unless a comment says otherwise;
+//! short-circuit. Port of tcode `fs/read.rs` minus images;
 //! `{path, offset?, limit?, force?}`.
 //!
-//! Order of checks, as there: stat first (a huge file is refused before it is
-//! loaded), directory / too large / binary, then the window, then freshness.
-//! The output is capped below the host's own budget so its footer
-//! (`continue with offset=…`) always survives.
+//! Order of checks: stat first (a huge file is refused before it is loaded),
+//! directory / too large / binary, then the window, then freshness. The
+//! output is capped below the host's own budget so its footer (`continue
+//! with offset=…`) always survives.
 //!
-//! A missing file is an ANSWER, not a refusal (docs/goals/std.md "existence
-//! answers"): the caller named the wrong path, and `notFoundHelp`'s listing of
-//! the parent directory is exactly the correction a model needs — the same
-//! genre as `grep`'s "no matches". A directory in place of a file, a file too
-//! large or binary, and a bad argument are still refusals: those are shape
-//! mismatches or malfunctions, not "nothing there".
+//! A missing file is an ANSWER, not a refusal: the caller named the wrong
+//! path, and `notFoundHelp`'s listing of the parent directory is exactly the
+//! correction a model needs — the same genre as `grep`'s "no matches". A
+//! directory in place of a file, a file too large or binary, and a bad
+//! argument are still refusals: those are shape mismatches or malfunctions,
+//! not "nothing there".
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
@@ -32,8 +31,8 @@ pub const min_window: usize = 120;
 pub const max_file_bytes: u64 = 10 * 1024 * 1024;
 /// Cap on the bytes a single read emits, independent of the line count.
 /// tcode fs/mod.rs MAX_READ_OUTPUT_BYTES is 128 KB; this is 8 KB under the
-/// host's per-result budget (docs/goals/std.md D5) so the host never truncates
-/// a read and its footer stays where the model can see it.
+/// host's per-result budget so the host never truncates a read and its
+/// footer stays where the model can see it.
 pub const max_output_bytes: usize = 120 * 1024;
 /// A NUL in the first 8 KB means binary. tcode fs/read.rs.
 const binary_probe_bytes: usize = 8192;

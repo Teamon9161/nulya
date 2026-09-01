@@ -1,7 +1,6 @@
-//! `nulya skill list|load` (DESIGN §14): the skill catalog contributed by the
-//! extensions active across the store roots, and the frozen `SKILL.md` behind a
-//! frozen ref. Both are shell-level reads — the model reaches them through
-//! `shell`, and neither is a model-facing tool.
+//! `nulya skill list|load`: the skill catalog contributed by the extensions
+//! active across the store roots, and the frozen `SKILL.md` behind a frozen
+//! ref. Both are shell-level reads; neither is a model-facing tool.
 
 const std = @import("std");
 const ext_skills = @import("../extension/skills.zig");

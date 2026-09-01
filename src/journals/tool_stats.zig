@@ -1,48 +1,28 @@
 //! Durable, append-only journal of completed tool-call facts.
 //!
-//! Stats are an OBSERVATION after tool execution, never an executor concern:
-//! the loop runs, the ledger records the factual batch, and `AgentSession`
-//! resolves each model-facing call name to its stable `ToolDefinition.id` and
-//! appends one `UseEvent` line per completed call. The journal persists raw
-//! facts only; ranking, recency windows, and promotion policy are derived later
-//! from `aggregate` (or by a policy reading `readAll` itself), never stored.
+//! Recorded as an observation after execution: the loop runs, the ledger
+//! records the batch, and `AgentSession` resolves each model-facing call name
+//! to its stable `ToolDefinition.id` and appends one `UseEvent` line. Ranking,
+//! recency, and promotion policy are derived later from `aggregate` or
+//! `readAll`, never stored here.
 //!
-//! Format: one JSON object per line in `<workspace>/.nulya/tool-usage.jsonl`:
-//!
+//! One JSON object per line in `<workspace>/.nulya/tool-usage.jsonl`:
 //!   {"v":1,"at":"2026-08-17T09:31:07Z","session":"s-1786-3f",
 //!    "tool_id":"ext:web.search/web_search","version":"v-3f9c…","ok":true,
 //!    "duration_ms":812}
 //!
-//! `v` is the journal schema version; a future format change bumps it so old
-//! journals fail with a precise error instead of garbage. `tool_id` is the
-//! durable identity (`ext:<id>/<tool>`, `builtin.shell`, ...), never the
-//! model-facing name, so stats accumulate across implementation versions.
+//! `v` is the schema version; a bump fails old journals with a precise error
+//! instead of misreading them. `tool_id` is the durable identity, never the
+//! model-facing name, so history accumulates across implementation versions
+//! while `version` (below) records which one served a given call. Every
+//! column beyond `tool_id`/`ok` is optional both ways: absent on read means
+//! "not recorded" (never a zero), and a writer may genuinely have nothing to
+//! say for one.
 //!
-//! The four columns beside them are what turns a bag of calls into evidence a
-//! slow loop can reason with: `at` puts a call on a timeline, `session` joins it
-//! to `session-outcomes.jsonl` (did the session this call served succeed?),
-//! `duration_ms` is the cost dimension `ok` alone cannot express — a tool that
-//! works but takes a minute is a different fact from one that works — and
-//! `version` is WHICH FROZEN IMPLEMENTATION served this call, the second half of
-//! the two-identity rule: `tool_id` stays version-free so a tool's history is
-//! one history, and `version` sits beside it so that history can also be read
-//! per implementation (did the last rebuild make it worse?). Evidence is
-//! append-only and cannot be backfilled: a call not recorded with its version
-//! is unknown forever, which is why the column is written today even though
-//! nothing in the kernel reads it yet. All four are OPTIONAL on read and stay
-//! `v:1`: every line written before they existed reads back with them null,
-//! which is "not recorded", never a zero. `session`, `duration_ms` and
-//! `version` are also genuinely absent for live writers — an in-memory session
-//! has no id, `nulya ext run` measures nothing, and `builtin.shell` has no
-//! implementation version at all (it is the kernel).
-//!
-//! Only complete events count: an append interrupted by cancel or crash can
-//! leave a partial final line; the next append first drops that tail back to
-//! the last `\n` so it can never be glued onto a later event into a permanently
-//! malformed middle line, and a read skips it (that file discipline — plus the
-//! per-journal writer lease that serializes concurrent appenders — is
-//! `journal.zig`, shared with the outcome journal). The reader stays strict
-//! about COMPLETE lines: a malformed one is an explicit error.
+//! An append interrupted by cancel or crash can leave a partial final line;
+//! the next append drops that tail back to the last `\n` (shared discipline
+//! with the outcome journal, `journal.zig`) before writing, and a read skips
+//! it. A malformed COMPLETE line is an explicit error.
 
 const std = @import("std");
 const journal = @import("journal.zig");

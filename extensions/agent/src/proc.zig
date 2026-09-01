@@ -1,11 +1,9 @@
 //! Running `nulya` as a child process, and reading what it said.
 //!
-//! Every tool in this package talks to the kernel the same way: spawn the
-//! binary that spawned us (`NULYA_EXE`, DESIGN §7.6), capture both streams,
-//! read the exit code. It lives here rather than in `main.zig` because the
-//! runner layer (`runners.zig`) makes the same calls — a delegation is started
-//! by the `agent` tool and driven by the `run` tool, in two processes, and
-//! "how do we call nulya" must be one answer for both.
+//! Every tool in this package talks to the kernel the same way: spawn the binary
+//! that spawned us (`NULYA_EXE`), capture both streams, read the exit code. A
+//! delegation is started by the `agent` tool and driven by the `run` tool, in
+//! two processes, so "how do we call nulya" must be one answer for both.
 
 const std = @import("std");
 
@@ -13,9 +11,9 @@ const max_child_output: usize = 4 << 20;
 
 pub const Run = struct { code: u8, stdout: []u8, stderr: []u8 };
 
-/// One `nulya <args…>` invocation, in this process's working directory — which
-/// is the workspace, because that is where the host spawns an extension
-/// (DESIGN §7.6). Output is captured, never inherited: stdout here is data.
+/// One `nulya <args…>` invocation, in this process's working directory — which is
+/// the workspace, because that is where the host spawns an extension. Output is
+/// captured, never inherited: stdout here is data.
 pub fn run(alloc: std.mem.Allocator, io: std.Io, argv: []const []const u8) !Run {
     const result = try std.process.run(alloc, io, .{
         .argv = argv,
@@ -53,11 +51,10 @@ pub fn firstLine(text: []const u8) []const u8 {
 
 /// `agent@<version>` for the version running right now.
 ///
-/// A frozen extension binary lives at `<root>/<id>/versions/<v>/bin/<id>`, so
-/// the version is two directories up from this executable. Named rather than
-/// left to `current`: this package is deliberately never activated (it is
-/// brought into a session with `--with`), so there is no `current` to fall back
-/// on — the same reason `/compact` names its version.
+/// A frozen extension binary lives at `<root>/<id>/versions/<v>/bin/<id>`, so the
+/// version is two directories up from this executable. Named rather than left to
+/// `current`: this package is never activated — it is brought into a session with
+/// `--with` — so there is no `current` to fall back on.
 pub fn selfRef(alloc: std.mem.Allocator, io: std.Io) ![]const u8 {
     const exe = std.process.executablePathAlloc(io, alloc) catch return "agent";
     const bin_dir = std.fs.path.dirname(exe) orelse return "agent";
@@ -70,24 +67,19 @@ pub fn selfRef(alloc: std.mem.Allocator, io: std.Io) ![]const u8 {
 /// Start the background task that drives one delegation.
 ///
 /// It belongs to the PARENT, so its `task_finished` is deposited into the
-/// parent's inbox when it ends (DESIGN §6.1) — the loop every driver already
-/// runs. Each round simply gets a new `t<N>`: nothing is reused, nothing is
-/// resumed, and two reports are two events in the parent's ledger.
+/// parent's inbox when it ends. Each round gets a new `t<N>`: nothing is reused,
+/// nothing is resumed, and two reports are two events in the parent's ledger.
 ///
-/// **Two arguments, and that is the whole command.** Everything else about a
+/// TWO ARGUMENTS, and that is the whole command. Everything else about a
 /// delegation — which harness, which remote conversation, what it may do, how
-/// many steps a round may take — is in its RECORD, and `runner.run` reads it
-/// from there (contract D2/D7). Copying those facts onto a command line made
-/// the record advisory (a hand-written `--arg permissions=unsafe` drove a
-/// delegation frozen at `readonly`) and it made the remote handle — which an
-/// external runner may return as ANY string (`external.zig`) — a substring of a
-/// shell command. Both of those stop being possible when the command carries
-/// only a name.
+/// many steps a round may take — is in its RECORD, which `runner.run` reads.
+/// Copying those facts onto a command line would make the record advisory, and
+/// would put the remote handle — which an external runner may return as ANY
+/// string — inside a shell command.
 ///
-/// `depth` is the exception and stays an argument: it is a fact about this
-/// CHAIN of delegations, not about the one being driven, and the same
-/// delegation driven from two depths is two different answers to "is this a
-/// cycle" (`main.max_depth`).
+/// `depth` is the exception and stays an argument: it is a fact about this CHAIN
+/// of delegations, not about the one being driven, and the same delegation driven
+/// from two depths is two different answers to "is this a cycle".
 pub fn startDelegationTask(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -98,8 +90,8 @@ pub fn startDelegationTask(
     depth: u32,
 ) !Run {
     // Quoted: the executable path may contain spaces, and the command is handed
-    // to a shell by the supervisor (`environment.shellArgv`). Nothing else in
-    // it can carry one — a delegation id is `d-<hex>` and a depth is a number.
+    // to a shell by the supervisor. Nothing else in it can carry one — a
+    // delegation id is `d-<hex>` and a depth is a number.
     const cmd = try std.fmt.allocPrint(
         alloc,
         "\"{s}\" ext run {s} run --arg delegation={s} --arg depth={d}",

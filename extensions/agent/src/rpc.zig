@@ -1,20 +1,18 @@
-//! The wire half of `agent`: this call's arguments in on stdin, its answer out
-//! on stdout, and the vocabulary the four tools answer in.
+//! The wire half of `agent`: this call's arguments in on stdin, its answer out on
+//! stdout, and the vocabulary the four tools answer in.
 //!
-//! The wire is `plain` (DESIGN §7.3, contract at the top of
-//! `src/extension/protocol.zig`): stdin is the arguments as one JSON object, the
-//! tool's name is `NULYA_TOOL` in the environment, and there is no envelope to
-//! read or write. Lifted from `extensions/std/src/rpc.zig`, which is the same
-//! contract — several tools in one binary dispatched on that name.
+//! The contract is at the top of `src/extension/protocol.zig`: stdin is the
+//! arguments as one JSON object, the tool's name is `NULYA_TOOL` in the
+//! environment, and there is no envelope to read or write.
 //!
-//! Two shapes of answer, on purpose:
+//! Two shapes of answer:
 //!   - `text`   → stdout, verbatim, exit 0. `agent`'s receipt and `run`'s report
 //!                reach the model as the sentences they are; `render` and `list`
-//!                print JSON, which a DRIVER parses — one wire carries both,
-//!                because stdout is just bytes.
+//!                print JSON a DRIVER parses. One wire carries both, because
+//!                stdout is just bytes.
 //!   - `failed` → stderr, then exit 1. The host folds it into a failed tool
-//!                result (`ok=false`) whose text is `exit 1` and that message, so
-//!                the message IS the teaching text.
+//!                result whose text is `exit 1` and that message, so the message
+//!                IS the teaching text.
 
 const std = @import("std");
 
@@ -62,7 +60,7 @@ pub fn readArguments(alloc: std.mem.Allocator, io: std.Io) !std.json.ObjectMap {
 pub fn answer(io: std.Io, outcome: Outcome) !noreturn {
     switch (outcome) {
         // Verbatim: no trailing newline is added, because these bytes ARE the
-        // result — a driver parsing `render`'s JSON gets exactly what was built.
+        // result.
         .text => |text| {
             try std.Io.File.stdout().writeStreamingAll(io, text);
             std.process.exit(0);
@@ -89,9 +87,9 @@ pub fn trimmedField(obj: std.json.ObjectMap, key: []const u8) []const u8 {
     return std.mem.trim(u8, raw, " \t\r\n");
 }
 
-/// A boolean argument that may also arrive as the STRING `"true"` — `ext run
-/// --arg k=v` has no types, and this tool is called that way by a background
-/// task as well as by a model.
+/// A boolean argument that may also arrive as the STRING `"true"`: `ext run --arg
+/// k=v` has no types, and this tool is called that way by a background task as
+/// well as by a model.
 pub fn boolField(obj: std.json.ObjectMap, key: []const u8) bool {
     return switch (obj.get(key) orelse return false) {
         .bool => |b| b,

@@ -1,12 +1,10 @@
-//! `nulya session list` (DESIGN §14): a READ-ONLY projection of
-//! `.nulya/sessions/` — what was composed, what it cost, how it turned out. It
-//! decides nothing and writes nothing, the same standing as `config show`.
+//! `nulya session list`: a READ-ONLY projection of `.nulya/sessions/` — what
+//! was composed, what it cost, how it turned out. It decides nothing and writes
+//! nothing.
 //!
-//! Its own file because it is a reader, not a verb: the rest of `session.zig`
-//! drives one session (deposit, step, cancel), while everything here walks every
-//! session file at once and joins it with the outcome journal and the store
-//! roots. Its first consumers are the evolution skill (which needs many sessions
-//! without reading every ledger) and the TUI's `/sessions`.
+//! A reader, not a verb: the rest of `session.zig` drives one session, while
+//! everything here walks every session file at once and joins it with the
+//! outcome journal and the store roots.
 
 const std = @import("std");
 const roots_mod = @import("../extension/roots.zig");
@@ -30,20 +28,18 @@ const SessionView = struct {
     model: []const u8,
     provider: []const u8,
     model_id: []const u8,
-    /// Which binary created it (DESIGN §3.4). Empty for a pre-stamp session.
+    /// Which binary created it. Empty for a pre-stamp session.
     nulya: ledger.Stamp,
-    /// Where its `shell` commands run (DESIGN §8). Empty = this host, which is
-    /// almost every session — so the human table only spends a column on it when
-    /// there is something to say.
+    /// Where its `shell` commands run. Empty = this host, which is almost every
+    /// session, so the human table only spends a column on it when there is
+    /// something to say.
     environment: []const u8,
     /// The workspace on that machine, when `environment` names a remote one.
-    /// Projected beside it because the two are one answer: which machine, and
-    /// which directory on it.
     remote_workspace: []const u8,
     events: usize,
     composition: Composition,
-    /// Sum of every assistant event's recorded usage (DESIGN §3.1). Steps whose
-    /// provider reported nothing contribute nothing.
+    /// Sum of every assistant event's recorded usage. Steps whose provider
+    /// reported nothing contribute nothing.
     usage: ledger.Usage,
     /// The same sum over every listed session sharing this `root`: what the whole
     /// episode cost, which is the number a compacted task actually spent.
@@ -57,14 +53,11 @@ const SessionView = struct {
         active: []const []const u8,
         native_tools: []const []const u8,
         /// Every system prompt those frozen versions contribute, as
-        /// `<id>@<version>/<path>` (DESIGN §7.5). A package that rewrites the
-        /// system blocks of every session it is in should be readable from the
-        /// listing, not only from the manifest.
+        /// `<id>@<version>/<path>`.
         system_prompts: []const []const u8,
-        /// The per-session prompts frozen into the header by `--prompt`
-        /// (DESIGN §3, §5) — their labels and sizes only. A listing says WHICH
-        /// session is which; the text itself is the session's own content, and
-        /// `nulya session events` is where content is read.
+        /// The per-session prompts frozen into the header by `--prompt` — their
+        /// labels and sizes only. The text itself is session content, which
+        /// `nulya session events` is for.
         prompts: []const InlinePromptView,
     };
 
@@ -77,7 +70,7 @@ const SessionView = struct {
         verdict: []const u8,
         note: ?[]const u8,
         at: []const u8,
-        /// `human` or `agent` (DESIGN §3.3) — an agent's verdict is a claim.
+        /// `human` or `agent` — an agent's verdict is a claim, not ground truth.
         source: []const u8,
         /// The session whose shell wrote it; equal to `id` means a self-grade.
         by: ?[]const u8,
@@ -98,9 +91,8 @@ pub fn sessionList(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
 
     const outcomes = try outcome.readAll(a, io, cwd_path);
 
-    // The store roots are opened once for the whole listing: a session's frozen
-    // `active` versions are content-addressed, so their manifests are read here
-    // only to say what they contribute (best effort — see `PromptIndex`).
+    // Opened once for the whole listing; frozen versions are content-addressed,
+    // so one manifest read answers for every session naming it.
     var search = RootSearch.open(a, io, cwd_path) catch null;
     defer if (search) |*s| s.deinit(a);
     var prompts: PromptIndex = .{ .roots = if (search) |*s| &s.roots else null, .cache = .init(a) };
@@ -126,9 +118,9 @@ pub fn sessionList(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
         try views.append(a, view);
     }
 
-    // Sessions fork (`session new --parent`, DESIGN §11), so one task can span
-    // several files; the episode is joined HERE, in the projection, and nowhere
-    // else — an outcome stays recorded against the id it was given.
+    // Sessions fork (`session new --parent`), so one task can span several
+    // files; the episode is joined HERE, in the projection, and nowhere else —
+    // an outcome stays recorded against the id it was given.
     try resolveEpisodes(a, views.items);
 
     // Newest first. `created` is the fact to sort on; sessions written before it
@@ -171,14 +163,13 @@ fn readSessionView(
             continue;
         }
         events += 1;
-        // Only lines that MAY carry what this view needs are parsed; the rest are
-        // just counted, so listing does not cost a full decode of every ledger.
-        // The substring tests are a pre-filter, never the decision: what counts
-        // is the decoded line's own `kind` / `usage`.
+        // Only lines that MAY carry what this view needs are parsed, so listing
+        // does not cost a full decode of every ledger. The substring tests are a
+        // pre-filter, never the decision: what counts is the decoded line.
         const may_have_usage = std.mem.indexOf(u8, line, "\"usage\":") != null;
         const may_be_first_text = first_user_text.len == 0 and std.mem.indexOf(u8, line, "\"kind\":\"user_text\"") != null;
-        // A session may have changed model since its header was written, and
-        // "what does this session run on" means the one in force (§9.5).
+        // A session may have changed model since its header was written;
+        // "what does this session run on" means the one in force.
         const may_be_rebind = std.mem.indexOf(u8, line, "\"kind\":\"model_rebind\"") != null;
         if (!may_have_usage and !may_be_first_text and !may_be_rebind) continue;
         const parsed = ledger.parseEventLine(a, line) catch continue;
@@ -207,8 +198,8 @@ fn readSessionView(
         // The episode is resolved once the whole listing is known; until then a
         // session is its own root, which is also the final answer for most.
         .root = id,
-        // The identity in force, which is the header's until a rebind said
-        // otherwise — the same question `session step` asks (§9.5).
+        // The identity in force: the header's until a rebind said otherwise —
+        // the same question `session step` asks.
         .model = if (rebound) |r| r.profile else h.model,
         .provider = if (rebound) |r| r.identity.provider else h.model_identity.provider,
         .model_id = if (rebound) |r| r.identity.model else h.model_identity.model,
@@ -235,9 +226,9 @@ fn readSessionView(
     };
 }
 
-/// Which system prompts a frozen `id@version` contributes (DESIGN §7.5), read
-/// from its manifest and memoized by `id@version` — versions are
-/// content-addressed, so one read answers for every session pinning it.
+/// Which system prompts a frozen `id@version` contributes, read from its
+/// manifest and memoized by `id@version` — versions are content-addressed, so
+/// one read answers for every session pinning it.
 ///
 /// Best effort throughout: a version this machine no longer holds (built in
 /// another checkout, deactivated and pruned) contributes nothing rather than
@@ -261,9 +252,8 @@ const PromptIndex = struct {
         if (gop.found_existing) return gop.value_ptr.*;
         gop.value_ptr.* = &.{};
 
-        // `.structural`: a read-only projection of what a frozen version
-        // declares. "Cannot read it" already means "not listed" here (best
-        // effort), and nothing in a listing runs.
+        // `.structural`: nothing in a listing runs, so a version whose bytes
+        // cannot be verified still contributes its declaration.
         const resolved = roots.resolveVersion(a, ref.id, ref.version, .structural) catch return gop.value_ptr.*;
         defer resolved.deinit(a);
         const paths = try a.alloc([]const u8, resolved.manifest.system_prompts.len);
@@ -278,13 +268,11 @@ const PromptIndex = struct {
 };
 
 /// Fill in each view's `root` (the oldest listed ancestor through `parent`) and
-/// `episode_usage` (that episode's total). Sessions fork for compaction and
-/// handoff, so the cost of a task is spread over a chain of files; joining them
-/// is a projection, never a change to what any journal recorded.
+/// `episode_usage` (that episode's total). Joining them is a projection, never
+/// a change to what any journal recorded.
 ///
-/// A parent that is not in the listing (another workspace, a deleted file) makes
-/// its child the root of its own episode: a listing must not fail because a file
-/// it cannot see is gone.
+/// A parent that is not in the listing (another workspace, a deleted file)
+/// makes its child the root of its own episode.
 fn resolveEpisodes(a: std.mem.Allocator, views: []SessionView) !void {
     var index: std.StringHashMap(usize) = .init(a);
     defer index.deinit();
@@ -345,8 +333,8 @@ fn printSessionList(alloc: std.mem.Allocator, io: std.Io, views: []const Session
                 v.usage.output_tokens,
                 if (v.outcome) |o| o.verdict else "-",
             });
-            // Who judged belongs next to the verdict: a session that graded
-            // itself must not read like someone else's assessment of it.
+            // A session that graded itself must not read like someone else's
+            // assessment of it.
             if (v.outcome) |o| {
                 if (o.source.len != 0 and !std.mem.eql(u8, o.source, "human")) {
                     const self_graded = if (o.by) |b| std.mem.eql(u8, b, v.id) else false;
@@ -364,8 +352,7 @@ fn printSessionList(alloc: std.mem.Allocator, io: std.Io, views: []const Session
                 }
                 try out.writer.writeAll("]");
             }
-            // Same rule as `root`: a session that runs where everything else
-            // does has nothing to say here, so it spends no width saying it.
+            // Same rule as `root`: nothing to say costs no width.
             if (v.environment.len != 0) try out.writer.print("  env {s}", .{v.environment});
             if (v.nulya.version.len != 0) try out.writer.print("  nulya {s}", .{v.nulya.version});
             if (v.first_user_text.len != 0) try out.writer.print("  {s}", .{v.first_user_text});

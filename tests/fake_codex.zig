@@ -133,7 +133,7 @@ const State = struct {
     }
 
     /// Both `thread/start` and `thread/resume` report the sandbox they applied —
-    /// which is exactly what the read-only ceiling is checked against (D10).
+    /// which is exactly what the read-only ceiling is checked against.
     fn openThread(self: *State, id: ?i64, thread: []const u8) !void {
         return self.reply(id, try std.fmt.allocPrint(
             self.alloc,

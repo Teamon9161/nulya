@@ -1,8 +1,9 @@
-//! Provider-independent prompt projection (DESIGN §1, §13).
+//! Provider-independent prompt projection: `Ledger` events -> `PromptIR`.
 //!
-//! The cache invariant is not about complete provider HTTP request bytes. The
-//! kernel owns a stable logical projection first; providers serialize this IR
-//! into their own cache mechanism.
+//! The cache invariant lives here, not in provider HTTP bytes: appending to the
+//! ledger must only EXTEND the projection, never rewrite an earlier turn
+//! (`isStablePrefix` is that invariant in testable form). Providers serialize
+//! this IR into their own cache mechanism.
 
 const std = @import("std");
 const ledger = @import("ledger.zig");
@@ -12,12 +13,11 @@ const ledger = @import("ledger.zig");
 /// always consumable.
 pub const max_system_prompt_bytes: usize = 2 * 1024 * 1024;
 
-/// One tool call as a provider may be sent it. Same three fields the ledger
-/// records (`ledger.ToolCall`), and every one of them borrowed from it — but a
-/// type of its own, because the two answer different questions: the ledger holds
-/// what the model EMITTED, this holds what may be REPLAYED. They differ exactly
-/// when a reply ran out of `max_tokens` mid-call, where `args_json` on the line
-/// is a torn JSON prefix and the projection substitutes `{}` (DESIGN §4).
+/// One tool call as a provider may be sent it. Same three fields as
+/// `ledger.ToolCall` and borrowed from it, but a distinct type: the ledger holds
+/// what the model EMITTED, this holds what may be REPLAYED. They differ when a
+/// reply ran out of `max_tokens` mid-call, where the ledger's `args_json` is a
+/// torn JSON prefix and the projection substitutes `{}`.
 pub const ToolCall = struct {
     id: []const u8,
     tool: []const u8,
@@ -26,8 +26,8 @@ pub const ToolCall = struct {
 };
 
 /// One tool result as a provider may be sent it: the ledger entry minus
-/// `spill_path`, which is where the kernel parked overflowing bytes and is no
-/// more model-visible than `usage` is. Borrowed from the ledger entry.
+/// `spill_path` (where the kernel parked overflowing bytes — not model-visible).
+/// Borrowed from the ledger entry.
 pub const ToolResult = struct {
     call_id: []const u8,
     ok: bool,
@@ -35,52 +35,38 @@ pub const ToolResult = struct {
 };
 
 /// One projected ledger event: the MODEL-VISIBLE subset of `ledger.Event`, with
-/// the turn kept whole. Every wire we speak needs turn-level structure — an
-/// assistant message carries its text and its calls together, a batch of results
-/// is one user turn — so flattening a turn into stringly blocks would only mean
-/// each provider re-deriving the boundaries it was just handed.
+/// the turn kept whole (every wire needs turn-level structure: an assistant
+/// message carries its text and calls together, a batch of results is one turn).
 ///
-/// What is NOT here is as load-bearing as what is: `assistant.usage`,
-/// `assistant.stop_reason`, a result's `spill_path` and an event's inbox
-/// `origin` are FACTS about the conversation, not text the model reads (DESIGN
-/// §3.1, §3.4). They have no field in this type, so "not projected" is a fact of
-/// the type rather than a rule someone has to keep following.
+/// `assistant.usage`, `assistant.stop_reason`, a result's `spill_path` and an
+/// event's inbox `origin` have no field in this type: "not projected" is a
+/// property of the type rather than a rule someone has to keep following.
 pub const Turn = union(enum) {
     user_text: UserText,
     assistant: Assistant,
-    /// One batch = one turn (DESIGN §0.2, §4); the provider decides how many
-    /// wire messages that is.
+    /// One batch = one turn; the provider decides how many wire messages that is.
     tool_results: []const ToolResult,
-    /// The model-facing announcement text only (DESIGN §5.3): a note's `id` /
-    /// `version` are reconciliation bookkeeping, never model-visible. Just
-    /// another appended turn, so it extends the stable prefix — the cache keeps
-    /// hitting.
+    /// The model-facing announcement text only: a note's `id` / `version` are
+    /// reconciliation bookkeeping, never model-visible.
     capability_note: []const u8,
-    /// The report a finished background task left behind — its text only
-    /// (DESIGN §3.1). The task's full name and its exit code are structured
-    /// facts for readers, never model-visible on their own: everything the model
-    /// needs to read is already IN the text, which the supervisor renders with
-    /// its own delimiters. Another appended turn, so it extends the stable
-    /// prefix like any other.
+    /// The report a finished background task left behind — its text only. The
+    /// task's full name and exit code are structured facts for readers; what the
+    /// model needs is already inside the text the supervisor rendered.
     task_finished: []const u8,
 
-    /// A user turn's model-visible content: its text and the images inlined
-    /// with it. Unlike `ToolCall` / `ToolResult`, this is not a narrowing of
-    /// what the ledger holds — every field of `ledger.UserText` is model-visible
-    /// — so the images are the LEDGER's slice, borrowed whole. Nothing to copy
-    /// means no per-projection storage for them, the way `calls` needs.
+    /// A user turn's model-visible content. Every field of `ledger.UserText` is
+    /// model-visible, so the images are the LEDGER's slice borrowed whole —
+    /// nothing to copy, hence no per-projection storage the way `calls` needs.
     pub const UserText = struct {
         text: []const u8,
         images: []const ledger.Image = &.{},
     };
 
     pub const Assistant = struct {
-        /// The turn's opaque provider reasoning items (`ledger.Event.assistant
-        /// .reasoning`, verbatim: a JSON array as text), or `""` when there were
-        /// none. A field of the turn rather than a block of its own — it belongs
-        /// to this assistant turn and to no other — and only providers that
-        /// declare `thinking_replay` serialize it, always ahead of the turn's
-        /// text and calls. The kernel never reads inside.
+        /// The turn's opaque provider reasoning items (verbatim: a JSON array as
+        /// text), or `""` when there were none. Only providers that declare
+        /// `thinking_replay` serialize it, always ahead of the turn's text and
+        /// calls. The kernel never reads inside.
         reasoning: []const u8,
         text: []const u8,
         calls: []const ToolCall,
@@ -106,15 +92,12 @@ pub const SystemPromptSnapshot = struct {
 
 pub const PromptIR = struct {
     system_blocks: []const SystemBlock,
-    /// One entry per ledger event, in order. Every string BORROWS from the
-    /// ledger's events — which are append-only and never freed or moved until
-    /// the ledger's own `deinit` — so a `PromptIR` must not outlive the ledger
-    /// it was projected from. Every caller projects immediately before a step
-    /// and drops it after.
+    /// One entry per ledger event, in order (minus `model_rebind`, which is not
+    /// a turn). Every string BORROWS from the ledger's events, so a `PromptIR`
+    /// must not outlive the ledger it was projected from.
     turns: []const Turn,
     /// Backing storage the turns' `calls` slices point into: one allocation for
-    /// the whole projection rather than one per turn, so `deinit` stays a fixed
-    /// number of frees and no turn owns anything.
+    /// the whole projection rather than one per turn, so no turn owns anything.
     call_storage: []ToolCall = &.{},
     /// Same, for the turns' `tool_results` slices.
     result_storage: []ToolResult = &.{},
@@ -134,26 +117,21 @@ pub fn project(alloc: std.mem.Allocator, events: []const ledger.Event) !PromptIR
 /// Project the ledger into what a provider may be sent.
 ///
 /// The ledger holds the FACT (what the model emitted); this holds what is legal
-/// to replay. There are two places the two differ, and both are here for the
-/// same reason — the line keeps saying what happened, and nothing unsendable
-/// ever reaches a wire:
+/// to replay. Two places they differ, both so that nothing unsendable reaches a
+/// wire while the line keeps saying what happened:
 ///
-///   1. A reply cut off by `max_tokens` has its calls recorded verbatim, torn
-///      arguments and all; an incomplete JSON value becomes `{}`, because
-///      replaying a torn prefix into a provider's `input` would 400 every later
-///      request of the session (DESIGN §4).
+///   1. On a turn cut off by `max_tokens`, an `args_json` that is not a complete
+///      JSON value becomes `{}` — replaying a torn prefix would 400 every later
+///      request of the session.
 ///   2. `reasoning` is opaque and belongs to the model that produced it, so
-///      after a `model_rebind` the turns from before it keep their reasoning in
-///      the ledger and lose it here (goals/model-rebind.md §3). A rebind itself
-///      projects to nothing at all: the model does not read that it was swapped.
-///      This is what makes changing model mid-session safe without the kernel
-///      holding any opinion about which models are compatible (physics #8).
+///      turns before the last `model_rebind` keep their reasoning in the ledger
+///      and lose it here. A rebind itself projects to nothing: the model does
+///      not read that it was swapped.
 pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const SystemBlock, events: []const ledger.Event) !PromptIR {
     var total_calls: usize = 0;
     var total_results: usize = 0;
     // The one event kind that is not a turn, so the array below is exactly the
-    // size it will be filled to — `deinit` frees what was allocated, not a
-    // shorter view of it.
+    // size it will be filled to.
     var rebinds: usize = 0;
     for (events) |event| switch (event) {
         .assistant => |as| total_calls += as.calls.len,
@@ -176,10 +154,7 @@ pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const System
     // reasoning is no longer ours to replay.
     const floor = ledger.reasoningFloor(events);
     for (events, 0..) |event, index| {
-        // Not a turn: it changes which reasoning may be replayed and nothing the
-        // model reads. Skipped BEFORE a slot is taken — `turns` is exactly as
-        // long as the turns there will be, and the common case is a rebind
-        // sitting at the very end (deposited, drained, about to be stepped).
+        // Skipped before a slot is taken: `turns` holds only turns.
         if (event == .model_rebind) continue;
         const turn = &turns[turn_at];
         switch (event) {
@@ -219,8 +194,8 @@ pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const System
     };
 }
 
-/// The cache invariant of DESIGN §1 in testable form: same tag and equal
-/// payloads, turn by turn.
+/// The cache invariant in testable form: same tag and equal payloads, turn by
+/// turn.
 pub fn isStablePrefix(prefix: []const Turn, full: []const Turn) bool {
     if (prefix.len > full.len) return false;
     for (prefix, full[0..prefix.len]) |a, b| {
@@ -286,11 +261,8 @@ test "PromptIR turns extend by prefix on append" {
 }
 
 test "a rebind is not a turn, and the reasoning behind it stops being replayed" {
-    // goals/model-rebind.md §3: reasoning is opaque and belongs to the model
-    // that produced it, so a session that changed model keeps every turn and
-    // hands the new model none of the old model's thinking. Everything else
-    // about the transcript — its text, its calls, its results — is untouched:
-    // that is what makes changing model mid-session possible at all.
+    // A session that changed model keeps every turn and hands the new model none
+    // of the old model's thinking; text, calls and results are untouched.
     const alloc = std.testing.allocator;
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
@@ -305,8 +277,8 @@ test "a rebind is not a turn, and the reasoning behind it stops being replayed" 
 
     // Four events, three turns: the rebind itself is nothing the model reads.
     try std.testing.expectEqual(@as(usize, 3), p.turns.len);
-    // …including when it is the LAST event, which is the ordinary case: the
-    // deposit is drained at a step boundary and the step projects immediately.
+    // …including when it is the LAST event, the ordinary case: the deposit is
+    // drained at a step boundary and the step projects immediately.
     try l.append(.{ .model_rebind = .{ .profile = "openai", .identity = .{ .provider = "openai", .model = "gpt-5.6-sol" } } });
     const trailing = try project(alloc, l.view());
     defer trailing.deinit(alloc);
@@ -378,7 +350,7 @@ test "a batch of tool results is ONE turn, and cost is not in the type at all" {
     try std.testing.expect(!p.turns[2].tool_results[1].ok);
 
     // `usage` / `stop_reason` have no field in `Turn` at all, so the same
-    // conversation without them projects to the very same turns (DESIGN §3.1).
+    // conversation without them projects to the very same turns.
     var plain = ledger.Ledger.init(alloc);
     defer plain.deinit();
     for (l.view()) |e| switch (e) {
@@ -415,7 +387,7 @@ test "a truncated turn's torn arguments are replayable in the projection; the le
     // happened to finish before the cap is sent exactly as it was written.
     try std.testing.expectEqualStrings("{}", calls[0].args_json);
     try std.testing.expectEqualStrings("{\"command\":\"ls\"}", calls[1].args_json);
-    // The ledger still records the fact, torn bytes and all (DESIGN §3.1).
+    // The ledger still records the fact, torn bytes and all.
     try std.testing.expectEqualStrings("{\"path\":\"a.t", l.view()[1].assistant.calls[0].args_json);
 
     // The substitution is scoped to a truncated turn: the same torn bytes on a
@@ -494,7 +466,7 @@ test "a capability_note appends a capability_note turn without breaking the pref
     const after = try project(alloc, l.view());
     defer after.deinit(alloc);
 
-    // Prefix-stable: the note only extends the projection (DESIGN §5.3, §1).
+    // Prefix-stable: the note only extends the projection.
     try std.testing.expect(isStablePrefix(before.turns, after.turns));
     try std.testing.expectEqual(before.turns.len + 1, after.turns.len);
     // Only the announcement text is model-visible; id/version stay behind.
@@ -515,12 +487,11 @@ test "a finished task appends one turn carrying only its text" {
     const after = try project(alloc, l.view());
     defer after.deinit(alloc);
 
-    // Just another appended turn: the cached prefix is untouched (DESIGN §1).
+    // Just another appended turn: the cached prefix is untouched.
     try std.testing.expect(isStablePrefix(before.turns, after.turns));
     try std.testing.expectEqual(before.turns.len + 1, after.turns.len);
-    // The name and the exit code are facts for readers, not model-visible on
-    // their own — `Turn.task_finished` has nowhere to put them, which is the
-    // point (they are already inside the text the supervisor rendered).
+    // The name and the exit code are facts for readers: `Turn.task_finished`
+    // has nowhere to put them (they are already inside the rendered text).
     try std.testing.expectEqualStrings(report, after.turns[after.turns.len - 1].task_finished);
 }
 

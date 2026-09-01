@@ -1,10 +1,10 @@
-//! Extension wire protocol (DESIGN §7.3).
+//! Extension wire protocol.
 //!
 //! The transport is deliberately dumb and oneshot: the host spawns the
 //! extension, writes the call's arguments to stdin, reads its stdout, and the
 //! process exits. No daemon, no streaming, no bidirectional events, no host
 //! callbacks. The wire protocol IS the ABI, so extensions need not be written in
-//! Zig (DESIGN §7.1).
+//! Zig.
 //!
 //! There is ONE wire, `plain`, and everything about a call other than the four
 //! things below is the same whatever a runtime is written in: the same timeout,
@@ -37,18 +37,10 @@
 //!
 //!     #!/bin/sh
 //!     printf 'hello %s\n' "${NULYA_ARG_name:-world}"
-//!
-//! Below are the two rules of that contract that are pure functions of the
-//! arguments — what "no arguments" is, and which keys reach the environment.
-//! They live with the contract rather than with the spawning code, so what
-//! `nulya ext api protocol` prints is the contract AND its implementation.
 
 const std = @import("std");
 
-/// One name/value pair of a per-call environment. It lives here rather than in
-/// `environment.zig` because the RULE that produces these names is this file's
-/// contract, and the execution side that consumes them is now two machines: the
-/// local backend and the remote agent both build the list from `callEnv`.
+/// One name/value pair of a per-call environment.
 pub const EnvVar = struct {
     name: []const u8,
     value: []const u8,
@@ -62,10 +54,7 @@ pub fn normalizedArguments(args_json: []const u8) []const u8 {
 }
 
 /// The arguments are a JSON object — the one shape rule of this wire, checked
-/// before anything is spawned or sent anywhere. Separate from `PlainEnv` because
-/// the two now happen on different machines: the seam that ACCEPTS a call checks
-/// it (`invoke.zig`), and the machine that SPAWNS the child derives the
-/// environment from the same bytes (`callEnv`).
+/// before anything is spawned or sent anywhere.
 pub fn requireArgumentsObject(alloc: std.mem.Allocator, arguments: []const u8) !void {
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments, .{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -77,13 +66,7 @@ pub fn requireArgumentsObject(alloc: std.mem.Allocator, arguments: []const u8) !
 
 /// The whole per-call environment for one invocation: `NULYA_TOOL`, every
 /// exported argument, and the presentation file when the caller has one.
-///
-/// Built where the child is SPAWNED — the local backend and the remote agent
-/// both call this — so the contract at the top of this file has ONE
-/// implementation whichever machine the process starts on, and the frame that
-/// crosses a channel carries only the arguments JSON it is derived from (no
-/// shell quoting, no argv length limit; goals/remote-env.md §3.3). Caller
-/// deinits.
+/// Caller deinits.
 pub fn callEnv(
     alloc: std.mem.Allocator,
     tool_name: []const u8,

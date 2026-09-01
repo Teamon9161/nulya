@@ -1,22 +1,20 @@
 //! What the model has already seen of each file, so `read` can short-circuit a
 //! redundant read of unchanged content, `write` can demand a read before it
 //! overwrites, `append` can demand at least a glimpse, and both can spot
-//! external modification. Zero-guessing: the model never spends tokens
-//! discovering what this process already knows.
+//! external modification. Port of tcode's `tcode-core/src/freshness.rs`,
+//! semantics and tests included.
 //!
-//! The tracker is a port of tcode's `tcode-core/src/freshness.rs`, semantics
-//! and tests included. What differs is where it lives: a tool here is one
-//! process per call, so the record is an append-only JSONL file in this
-//! session's scratch directory (`.nulya/scratch/<session>/std-freshness.jsonl`)
-//! — one line per `record_*` event, replayed on open. A fork or handoff is a
-//! new session id and therefore a fresh file, which is exactly right: the new
-//! context has read nothing yet. Outside a session there is no file and no
-//! gate. Paths are keyed absolute, compared byte for byte (as tcode compares
-//! `PathBuf`s); the hash is only ever compared with hashes this file wrote.
+//! Since a tool here is one process per call, the record is an append-only
+//! JSONL file in this session's scratch directory
+//! (`.nulya/scratch/<session>/std-freshness.jsonl`) — one line per `record_*`
+//! event, replayed on open. A fork or handoff gets a new session id and
+//! therefore a fresh file: the new context has read nothing yet. Outside a
+//! session there is no file and no gate. Paths are keyed absolute, compared
+//! byte for byte; the hash is only ever compared with hashes this file wrote.
 //!
-//! `edit` reports here too (as a read of the echoed snippet under the new
-//! hash, see edit.zig), so a `write`/`append` after our own edit is not mistaken
-//! for an external change; a change made any other way still is.
+//! `edit` reports here too, as a read of the echoed snippet under the new
+//! hash, so a `write`/`append` after our own edit is not mistaken for an
+//! external change.
 
 const std = @import("std");
 

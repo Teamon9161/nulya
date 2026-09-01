@@ -1,4 +1,4 @@
-//! Extension tools as ordinary kernel tools (DESIGN §7.3, §5).
+//! Extension tools as ordinary kernel tools.
 //!
 //! `Binding` pairs a tool's model-facing `tool.ToolDefinition` with the FROZEN
 //! VERSION that serves its calls, then adapts it into the kernel's single
@@ -27,9 +27,9 @@ pub const Binding = struct {
     ext_id: []const u8,
     /// The frozen version that SERVES a call to it. For a session whose tools
     /// run on another machine that is the header's `exec_version` — the sibling
-    /// build for that machine's target (DESIGN §3.4) — and otherwise the
-    /// member's own frozen version. Either way the choice was made once, at
-    /// freeze time, and is merely carried here.
+    /// build for that machine's target — and otherwise the member's own frozen
+    /// version. Either way the choice was made once, at freeze time, and is
+    /// merely carried here.
     version: []const u8,
     /// The wall-clock cap this tool's frozen manifest declared for one call, or
     /// null to take the host default (`invoke.Options.timeout_ms`). Frozen with
@@ -68,8 +68,7 @@ pub const Binding = struct {
                 .input_schema = input_schema,
                 // Copied, not re-read: an optional bool owns nothing, and this
                 // is the frozen manifest's claim travelling to whoever answers
-                // the gate (DESIGN §4/§7.2.1). `null` stays `null` — silence is
-                // not "not read-only".
+                // the gate. `null` stays `null` — silence is not "not read-only".
                 .readonly = definition.readonly,
             },
             .ext_id = owned_ext_id,
@@ -255,7 +254,7 @@ test "initOwned copies every exposed string and survives the source being freed"
     try testing.expectEqualStrings("{\"type\":\"object\"}", binding.definition.input_schema);
     try testing.expectEqualStrings("web.search", binding.ext_id);
     try testing.expectEqualStrings("v-000000000000000000000001", binding.version);
-    // Nothing was claimed, so nothing is claimed here either (DESIGN §7.2.1).
+    // Nothing was claimed, so nothing is claimed here either.
     try testing.expect(binding.definition.readonly == null);
 }
 
@@ -270,7 +269,7 @@ test "a manifest's readonly claim rides on the frozen definition" {
     }, "std", "v-000000000000000000000002", null);
     defer binding.deinit(alloc);
 
-    // The claim is what the gate is shown (DESIGN §4): the alternative — asking
+    // The claim is what the gate is shown: the alternative — asking
     // a manifest again at approval time — is a second derivation of a fact this
     // session already froze.
     try testing.expectEqual(@as(?bool, true), binding.asTool().definition.readonly);
@@ -336,7 +335,7 @@ test "a binding's declared timeout reaches the environment; without one the host
     defer alloc.free(default_result.output);
     try testing.expectEqual(@as(?u32, invoke.Options.default_timeout_ms), default_env.saw_timeout_ms);
 
-    // A tool that knows it is slow said so in its manifest (DESIGN §7.3); the
+    // A tool that knows it is slow said so in its manifest; the
     // binding carries that verbatim to the child.
     var slow_binding = testBinding();
     slow_binding.timeout_ms = 600_000;

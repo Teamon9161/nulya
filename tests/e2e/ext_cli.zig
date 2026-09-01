@@ -1,6 +1,4 @@
-//! Membership / `ext run` / `ext inspect` / `ext sync --seed` on the real binary
-//! (docs/goals/ext-review-2.md Lane K + Lane C, ext-review.md Lane C; DESIGN
-//! §5.1/§7.2/§7.3/§7.5/§7.8/§14).
+//! Membership / `ext run` / `ext inspect` / `ext sync --seed` on the real binary.
 //!
 //!   - a package joins a session by one of three routes: config's
 //!     `[extensions] with` (standing, and the project layer may write it),
@@ -14,14 +12,13 @@
 //!     person named it or its own manifest did; a broken package nobody asked
 //!     for is skipped.
 //!   - `nulya ext run` no longer applies a manifest's own `timeout_ms` — that
-//!     field now bounds only a call reaching the model's tool face (D6). A
-//!     slow script tool run through the CLI is unbounded unless the caller
-//!     opts in with `--timeout-ms`.
+//!     field now bounds only a call reaching the model's tool face. A slow
+//!     script tool run through the CLI is unbounded unless the caller opts in
+//!     with `--timeout-ms`.
 //!   - `nulya ext inspect` answers the STORE, never a draft, for `<id>` and
-//!     `<id>@<version>`; a draft is asked for by naming its path instead
-//!     (D9).
-//!   - `nulya ext sync --seed` is `ext seed` followed by the same sync
-//!     (DESIGN §7.2): `--dry-run` plans both steps and writes neither.
+//!     `<id>@<version>`; a draft is asked for by naming its path instead.
+//!   - `nulya ext sync --seed` is `ext seed` followed by the same sync:
+//!     `--dry-run` plans both steps and writes neither.
 
 const std = @import("std");
 const support = @import("support.zig");
@@ -37,7 +34,7 @@ fn nulyaExe(alloc: std.mem.Allocator, host_env: *const std.process.Environ.Map) 
     return std.fs.path.resolve(alloc, &.{rel});
 }
 
-// ── 1. membership: only a NAME composes a package (DESIGN §5.1) ─────────────
+// ── 1. membership: only a NAME composes a package ─────────────
 
 /// Build and activate a data package whose only contribution is a system
 /// prompt (no runtime, so no toolchain is needed). Returns its version id;
@@ -97,7 +94,7 @@ fn scriptPackage(
     const script_name = if (windows) "run.ps1" else "run.sh";
     // Nothing here calls the tool, so the script only has to exist. Its surface
     // is `manual` because every caller here PINS it, and only a `manual` tool
-    // takes a pin (DESIGN §5.1).
+    // takes a pin.
     const script_body = if (windows) "[Console]::Out.Write('ok')\n" else "#!/bin/sh\nprintf ok\n";
     const interpreter = if (windows) "powershell" else "sh";
 
@@ -193,7 +190,7 @@ test "a built and activated prompt package joins no session until `[extensions] 
     }
 
     // …and `--bare` composes from its own flags alone, so the same workspace
-    // opens a session without it (DESIGN §14).
+    // opens a session without it.
     {
         const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{"--bare"})).?;
         defer alloc.free(header);
@@ -258,7 +255,7 @@ test "--bare ignores both standing config lists; a --pin on the command line sti
     }
 
     // `--bare` subtracts only the CONFIG half: a pin on the command line still
-    // brings its own package in (DESIGN §5.1).
+    // brings its own package in.
     {
         const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{ "--bare", "--pin", "ext:face/look" })).?;
         defer alloc.free(header);
@@ -269,7 +266,7 @@ test "--bare ignores both standing config lists; a --pin on the command line sti
 }
 
 /// `promptPackage`, plus `"apply": "auto"` at the top of the manifest: the
-/// package that says activating it IS installing it (DESIGN §5.1). Built and
+/// package that says activating it IS installing it. Built and
 /// activated; returns its version id.
 fn standingPromptPackage(
     alloc: std.mem.Allocator,
@@ -342,7 +339,7 @@ test "apply: auto — activating IS installing; every fresh session composes it,
     }
 
     // `--bare` reads no standing layer at all — config's two lists, and this
-    // one, which lives in the store instead of in config (DESIGN §5.1).
+    // one, which lives in the store instead of in config.
     {
         const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{"--bare"})).?;
         defer alloc.free(header);
@@ -880,7 +877,7 @@ test "a doctored current record cannot grant standing reach: the sealed manifest
     try std.testing.expect(std.mem.indexOf(u8, header, "mode.sly") == null);
 }
 
-// ── 2. `ext run` timeout: none by default, `--timeout-ms` opts in (D6) ──────
+// ── 2. `ext run` timeout: none by default, `--timeout-ms` opts in ──────
 
 /// A host-appropriate script tool that sleeps ~2s before answering — long
 /// enough to catch a 1000ms manifest timeout still being enforced by mistake,
@@ -967,7 +964,7 @@ test "ext run: a manifest timeout_ms is a bound for the model face only — the 
     }
 }
 
-// ── 3. `ext inspect`: version in effect / exact version / draft by path (D9) ─
+// ── 3. `ext inspect`: version in effect / exact version / draft by path ─
 
 test "ext inspect: bare id answers the version in effect with no draft fallback, <id>@<version> answers exactly that version, and a path answers the draft" {
     const alloc = std.testing.allocator;
@@ -1017,7 +1014,7 @@ test "ext inspect: bare id answers the version in effect with no draft fallback,
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "second.md", .data = "SECOND\n" });
 
     // ① still answers the ACTIVE version, unaffected by the draft edit — no
-    // draft fallback (D9).
+    // draft fallback.
     {
         const inspected = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "inspect", "inspect.demo" });
         defer alloc.free(inspected.stdout);
@@ -1063,7 +1060,7 @@ test "ext inspect: bare id answers the version in effect with no draft fallback,
     }
 }
 
-// ── 4. `ext sync --seed` (ext-review-2 §2, C3) ───────────────────────────────
+// ── 4. `ext sync --seed` ──────────────────────────────────────────────────────
 
 test "ext sync --seed --dry-run: a seed plan for the bundled drafts, on a root that does not exist yet, writes nothing" {
     const alloc = std.testing.allocator;

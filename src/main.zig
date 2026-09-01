@@ -1,11 +1,8 @@
 //! Nulya — a minimal, self-evolving AI agent harness.
 //!
 //! The entry point is a switch and nothing else: every invocation — including
-//! the bare one, which prints the usage screen — goes to `cli.dispatch`
-//! (DESIGN §14). The fixed-prompt demo is a verb like any other (`nulya demo`),
-//! so there is no behaviour reachable only by running the binary with no
-//! arguments. This file also aggregates every module's tests for `zig build
-//! test`.
+//! the bare one, which prints the usage screen — goes to `cli.dispatch`. This
+//! file also aggregates every module's tests for `zig build test`.
 
 const std = @import("std");
 const cli = @import("cli.zig");
@@ -21,22 +18,20 @@ pub fn main(init: std.process.Init) !u8 {
     // sanitization) see the real environment (environment.hostEnvironMap).
     environment.registerHostEnviron(init.minimal.environ);
 
-    // OpenSSH invokes SSH_ASKPASS with only its prompt as argv. A private
-    // marker selects this fixed helper before the ordinary CLI sees that argv.
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const argv = try init.arena.allocator().alloc([]const u8, args.len -| 1);
     for (args[1..], 0..) |a, i| argv[i] = a;
 
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
-    // OpenSSH supplies exactly one argv word: its prompt. Requiring that shape
-    // prevents a broad SendEnv rule from making the remote `nulya remote serve`
-    // mistake a forwarded marker for a helper invocation.
+    // OpenSSH invokes SSH_ASKPASS with exactly one argv word: its prompt. A
+    // private marker env var selects the helper before the ordinary CLI sees
+    // that argv; requiring the one-word shape too keeps a broad SendEnv rule
+    // from making a remote `nulya remote serve` mistake a forwarded marker for
+    // a helper invocation.
     if (argv.len == 1) if (host.get(ssh_askpass.marker_env)) |marker|
         return ssh_askpass.runHelper(io, marker);
 
-    // `nulya <cmd> ...` -> CLI (DESIGN §14); bare `nulya` -> the usage screen,
-    // which `dispatch` prints for an empty argv.
     return cli.dispatch(alloc, io, argv);
 }
 

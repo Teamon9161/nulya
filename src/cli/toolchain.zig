@@ -1,7 +1,7 @@
-//! `nulya toolchain zig`, plus the one place a Zig compiler is resolved
-//! (DESIGN §10). `ext build` needs the same answer, so the resolution — and the
-//! single line that admits when the compiler came from an unpinned PATH — lives
-//! here rather than being spelled twice.
+//! `nulya toolchain zig`, plus the one place a Zig compiler is resolved.
+//! `ext build` needs the same answer, so the resolution — and the single line
+//! that admits when the compiler came from an unpinned PATH — lives here rather
+//! than being spelled twice.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -31,7 +31,6 @@ pub fn dispatchToolchain(alloc: std.mem.Allocator, io: std.Io, args: []const []c
         },
     };
     defer zig_exe.deinit(alloc);
-    // This verb IS the compiler, so which one it is belongs on screen.
     try noteUnpinnedZig(alloc, io, zig_exe);
 
     var argv = try alloc.alloc([]const u8, args.len);
@@ -48,11 +47,11 @@ pub fn dispatchToolchain(alloc: std.mem.Allocator, io: std.Io, args: []const []c
 }
 
 /// A resolved compiler and where it came from — the second half matters,
-/// because only one of the three sources is unpinned.
+/// because only one of the three sources (`path`) is unpinned.
 pub const ZigExe = struct {
     path: []u8,
     /// `managed` = nulya's own toolchain directory, whether this binary
-    /// extracted the compiler into it or found it already there (DESIGN §10).
+    /// extracted the compiler into it or found it already there.
     source: enum { env, managed, path },
 
     pub fn deinit(self: ZigExe, alloc: std.mem.Allocator) void {
@@ -60,13 +59,9 @@ pub const ZigExe = struct {
     }
 
     /// Where this path came from, for a sentence a person has to act on.
-    ///
-    /// It decides what a failure even means. `NULYA_ZIG` is taken **verbatim,
-    /// unchecked** — the other two answer only after finding a file — so a
-    /// broken `NULYA_ZIG` and a toolchain that went missing between resolving
-    /// and spawning read identically without this word, and they are somebody
-    /// editing an environment variable versus something on the machine holding
-    /// a file open.
+    /// `NULYA_ZIG` is taken verbatim and unchecked, while the other two answer
+    /// only after finding a file — so without this word a broken `NULYA_ZIG`
+    /// and a toolchain that vanished between resolving and spawning read alike.
     pub fn origin(self: ZigExe) []const u8 {
         return switch (self.source) {
             .env => "from NULYA_ZIG",
@@ -79,16 +74,13 @@ pub const ZigExe = struct {
 /// Resolve a zig executable, in this order: `NULYA_ZIG` (the explicit dev
 /// override), the managed toolchain directory (extracted from the embedded
 /// archive when there is one, else whatever pinned zig is already unpacked
-/// there — DESIGN §10), then a `zig` on PATH. Caller owns the returned path;
+/// there), then a `zig` on PATH. Caller owns the returned path;
 /// `error.NoZigToolchain` means none of the three answered.
 ///
-/// The PATH fallback is for development builds, which carry no toolchain: the
-/// alternative is that `nulya ext build` cannot compile anything on a machine
-/// that plainly has a compiler. It is honest rather than pinned — a compiled
-/// version's id hashes the compiler identity (DESIGN §7.4), so building with a
-/// different zig yields a *different version*, never a silently different
-/// binary under the same id. That is why taking it is allowed, and why callers
-/// that actually compile say so once (`noteUnpinnedZig`).
+/// Taking a PATH zig is safe because a compiled version's id hashes the
+/// compiler identity: a different zig yields a *different version*, never a
+/// silently different binary under the same id. Callers that actually compile
+/// still say so once (`noteUnpinnedZig`).
 pub fn resolveZig(alloc: std.mem.Allocator, io: std.Io) !ZigExe {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
@@ -126,9 +118,8 @@ pub fn managedDirPath(alloc: std.mem.Allocator) ![]u8 {
 }
 
 /// The two pinned ways out of "no usable compiler", with the directory spelled
-/// out — every verb that can hit the wall prints this same sentence, so the
-/// repair is never described two ways. (PATH is the third, unpinned way; a
-/// caller adds it only when no zig answered at all.) Caller owns the result.
+/// out. Every verb that can hit the wall prints this same sentence, so the
+/// repair is never described two ways. Caller owns the result.
 pub fn noZigHint(alloc: std.mem.Allocator) ![]u8 {
     const dir = try managedDirPath(alloc);
     defer alloc.free(dir);
@@ -141,8 +132,7 @@ pub fn noZigHint(alloc: std.mem.Allocator) ![]u8 {
 
 /// One stderr line naming the compiler that is about to define a version id —
 /// only for the unpinned source, and only from a caller that really compiles
-/// (a data or script package never touches zig, so saying it there would be
-/// noise about a decision that was not made).
+/// (a data or script package never touches zig).
 pub fn noteUnpinnedZig(alloc: std.mem.Allocator, io: std.Io, zig: ZigExe) !void {
     if (zig.source != .path) return;
     const note = try std.fmt.allocPrint(

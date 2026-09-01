@@ -2,23 +2,16 @@
 //!
 //! A definition is a markdown file with front matter: `.nulya/agents/<name>.md`
 //! in the workspace, or `<NULYA_HOME | ~/.nulya>/agents/<name>.md` on this
-//! machine. Its front matter is a set of `session new` arguments and its body is
-//! a system prompt — PLAN §3.2's "an agent is a `session new` with a particular
-//! set of arguments", made literal.
+//! machine. Its front matter is a set of `session new` arguments; its body is a
+//! system prompt.
 //!
-//! **Why materialising lives here and not in the front end.** A system prompt
-//! reaches a session exactly one way (physics #3/#4): contributed by a frozen
-//! extension version the session composed. So a definition has to become a data
-//! extension, and that rendering — the manifest bytes, the prompt file, which
-//! store root — decides the VERSION ID, which is the hash of exactly those
-//! bytes. Two implementations of it would be two versions of the same persona
-//! that happen to disagree about a trailing newline. There is one writer, and it
-//! is this tool; the TUI reads definitions (to list them) and asks this to build.
+//! There is ONE writer of the rendering (this tool) and one reader of the format
+//! (`main.list`): a front end that parsed front matter as well would be a second
+//! answer to "is this agent read-only".
 //!
 //! The front matter dialect is deliberately small — `key: value`, `key: [a, b]`,
 //! and the `- item` block form. Every field below is a word, a flag, a number or
-//! a list of tool ids; the day one needs nesting is the day this reads a real
-//! YAML, and a dependency plus its failure modes is a poor trade until then.
+//! a list of tool ids; the day one needs nesting is the day this reads real YAML.
 
 const std = @import("std");
 const builtin = @import("builtin.zig");
@@ -26,11 +19,9 @@ const header_mod = @import("header.zig");
 const record = @import("record.zig");
 const runners = @import("runners.zig");
 
-/// Which layer a definition came from, in search order. Workspace wins on a
-/// name collision — a checkout says what its own work needs, the machine's copy
-/// is the fallback, and this package's own `builtin` personas are the floor
-/// nobody had to install. The loser is never dropped, only marked `shadowed`:
-/// the store roots' rule (DESIGN §7.2), for the store roots' reason.
+/// Which layer a definition came from, in search order. Workspace wins on a name
+/// collision; this package's own `builtin` personas are the floor nobody had to
+/// install. The loser is never dropped, only marked `shadowed`.
 pub const Layer = enum { workspace, user, builtin };
 
 pub const Def = struct {
@@ -38,52 +29,39 @@ pub const Def = struct {
     description: []const u8 = "",
     /// How much this agent may do: `readonly`, `default` or `unsafe`
     /// (`record.Permissions`). A ceiling every runner translates into its own
-    /// harness's terms and refuses the delegation rather than exceed (D10) — a
-    /// policy, not a sandbox (DESIGN §9).
-    ///
-    /// It replaced `readonly: true`, which said one thing and left the other
-    /// two grants sharing a word. A definition still writing the old field is
-    /// REFUSED whole, not read as `default`: that is the same reasoning an
-    /// unknown `runner:` gets, and here it is sharper — silently reading a
-    /// definition that asked for read-only as an ordinary one is exactly the
-    /// widening the field exists to prevent.
+    /// harness's terms and refuses the delegation rather than exceed — a policy,
+    /// not a sandbox. The `readonly: true` this replaced is REFUSED whole, never
+    /// read as `default`.
     permissions: record.Permissions = record.default_permissions,
-    /// WHICH HARNESS holds this agent's conversation (contract D1/D7). The
-    /// default is this nulya — a session of its own, driven by a background
-    /// task — and every other field below is written in that vocabulary. An
-    /// unknown word costs the whole definition (`ParseError.UnknownRunner`)
-    /// rather than a warning and a default: a persona quietly running on
-    /// something other than the harness it asked for is worse than one that is
-    /// not there, and the mistake is one word in one line to fix.
+    /// WHICH HARNESS holds this agent's conversation. The default is this nulya —
+    /// a session of its own, driven by a background task — and every other field
+    /// below is written in that vocabulary. An unknown word costs the whole
+    /// definition rather than a warning and a default: a persona quietly running
+    /// on something other than what it asked for is worse than one that is not
+    /// there.
     runner: runners.Runner = runners.default,
     /// `--profile`; empty means "inherit whatever asked for the delegation".
     /// Only the nulya runner has such a thing.
     profile: []const u8 = "",
     /// `--model` within that profile; empty means the profile's default.
     model: []const u8 = "",
-    /// What an EXTERNAL runner should run on, in that harness's own vocabulary
-    /// (contract D9) — `runner_model: gpt-5-codex`, say. Opaque here: this
-    /// package does not own the catalogue, so a parser for it could only ever be
-    /// a second, staler copy of somebody else's list, and an id it did not
-    /// recognise would be refused by the wrong side. Errors come back from the
-    /// harness, unedited.
+    /// What an EXTERNAL runner should run on, in that harness's own vocabulary —
+    /// `runner_model: gpt-5-codex`, say. Opaque here: a parser for it could only
+    /// be a staler copy of somebody else's catalogue.
     ///
-    /// A definition writes ONE of these vocabularies, and which one is decided
-    /// by its `runner:`. The other is dropped with a warning when the front
-    /// matter has been read whole (`crossCheck`) — after, not during, because a
-    /// definition may write its fields in any order.
+    /// A definition writes ONE of these vocabularies, decided by its `runner:`.
+    /// The other is dropped with a warning once the front matter has been read
+    /// WHOLE (`crossCheck`) — a definition may write its fields in any order.
     runner_model: []const u8 = "",
     /// `ext:<id>/<tool>` ids for `--pin`, on top of the session's usual face.
     pins: []const []const u8 = &.{},
-    /// The agents this one may delegate to. **Empty is a leaf** — the default,
-    /// and what every persona but `orchestrator` is: a delegated session carries
-    /// this package only when its definition names somebody to pass work to, so
-    /// "can it delegate" is one decision written in one place (DESIGN §7.8).
+    /// The agents this one may delegate to. EMPTY IS A LEAF, the default: a
+    /// delegated session carries this package only when its definition names
+    /// somebody to pass work to, so "can it delegate" is one decision in one
+    /// place.
     agents: []const []const u8 = &.{},
     /// How many turns a caller may send into one delegated session — the
-    /// follow-ups `agent{session, task}` adds on top of the first. 0 = no limit;
-    /// each turn is still bounded by `max_steps`, and the caller is still the
-    /// one deciding whether another one is worth it.
+    /// follow-ups `agent{session, task}` adds on top of the first. 0 = no limit.
     max_exchanges: u32 = 0,
     /// `session step --max-steps`; 0 means the kernel's own budget.
     max_steps: u32 = 0,
@@ -119,8 +97,7 @@ pub fn isPlainName(name: []const u8) bool {
 }
 
 /// A session id, as the kernel mints them (`s-<digits>-<hex>`); checked because
-/// it becomes a path, and because "that is not a session id" is a better answer
-/// than a file that is not there.
+/// it becomes a path.
 pub fn isPlainSessionId(id: []const u8) bool {
     if (!std.mem.startsWith(u8, id, "s-") or id.len > 128) return false;
     for (id["s-".len..]) |c| {
@@ -129,10 +106,8 @@ pub fn isPlainSessionId(id: []const u8) bool {
     return id.len > "s-".len;
 }
 
-/// A pin has one shape, and a pin the kernel cannot resolve does not cost a
-/// tool — it refuses the whole `session new` (`PinToolNotDeclared`). So a
-/// malformed one is dropped here rather than carried to a message about
-/// something else entirely.
+/// A pin has one shape. One the kernel cannot resolve does not cost a tool — it
+/// refuses the whole `session new` — so a malformed one is dropped HERE.
 pub fn isPin(text: []const u8) bool {
     if (!std.mem.startsWith(u8, text, "ext:")) return false;
     const rest = text["ext:".len..];
@@ -148,13 +123,12 @@ pub fn isPin(text: []const u8) bool {
 }
 
 /// `<profile>` or `<profile>/<model-id>` — the kernel's two flags, which mean
-/// different things (DESIGN §9.5). Naming only the profile is legal and means
-/// "that profile's default model". Null is "this is not a model reference".
+/// different things. Naming only the profile is legal and means "that profile's
+/// default model". Null is "this is not a model reference".
 ///
 /// TWO CALLERS, ONE SHAPE: a definition's `model:` front matter and the `model`
-/// argument of the `agent` tool. They must be the same string in the same
-/// grammar — the argument's whole purpose is to override the field for one
-/// delegation, and two parsers would be two grammars.
+/// argument of the `agent` tool. The argument's whole purpose is to override the
+/// field for one delegation, so two parsers would be two grammars.
 pub const ModelRef = struct { profile: []const u8, model: []const u8 };
 
 pub fn parseModelRef(value: []const u8) ?ModelRef {
@@ -174,8 +148,7 @@ fn unquote(value: []const u8) []const u8 {
 }
 
 /// Parse one definition file. Warnings are collected rather than fatal: losing a
-/// whole persona over one bad line is the expensive answer, and the two errors
-/// that ARE fatal are the two ways to not be a definition at all.
+/// whole persona over one bad line is the expensive answer.
 pub fn parse(
     alloc: std.mem.Allocator,
     text: []const u8,
@@ -238,8 +211,7 @@ pub fn parse(
             def.permissions = record.Permissions.parse(unquote(value)) orelse return error.UnknownPermissions;
         } else if (std.mem.eql(u8, key, "readonly")) {
             // The word this field replaced. Refused rather than translated: a
-            // ceiling is the one thing that must not be read approximately, and
-            // `permissions: readonly` is one line to write.
+            // ceiling must not be read approximately.
             return error.UnknownPermissions;
         } else if (std.mem.eql(u8, key, "runner")) {
             def.runner = runners.Runner.parse(unquote(value)) orelse return error.UnknownRunner;
@@ -266,24 +238,19 @@ pub fn parse(
     return def;
 }
 
-/// The fields whose meaning depends on `runner:`, checked once the whole front
+/// The fields whose meaning depends on `runner:`, checked once the WHOLE front
 /// matter has been read — a definition may name its runner after the field the
-/// runner decides, and a check done line by line would answer differently
-/// depending on the order somebody typed.
+/// runner decides, and a line-by-line check would answer differently depending on
+/// the order somebody typed.
 ///
-/// A field that belongs to the other harness is DROPPED and named, not honoured
-/// as if it were the local one: `model: openai/gpt-5` on a codex agent is a
-/// nulya profile reference, and passing it to Codex would name a model nobody
-/// serves. A warning rather than a refusal, because unlike an unknown `runner:`
-/// this cannot silently run the persona somewhere it did not ask for — it only
-/// runs it on the harness's default.
+/// A field belonging to the other harness is DROPPED and named, never honoured as
+/// if it were the local one: `model: openai/gpt-5` on a codex agent would name a
+/// model nobody serves. A warning rather than a refusal, because this can only
+/// run the persona on the harness's default.
 ///
-/// The rest of the front matter is nulya's own composition — a tool face made of
-/// pins, a step budget, a list of agents to pass work to — and an external
-/// harness composes its own. Those are CLEARED here for one reason: a field that
-/// silently does nothing is the failure this whole function exists to prevent,
-/// and `agents: [explore]` on a codex persona would otherwise read as "this one
-/// can delegate" when the tool is not there to delegate with.
+/// Nulya composition — pins, a step budget, a list of agents — is CLEARED for an
+/// external harness so no field silently does nothing: `agents: [explore]` on a
+/// codex persona would otherwise read as "this one can delegate".
 fn crossCheck(
     alloc: std.mem.Allocator,
     def: *Def,
@@ -326,8 +293,7 @@ fn crossCheck(
 }
 
 /// One entry of either list, validated by its own rule. A malformed one is
-/// dropped and named: a bad pin refuses the whole `session new`, and a bad agent
-/// name is a delegation that could only ever fail.
+/// dropped and named.
 fn addItem(
     alloc: std.mem.Allocator,
     key: []const u8,
@@ -358,9 +324,8 @@ fn warnPin(alloc: std.mem.Allocator, into: *std.ArrayList([]const u8), source: [
 /// Where definitions live, relative to the workspace (this process's cwd).
 pub const project_dir = ".nulya/agents";
 
-/// This machine's directory: `$NULYA_HOME/agents`, else `<home>/.nulya/agents`
-/// — the kernel's own rule for the user config dir. Null when there is no home,
-/// which is a fact about the machine and not a failure.
+/// This machine's directory: `$NULYA_HOME/agents`, else `<home>/.nulya/agents`.
+/// Null when there is no home, which is a fact about the machine, not a failure.
 pub fn userDir(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) !?[]const u8 {
     if (env.get("NULYA_HOME")) |home| {
         if (home.len > 0) return try std.fs.path.join(alloc, &.{ home, "agents" });
@@ -381,10 +346,8 @@ pub const Entry = struct {
 
 /// Every definition all three layers hold, in search order, duplicates marked.
 ///
-/// Warn-and-skip, never fatal (tcode's discipline): the two ways to be skipped
-/// are the two ways to not be a definition — no front matter, no body — and a
-/// field that cannot be read is a warning and a default, because losing a whole
-/// persona over one bad line is the expensive answer.
+/// Warn-and-skip, never fatal: a field that cannot be read is a warning and a
+/// default, because losing a whole persona over one bad line is expensive.
 pub fn discover(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) ![]Entry {
     var out: std.ArrayList(Entry) = .empty;
     try readDir(alloc, io, project_dir, .workspace, &out);
@@ -392,8 +355,7 @@ pub fn discover(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.En
     for (builtin.all) |b| {
         var warnings: std.ArrayList([]const u8) = .empty;
         const source = try std.fmt.allocPrint(alloc, "builtin:{s}", .{b.name});
-        // A builtin that does not parse is this package's own bug, not a
-        // person's, so it is dropped rather than reported at them.
+        // A builtin that does not parse is this package's bug, not a person's.
         const def = parse(alloc, b.text, b.name, .builtin, source, &warnings) catch continue;
         try append(alloc, &out, .{ .def = def, .warnings = warnings.items });
     }
@@ -408,11 +370,8 @@ fn append(alloc: std.mem.Allocator, out: *std.ArrayList(Entry), entry: Entry) !v
     try out.append(alloc, marked);
 }
 
-/// One layer's `*.md`, flat and sorted.
-///
-/// Flat and only `.md` on purpose: an `agents/` directory is a list of personas,
-/// not a tree to organise. A layout that needs one can say so later; guessing
-/// now would make the first thing anybody tries — drop a file in — the odd case.
+/// One layer's `*.md`, flat and sorted. Flat and `.md` only: an `agents/`
+/// directory is a list of personas, not a tree to organise.
 fn readDir(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -442,11 +401,9 @@ fn readDir(
         var warnings: std.ArrayList([]const u8) = .empty;
         const def = parse(alloc, text, file[0 .. file.len - ".md".len], layer, full, &warnings) catch |err| switch (err) {
             error.OutOfMemory => return err,
-            // The two ways to not be a definition, a name nobody can use, a
-            // harness this package cannot talk to, and a ceiling it cannot
-            // read. The last two cost the whole definition for one reason: a
-            // persona that runs somewhere — or at some width — nobody asked
-            // for is worse than a persona that is not there.
+            // A harness this package cannot talk to and a ceiling it cannot read
+            // cost the whole definition: a persona that runs somewhere — or at
+            // some width — nobody asked for is worse than one that is not there.
             error.NoFrontMatter,
             error.NoBody,
             error.BadName,
@@ -479,9 +436,9 @@ pub fn find(
 /// How many names an "unknown agent" message lists before it stops being help.
 const max_listed_names: usize = 64;
 
-/// The names a caller may use, in search order — the winners of all three
-/// layers. This list only ever appears inside a message already telling the
-/// model its name was wrong, so a shadowed copy has nothing to add to it.
+/// The names a caller may use, in search order — the winners of all three layers.
+/// It only appears inside a message already saying the name was wrong, so a
+/// shadowed copy has nothing to add.
 pub fn names(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     for (try discover(alloc, io, env)) |entry| {
@@ -494,8 +451,7 @@ pub fn names(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Envir
 
 /// The prefix this package writes on a persona's prompt and reads back off a
 /// session header. A label, not an id: the kernel carries `source` verbatim and
-/// never looks inside it, so the writer and the reader of this convention are
-/// both here (`promptPath` writes it, `wornPersona` strips it).
+/// never looks inside it, so both ends of the convention are here.
 const label_prefix = "agent-";
 
 /// The label a definition's system prompt block carries for the life of every
@@ -506,23 +462,18 @@ pub fn promptLabel(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
 
 /// Where a definition's body is rendered for `session new --prompt` to read.
 ///
-/// Under `.nulya/scratch/`, where this repository already stages things for the
-/// CLI, and deliberately NOT under a store root: a persona is text with no life
-/// of its own outside the session that wears it, so it is never an installed
-/// artifact — nothing to activate, nothing to prune, nothing showing up in
-/// `ext list`. The file name's stem is the label, because that is what
-/// `session new` takes as the block's `source`.
+/// Under `.nulya/scratch/` and NOT under a store root: a persona is text with no
+/// life of its own outside the session that wears it, so it is never an installed
+/// artifact. The file name's stem is the label `session new` takes as `source`.
 pub fn promptPath(alloc: std.mem.Allocator, label: []const u8) ![]const u8 {
     return std.fmt.allocPrint(alloc, ".nulya/scratch/agents/{s}.md", .{label});
 }
 
 /// Render the definition's body to that file, overwriting whatever was there.
 ///
-/// Written fresh every time and content-determined: two delegations to one
-/// definition race harmlessly because they write the same bytes, and an edited
-/// definition is picked up without anybody running a command. The file is a
-/// handoff to `session new`, which reads it once and freezes the bytes into the
-/// header — after that nothing depends on it existing.
+/// Content-determined, so two delegations to one definition race harmlessly. The
+/// file is a handoff to `session new`, which reads it once and freezes the bytes
+/// into the header; after that nothing depends on it existing.
 pub fn writePrompt(alloc: std.mem.Allocator, io: std.Io, def: Def, path: []const u8) !void {
     const cwd = std.Io.Dir.cwd();
     if (std.fs.path.dirname(path)) |dir| try cwd.createDirPath(io, dir);
@@ -531,12 +482,11 @@ pub fn writePrompt(alloc: std.mem.Allocator, io: std.Io, def: Def, path: []const
 }
 
 /// The persona a session is wearing, from its frozen header: the `agent-<name>`
-/// system prompt `session new --prompt` froze into it (DESIGN §3). Null for a
-/// session that is not a delegation — a top-level conversation, where nothing is
-/// restricted.
+/// system prompt `session new --prompt` froze into it. Null for a session that is
+/// not a delegation.
 ///
-/// The header is the authority on purpose: it is frozen, so it says what this
-/// session actually composed with rather than what a definition file says today.
+/// The header is the authority because it is FROZEN: it says what this session
+/// actually composed with, not what a definition file says today.
 pub fn wornPersona(alloc: std.mem.Allocator, io: std.Io, session_id: []const u8) !?[]const u8 {
     const root = header_mod.object(alloc, io, session_id) orelse return null;
     const composition = switch (root.get("composition") orelse return null) {
@@ -609,10 +559,8 @@ test "which model vocabulary a definition writes in is decided by its runner, wh
     defer arena.deinit();
     const a = arena.allocator();
 
-    // An external runner takes an opaque string, and the nulya-shaped fields
-    // beside it are dropped rather than handed to a harness that has never
-    // heard of a profile. `runner:` is written AFTER them on purpose: the
-    // answer must not depend on the order somebody typed.
+    // `runner:` is written AFTER the fields it decides, on purpose: the answer
+    // must not depend on the order somebody typed.
     {
         var warnings: std.ArrayList([]const u8) = .empty;
         const def = try parseOne(
@@ -624,20 +572,18 @@ test "which model vocabulary a definition writes in is decided by its runner, wh
         try std.testing.expectEqualStrings("gpt-5-codex", def.runner_model);
         try std.testing.expectEqualStrings("", def.profile);
         try std.testing.expectEqualStrings("", def.model);
-        // Nulya's own composition, cleared rather than left to look like it does
-        // something: a codex thread has its own tool face and its own budget.
+        // Nulya composition, cleared rather than left to look like it does
+        // something.
         try std.testing.expectEqual(@as(usize, 0), def.pins.len);
         try std.testing.expectEqual(@as(usize, 0), def.agents.len);
         try std.testing.expectEqual(@as(u32, 0), def.max_steps);
-        // …but exchanges are counted from the delegation's record, which every
-        // runner has, so that one survives.
+        // …but exchanges are counted from the record, which every runner has.
         try std.testing.expectEqual(@as(u32, 3), def.max_exchanges);
         // One sentence for the model, one for the rest.
         try std.testing.expectEqual(@as(usize, 2), warnings.items.len);
     }
 
-    // …and the mirror: a nulya agent's `runner_model` names a harness it is not
-    // running on, so it goes the same way.
+    // …and the mirror.
     {
         var warnings: std.ArrayList([]const u8) = .empty;
         const def = try parseOne(a, "---\nrunner_model: gpt-5-codex\nmodel: deepseek\n---\nbody\n", &warnings);
@@ -675,18 +621,15 @@ test "a file that is not a definition is refused; a bad field is a warning and a
     try std.testing.expectError(error.NoFrontMatter, parseOne(a, "just some notes\n", &warnings));
     try std.testing.expectError(error.NoBody, parseOne(a, "---\nname: empty\n---\n\n", &warnings));
     try std.testing.expectError(error.BadName, parseOne(a, "---\nname: ../etc/passwd\n---\nbody\n", &warnings));
-    // A harness this package cannot talk to costs the whole definition: running
-    // the persona on something other than what it named is the worse answer.
+    // A harness this package cannot talk to costs the whole definition.
     try std.testing.expectError(error.UnknownRunner, parseOne(a, "---\nrunner: borges\n---\nbody\n", &warnings));
-    // …and so does a ceiling nobody can read. Both spellings: a word that is
-    // not one of the three, and the `readonly:` flag this field replaced —
-    // reading either one as "default" is the widening it exists to prevent.
+    // …and so does a ceiling nobody can read, in either spelling: reading one as
+    // "default" is the widening the field exists to prevent.
     try std.testing.expectError(error.UnknownPermissions, parseOne(a, "---\npermissions: none\n---\nbody\n", &warnings));
     try std.testing.expectError(error.UnknownPermissions, parseOne(a, "---\nreadonly: true\n---\nbody\n", &warnings));
     try std.testing.expectError(error.UnknownPermissions, parseOne(a, "---\nreadonly: false\n---\nbody\n", &warnings));
 
-    // Everything else survives with a default and a sentence: losing a whole
-    // persona over one bad line is the expensive answer.
+    // Everything else survives with a default and a sentence.
     const def = try parseOne(a,
         \\---
         \\model: /nope
@@ -698,8 +641,8 @@ test "a file that is not a definition is refused; a bad field is a warning and a
     , &warnings);
     try std.testing.expectEqualStrings("", def.profile);
     try std.testing.expectEqual(@as(u32, 0), def.max_steps);
-    // The bad pin is dropped and the good one kept — an unresolvable pin refuses
-    // the whole `session new`, so it must never reach one.
+    // An unresolvable pin refuses the whole `session new`, so it never reaches
+    // one.
     try std.testing.expectEqual(@as(usize, 1), def.pins.len);
     try std.testing.expectEqualStrings("ext:std/read", def.pins[0]);
     try std.testing.expectEqual(@as(usize, 3), warnings.items.len);
@@ -730,8 +673,8 @@ test "the spawn whitelist and the exchange budget, and what a bad entry costs" {
     try std.testing.expectEqual(@as(usize, 0), leaf.agents.len);
     try std.testing.expectEqual(@as(u32, 0), leaf.max_exchanges);
 
-    // The block form works for both lists, and a name nobody could delegate to
-    // is dropped with a sentence rather than carried to a failing delegation.
+    // The block form works for both lists, and an unusable name is dropped with
+    // a sentence rather than carried to a failing delegation.
     const blocky = try parseOne(a, "---\nagents:\n  - one\n  - ../two\nmax_exchanges: soon\n---\nbody\n", &warnings);
     try std.testing.expectEqual(@as(usize, 1), blocky.agents.len);
     try std.testing.expectEqualStrings("one", blocky.agents[0]);
@@ -746,8 +689,8 @@ test "a session id is checked because it becomes a path" {
     try std.testing.expect(!isPlainSessionId("s-../etc/passwd"));
 }
 
-// The front matter field and the `agent` tool's `model` argument are the same
-// string in the same grammar, so this is the whole of both readings.
+// The front matter field and the `agent` tool's `model` argument share this
+// grammar, so this is the whole of both readings.
 test "a model reference is a profile, optionally with an id inside it" {
     const only_profile = parseModelRef("deepseek").?;
     try std.testing.expectEqualStrings("deepseek", only_profile.profile);
@@ -797,8 +740,7 @@ test "discovery layers workspace over user over builtin, and marks what it shado
     defer env.deinit();
     try env.put("NULYA_HOME", home);
 
-    // Nothing written anywhere: the personas the package ships are the floor,
-    // and they are enough to delegate with.
+    // Nothing written anywhere: the shipped personas are the floor, and enough.
     {
         const found = try discover(a, io, &env);
         try std.testing.expectEqual(builtin.all.len, found.len);
@@ -812,7 +754,7 @@ test "discovery layers workspace over user over builtin, and marks what it shado
     }
 
     // A user definition of a builtin's name wins, and the builtin is still
-    // listed — the store roots' rule, not tcode's reserved names.
+    // listed rather than dropped.
     try tmp.dir.createDirPath(io, "agents");
     try tmp.dir.writeFile(io, .{ .sub_path = "agents/explore.md", .data = "---\ndescription: mine\n---\nmy explore\n" });
     {
@@ -862,16 +804,15 @@ test "the bundled personas parse, and explore is the read-only one" {
         try std.testing.expectEqual(@as(usize, 0), warnings.items.len);
         try std.testing.expectEqualStrings(b.name, def.name);
         try std.testing.expect(def.description.len != 0);
-        // No builtin carries its own step ceiling: they run on the kernel's
-        // runaway guard like the parent does. A persona-sized budget looks
-        // prudent and is not — it cuts the sub-agent off mid-investigation,
-        // and everything it found dies in a session nobody will ever read.
+        // No builtin carries its own step ceiling: a persona-sized budget cuts
+        // the sub-agent off mid-investigation, and everything it found dies in a
+        // session nobody will ever read.
         try std.testing.expectEqual(@as(u32, 0), def.max_steps);
         // The coordinator has no pins on purpose: delegation is its whole job.
         try std.testing.expect(def.pins.len != 0 or def.agents.len != 0);
         for (def.pins) |pin| try std.testing.expect(isPin(pin));
-        // Nothing names a model: a persona that does not care should run on
-        // whatever asked for it.
+        // Nothing names a model: a persona that does not care runs on whatever
+        // asked for it.
         try std.testing.expectEqualStrings("", def.profile);
     }
     var w: std.ArrayList([]const u8) = .empty;

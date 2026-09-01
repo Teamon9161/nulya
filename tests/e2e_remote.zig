@@ -1,6 +1,5 @@
 //! The remote environment (`zig build e2e-remote`): the channel, the two host
-//! verbs, and a session whose commands run on another machine (DESIGN §8.1,
-//! `docs/goals/remote-env.md` — Phase 1).
+//! verbs, and a session whose commands run on another machine.
 //!
 //! **The "other machine" here is this one, over a pipe.** `--env
 //! remote:exec:<this binary>` starts a real `nulya remote serve` and talks to

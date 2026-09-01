@@ -1,4 +1,4 @@
-//! The wire and per-platform entries (DESIGN §7.1, §7.3).
+//! The wire and per-platform entries.
 //!
 //! The claim under test is that a script extension is a real one: what `nulya
 //! ext init` scaffolds — no compiler, no JSON to parse, no id to echo — goes the
@@ -133,7 +133,7 @@ test "the wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned s
     try ws.access(io, draft ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "run.ps1", .{});
     // And the scaffold declares neither `permissions` nor `wire`: neither key is
     // in the schema any more, and a template is copied far more often than it is
-    // read, so it must not propagate the ceremony (DESIGN §9, §7.1).
+    // read, so it must not propagate the ceremony.
     const manifest_bytes = try ws.readFileAlloc(io, draft ++ std.fs.path.sep_str ++ "extension.json", alloc, .limited(1 << 16));
     defer alloc.free(manifest_bytes);
     try std.testing.expect(std.mem.indexOf(u8, manifest_bytes, "permissions") == null);
@@ -177,7 +177,7 @@ test "the wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned s
     // On the model's tool face: a real session, a real step, and the tool result
     // the model reads is the script's stdout, byte for byte. `--with` and nothing
     // else — the scaffold writes no `surface`, which means `auto`, so composing
-    // the package IS putting its tool in front of the model (DESIGN §7.2.1).
+    // the package IS putting its tool in front of the model.
     const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "greeter" });
     defer alloc.free(new.stdout);
     try std.testing.expectEqual(@as(u8, 0), new.code);
@@ -501,7 +501,7 @@ test "`ext init --zig` scaffolds a runtime spoken to the same way: --arg, no jso
 
     const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "compiled.greeter";
     // The compiled scaffold says nothing about a wire either: how a process is
-    // talked to was never a property of what kind of process it is (DESIGN §7.1).
+    // talked to was never a property of what kind of process it is.
     const manifest_bytes = try ws.readFileAlloc(io, draft ++ std.fs.path.sep_str ++ "extension.json", alloc, .limited(1 << 16));
     defer alloc.free(manifest_bytes);
     try std.testing.expect(std.mem.indexOf(u8, manifest_bytes, "wire") == null);
@@ -524,7 +524,7 @@ test "`ext init --zig` scaffolds a runtime spoken to the same way: --arg, no jso
     }
 
     // ② No JSON at all, and no --arg: the tool is named, so the call still
-    // runs — its arguments default to `{}` (C2, ext-review-2 §2).
+    // runs — its arguments default to `{}`.
     {
         const run = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "greet" });
         defer alloc.free(run.stdout);

@@ -1,5 +1,4 @@
-//! `--env remote:…`: the workspace lives on another machine (DESIGN §8.1,
-//! goals/remote-env.md Phase 1).
+//! `--env remote:…`: the workspace lives on another machine.
 //!
 //! What is pinned here is what a mistake would make invisible:
 //!
@@ -22,7 +21,7 @@
 //!      creation, and a package with no build for that machine stops creation
 //!      instead of failing later (`exec_version`);
 //!  10. the workspace store on THAT machine is gated there the way one here is
-//!      gated here (DESIGN §9) — a checkout cannot shadow a pushed version, and
+//! gated here — a checkout cannot shadow a pushed version, and
 //!      the refusal is one failed call, not a dead channel;
 //!  11. a background task runs on that machine and its report still arrives here
 //!      as the one thing a driver knows how to read — a `task_finished` drained
@@ -534,11 +533,11 @@ test "put-file creates the directories the path names" {
 // ── pushing an extension version ────────────────────────────────────────────
 //
 // The far machine has to be a DIFFERENT machine in the one respect this is
-// about: its user store. Offline the far side is this same binary over a pipe,
-// which inherits the harness's environment — so these tests go through
+// about: its user store. Offline the far side is this same binary over a pipe
+// inheriting the harness's environment, so these tests go through
 // `tests/remote_home.zig`, a transport that adds `NULYA_HOME` and then spawns
-// the real nulya. Without it "the far store" and "this store" would be one
-// directory, and every assertion below would be true for the wrong reason.
+// the real nulya — otherwise "the far store" and "this store" would be one
+// directory.
 
 /// A spec whose agent has `home` as its own nulya home.
 fn homedSpec(alloc: std.mem.Allocator, exe: []const u8, home: []const u8) ![]u8 {
@@ -895,16 +894,15 @@ test "a workspace store that arrived with a checkout over there is refused there
     const ws = tmp.dir;
 
     // The far machine's workspace, already holding a built version nobody over
-    // there ever looked at — what cloning a repo with a `.nulya/extensions` in it
-    // produces. That store is the FIRST root over there, so without a gate on
-    // that side it would shadow whatever `ext push` delivered into the far user
-    // store, and the checkout would have composed itself in.
+    // there ever looked at — what cloning a repo with a `.nulya/extensions` in
+    // it produces. That store is the FIRST root over there, so without a gate
+    // it would shadow whatever `ext push` delivered into the far user store.
     //
     // A script package, so this costs no compiler: the gate is about resolving
     // THROUGH that store, not about what kind of thing it holds. These two
-    // commands run under `runCli`'s own throwaway home, which is what leaves the
-    // home the agent will consult with no record of this store — the state a
-    // checkout arrives in.
+    // commands run under `runCli`'s own throwaway home, leaving the home the
+    // agent will consult with no record of this store — the state a checkout
+    // arrives in.
     var far = std.testing.tmpDir(.{});
     defer far.cleanup();
     const id = "checkedout";

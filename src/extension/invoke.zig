@@ -1,27 +1,18 @@
-//! Extension tool invocation (DESIGN §7.3).
+//! Extension tool invocation.
 //!
-//! The narrow seam between a NAMED frozen extension version and the one wire:
-//! the arguments on stdin, `NULYA_TOOL` / `NULYA_ARG_<k>` in the environment,
-//! stdout verbatim, the exit code as ok/failed. It knows nothing about the
-//! extension store: the caller decides WHICH version serves the call (session
-//! composition froze it; `ext run` resolved it) and the executing machine
-//! decides which file that version means (`extension/exec.zig`). `invokeTool`
-//! never asks what `current` means, and never holds a path.
-//!
-//! The contract itself, and the two pure rules inside it, live in
-//! `protocol.zig` — what this file adds is spawning, capture, and the text a
-//! failed call is read as.
+//! The narrow seam between a named frozen extension version and the one wire
+//! (`protocol.zig`): arguments on stdin, `NULYA_TOOL` / `NULYA_ARG_<k>` in the
+//! environment, stdout verbatim, the exit code as ok/failed. The caller
+//! decides which version serves the call; the executing machine decides
+//! which file that version means (`extension/exec.zig`).
 //!
 //! Failure classification — the three kinds never merge:
-//!
-//!   extension application failure (non-zero exit) → normalized failed invocation
-//!   host execution/resource failure                → error
-//!   cancellation                                   → error.Canceled unchanged
+//!   extension application failure (non-zero exit) -> normalized failed invocation
+//!   host execution/resource failure                -> error
+//!   cancellation                                    -> error.Canceled unchanged
 //!
 //! Ownership: the returned `ToolInvocation.output` is owned by the allocator
-//! passed to `invokeTool` and freed with `ToolInvocation.deinit`. Every
-//! intermediate allocation (per-call environment, captured stdout/stderr,
-//! diagnostic) is released on all paths.
+//! passed to `invokeTool` and freed with `ToolInvocation.deinit`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -32,11 +23,11 @@ const tool = @import("../tool.zig");
 
 pub const Options = struct {
     /// The cap a caller that has nothing better to say uses. A tool whose
-    /// manifest declares its own passes that instead (DESIGN §7.3).
+    /// manifest declares its own passes that instead.
     pub const default_timeout_ms: u32 = tool.Timeouts.extension_ms;
 
-    /// Wall-clock cap for the oneshot call, forwarded to `Environment.runExtension`
-    /// (`tool.Timeouts`, base-tools.md §3).
+    /// Wall-clock cap for the oneshot call, forwarded to
+    /// `Environment.runExtension`.
     timeout_ms: u32 = default_timeout_ms,
     /// Runner-level capture cap for the child's stdout/stderr.
     max_output_bytes: usize = 1 << 20,
@@ -63,14 +54,13 @@ pub const ToolInvocation = struct {
 /// particular is host execution control and is never folded into a failed
 /// invocation.
 ///
-/// The result is the child's stdout verbatim, which §7.3 already defines — no
-/// second rule about how text reaches the model. A non-zero exit is an ordinary
-/// failed invocation carrying `exit <n>`, the child's stderr, and whatever it
-/// managed to print.
+/// The result is the child's stdout verbatim — no second rule about how text
+/// reaches the model. A non-zero exit is an ordinary failed invocation
+/// carrying `exit <n>`, the child's stderr, and whatever it managed to print.
 ///
-/// The arguments' SHAPE is checked here, before anything is spawned or sent
-/// anywhere: nothing runs — and no frame crosses a channel — with something a
-/// tool's declared `input` schema could not describe.
+/// The arguments' shape is checked here, before anything is spawned or sent
+/// anywhere: nothing runs with something a tool's declared `input` schema
+/// could not describe.
 pub fn invokeTool(
     alloc: std.mem.Allocator,
     env: environment.Environment,
@@ -94,12 +84,10 @@ pub fn invokeTool(
         .timeout_ms = options.timeout_ms,
         .presentation_file = options.presentation_file,
     }) catch |err| {
-        // "This machine cannot run that version" is a FAILED CALL, not a host
+        // "This machine cannot run that version" is a failed call, not a host
         // fault: the caller is the one who can act on it, and killing the whole
         // step over it would take a conversation down for something one tool
-        // could have reported. The far side of a channel answers the same class
-        // of failure with a refusal that arrives here as the same shape, so the
-        // model reads one story whichever machine it happened on.
+        // could have reported.
         if (!exec.isUnrunnableHere(err)) return err;
         var diag: std.Io.Writer.Allocating = .init(alloc);
         errdefer diag.deinit();

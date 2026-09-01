@@ -1,19 +1,14 @@
-//! Delegation end to end (CLAUDE.md T32, docs/goals/agent-runner.md): the
-//! bundled `agent` package and every runner that can hold a delegation.
+//! Delegation end to end: the bundled `agent` package and every runner that can
+//! hold a delegation.
 //!
 //! A delegation is a `d-*` identity of its own with its own append-only record;
 //! the runner behind it may be a nulya session, an external harness driven over
 //! its own protocol (Codex, Claude, pi — all answered offline by the fakes
 //! `build.zig` builds for exactly this), or somebody else's extension speaking
-//! the `agent_runner` contract. What is pinned down here is the side of that
-//! conversation this repository owns: which requests go out and when, what the
-//! record freezes, how a turn sent mid-run is queued rather than refused, how an
-//! interrupt stops a round, and how the report comes back to the parent through
-//! its inbox.
-//!
-//! Split out of `extension.zig` so `zig build e2e-agent` is a step of its own
-//! (the tests here are the suite's slowest: every one drives a real background
-//! task). The tests moved verbatim.
+//! the `agent_runner` contract. Pinned down here: which requests go out and
+//! when, what the record freezes, how a turn sent mid-run is queued rather than
+//! refused, how an interrupt stops a round, and how the report comes back to
+//! the parent through its inbox.
 
 const std = @import("std");
 const support = @import("support.zig");
@@ -27,13 +22,10 @@ const runCliEnvs = support.runCliEnvs;
 /// How long a wait in this file sits before calling it a failure — as an
 /// argument to `nulya task wait`, and as a poll count at 50 ms below.
 ///
-/// These are budgets, not delays: every one of them returns the instant the
-/// thing it waits for happens, so a large number costs nothing on a healthy
-/// run. It is only paid when a test is already failing. A SMALL number, on the
-/// other hand, is paid whenever the machine is busy — as a red suite that says
-/// nothing about the code (docs/goals/agent-runner.md §6, "测试提速"). Every
-/// test here drives at least one real child `nulya session step`, so "busy"
-/// includes the other three e2e groups running beside this one.
+/// A budget, not a delay: it returns the instant the thing it waits for
+/// happens, so a large number costs nothing on a healthy run and is only paid
+/// when a test is already failing or the machine is busy running the other
+/// e2e groups beside this one.
 const wait_budget_ms = "180000";
 const wait_tries = 3600; // × 50 ms — the same budget, polled
 
@@ -178,7 +170,7 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
 
     // The read-only agent met the gate: the scripted provider's one `shell` call
     // never ran, and the refusal is that call's tool_result — in the ledger, and
-    // readable by the sub-agent (DESIGN §4).
+    // readable by the sub-agent.
     {
         const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
         defer alloc.free(events.stdout);
@@ -204,11 +196,9 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "as DATA") != null);
     }
 
-    // ⑤ `model` says what THIS delegation runs on (DESIGN §7.8). Two refusals,
-    // both before anything is created: a string that is not a model reference,
-    // and a reference on a FOLLOW-UP — that session froze its identity when it
-    // was created (physics #2), and silently ignoring the argument would be the
-    // worst of the three available answers.
+    // ⑤ `model` says what THIS delegation runs on. Two refusals, both before
+    // anything is created: a string that is not a model reference, and a
+    // reference on a FOLLOW-UP — that session froze its identity when created.
     {
         const bad = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\",\"model\":\"/nope\"}" }, &.{
             .{ .key = "NULYA_SESSION", .value = session_file },
@@ -229,15 +219,10 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
         try std.testing.expect(std.mem.indexOf(u8, late.stdout, "NEW delegation") != null);
     }
 
-    // ⑥ A ledger line is as long as the text inside it: the task alone can be
-    // thousands of bytes, and an assistant turn carries the provider's opaque
-    // reasoning as well. So whoever reads the child's `--stream` has to hold a
-    // whole line whatever its length — a reader that gives up on a long one
-    // stops draining a pipe the child is still writing into, and then the child
-    // blocks on stdout while the reader blocks on its stderr: the report never
-    // arrives, and the parent waits for ever for a sub-agent that has already
-    // finished. Nothing about that failure is visible in either session, which
-    // is exactly why it is worth a test.
+    // ⑥ A ledger line is as long as the text inside it, and a reader of the
+    // child's `--stream` that gives up on a long line stalls the pipe: the
+    // child blocks on stdout, the reader blocks on its stderr, and the report
+    // never arrives even though the sub-agent has already finished.
     {
         const long = try alloc.alloc(u8, 12 << 10);
         defer alloc.free(long);
@@ -281,7 +266,7 @@ test "bundled agent: the personas the package ships need no files — list layer
     defer alloc.free(ref);
 
     // ① Nothing written anywhere: `explore`, `plan` and `general` are already
-    // there. Distribution is the binary (DESIGN §7.8) — no install step, and no
+    // there. Distribution is the binary — no install step, and no
     // directory to create.
     {
         const listed = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "list", "{}" });
@@ -312,7 +297,7 @@ test "bundled agent: the personas the package ships need no files — list layer
     }
 
     // ② A workspace definition of the same name WINS, and the builtin is still
-    // listed, marked — the store roots' rule (§7.2), not a reserved name.
+    // listed, marked — the store roots' rule, not a reserved name.
     try ws.createDirPath(io, ".nulya/agents");
     try ws.writeFile(io, .{ .sub_path = ".nulya/agents/explore.md", .data = "---\ndescription: mine\n---\nmy own explore\n" });
     {
@@ -339,11 +324,10 @@ test "bundled agent: the personas the package ships need no files — list layer
     }
     try ws.deleteFile(io, ".nulya/agents/explore.md");
 
-    // ③ The builtin `explore` pins `std`'s read-only tools. `render` hands those
-    // pins on as written and has no opinion about whether they resolve: a pin
-    // brings its own package into the session (DESIGN §5.1), so there is exactly
-    // one judge of that, and it is the `session new` that would be refused.
-    // Nothing is derived here, and no `members` list is answered any more.
+    // ③ The builtin `explore` pins `std`'s read-only tools. `render` hands
+    // those pins on as written and has no opinion about whether they resolve —
+    // a pin brings its own package into the session, so `session new` is the
+    // one judge of that.
     {
         const rendered = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "render", "{\"name\":\"explore\"}" });
         defer alloc.free(rendered.stdout);
@@ -364,12 +348,9 @@ test "bundled agent: the personas the package ships need no files — list layer
         try std.testing.expectEqual(@as(u8, 0), activated.code);
     }
 
-    // What "read-only" MEANS at the gate now travels on the gate request itself
-    // (DESIGN §4), frozen from this very manifest at composition time. `ext
-    // inspect <id>@<version>` still has to answer for it — it is how a person
-    // checks the same claim — but nothing reads it to build an allow-list any
-    // more, which is the derivation that once came back empty and made a
-    // read-only delegation read-only in name only (BUGS #16).
+    // What "read-only" MEANS at the gate travels on the gate request itself,
+    // frozen from this manifest at composition time; `ext inspect
+    // <id>@<version>` answers the same claim for a person checking by hand.
     {
         const frozen = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "inspect", std_ref });
         defer alloc.free(frozen.stdout);
@@ -405,11 +386,10 @@ test "bundled agent: the personas the package ships need no files — list layer
         try std.testing.expectEqual(@as(u8, 0), waited.code);
     }
 
-    // The child's frozen composition: the persona as BYTES the header holds, the
-    // `std` its pins brought in as the only member (nothing on the delegation's
-    // command line named it — the kernel's own implication did, DESIGN §5.1),
-    // and exactly the three read-only tools on its native face. The persona is
-    // not an extension — the store gained nothing from this delegation.
+    // The child's frozen composition: the persona as BYTES the header holds,
+    // `std` as the only member (its pins implied membership; nothing on the
+    // command line named it), and exactly its three read-only tools on the
+    // native face. The persona is not an extension — the store gained nothing.
     {
         const header = try support.readSessionFile(alloc, io, ws, child);
         defer alloc.free(header);
@@ -465,7 +445,7 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
 
     // ① The first delegation. The receipt names the DELEGATION — what the model
     //    says back to this tool — and, because the abstraction does not hide
-    //    anything (D2), the remote conversation behind it as well.
+    //    anything, the remote conversation behind it as well.
     const first = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"task\":\"first\"}" }, in_parent);
     defer alloc.free(first.stdout);
     try std.testing.expectEqual(@as(u8, 0), first.code);
@@ -506,9 +486,8 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
 
     // ② The exchange budget is the RECORD's turn count, not the child ledger's
     //    user turns — the only count an external runner could ever answer too.
-    //    Two turns appended to the child directly, behind this tool's back, are
-    //    three user turns in that session and still one message in the
-    //    delegation: the budget must not move.
+    //    Two turns appended to the child directly are three user turns in that
+    //    session and still one message in the delegation.
     {
         for ([_][]const u8{ "sideband one", "sideband two" }) |text| {
             const said = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", child, text });
@@ -531,7 +510,7 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
         try std.testing.expectEqual(@as(u8, 0), waited.code);
     }
     // Nothing new was created: another turn goes into the conversation that
-    // already holds everything it found (DESIGN §1).
+    // already holds everything it found.
     const after = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list" });
     defer alloc.free(after.stdout);
     try std.testing.expectEqual(std.mem.count(u8, before.stdout, "\n"), std.mem.count(u8, after.stdout, "\n"));
@@ -547,10 +526,8 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stepped.stdout, "\"kind\":\"task_finished\""));
     }
 
-    // ③ The budget itself. Two turns have been sent into the delegation and it
-    //    allows two follow-ups on top of the first, so a third goes through —
-    //    which the child's four user turns would already have refused — and the
-    //    fourth is named, with the number.
+    // ③ The budget itself: two follow-ups are allowed on top of the first, so a
+    //    third goes through and a fourth is refused, named with the number.
     {
         const request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"third\"}}", .{d});
         defer alloc.free(request);
@@ -567,9 +544,8 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
         try std.testing.expect(std.mem.indexOf(u8, over.stdout, "follow-up turn") != null);
     }
 
-    // ④ The vocabulary. A SESSION id is what this took before delegations had
-    //    ids of their own; it is refused with the word that replaced it rather
-    //    than with a missing directory (D11), and an id of the right shape that
+    // ④ A session id (the vocabulary this replaced) is refused by name rather
+    //    than as a missing directory; a delegation id of the right shape that
     //    names nothing is a different answer again.
     {
         const old_shape = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"x\"}}", .{child});
@@ -586,9 +562,8 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
     }
 
     // ⑤ A delegation belongs to the conversation that opened it. Another session
-    //    that knows the id cannot take it over — if it could, the next report
-    //    would arrive there instead, and "a sub-agent reports back to its parent"
-    //    would mean "to whoever spoke to it last".
+    //    that knows the id cannot take it over — the next report would arrive
+    //    there instead of at the true parent.
     {
         const other = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
         defer alloc.free(other.stdout);
@@ -674,10 +649,9 @@ test "bundled agent: the permission ladder is one word frozen into the delegatio
         .sub_path = ".nulya/agents/plain.md",
         .data = "---\ndescription: an ordinary worker\n---\nDo the work.\n",
     });
-    // The word this field replaced. Refused whole rather than read as an
-    // ordinary delegation: reading a definition that asked for read-only as
-    // something wider is the one outcome the ladder exists to prevent, so it
-    // does not appear in the catalogue at all.
+    // `readonly: true` (the word this field replaced) is refused whole rather
+    // than read as an ordinary delegation, so it does not appear in the
+    // catalogue at all.
     try ws.writeFile(io, .{
         .sub_path = ".nulya/agents/old.md",
         .data = "---\ndescription: written before the ladder\nreadonly: true\n---\nDo the work.\n",
@@ -743,8 +717,7 @@ test "bundled agent: the permission ladder is one word frozen into the delegatio
 
     // ② …and the call is nearer than the definition, in both directions: an
     //    ordinary persona delegated with `readonly` is held to reading, and it
-    //    is the RECORD that says so, because the record is what every later
-    //    round of that delegation is driven from.
+    //    is the RECORD that every later round of the delegation is driven from.
     {
         const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"plain\",\"task\":\"go\",\"permissions\":\"readonly\"}" }, in_parent);
         defer alloc.free(started.stdout);
@@ -817,11 +790,9 @@ test "bundled agent: the wake invariant — a turn sent while a runner holds the
     const lock_path = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/.runner.lock", .{d});
     defer alloc.free(lock_path);
 
-    // ① A runner is driving. Its lease is what says so — an OS lock, so nothing
-    //    has to be believed about a process that may already be dead. A turn
-    //    sent now is ACCEPTED (D3: it is what a person typing mid-answer does),
-    //    queued into the conversation, and starts no second runner: the holder
-    //    will find it.
+    // ① A runner is driving, held by an OS lock (nothing has to be believed
+    //    about a process that may already be dead). A turn sent now is ACCEPTED
+    //    and queued into the conversation, starting no second runner.
     var held = try ws.createFile(io, lock_path, .{ .truncate = false, .read = true, .lock = .exclusive });
     const tasks_before = try countTasks(alloc, io, ws, exe_abs, parent);
     {
@@ -834,10 +805,9 @@ test "bundled agent: the wake invariant — a turn sent while a runner holds the
     }
     try std.testing.expectEqual(tasks_before, try countTasks(alloc, io, ws, exe_abs, parent));
 
-    // ② A redundant runner — two senders probing at the same moment is the race
-    //    the lease exists for — loses it and says NOTHING. A report frame from a
-    //    runner that drove nothing would be a sub-agent's findings that no
-    //    sub-agent produced, arriving in the parent as an ordinary message.
+    // ② A redundant runner — two senders probing at once is the race the lease
+    //    exists for — loses it and says NOTHING: a report frame from a runner
+    //    that drove nothing would be findings no sub-agent produced.
     {
         const args = try std.fmt.allocPrint(alloc, "{{\"delegation\":\"{s}\",\"session\":\"{s}\",\"agent\":\"worker\"}}", .{ d, child });
         defer alloc.free(args);
@@ -847,10 +817,9 @@ test "bundled agent: the wake invariant — a turn sent while a runner holds the
         try std.testing.expect(std.mem.indexOf(u8, lost.stdout, "<agent-report") == null);
     }
 
-    // ③ The lease is free again — the runner left, or was killed, and the OS
-    //    released it either way. The next turn starts a fresh runner, and that
-    //    runner finds BOTH messages: the one queued while the lease was held has
-    //    been waiting in the conversation all along.
+    // ③ The lease is free again — the OS released it whether the runner left or
+    //    was killed. The next turn starts a fresh runner, which finds BOTH
+    //    messages: the queued one was waiting in the conversation all along.
     held.close(io);
     {
         const request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"queued two\"}}", .{d});
@@ -927,7 +896,7 @@ test "bundled agent: an interrupt stops the run in flight — the step is killed
     defer alloc.free(interrupted.stdout);
     try std.testing.expectEqual(@as(u8, 0), interrupted.code);
 
-    // An interrupt is a DELIVERY, not a kind of message (D3): the record holds
+    // An interrupt is a DELIVERY, not a kind of message: the record holds
     // one ordinary turn row, marked with how it was sent.
     {
         const rows = try readRecord(alloc, io, ws, d);
@@ -947,7 +916,7 @@ test "bundled agent: an interrupt stops the run in flight — the step is killed
         defer alloc.free(events.stdout);
         // The step that was running died where it stood, leaving a call batch
         // with no results; the kernel closes it at the next step boundary, which
-        // is the next round of the very same runner (DESIGN §4).
+        // is the next round of the very same runner.
         try std.testing.expect(std.mem.indexOf(u8, events.stdout, "interrupted before Nulya recorded results") != null);
         // …and the message the interrupt carried is in the conversation.
         try std.testing.expect(std.mem.indexOf(u8, events.stdout, "INTERRUPT-SENTINEL") != null);
@@ -1020,8 +989,7 @@ test "bundled agent: the record is what a delegation is driven by — its budget
     // ① The definition is gone. A delegation is a conversation that already
     //    exists — its persona is in the child's header, its ceiling and its
     //    budget are in the record — so deleting the file it was BORN from ends
-    //    nothing. (It used to: the follow-up path looked the persona up by name
-    //    and refused when it was not there.)
+    //    nothing.
     try ws.deleteFile(io, ".nulya/agents/frozen.md");
 
     {
@@ -1045,16 +1013,12 @@ test "bundled agent: the record is what a delegation is driven by — its budget
     }
 
     // ② The ceiling is not an argument, and neither is anything else about a
-    //    delegation. `run` is an internal tool, so this is a call by hand — and
-    //    it names the widest rung there is, plus a remote conversation that does
-    //    not exist. Neither word is read at all now: `run` takes a delegation
-    //    and a depth, and the record answers everything else. Still asserted
-    //    from outside, because "argv cannot say this" is the claim, not "the
-    //    struct happens not to have a field for it".
+    //    delegation: `run` takes only a delegation and a depth, and the record
+    //    answers everything else — so a hand-written call naming the widest
+    //    rung and a nonexistent session is read as neither.
     //
-    //    `loop` so the child asks for a shell call on every step it takes; the
-    //    frozen `max_steps: 1` (also from the record — it is not on this command
-    //    line either) stops it after one.
+    //    `loop` so the child asks for a shell call on every step; the frozen
+    //    `max_steps: 1` from the record stops it after one.
     {
         const before = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
         defer alloc.free(before.stdout);
@@ -1079,11 +1043,9 @@ test "bundled agent: the record is what a delegation is driven by — its budget
         // command line did — and the session that command line invented was
         // never touched.
         try std.testing.expect(std.mem.count(u8, after.stdout, "cannot run shell") > denials_before);
-        // And it drove it read-only, whatever the command line asked for.
-        // Nothing this delegation ever calls can succeed: every tool result in
-        // its ledger is a refusal. One `"ok":true` would be a call that ran —
-        // which is exactly what dropping the gate for `unsafe` would produce,
-        // since the scripted provider asks for `shell` on every step.
+        // And it drove it read-only, whatever the command line asked for: every
+        // tool result in its ledger is a refusal, since the scripted provider
+        // asks for `shell` on every step.
         try std.testing.expect(std.mem.indexOf(u8, after.stdout, "\"ok\":true") == null);
     }
 
@@ -1162,9 +1124,8 @@ test "bundled agent: a sub-agent that spends every step on tools is asked to sto
         try std.testing.expect(std.mem.indexOf(u8, events.stdout, support.launch.ScriptedProvider.wrap_up_opening) != null);
     }
 
-    // …and the parent's report carries what the child said when asked, not the
-    // sentence that used to stand in for having nothing. Before this, the same
-    // run reported only that the budget ran out.
+    // …and the parent's report carries what the child said when asked, rather
+    // than a stand-in sentence for having nothing.
     {
         // One step, like every other parent step here: the report is what this
         // is about. Unbounded, the parent's own `wrapup` stand-in never ends a
@@ -1209,13 +1170,10 @@ test "bundled agent: nothing runs in the round a sub-agent is given for its repo
     const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
     defer alloc.free(session_file);
 
-    // `wrapdefy`: the sub-agent calls a tool on every step it is given, the
-    // round it was asked to spend on its report included. The request says
-    // "text only — do not call any more tools"; this model does not care, which
-    // is the only interesting case, because a sentence the model obeys proves
-    // nothing about what the harness allows. Seeing the call refused, it
-    // answers in text — the other half, and the one a budget of one turn would
-    // have made unreachable.
+    // `wrapdefy`: the sub-agent calls a tool on every step, including the round
+    // it was asked to spend on its report — the interesting case, since a model
+    // that obeys the "text only" request proves nothing about what the harness
+    // allows. Seeing the call refused, it answers in text instead.
     const in_parent: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "wrapdefy" },
@@ -1236,17 +1194,11 @@ test "bundled agent: nothing runs in the round a sub-agent is given for its repo
     // and on no other, and a gate that had quietly become permanent would show
     // up here first.
     try ws.access(io, Scripted.defiant_before_file, .{});
-    // …and the round asked for the report ran none. Before this the wrap-up
-    // round was an ordinary `session step` carrying the delegation's own
-    // budget, so a sub-agent that ignored the sentence simply started again —
-    // and with the bundled personas on the kernel's ceiling, started again for
-    // up to 500 more steps.
+    // …and the round asked for the report ran none.
     try std.testing.expectError(error.FileNotFound, ws.access(io, Scripted.defiant_after_file, .{}));
 
     // Two turns, and not one more: the call, and the answer that reading the
-    // refusal made possible. A budget of one would have stopped at the first —
-    // the note the gate writes would have been addressed to a turn that never
-    // came, and everything the sub-agent found would have gone with it.
+    // refusal made possible.
     {
         const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
         defer alloc.free(events.stdout);
@@ -1272,7 +1224,7 @@ fn delegationOf(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
 }
 
 /// The remote conversation out of the same receipt — named on purpose: the
-/// abstraction gives the facts one name, it does not hide them (D2).
+/// abstraction gives the facts one name, it does not hide them.
 fn remoteOf(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     const at = std.mem.indexOf(u8, text, "session s-").? + "session ".len;
     var end = at;
@@ -1350,15 +1302,13 @@ test "bundled agent: only a persona with an agents whitelist carries the tool, i
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     };
 
-    // A coordinator's session carries the tool; a leaf's does not — one field in
-    // one place decides it, so a leaf has nothing to refuse later.
-    //
-    // MEMBERSHIP is the whole of that decision. `agent` is `surface: "auto"`
-    // (§5.1), so the one `--with` the delegation adds for a coordinator both
-    // freezes the package into `active` and puts its entry tool in the native
-    // face; no pin is passed, and one naming it would be refused. The three
-    // `internal` tools stay off that face — `--bare` means nothing else can put
-    // them there either, so the list is exactly one long.
+    // A coordinator's session carries the tool; a leaf's does not — MEMBERSHIP
+    // is the whole of that decision. `agent` is `surface: "auto"`, so the one
+    // `--with` the delegation adds for a coordinator both freezes the package
+    // into `active` and puts its entry tool in the native face; no pin is
+    // passed, and one naming it would be refused. The three `internal` tools
+    // stay off that face — `--bare` means nothing else can put them there
+    // either, so the list is exactly one long.
     const boss_file = try delegateTo(alloc, io, ws, exe_abs, ref, in_parent, parent, "boss", "coordinate");
     defer alloc.free(boss_file);
     const worker_file = try delegateTo(alloc, io, ws, exe_abs, ref, in_parent, parent, "worker", "work");
@@ -1406,7 +1356,7 @@ test "bundled agent: only a persona with an agents whitelist carries the tool, i
     // The depth backstop: a whitelist cannot see an INDIRECT cycle (`a` may
     // delegate to `b`, `b` to `a`), so the runner tells each step how deep it is
     // and this refuses at the bound. Not a security boundary — the variable is
-    // absent when a person drives a delegated session — and it says so in DESIGN.
+    // absent when a person drives a delegated session.
     {
         const deep: []const EnvPair = &.{
             .{ .key = "NULYA_SESSION", .value = boss_file },
@@ -1445,13 +1395,11 @@ fn delegateTo(
     return std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{out.stdout[at..end]});
 }
 
-// ── the Codex runner (contract ar-d) ────────────────────────────────────────
+// ── the Codex runner ─────────────────────────────────────────────────────────
 //
 // A delegation whose definition says `runner: codex` is held by a Codex thread
-// instead of a nulya session. These run against `tests/fake_codex.zig` — an
-// app-server that answers the protocol and never leaves this machine — because
-// everything worth pinning down is on THIS side of that conversation: which
-// requests the runner sends, when it sends them, and what it refuses to open.
+// instead of a nulya session, run here against `tests/fake_codex.zig` — an
+// app-server that answers the protocol and never leaves this machine.
 
 /// The offline app-server, built by `build.zig` for exactly this. Absent means
 /// the suite was not launched through `zig build e2e`.
@@ -1465,7 +1413,7 @@ fn fakeCodex(alloc: std.mem.Allocator) !?[]u8 {
 
 /// The remote out of a codex receipt (`… — delegation d-…, codex thread t-…`).
 /// Named on purpose, like the nulya one: the abstraction gives the facts one
-/// name, it does not hide them (D2).
+/// name, it does not hide them.
 fn codexThreadOf(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     const at = std.mem.indexOf(u8, text, "codex thread ").? + "codex thread ".len;
     var end = at;
@@ -1538,7 +1486,7 @@ test "bundled agent: a codex delegation is a thread, not a session — the recor
     defer alloc.free(ref);
 
     // A definition whose only nulya-shaped field is the body. `runner_model` is
-    // the other harness's vocabulary (D9) — never parsed here.
+    // the other harness's vocabulary — never parsed here.
     try ws.createDirPath(io, ".nulya/agents");
     try ws.writeFile(io, .{
         .sub_path = ".nulya/agents/scout.md",
@@ -1560,7 +1508,7 @@ test "bundled agent: a codex delegation is a thread, not a session — the recor
     // ① The call's `model` beats the definition's, and for an external runner it
     // is passed through WHOLE. `/nope` is the string a nulya delegation refuses
     // outright as a malformed profile reference — one string, two runners, two
-    // right answers, because the grammar belongs to the harness (D9).
+    // right answers, because the grammar belongs to the harness.
     const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"scout\",\"task\":\"find the parser\",\"model\":\"/nope\"}" }, with_codex);
     defer alloc.free(started.stdout);
     try std.testing.expectEqual(@as(u8, 0), started.code);
@@ -1576,7 +1524,7 @@ test "bundled agent: a codex delegation is a thread, not a session — the recor
 
     // ② The record froze which harness holds this delegation and what it was
     // asked to run on — in its own column, so nothing has to be interpreted to
-    // be read (D2).
+    // be read.
     {
         const rows = try readRecord(alloc, io, ws, d);
         defer alloc.free(rows);
@@ -1596,7 +1544,7 @@ test "bundled agent: a codex delegation is a thread, not a session — the recor
     // ③ The report reaches the parent exactly the way a nulya delegation's does:
     // the ordinary `task_finished` event, drained at the next step boundary. The
     // runner contract earned that for free — no new event kind, and no driver
-    // had to learn anything (D8).
+    // had to learn anything.
     {
         const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
@@ -1612,7 +1560,7 @@ test "bundled agent: a codex delegation is a thread, not a session — the recor
     }
 
     // ④ Another turn into the same delegation, sent while nothing is running.
-    // The channel is the delegation's own inbox (D5) — Codex has no inbox for us
+    // The channel is the delegation's own inbox — Codex has no inbox for us
     // to append to — and the proof that it was used is both the directory being
     // there and the second report quoting a message that could only have come
     // through it.
@@ -1707,7 +1655,7 @@ test "bundled agent: a codex delegation that is running takes a message as turn/
     // ① An ordinary message, delivered while the turn is running. The runner
     // reads `<d>/inbox/` between the lines of the stream, and a message found
     // there mid-turn becomes `turn/steer` — the same act as typing while the
-    // main conversation is answering (D3).
+    // main conversation is answering.
     {
         const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"also check the lexer\"}}", .{d});
         defer alloc.free(args);
@@ -1881,17 +1829,15 @@ test "bundled agent: a message that asks to interrupt is never steered into the 
         defer alloc.free(log);
         // It stopped the turn…
         try std.testing.expect(std.mem.indexOf(u8, log, "turn/interrupt") != null);
-        // …and the message itself never went into it. The log holds whole
-        // requests, so a steer carrying this text would be visible here; if it
-        // had been, the message would have been folded into an answer that was
-        // then thrown away.
+        // …and the message itself never went into it: the log holds whole
+        // requests, so a steer carrying this text would be visible here.
         var lines = std.mem.splitScalar(u8, log, '\n');
         while (lines.next()) |line| {
             if (std.mem.indexOf(u8, line, "turn/steer") == null) continue;
             try std.testing.expect(std.mem.indexOf(u8, line, "RACE-SENTINEL") == null);
         }
         // Not lost either: a later turn was started with it, which is the whole
-        // point of leaving it in the inbox (D4).
+        // point of leaving it in the inbox.
         try std.testing.expect(std.mem.indexOf(u8, log, "RACE-SENTINEL") != null);
     }
 
@@ -1998,14 +1944,12 @@ test "bundled agent: the three rungs reach codex as its own three sandboxes, and
     }
 }
 
-// ── the Claude runner (contract ar-f) ───────────────────────────────────────
+// ── the Claude runner ────────────────────────────────────────────────────────
 //
 // A delegation whose definition says `runner: claude` is held by a Claude Code
-// session instead of a nulya one. These run against `tests/fake_claude.zig` — a
+// session instead of a nulya one, run here against `tests/fake_claude.zig` — a
 // `claude -p` that answers the stream-json protocol and never leaves this
-// machine — because everything worth pinning down is on THIS side of that
-// conversation: which flags the runner passes, when it writes a message into
-// stdin, and what it refuses to run.
+// machine.
 
 /// The offline `claude`, built by `build.zig` for exactly this. Absent means the
 /// suite was not launched through `zig build e2e`.
@@ -2065,7 +2009,7 @@ test "bundled agent: a claude delegation is a claude session — the record free
 
     // ① The call's `model` beats the definition's, and for an external runner it
     // is passed through WHOLE — `/nope` is the string a nulya delegation refuses
-    // outright as a malformed profile reference (D9).
+    // outright as a malformed profile reference.
     const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"scout\",\"task\":\"find the parser\",\"model\":\"/nope\"}" }, with_claude);
     defer alloc.free(started.stdout);
     try std.testing.expectEqual(@as(u8, 0), started.code);
@@ -2080,8 +2024,8 @@ test "bundled agent: a claude delegation is a claude session — the record free
     defer alloc.free(remote);
 
     // ② The record froze which harness holds this delegation, at what version,
-    // and what it was asked to run on — each in its own column, so nothing has to
-    // be interpreted to be read (D2/D7).
+    // and what it was asked to run on — each in its own column, so nothing has
+    // to be interpreted to be read.
     {
         const rows = try readRecord(alloc, io, ws, d);
         defer alloc.free(rows);
@@ -2112,7 +2056,7 @@ test "bundled agent: a claude delegation is a claude session — the record free
 
     // ④ The report reaches the parent exactly the way a nulya delegation's does:
     // the ordinary `task_finished` event, drained at the next step boundary. No
-    // new event kind, and no driver had to learn anything (D8).
+    // new event kind, and no driver had to learn anything.
     {
         const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
@@ -2145,7 +2089,7 @@ test "bundled agent: a claude delegation is a claude session — the record free
     }
 
     // ⑥ Another turn, sent while nothing is running. The channel is the
-    // delegation's own inbox (D5), and the round that takes it RESUMES the
+    // delegation's own inbox, and the round that takes it RESUMES the
     // session rather than opening a second one — which is what makes a follow-up
     // cheap in the first place.
     {
@@ -2237,7 +2181,7 @@ test "bundled agent: a claude delegation that is running takes an interrupt as a
     // Wait until a turn is genuinely under way — that is what an interrupt is for.
     try waitForText(io, alloc, ws, "claude-log.txt", "user ");
 
-    // The interrupt: the message first, then the marker (D6). The runner checks
+    // The interrupt: the message first, then the marker. The runner checks
     // the marker between the lines it reads, so the message behind it stays in
     // the inbox rather than being fed to a turn that is about to be cut short.
     {
@@ -2271,7 +2215,7 @@ test "bundled agent: a claude delegation that is running takes an interrupt as a
     }
 
     // …and the message behind it was answered rather than lost: the interrupt is
-    // execution control, not a kind of message (D3).
+    // execution control, not a kind of message.
     {
         const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
@@ -2414,12 +2358,11 @@ test "bundled agent: the three rungs reach claude as its own three permission mo
     }
 }
 
-// ── the Pi runner (contract ar-e) ───────────────────────────────────────────
+// ── the Pi runner ────────────────────────────────────────────────────────────
 //
 // A delegation whose definition says `runner: pi` is held by a `pi --mode rpc`
-// session. These run against `tests/fake_pi.zig` — a process that answers the
-// documented RPC protocol offline — because everything worth pinning down is on
-// THIS side of it.
+// session, run here against `tests/fake_pi.zig` — a process that answers the
+// documented RPC protocol offline.
 
 /// The offline `pi`, built by `build.zig` for exactly this.
 fn fakePi(alloc: std.mem.Allocator) !?[]u8 {
@@ -2487,7 +2430,7 @@ test "bundled agent: a pi delegation is a pi session — one flag opens or resum
     defer alloc.free(remote);
 
     // The record froze which harness holds this delegation, at what version, and
-    // what it was asked to run on — each in its own column (D2/D7).
+    // what it was asked to run on — each in its own column.
     {
         const rows = try readRecord(alloc, io, ws, d);
         defer alloc.free(rows);
@@ -2541,7 +2484,7 @@ test "bundled agent: a pi delegation is a pi session — one flag opens or resum
     }
 
     // Another turn, sent while nothing is running: the channel is the
-    // delegation's own inbox (D5) and the next round takes it.
+    // delegation's own inbox and the next round takes it.
     {
         const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"and the lexer\"}}", .{d});
         defer alloc.free(args);
@@ -2644,7 +2587,7 @@ test "bundled agent: a pi delegation that is running takes an interrupt as abort
         try std.testing.expect(std.mem.indexOf(u8, log, "abort") != null);
     }
 
-    // …and the message behind it was answered rather than lost (D3).
+    // …and the message behind it was answered rather than lost.
     {
         const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
@@ -2717,10 +2660,9 @@ test "bundled agent: a read-only pi delegation asks for the allow-list and stops
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: go") == null);
     }
 
-    // The allow-list really was asked for. (That `abort` went down the wire is
-    // pinned by the interrupt test above; here the process is closed right after
-    // the refusal, so the fake never gets to read it back — which is fine: the
-    // ceiling's job is that the round produces nothing, and that is asserted.)
+    // The allow-list really was asked for. The process is closed right after
+    // the refusal without reading `abort` back, which is fine: the ceiling's
+    // job is that the round produces nothing, and that is asserted.
     {
         const log = try ws.readFileAlloc(io, "pi-log.txt", alloc, .limited(1 << 20));
         defer alloc.free(log);
@@ -2794,22 +2736,15 @@ test "bundled agent: a read-only pi delegation asks for the allow-list and stops
     }
 }
 
-// ── ar-g: a runner that lives outside this package ──────────────────────────
+// ── a runner that lives outside this package ────────────────────────────────
 //
-// The four arms in `extensions/agent` are there because they were first;
-// nothing about them is privileged. `runner: ext:<id>` is the claim that a
-// fifth harness needs no code in that package at all — one extension with one
-// `agent_runner` tool, and the delegation world view comes with it. The fixture
-// below is that extension, written the way a third party would write one: a
-// SCRIPT, no Zig, no toolchain, answering the two operations of the contract
-// (`extensions/agent/src/external.zig`).
-//
-// It echoes rather than talks to a model — what these tests pin down is on this
-// side of the wire (which version is called, that the message is staged where
-// the contract says, that the interrupt marker crosses the boundary, that a
-// refusal at `op=open` costs the whole delegation), and a test that needed a
-// model is a test nobody runs. `$tag` is how a round says WHICH BUILD answered
-// it, which is the whole of the version-freeze assertion.
+// `runner: ext:<id>` is the claim that a fifth harness needs no code in
+// `extensions/agent` at all — one extension with one `agent_runner` tool, and
+// the delegation world view comes with it. The fixture below is that
+// extension, written the way a third party would: a SCRIPT, no Zig, no
+// toolchain, answering the two operations of the contract
+// (`extensions/agent/src/external.zig`). It echoes rather than talks to a
+// model; `$tag` is how a round says WHICH BUILD answered it.
 
 fn runnerScriptPs1(alloc: std.mem.Allocator, tag: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc,
@@ -3007,13 +2942,13 @@ test "bundled agent: a delegation can be held by a runner that is somebody else'
     try std.testing.expectEqual(@as(u8, 0), started.code);
     // The receipt names the runner as the delegation's own word for it, and does
     // not call the handle a session — this side does not know what kind of thing
-    // it is (D2).
+    // it is.
     try std.testing.expect(std.mem.indexOf(u8, started.stdout, "ext:echo-runner conversation") != null);
 
     const d = try delegationOf(alloc, started.stdout);
     defer alloc.free(d);
 
-    // The record froze WHICH runner and WHICH VERSION of it (D7) — the whole
+    // The record froze WHICH runner and WHICH VERSION of it — the whole
     // point of resolving `current` once, at the moment the delegation opens.
     {
         const rows = try readRecord(alloc, io, ws, d);
@@ -3088,7 +3023,7 @@ test "bundled agent: a delegation can be held by a runner that is somebody else'
         });
         defer alloc.free(stepped.stdout);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: and the lexer (v1)") != null);
-        // …and the message travelled through the delegation's own inbox (D5),
+        // …and the message travelled through the delegation's own inbox,
         // which the round drained.
         try std.testing.expect(try inboxEmpty(io, alloc, ws, d));
     }
@@ -3141,7 +3076,7 @@ test "bundled agent: the permission ladder crosses the contract as one word — 
 
     // The ceiling reaches the runner at `op=open`, and a runner that cannot
     // enforce it refuses the whole delegation rather than opening one that would
-    // run wider than it said (D10).
+    // run wider than it said.
     {
         const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, &.{
             .{ .key = "NULYA_SESSION", .value = session_file },
@@ -3269,8 +3204,8 @@ test "bundled agent: an interrupt crosses the contract — an outside runner tak
         try std.testing.expectEqual(@as(u8, 0), waited.code);
     }
 
-    // The message the interrupt carried was answered rather than lost (D3/D6),
-    // and the answer the cut-short round was going to give is not reported.
+    // The message the interrupt carried was answered rather than lost, and the
+    // answer the cut-short round was going to give is not reported.
     {
         const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },

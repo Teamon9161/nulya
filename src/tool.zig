@@ -6,7 +6,7 @@
 //!                   this out of the conversation; the tool never sees the ledger.
 //!   - `ctx_header`: *constant-size* context. It must NOT grow with the
 //!                   conversation — that is what keeps the cache prefix stable
-//!                   (DESIGN §1) and keeps tools least-privilege (DESIGN §7.6).
+//!                   and keeps tools least-privilege.
 //!   - factual data (files, command output) is reached through the environment
 //!     and `cwd`, not passed in. "Needs the whole conversation" -> it is a
 //!     subagent, not a tool.
@@ -21,19 +21,19 @@ const environment = @import("environment.zig");
 
 pub const Environment = environment.Environment;
 
-/// Truncation / spill limits. Kernel defaults live here (base-tools.md §3) and
-/// are the primary knob for per-result token cost.
+/// Truncation / spill limits. Kernel defaults live here and are the primary
+/// knob for per-result token cost.
 pub const OutputBudget = emit.OutputBudget;
 
 pub const StepOutputBudget = emit.StepOutputBudget;
 
-/// Wall-clock caps for the child processes the kernel spawns (base-tools.md §3).
-/// ONE table, so no call site carries its own literal: `shell` defaults to
-/// `shell_default_ms` and clamps a model-supplied `timeout_ms` into
-/// `[1, shell_max_ms]`; an extension's oneshot `tool/call` gets `extension_ms`
-/// unless its manifest declares its own, which may reach `extension_max_ms`
-/// (DESIGN §7.3). Not config: a timeout is a property of the tool contract the
-/// model is taught, not of an operator's deployment.
+/// Wall-clock caps for the child processes the kernel spawns. ONE table, so no
+/// call site carries its own literal: `shell` defaults to `shell_default_ms`
+/// and clamps a model-supplied `timeout_ms` into `[1, shell_max_ms]`; an
+/// extension's oneshot `tool/call` gets `extension_ms` unless its manifest
+/// declares its own, which may reach `extension_max_ms`. Not config: a
+/// timeout is a property of the tool contract the model is taught, not of an
+/// operator's deployment.
 pub const Timeouts = struct {
     pub const shell_default_ms: u32 = 120_000;
     pub const shell_max_ms: u32 = 600_000;
@@ -52,7 +52,7 @@ pub const Timeouts = struct {
 /// output budgets stays outside this type; `presentation_file` is only a
 /// constant-size pointer to a side channel the loop owns.
 pub const ToolContext = struct {
-    /// The process execution environment (DESIGN §8).
+    /// The process execution environment.
     environment: Environment,
     /// Working directory for filesystem-relative operations.
     cwd: []const u8,
@@ -106,10 +106,10 @@ pub const ToolDefinition = struct {
     description: []const u8,
     input_schema: []const u8,
     /// This tool's own claim that it only reads, frozen from its manifest
-    /// (`contributes.tools[].readonly`, DESIGN §7.2.1). The kernel enforces
-    /// nothing with it; it travels here so that whoever answers the gate
-    /// (DESIGN §4) reads the frozen fact instead of re-deriving it from a
-    /// manifest — which is a derivation that can fail silently, and did.
+    /// (`contributes.tools[].readonly`). The kernel enforces nothing with it;
+    /// it travels here so that whoever answers the gate reads the frozen fact
+    /// instead of re-deriving it from a manifest — which is a derivation that
+    /// can fail silently, and did.
     ///
     /// `null` is not `false`: the package said nothing (and the builtin `shell`
     /// is the kernel itself, which makes no claim either). Not part of the
@@ -121,8 +121,8 @@ pub const ToolDefinition = struct {
 
 /// A registered tool: its model-facing definition and its execution handler.
 ///
-/// Several calls may arrive in one assistant turn; the loop runs them serially
-/// (DESIGN §4), which preserves model-call order and makes every side effect
+/// Several calls may arrive in one assistant turn; the loop runs them
+/// serially, which preserves model-call order and makes every side effect
 /// visible to the calls after it. Batching is about ONE round trip, not about
 /// concurrency, so a tool never has to be concurrency-safe.
 pub const Tool = struct {

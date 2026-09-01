@@ -1,4 +1,4 @@
-//! Provider/model boundary (DESIGN §13).
+//! Provider/model boundary.
 //!
 //! The agent loop owns ledger append/order invariants. A provider owns transport
 //! state, request serialization, cache breakpoint placement, and wire-format
@@ -11,8 +11,8 @@ const tool = @import("tool.zig");
 
 /// What the loop and the projection must know about a provider. One field: a
 /// provider that cannot replay opaque reasoning items gets the `reasoning`
-/// block skipped (DESIGN §13). Anything a provider can decide for itself stays
-/// inside the provider.
+/// block skipped. Anything a provider can decide for itself stays inside the
+/// provider.
 pub const ProviderCapabilities = struct {
     thinking_replay: bool = false,
 };
@@ -23,17 +23,17 @@ pub const Options = struct {
 };
 
 /// What one turn cost. The same struct the ledger records on the assistant
-/// event (DESIGN §3.1) — one shape end to end, no conversion in the loop.
-/// `input_tokens` is NON-cached input: providers whose counters include cached
-/// tokens must subtract before filling this in.
+/// event — one shape end to end, no conversion in the loop. `input_tokens` is
+/// NON-cached input: providers whose counters include cached tokens must
+/// subtract before filling this in.
 pub const Usage = ledger.Usage;
 
 /// Why the model stopped. The same enum the ledger records on the assistant
-/// event (DESIGN §3.1) — one shape end to end, no conversion in the loop.
+/// event — one shape end to end, no conversion in the loop.
 pub const StopReason = ledger.StopReason;
 
-/// How the loop treats a wire that fails or falls silent (DESIGN §13). A
-/// provider makes ONE attempt per `stream` and reports a transient fault as one
+/// How the loop treats a wire that fails or falls silent. A provider makes
+/// ONE attempt per `stream` and reports a transient fault as one
 /// of the errors `isTransient` names; the loop (`loop.collectTurn`) owns the
 /// single retry loop, so connect failures and mid-stream drops back off the same
 /// way and every attempt is visible to an observer. Backoff before the n-th
@@ -92,8 +92,8 @@ pub const StreamEvent = union(enum) {
     /// shape (an Anthropic `thinking` / `redacted_thinking` block, a Responses
     /// `reasoning` item with its `encrypted_content`, …). Emitted once the item
     /// is whole; the collector keeps every item verbatim so the turn's reasoning
-    /// can be replayed to the same model on later steps (DESIGN §3.1, §13). The
-    /// kernel never looks inside.
+    /// can be replayed to the same model on later steps. The kernel never looks
+    /// inside.
     reasoning_item: []const u8,
     tool_use_start: ToolUseStart,
     tool_use_input_delta: ToolUseInputDelta,
@@ -133,8 +133,8 @@ pub const ModelTurn = struct {
     text: []const u8,
     calls: []const ledger.ToolCall,
     /// Token accounting for this turn. Carries the cache-read counter so the loop
-    /// can *measure* the cache-generation invariant (DESIGN §1), not just hope
-    /// for it. No owned allocations — `deinit` leaves it untouched.
+    /// can *measure* the cache-generation invariant, not just hope for it. No
+    /// owned allocations — `deinit` leaves it untouched.
     usage: Usage = .{},
     /// Why the model stopped. `tool_use` vs `end_turn` drive the loop; `max_tokens`
     /// tells the caller the turn was truncated mid-thought.

@@ -64,7 +64,7 @@ pub const plain_main_zig =
 /// wording does.
 ///
 /// `"surface": "manual"` because these fixtures exist for the PIN tests: only
-/// a `manual` tool can be pinned (DESIGN §5.1), and the default is `auto` —
+/// a `manual` tool can be pinned, and the default is `auto` —
 /// membership alone would put it on the face, which is a different test.
 fn fixtureManifestJson(alloc: std.mem.Allocator, id: []const u8, tool_name: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc,
@@ -181,7 +181,7 @@ pub fn greetSource(alloc: std.mem.Allocator, greeting: []const u8) ![]u8 {
 
 /// The workspace store, as an environment resolves it: relative, against the
 /// workspace the CALL names — which is what makes the same spec correct on a
-/// remote agent looking at its own workspace (goals/remote-env.md §3.3).
+/// remote agent looking at its own workspace.
 pub const workspace_store_roots: []const []const u8 = &.{".nulya/extensions"};
 
 /// One native tool invocation through the real executor chain: a fresh
@@ -356,7 +356,7 @@ pub const EnvPair = struct { key: []const u8, value: []const u8 };
 /// The child's user layer, defaulted into the workspace so no e2e run ever reads
 /// or writes the developer's real `~/.nulya`: the user store `--user` writes to,
 /// the user config, and the trusted-stores journal `ext build` / `ext trust`
-/// append to (DESIGN §9) all live under `NULYA_HOME`. A test that cares about the
+/// append to all live under `NULYA_HOME`. A test that cares about the
 /// user layer passes its own `NULYA_HOME` pair, which wins — the pairs are applied
 /// after this.
 pub const home_subdir = ".nulya-test-home";
@@ -409,7 +409,7 @@ pub fn runCliEnvs(
 }
 
 /// One CLI invocation that is FED something on stdin — `session step --gate`,
-/// whose approval verdicts arrive there (DESIGN §14). `std.process.run` always
+/// whose approval verdicts arrive there. `std.process.run` always
 /// hands the child an empty stdin, so this is the same shape with one pipe more.
 ///
 /// The whole answer is written and stdin is closed before stdout is drained:
@@ -509,11 +509,11 @@ pub fn readSessionFile(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id:
 
 // ── Compile once, install everywhere ────────────────────────────────────────
 //
-// Building a COMPILED extension really runs `zig build-exe -O ReleaseSafe`, and
-// DESIGN §7.4 fixes that invocation: no `--enable-cache`, and a fresh
-// content-addressed store path every time. So it costs a full compile (~7s on a
-// developer machine) that no zig cache can shorten — and this suite wants a
-// built version of the same handful of packages in a dozen fresh workspaces.
+// Building a COMPILED extension really runs `zig build-exe -O ReleaseSafe`, with
+// no `--enable-cache` and a fresh content-addressed store path every time. So it
+// costs a full compile (~7s on a developer machine) that no zig cache can
+// shorten — and this suite wants a built version of the same handful of
+// packages in a dozen fresh workspaces.
 //
 // Most of those tests are not about building. They need a frozen version to
 // EXIST in their store so they can activate it, pin it, run it, resume a header
@@ -613,9 +613,9 @@ fn prebuiltVersion(
 ///
 /// The copy is what makes this cheap AND what makes it honest: a version is
 /// content-addressed, so identical bytes are the same version. What a copy
-/// cannot reproduce is the store's BIRTH — DESIGN §9 trusts a workspace store
-/// because a local `ext build` filled it, and nothing local filled this one. So
-/// the trust is recorded here explicitly: the harness standing in for the person
+/// cannot reproduce is the store's BIRTH — a workspace store is trusted because
+/// a local `ext build` filled it, and nothing local filled this one. So the
+/// trust is recorded here explicitly: the harness standing in for the person
 /// who would have run `nulya ext trust`, in the same isolated home `runCli` uses.
 fn installVersion(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8, version: []const u8) !void {
     try installVersionInto(alloc, io, ws, ".nulya" ++ std.fs.path.sep_str ++ "extensions", id, version);
@@ -624,7 +624,7 @@ fn installVersion(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []co
 
 /// The copy itself, into any store root under `ws` — the workspace store, or a
 /// user root a test points `NULYA_HOME` at. Trust is the caller's business: it
-/// is the WORKSPACE store alone that a session gates on (DESIGN §9).
+/// is the WORKSPACE store alone that a session gates on.
 fn installVersionInto(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -707,7 +707,7 @@ fn expectTreeSubset(alloc: std.mem.Allocator, io: std.Io, from: std.Io.Dir, to: 
 }
 
 /// Record `ws`'s workspace extension store in the test home's trust journal, the
-/// way `nulya ext trust` would (DESIGN §9). Idempotent.
+/// way `nulya ext trust` would. Idempotent.
 fn trustWorkspaceStore(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir) !void {
     var store_dir = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
     defer store_dir.close(io);

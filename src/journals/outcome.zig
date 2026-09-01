@@ -1,47 +1,33 @@
 //! Durable, append-only journal of session outcomes — the ground truth a slow
-//! loop evaluates skills, prompts and drivers against (DESIGN §3.3, PLAN §3.7).
+//! loop evaluates skills, prompts and drivers against.
 //!
-//! An outcome is a JUDGMENT about a finished session, not a conversation turn,
-//! so it is a second journal beside tool usage rather than a ledger event: a
-//! session's tail usually has no next step to drain an inbox through, the
-//! verdict is evidence for policy rather than model-visible text, and the ledger
-//! gains no "stored but never projected" event kind. Same principle as the usage
-//! journal: **persist facts, derive stats**.
-//!
-//! Format: one JSON object per line in `<workspace>/.nulya/session-outcomes.jsonl`:
+//! One JSON object per line in `<workspace>/.nulya/session-outcomes.jsonl`:
 //!
 //!   {"v":1,"session":"s-…","verdict":"success","note":"…","at":"2026-08-16T09:31:00Z"}
 //!   {"v":1,"session":"s-…","verdict":"success","at":"…","source":"agent","by":"s-…"}
 //!   {"v":1,"session":"s-…","verdict":"failure","at":"…","seq":7}
 //!
-//! `note` is optional. A session may be judged more than once — every line is
-//! kept and readers take the LAST one for a session (`latestFor`), because a
-//! correction is an append like everywhere else in Nulya. **No line at all means
-//! UNKNOWN, never failure.**
+//! `note` is optional. A session may be judged more than once; every line is
+//! kept and readers take the LAST one for a session (`latestFor`). No line at
+//! all means UNKNOWN, never failure.
 //!
-//! Three optional columns say WHO judged and WHAT was judged, and each is
-//! written only when it is not the default — so a person's verdict on a whole
-//! session is byte-identical to the line this journal wrote before they existed:
-//!
+//! Three optional columns say WHO judged and WHAT was judged, each written
+//! only when it is not the default — so a person's verdict on a whole session
+//! is byte-identical to the line this journal wrote before they existed:
 //!   * `source` — absent means a person (`human`). `agent` means the line was
-//!     written from inside a session's own shell, which `nulya session outcome`
-//!     detects through `NULYA_SESSION`. The distinction is load-bearing for the
-//!     slow loop: an agent grading the very session it is running is a CLAIM,
-//!     not ground truth, and without this column it was indistinguishable from
-//!     a human verdict. An unrecognized `source` is an error, never coerced to
-//!     `human` — silently reading someone else's verdict as a person's is the
-//!     failure this column exists to prevent.
+//!     written from inside a session's own shell (`nulya session outcome`
+//!     detects this through `NULYA_SESSION`): a session grading itself is a
+//!     CLAIM, not ground truth. An unrecognized value is an error, never
+//!     coerced to `human`.
 //!   * `by` — which session's shell wrote it (only with `source:"agent"`), so
-//!     `by == session` reads at a glance as "this session graded itself".
-//!   * `seq` — a judgment about ONE assistant turn instead of the whole session
-//!     (PLAN §3.7.8). `latestFor` ignores these: the verdict that stands for a
-//!     session is the last WHOLE-SESSION line, and a turn-level correction must
-//!     never silently become the session's grade.
+//!     `by == session` reads as "this session graded itself".
+//!   * `seq` — a judgment about ONE assistant turn instead of the whole
+//!     session. `latestFor` ignores these: the verdict that stands for a
+//!     session is the last WHOLE-SESSION line.
 //!
-//! The file discipline (append one complete line under the journal's writer
-//! lease, repair a torn crash tail on write and skip it on read, a missing file
-//! means "no verdicts yet") is shared with `tool_stats.zig` through
-//! `journal.zig`; the schema below is this module's alone.
+//! File discipline (writer lease, torn-tail repair on write and skip on read,
+//! a missing file means "no verdicts yet") is shared with `tool_stats.zig`
+//! through `journal.zig`; the schema above is this module's alone.
 
 const std = @import("std");
 const journal = @import("journal.zig");
@@ -218,8 +204,8 @@ fn appendParsed(alloc: std.mem.Allocator, outcomes: *std.ArrayList(Outcome), lin
     if (parsed.value.v != journal_schema_version) return error.UnsupportedOutcomeVersion;
     if (parsed.value.session.len == 0) return error.InvalidOutcomeJournal;
     const verdict = Verdict.parse(parsed.value.verdict) orelse return error.InvalidOutcomeJournal;
-    // Absent means human (the rule DESIGN §3.3 reserved for this column); an
-    // unknown value is refused rather than read as one, exactly like a verdict.
+    // Absent means human; an unknown value is refused rather than read as
+    // one, exactly like a verdict.
     const source = if (parsed.value.source) |s|
         Source.parse(s) orelse return error.InvalidOutcomeJournal
     else

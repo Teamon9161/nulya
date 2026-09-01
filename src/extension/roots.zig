@@ -1,8 +1,8 @@
-//! Ordered store-root search (DESIGN §7.2).
+//! Ordered store-root search.
 //!
-//! `store.zig` owns ONE root — its version directories, its `current` pointer,
+//! `store.zig` owns one root — its version directories, its `current` pointer,
 //! its writer lease. This file owns the order in which a process consults
-//! SEVERAL of them, and nothing else: which root answers for an id, which root
+//! several of them, and nothing else: which root answers for an id, which root
 //! holds a named frozen version, and the single `Resolved` every caller shares,
 //! so session composition, `nulya ext run` and the skill loader cannot drift on
 //! search order or on where a frozen entry lives.
@@ -17,15 +17,14 @@ const testkit = @import("testkit.zig");
 const integrity = @import("integrity.zig");
 const target_mod = @import("target.zig");
 
-/// The ordered set of store roots a process searches (DESIGN §7.2): the
-/// workspace's `.nulya/extensions`, then the user's `~/.nulya/extensions`, then
-/// any `extensions.paths` from a TRUSTED config layer. Order is the whole
-/// semantics — **the first root holding an ACTIVE version of an id wins**, so a
-/// workspace copy shadows a user-wide one, and a checkout can never add a root
-/// (DESIGN §9.5). "Holding" means a `current` pointer: a bare `<id>/` directory
-/// with no `current` (a draft, a deactivated copy) shadows nothing — otherwise
-/// deactivating in the workspace would silently hide, not reveal, the copy in
-/// the next root.
+/// The ordered set of store roots a process searches: the workspace's
+/// `.nulya/extensions`, then the user's `~/.nulya/extensions`, then any
+/// `extensions.paths` from a trusted config layer. Order is the whole
+/// semantics — the first root holding an active version of an id wins, so a
+/// workspace copy shadows a user-wide one. "Holding" means a `current`
+/// pointer: a bare `<id>/` directory with no `current` (a draft, a
+/// deactivated copy) shadows nothing — otherwise deactivating in the
+/// workspace would silently hide, not reveal, the copy in the next root.
 ///
 /// A root that does not exist is simply absent, not an error: having no
 /// user-level store is the normal case. Roots own their opened handles and
@@ -54,18 +53,18 @@ pub const Roots = struct {
         version: []const u8,
         /// What the winning root's `current` recorded about `apply`
         /// (`store.Active.standing`): this version was activated here as a
-        /// member of every fresh session (DESIGN §5.1). Carried along because
-        /// it comes from the same read as the version and is the ONLY
-        /// trustworthy answer to that question — see `Store.readCurrent`.
-        /// Defaults to false for the callers that assemble an entry to resolve
-        /// ONE named id: that path is not asking this question.
+        /// member of every fresh session. Carried along because it comes from
+        /// the same read as the version and is the only trustworthy answer to
+        /// that question — see `Store.readCurrent`. Defaults to false for the
+        /// callers that assemble an entry to resolve one named id: that path
+        /// is not asking this question.
         standing: bool = false,
     };
 
     /// The single answer to `id[@version] -> root -> manifest -> entry path`.
     /// Session composition, `nulya ext run`, and the skill loader all ask for it
     /// through `resolveActive` / `resolveVersion`, so none of them can drift on
-    /// search order (DESIGN §7.2) or on where a frozen entry lives (§7.4).
+    /// search order or on where a frozen entry lives.
     pub const Resolved = struct {
         /// Owned.
         id: []const u8,
@@ -91,11 +90,10 @@ pub const Roots = struct {
         pub fn entryPathAbs(self: Resolved, alloc: std.mem.Allocator, roots: *const Roots) ![]u8 {
             const rt = self.manifest.runtime orelse return error.MissingRuntime;
             const entry_rel = roots.store(self.root).versionRuntimeEntryPath(alloc, self.id, self.version, rt) catch |err| {
-                // The one line that carries what `EntryUnsupportedOnHost` cannot
-                // (the `reportBrokenActive` precedent in `composition.zig`): a
-                // Zig error has no payload, and "which package, and on which
-                // host" is the whole of what the reader has to know. Best
-                // effort — a failure to say it never changes the failure.
+                // A Zig error has no payload, so "which package, and on which
+                // host" is said separately here rather than lost with the
+                // bare error name. Best effort — a failure to say it never
+                // changes the failure.
                 if (err == error.EntryUnsupportedOnHost) reportEntryUnsupported(roots.io, self.id, self.version);
                 return err;
             };
@@ -104,12 +102,11 @@ pub const Roots = struct {
         }
     };
 
-    /// Name the package a per-OS `runtime.entry` does not cover on this machine
-    /// (DESIGN §7.1). stderr, so `session step --stream` keeps stdout pure JSON —
-    /// the channel `composition.reportBrokenActive` and the kernel-drift warning
-    /// already use. Silent under `builtin.is_test` for that function's reason:
-    /// unit tests construct this state on purpose and assert the error, and a
-    /// repair line about a tmp store reads as advice about a real one.
+    /// Name the package a per-OS `runtime.entry` does not cover on this
+    /// machine. Written to stderr, so `session step --stream` keeps stdout
+    /// pure JSON. Silent under `builtin.is_test`: unit tests construct this
+    /// state on purpose and assert the error, and a repair line about a tmp
+    /// store reads as advice about a real one.
     fn reportEntryUnsupported(io: std.Io, id: []const u8, version: []const u8) void {
         if (builtin.is_test) return;
         var buf: [512]u8 = undefined;
@@ -131,13 +128,13 @@ pub const Roots = struct {
         return try self.resolveAt(alloc, active.root, id, active.version, level);
     }
 
-    /// A named built version, taken from the first root that holds a USABLE
+    /// A named built version, taken from the first root that holds a usable
     /// copy (root order, as `firstWithVersion`) — versions are content-addressed,
     /// so every root's copy is the same bytes and only "where it was found"
     /// differs. A root whose copy is absent or broken (any `isExtensionFault`:
     /// a half-written `versions/<v>/` left by a crash, a bad seal) is skipped
     /// rather than allowed to shadow a good copy further down the search order.
-    /// If no root yields one, the FIRST such fault is returned — the most
+    /// If no root yields one, the first such fault is returned — the most
     /// specific thing known about why — or `error.VersionNotFound` when no root
     /// held it at all. Host faults (cancellation, OOM, real I/O) propagate at
     /// once and are never softened into "not found".
@@ -251,29 +248,26 @@ pub const Roots = struct {
         alloc.free(list);
     }
 
-    /// The sibling of `<id>@<version>` built for ANOTHER machine: the version,
+    /// The sibling of `<id>@<version>` built for another machine: the version,
     /// in root order, whose seal records the same package bytes for
     /// `target_words`. Null when no root holds one; caller owns the result.
-    ///
     /// This is how a session whose tools run elsewhere learns which frozen
-    /// implementation will actually serve its calls (`exec_version`, DESIGN §3.4,
-    /// goals/remote-env.md §3.1). The two versions are ONE package that differs
-    /// only in what it was compiled for, and `(package_digest, target)` is
-    /// already the key a donor copy matches on — so this asks `Store.findSealed`,
-    /// the same matcher a build asks about its own machine.
+    /// implementation will actually serve its calls. The two versions are one
+    /// package that differs only in what it was compiled for, and
+    /// `(package_digest, target)` is already the key a donor copy matches on —
+    /// so this asks `Store.findSealed`, the same matcher a build asks about
+    /// its own machine.
     ///
-    /// `source_root` names WHICH root's copy of `<id>@<version>` is the one to
-    /// trust for the starting digest — the caller's answer, not this function's
-    /// guess. Composition already ran `.sealed` resolution to pick a winning
-    /// root per DESIGN §7.2 (first active root wins); re-deriving that here by
+    /// `source_root` names which root's copy of `<id>@<version>` is the one to
+    /// trust for the starting digest — the caller's answer, not this
+    /// function's guess. Composition already ran `.sealed` resolution to pick
+    /// a winning root (first active root wins); re-deriving that here by
     /// scanning roots in order and taking whichever one's seal parses first
-    /// would let an unvalidated copy in an EARLIER root (a stale or tampered
+    /// would let an unvalidated copy in an earlier root (a stale or tampered
     /// `versions/<v>/` left in the workspace store, say) hand back a different
-    /// digest than the root composition actually resolved — silently searching
-    /// for the wrong sibling, or reporting `ExecVersionNotFound` for a session
-    /// that in fact has a good target build. The digest read from `source_root`
-    /// is not re-validated as `.sealed` here: composition already did that work
-    /// to arrive at `source_root` in the first place.
+    /// digest than the root composition actually resolved. The digest read
+    /// from `source_root` is not re-validated as `.sealed` here: composition
+    /// already did that work to arrive at `source_root` in the first place.
     ///
     /// No compiler is named: which zig produced the copy for that machine is not
     /// something this session gets to require, and the sorted search inside
@@ -472,7 +466,7 @@ test "resolveForTarget reads the digest from the caller's source root, not scan 
     }
 
     // The genuine cross-compiled sibling: the SAME real package digest, built
-    // for a different machine (`ext build --target`, DESIGN §7.4). This is
+    // for a different machine (`ext build --target`). This is
     // what a remote session's `exec_version` lookup is actually after.
     const sibling = "v-" ++ ("a" ** 24);
     {

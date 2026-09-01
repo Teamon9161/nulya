@@ -1,11 +1,10 @@
 //! Shared session-launch helpers for the `nulya session *` CLI and the bare
-//! `nulya` demo (DESIGN §14, PLAN §3.2).
+//! `nulya` demo.
 //!
 //! Both surfaces need the same three things: a deterministic scripted provider
 //! (the offline stand-in when no API key is configured), a way to build a model
-//! from a config profile, and the conventions for session file paths and ids.
-//! Keeping them here means the demo runs through the exact same durable-session
-//! path the CLI does.
+//! from a config profile, and the conventions for session file paths and ids —
+//! so the demo runs the same durable-session path the CLI does.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -27,7 +26,7 @@ const build_options = @import("config_options");
 
 /// This build's version string, straight from `build.zig.zon` `.version` (build.zig
 /// passes it through). Stamped into every new session header as provenance
-/// (`ledger.Stamp`, DESIGN §3.4); nothing branches on it.
+/// (`ledger.Stamp`); nothing branches on it.
 pub const version: []const u8 = build_options.version;
 
 pub const default_openai_model = "gpt-4o-mini";
@@ -40,7 +39,7 @@ pub const scratch_dir = ".nulya/scratch";
 /// filenames inside are deterministic (ledger seq + call index, `emit.zig`), so
 /// the session id is the only thing keeping two concurrent sessions — a fork's
 /// parent and child, a compact driver and its observer — from writing the same
-/// file (base-tools.md §2). Caller owns the result.
+/// file. Caller owns the result.
 pub fn sessionScratchDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
     // `/` on every OS (`emit.joinRel`): this prefix reaches the model in every
     // spill footer and task receipt, and the rest of it is already spelled so.
@@ -48,9 +47,9 @@ pub fn sessionScratchDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
 }
 
 /// Where that session's background tasks live: `<scratch>/<id>/tasks`, one
-/// directory per task (DESIGN §6.1). Beside the spills on purpose — a session's
-/// whole byproduct is one subtree, so `rm -rf .nulya/scratch/<id>` clears it in
-/// one move and nothing survives under a name nobody remembers. Caller owns it.
+/// directory per task. Beside the spills on purpose — a session's whole
+/// byproduct is one subtree, so `rm -rf .nulya/scratch/<id>` clears it in one
+/// move. Caller owns it.
 pub fn sessionTasksDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
     const scratch = try sessionScratchDir(alloc, id);
     defer alloc.free(scratch);
@@ -60,78 +59,58 @@ pub fn sessionTasksDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
 pub const tasks_subdir = "tasks";
 
 /// A deterministic, terminating scripted provider — the offline stand-in for a
-/// real model (DESIGN §13). The modes are selected by `NULYA_SCRIPTED_MODE`:
+/// real model. The modes are selected by `NULYA_SCRIPTED_MODE`:
 ///
-///   finish (default): make one `shell` call, then end the turn once a tool
-///                     result is already in the transcript. A turn completes in
-///                     two steps, so a `session step` reaches an end state.
-///   loop:             always make one `shell` call and never end the turn, so a
-///                     `--max-steps` cap is the only thing that stops it.
+///   finish (default): one `shell` call, then end the turn once a tool result is
+///                     already in the transcript (a turn takes two steps).
+///   loop:             always call `shell`, never end the turn, so `--max-steps`
+///                     is the only thing that stops it.
 ///   truncate:         every reply is cut by `max_tokens` mid tool call (a torn
-///                     JSON prefix, then `done: max_tokens`), so the loop's
-///                     truncated-turn path and `run`'s streak stop are testable.
-///   handoff:          play a two-phase goal: call the `handoff` tool once (a
-///                     complete brief), and end the turn in the session that
-///                     was forked from it. That makes the whole /goal loop —
-///                     model proposes, driver forks, work continues in the child
-///                     — testable with no network and no real model.
+///                     JSON prefix, then `done: max_tokens`).
+///   handoff:          call the `handoff` tool once with a complete brief, and
+///                     end the turn in the session forked from it.
 ///   wrapup:           never end a turn on its own — like `loop` — until a user
-///                     turn asks it to stop and report, and then answer in text.
-///                     The offline stand-in for the one thing a spent step
-///                     budget is worth doing something about: everything the
-///                     sub-agent found is in a session the caller never reads,
-///                     so the runner asks for it (`extensions/agent`'s
-///                     `wrap_up`) rather than reporting an empty round.
-///   wrapdefy:         the same run with a model that does NOT take the hint:
-///                     it calls a tool on every step, including the one it was
-///                     asked to spend on its report — and then, seeing that the
-///                     call did not run, answers in text after all. Each call
-///                     writes a file named for which side of the ask it is on,
-///                     so a test can say whether a tool RAN rather than whether
-///                     one was asked for — the difference between a constraint
-///                     and a sentence — while the answer at the end says the
-///                     refusal was something the model could still act on.
+///                     turn asks it to stop and report, then answer in text.
+///   wrapdefy:         the same run with a model that does NOT take the hint: it
+///                     calls a tool on every step, then answers in text after
+///                     seeing the call did not run. Each call writes a file named
+///                     for which side of the ask it is on, so a test can say
+///                     whether a tool RAN rather than whether one was asked for.
 ///   readfile:         call the `read` tool once on a fixed file name, then end
-///                     the turn once a result is in the transcript. The one mode
-///                     that exercises an EXTENSION tool rather than `shell`,
-///                     which is what a session whose workspace lives on another
-///                     machine has to be tested through: the question there is
-///                     whose files `read` reads.
+///                     the turn. The one mode exercising an EXTENSION tool rather
+///                     than `shell` — which is how a session whose workspace
+///                     lives elsewhere gets tested: whose files does `read` read.
 ///   background:       start ONE background command, then end the turn — saying
 ///                     `background done` once a `task_finished` turn is in the
 ///                     transcript and `waiting` while it is not, so a test can
-///                     tell whether the model actually READ the report rather
-///                     than merely being stepped again.
+///                     tell whether the model actually READ the report.
 pub const ScriptedProvider = struct {
     mode: Mode = .finish,
 
     pub const Mode = enum { finish, loop, truncate, handoff, batch, background, wrapup, wrapdefy, readfile };
 
-    /// The file the `readfile` mode asks for, workspace-relative. A fixed name
-    /// rather than a configurable one: the stand-in is deterministic, and the
-    /// test puts a DIFFERENT body at this name on each machine — which is how
-    /// "whose file did it read" becomes an observable answer.
+    /// The file the `readfile` mode asks for, workspace-relative. Fixed, so a
+    /// test can put a DIFFERENT body at this name on each machine and make
+    /// "whose file did it read" observable.
     pub const read_target = "remote-sentinel.txt";
     const read_args =
         \\{"path":"remote-sentinel.txt"}
     ;
 
     /// The opening words of what a runner sends a sub-agent whose steps ran out.
-    /// Spelled out rather than imported for the same reason `summary_marker` is:
-    /// the sentence lives in `extensions/agent`, a separate artifact this
-    /// offline stand-in only has to AGREE with, not share a type with.
+    /// Spelled out rather than imported: the sentence lives in
+    /// `extensions/agent`, a separate artifact this stand-in only has to AGREE
+    /// with, not share a type with.
     pub const wrap_up_opening = "Your step budget is spent";
 
     /// The files the `wrapdefy` mode's two commands create, in the session's
-    /// working directory. Two names rather than one because the question is
-    /// which ROUND ran a tool: the first says an ordinary round is untouched,
-    /// and the absence of the second is the whole point.
+    /// working directory. Two names because the question is which ROUND ran a
+    /// tool: the first says an ordinary round is untouched, and the ABSENCE of
+    /// the second is what a test asserts.
     pub const defiant_before_file = "wrapup-before.txt";
     pub const defiant_after_file = "wrapup-after.txt";
-    /// What it says once the refusal is in front of it. A round that only
-    /// refused would leave everything the sub-agent found in a session nobody
-    /// reads, so this is the half of the wrap-up round that has to be paid for:
-    /// the deny is a `tool_results` entry, and reading one takes a turn.
+    /// What it says once the refusal is in front of it: the deny is a
+    /// `tool_results` entry, and reading one takes a turn.
     pub const defiant_report = "denied, so here is what I found";
     const defiant_before_args = "{\"command\":\"echo ran > " ++ defiant_before_file ++ "\"}";
     const defiant_after_args = "{\"command\":\"echo ran > " ++ defiant_after_file ++ "\"}";
@@ -151,11 +130,10 @@ pub const ScriptedProvider = struct {
         \\{"done":"Phase 1 is finished: read the map and listed what matters.","next_task":"Phase 2: PHASE-2-SENTINEL — write the note and stop.","keep":"The sentinel PHASE-2-SENTINEL identifies this handover."}
     ;
 
-    /// The marker a carried brief starts with. Seeing it means this session was
-    /// forked from another one — the second phase — so the scripted model has
-    /// nothing left to hand off and simply answers. Spelled out here rather than
-    /// imported: the marker's source is `extensions/compact`, which is a
-    /// separate artifact that this offline stand-in only has to agree with.
+    /// The marker a carried brief starts with: this session was forked from
+    /// another one, so the scripted model has nothing left to hand off. Spelled
+    /// out rather than imported — its source is `extensions/compact`, a separate
+    /// artifact this stand-in only has to agree with.
     const summary_marker = "<nulya:context-summary>";
 
     pub fn fromEnv(env: *const std.process.Environ.Map) ScriptedProvider {
@@ -197,8 +175,8 @@ pub const ScriptedProvider = struct {
             return;
         }
         // Three calls in ONE turn: the shape a serial gate is actually asked
-        // about (DESIGN §4 — the kernel offers call N only once N-1 has run), so
-        // a driver's batch policy has something offline to be tested against.
+        // about (the kernel offers call N only once N-1 has run), so a driver's
+        // batch policy has something offline to be tested against.
         if (self.mode == .batch) {
             if (hasToolResult(request.prompt_ir.turns)) {
                 try sink.emit(.{ .text_delta = "done" });
@@ -228,11 +206,10 @@ pub const ScriptedProvider = struct {
             return;
         }
         if (self.mode == .wrapdefy) {
-            // A call that did not run: the gate refused it, and the note saying
-            // so is this result's text. `ok == false` rather than that wording —
-            // every other tool result in this mode is an `echo` that worked, so
-            // the failed one is the refusal, and the stand-in does not need to
-            // agree with the kernel about a sentence to notice it.
+            // A call that did not run: the gate refused it. Detected by
+            // `ok == false` rather than by the wording — every other tool result
+            // in this mode is an `echo` that worked, so the stand-in never has
+            // to agree with the kernel about a sentence.
             if (hasFailedToolResult(request.prompt_ir.turns)) {
                 try sink.emit(.{ .text_delta = defiant_report });
                 try sink.emit(.{ .done = .end_turn });
@@ -268,7 +245,7 @@ pub const ScriptedProvider = struct {
             }
             // The receipt came back but the task has not finished: end the turn
             // and leave it to the driver to step again when there is something
-            // to read (DESIGN §6.1 — when to continue is policy, not kernel).
+            // to read (when to continue is policy, not kernel).
             if (hasToolResult(request.prompt_ir.turns)) {
                 try sink.emit(.{ .text_delta = "waiting" });
                 try sink.emit(.{ .done = .end_turn });
@@ -388,7 +365,7 @@ pub const ModelHolder = union(enum) {
 };
 
 /// Resolve `profile_name` (+ an optional model id) into the model IDENTITY
-/// frozen at session creation — the ONE model-resolution decision (DESIGN §3).
+/// frozen at session creation — the ONE model-resolution decision.
 /// It is credential-aware, so what gets frozen is exactly what will run: a
 /// profile whose credential is not resolvable falls back to the scripted
 /// identity here, and `buildFromDescriptor` then builds scripted too — no fork
@@ -396,16 +373,14 @@ pub const ModelHolder = union(enum) {
 ///
 /// The header never holds a secret: it records the env var NAME (`api_key_env`)
 /// and the profile name, and the credential itself is re-resolved on every
-/// resume — from the profile's own `api_key` in the user's config, else from the
-/// environment. Both are the user's own mutable places; neither is model-visible
-/// state, so which one it comes from is not part of the identity. The codex
+/// resume — so which place it comes from is not part of the identity. The codex
 /// profile's credential is the Codex CLI's `auth.json`, which is why this needs
 /// `io`.
 ///
-/// `model_id` overrides the profile's default model (`ProviderProfile.defaultModel`)
-/// and is taken as given — a picker offers the catalog's ids, but a driver may
-/// name any id the endpoint serves. Slices borrow the config profile; the caller
-/// freezes copies into the header before config is dropped.
+/// `model_id` overrides the profile's default (`ProviderProfile.defaultModel`)
+/// and is taken as given: a driver may name any id the endpoint serves. Slices
+/// borrow the config profile; the caller freezes copies into the header before
+/// config is dropped.
 pub fn resolveDescriptor(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -419,12 +394,11 @@ pub fn resolveDescriptor(
     const chosen = nonEmpty(model_id orelse "", profile.defaultModel());
     const keyed = credentialSource(alloc, io, profile, env) != .none;
     return switch (profile.kind) {
-        // A scripted PROFILE freezes the id it was asked for. The stand-in
-        // ignores it — but the id is what the session was created as, and the
-        // shell's catalog lookups (`[[models]]`, e.g. the `--image` gate in
-        // §14) ask the frozen identity what model this is. The keyless
-        // fallbacks below deliberately keep the bare identity: there the id the
-        // caller asked for is precisely what did NOT happen.
+        // A scripted PROFILE freezes the id it was asked for: the stand-in
+        // ignores it, but the shell's catalog lookups (`[[models]]`, e.g. the
+        // `--image` gate) ask the frozen identity what model this is. The
+        // keyless fallbacks below keep the BARE identity — there the id the
+        // caller asked for is precisely what did not happen.
         .scripted => .{ .provider = "scripted", .model = chosen },
         // Only a resolvable credential yields a durable API identity; otherwise
         // this session is (and stays) scripted.
@@ -449,10 +423,10 @@ pub fn resolveDescriptor(
 
 /// Where a profile's credential comes from right now, if anywhere. `config`
 /// (its own `api_key`, the user's file) wins over `env` (`api_key_env`), which
-/// wins over `file` (the user credential file, §9.5) — so the key a person
-/// pasted into nulya's own config is the one that runs even if a stale variable
-/// is still exported, and an exported variable still beats the file for the
-/// length of that shell. `scripted` needs nothing.
+/// wins over `file` (`credentials_file`) — so the key a person pasted into
+/// nulya's own config is the one that runs even if a stale variable is still
+/// exported, and an exported variable still beats the file for the length of
+/// that shell. `scripted` needs nothing.
 pub const CredentialSource = enum { none, config, env, file, login, builtin };
 
 pub fn credentialSource(
@@ -477,25 +451,16 @@ pub fn credentialSource(
 
 /// The user credential file: `<NULYA_HOME | ~/.nulya>/credentials.toml`.
 ///
-/// **Why a file at all.** A child process does not inherit secrets: every
-/// process nulya spawns gets an environment with the secret-shaped variables
-/// stripped (`environment.isSecretKey`, physics #6), which is right and is not
-/// changing. But it means a background task — or an extension acting as a driver
-/// — cannot resolve an `api_key_env` credential, so anything it creates would
-/// have had no key. `codex` never had this problem because its credential was
-/// always a FILE (`~/.codex/auth.json`) and `HOME` is not a secret. This
-/// generalises that precedent to the other providers.
+/// A child process does not inherit secrets (`environment.isSecretKey` strips
+/// them), so a background task — or an extension acting as a driver — cannot
+/// resolve an `api_key_env` credential, and anything it creates would have had
+/// no key. `codex` never had this problem: its credential is a FILE
+/// (`~/.codex/auth.json`) and `HOME` is not a secret.
 ///
-/// **Why the keys are env var names.** The file supplies VALUES for the names a
-/// profile already declares in `api_key_env`; it introduces no second naming
-/// scheme, no per-profile section, and no config change — "a durable credential
-/// travels only through `api_key_env`" (DESIGN §9.5) stays literally true, and
-/// the file is simply a second place those names can be answered from.
-///
-/// **Why TOML rather than a journal.** The three `.jsonl` files in this
-/// repository are journals: append-only records of things that happened or were
-/// authorised. This is neither — it is human-written settings, exactly like
-/// `config.toml`, which it sits beside and shares a parser with.
+/// The keys are env var NAMES, so a durable credential still travels only
+/// through `api_key_env` and this is a second place those names are answered
+/// from. TOML because it is human-written settings, like `config.toml`, which it
+/// sits beside and shares a parser with.
 pub const credentials_file = "credentials.toml";
 
 pub fn credentialFilePath(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) !?[]u8 {
@@ -505,16 +470,14 @@ pub fn credentialFilePath(alloc: std.mem.Allocator, env: *const std.process.Envi
     return try std.fs.path.join(alloc, &.{ home, credentials_file });
 }
 
-/// Said at most once per process: a warning that repeats on every profile of
-/// every `config show` is a warning nobody reads.
+/// Said at most once per process, not once per profile lookup.
 var warned_credentials_mode = false;
 
 /// The value the credential file gives for `name`, or null. Caller frees.
 ///
 /// Every failure is a null: no home, no file, unreadable, malformed, no such
 /// key, empty value. A credential that cannot be read is a credential that is
-/// not there, and the caller's answer to that — a refusal naming this path — is
-/// more use than an error about TOML syntax.
+/// not there, and the caller answers that with a refusal naming this path.
 fn fileValue(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -525,10 +488,9 @@ fn fileValue(
     const path = (credentialFilePath(alloc, env) catch return null) orelse return null;
     defer alloc.free(path);
 
-    // POSIX: a secret readable by everyone on the machine is worth a sentence.
-    // Read anyway — refusing to use a key somebody put there on purpose would be
-    // this program deciding for them (the same attitude `codex` auth.json gets).
-    // Windows has no mode bits to judge, so it says nothing.
+    // POSIX: a secret readable by everyone on the machine is worth a sentence,
+    // but it is read anyway. Windows has no mode bits to judge, so it says
+    // nothing.
     if (builtin.os.tag != .windows and !warned_credentials_mode) {
         if (std.Io.Dir.cwd().statFile(io, path, .{})) |st| {
             if (@intFromEnum(st.permissions) & 0o077 != 0) {
@@ -595,9 +557,8 @@ pub const BuildOptions = struct {
 /// `api_key` (`opts.inline_key`), else the environment, or for codex the Codex
 /// CLI's auth file — and stores no secret. There is deliberately NO scripted
 /// fallback: a session frozen as a real provider whose credential is gone fails
-/// with `MissingCredential` rather than silently degrading to scripted (DESIGN
-/// §3). An empty/legacy or scripted descriptor builds the scripted provider,
-/// needing no credential.
+/// with `MissingCredential` rather than silently degrading to scripted. An empty
+/// or scripted descriptor builds the scripted provider, needing no credential.
 pub fn buildFromDescriptor(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -609,8 +570,7 @@ pub fn buildFromDescriptor(
         return .{ .scripted = ScriptedProvider.fromEnv(env) };
     }
     const inline_key: ?[]const u8 = if (opts.inline_key) |k| (if (k.len != 0) k else null) else null;
-    // The file is the LAST place looked, after the config's own key and the
-    // environment (`credentialSource` says the same order, and says it once).
+    // The file is the LAST place looked (`credentialSource` defines the order).
     // Owned, so it is freed the moment the provider has copied it — a secret
     // does not outlive the call that needed it.
     var from_file: ?[]u8 = null;
@@ -654,28 +614,27 @@ pub fn nonEmpty(value: []const u8, fallback: []const u8) []const u8 {
     return if (value.len == 0) fallback else value;
 }
 
-/// The execution environment a session runs its tools behind, per config
-/// (DESIGN §8). Only `local` exists: `sandbox` / `remote` parse but have no
-/// implementation, so they are refused HERE — at the one place a session's
-/// environment is built — rather than silently running locally under a config
-/// that asked for isolation.
+/// The execution environment a session runs its tools behind, per config. Only
+/// `local` exists: `sandbox` parses but has no implementation, so it is refused
+/// HERE — at the one place a session's environment is built — rather than
+/// silently running locally under a config that asked for isolation.
 ///
 /// `session` names the durable session background tasks belong to, and is what
 /// makes `startShellTask` possible at all: null (a `session new`, the demo, a
 /// test) means a `shell {background:true}` has nowhere to report to and says so.
-/// Both halves are computed HERE rather than derived down in the environment —
-/// where a workspace keeps its sidecars is the shell layer's decision, exactly
-/// as `StepContext.scratch_dir` is.
-/// `exec` is the session's `--env` spec (`""` = local, DESIGN §8) — a different
-/// axis from `backend`: it says which machine's shell reads a `shell` command,
-/// not how confined that command is. It is a parameter rather than a config key
-/// because it is decided per session and frozen in that session's header, the
-/// way the model identity is.
+/// Both halves are computed HERE rather than derived down in the environment:
+/// where a workspace keeps its sidecars is the shell layer's decision.
+///
+/// `exec` is the session's `--env` spec (`""` = local) — a different axis from
+/// `backend`: it says which machine's shell reads a `shell` command, not how
+/// confined that command is. A parameter rather than a config key because it is
+/// decided per session and frozen in that session's header, like the model
+/// identity.
 ///
 /// `ext_roots` is where THIS machine keeps extension versions (`extensionRoots`).
 /// The environment needs them because resolving `(id, version)` into something
-/// to spawn belongs to the machine that holds the bytes (DESIGN §7.5), and a
-/// caller that runs no extension may pass none.
+/// to spawn belongs to the machine that holds the bytes; a caller that runs no
+/// extension may pass none.
 pub fn localEnvironment(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -704,34 +663,28 @@ pub fn isRemoteSpec(exec: []const u8) bool {
     return remote.isSpec(environment.normalizeExecSpec(exec));
 }
 
-/// The sentence `ssh:<destination>` gets, now that the exec-target spelling it
-/// used to name is gone (goals/remote-env.md §7.1, 2026-08-30): it wrapped one
-/// command while the workspace, extensions and every spill file stayed on the
-/// host, which was dishonest the moment anything beyond `shell` mattered — the
-/// same split `runExtension` moving over the channel exists to end (DESIGN
-/// §8.2). A resume that finds this spelling frozen into an old header gets the
-/// same words appended to its own refusal, not a silent re-interpretation as
+/// The sentence `ssh:<destination>` gets: that exec-target spelling no longer
+/// exists. A resume that finds it frozen into an old header gets these same
+/// words appended to its own refusal, NOT a silent re-interpretation as
 /// `remote:ssh:` — the two move different things (only the command versus the
 /// whole workspace, which is why `--workspace` matters for one and not the
-/// other), so guessing which one an old session meant would be a second
-/// silent substitution of exactly the kind `MissingCredential` refuses to make.
+/// other), so which one an old session meant cannot be guessed.
 pub const legacy_ssh_hint =
     "ssh as an exec target was retired; use --env remote:ssh:<destination> instead " ++
     "to move the whole workspace there (see --workspace), or --env wsl to keep only the shell elsewhere";
 
 /// Null unless `spec` (already `normalizeExecSpec`d) is the retired
-/// `ssh:<destination>` exec-target spelling — `remote:ssh:` does not match
-/// (checked before this runs, in every caller) and neither does anything else.
+/// `ssh:<destination>` exec-target spelling. `remote:ssh:` does not match —
+/// every caller checks that first.
 pub fn legacySshHint(spec: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, spec, "ssh:")) return null;
     return legacy_ssh_hint;
 }
 
 /// Say why an `--env` spec cannot be used, or null when it can — so a CLI verb
-/// can refuse BEFORE it creates anything, the way a missing `--prompt` file
-/// does. The four answers are kept apart on purpose: a typo, the wrong
-/// machine, a spelling from the other family, and the one spelling that used
-/// to work and now needs a specific pointer are four different fixes.
+/// can refuse BEFORE it creates anything. The four answers are kept apart: a
+/// typo, the wrong machine, a spelling from the other family, and the retired
+/// spelling are four different fixes.
 pub fn execTargetRefusal(exec: []const u8) ?[]const u8 {
     const spec = environment.normalizeExecSpec(exec);
     if (remote.isSpec(spec)) {
@@ -747,9 +700,9 @@ pub fn execTargetRefusal(exec: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The execution environment a session runs its tools behind: today's local
-/// backend, or the remote channel (DESIGN §8.1). A union rather than two call
-/// paths so every verb keeps one shape — build it, hand out the handle, deinit.
+/// The execution environment a session runs its tools behind: the local backend
+/// or the remote channel. A union rather than two call paths so every verb keeps
+/// one shape — build it, hand out the handle, deinit.
 pub const SessionEnvironment = union(enum) {
     local: environment.LocalEnvironment,
     remote: remote.RemoteEnvironment,
@@ -768,18 +721,16 @@ pub const SessionEnvironment = union(enum) {
         }
     }
 
-    /// Let this session's children name the session they are in (DESIGN §5.3),
-    /// in the two halves that used to be one variable:
+    /// Let this session's children name the session they are in, in two halves:
     ///
-    ///   - `NULYA_SESSION` is the session FILE's path, and is published LOCALLY
-    ///     ONLY — not as an oversight: it names a file on this machine, so
-    ///     handing it to a process on another one would be a lie a package could
-    ///     act on (a capability note deposited into nothing, a handoff written
-    ///     where no driver looks).
-    ///   - `NULYA_SESSION_ID` is the session's identity, which is true wherever
-    ///     the process runs, so it travels. Splitting the two is what lets a
-    ///     package that only ever wanted the id — a scratch key, a journal
-    ///     column — keep working when the workspace moved.
+    ///   - `NULYA_SESSION` is the session FILE's path, published LOCALLY ONLY:
+    ///     it names a file on this machine, so handing it to a process on
+    ///     another one would be a lie a package could act on (a capability note
+    ///     deposited into nothing, a handoff written where no driver looks).
+    ///   - `NULYA_SESSION_ID` is the session's identity, true wherever the
+    ///     process runs, so it travels. A package that only ever wanted the id
+    ///     (a scratch key, a journal column) keeps working when the workspace
+    ///     moved.
     pub fn publishSession(self: *SessionEnvironment, session_path: []const u8, session_id: []const u8) !void {
         switch (self.*) {
             .local => |*l| try l.publishSession(session_path, session_id),
@@ -789,13 +740,12 @@ pub const SessionEnvironment = union(enum) {
 };
 
 /// Build the environment a session runs behind. `exec` decides which of the two
-/// it is; everything else (config backend, the session ref for background
-/// tasks) applies to the local one exactly as before.
+/// it is; everything else (config backend, the session ref for background tasks)
+/// applies to the local one.
 ///
 /// A remote spec CONNECTS here — the transport is spawned and the handshake
-/// completes — because there is no honest way to hand back a handle to a
-/// machine that has not answered. A failure is therefore loud and at the top of
-/// the step, which is where an unreachable machine belongs.
+/// completes — because there is no honest way to hand back a handle to a machine
+/// that has not answered. A failure is therefore loud and at the top of the step.
 pub fn sessionEnvironment(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -811,7 +761,7 @@ pub fn sessionEnvironment(
         if (cfg.environment.backend != .local) return error.UnsupportedEnvironmentBackend;
         // No store roots: a remote environment resolves nothing here. Which
         // version means which file is the far agent's answer, given against ITS
-        // roots (goals/remote-env.md §3.1).
+        // roots.
         return .{
             .remote = try remote.RemoteEnvironment.connect(alloc, io, .{
                 .spec = spec,
@@ -819,7 +769,7 @@ pub fn sessionEnvironment(
                 .version = version,
                 // The same two halves the local one gets, and for the same reason:
                 // a background task's NAME and its delivery belong to the machine
-                // holding the ledger, whichever machine runs the command (§8.2).
+                // holding the ledger, whichever machine runs the command.
                 .session = session,
                 .ssh_password = ssh_password,
             }),
@@ -828,15 +778,14 @@ pub fn sessionEnvironment(
     return .{ .local = try localEnvironment(alloc, io, cfg, session, exec, ext_roots) };
 }
 
-/// The extension store roots this process searches, in order (DESIGN §7.2):
+/// The extension store roots this process searches, in order:
 ///
 ///   1. the workspace's `.nulya/extensions` (relative — resolved against cwd);
 ///   2. the user's `<NULYA_HOME | ~/.nulya>/extensions`, so a capability built
 ///      once is available in every workspace;
 ///   3. `extensions.paths` from the config — **trusted layers only**, since a
 ///      checkout must not be able to decide which directories on this machine
-///      get to supply `current` versions (the same "project layer can only
-///      narrow" invariant as DESIGN §9.5).
+///      get to supply `current` versions (a project layer can only narrow).
 ///
 /// The first root holding an id wins, so a workspace copy shadows a user-wide
 /// one. Roots that do not exist are skipped when opened. Caller owns the slice
@@ -880,15 +829,15 @@ pub fn userHomeDir(alloc: std.mem.Allocator, env: *const std.process.Environ.Map
 }
 
 /// Refuse to start a session composed against a workspace extension store that
-/// arrived with a checkout and has never been trusted on this machine
-/// (DESIGN §9). Returns `error.WorkspaceStoreUntrusted`; the CLI turns that into
-/// the message and the exit code, so nothing in the kernel — not
-/// `SessionComposition`, not `AgentSession` — knows trust exists.
+/// arrived with a checkout and has never been trusted on this machine. Returns
+/// `error.WorkspaceStoreUntrusted`; the CLI turns that into the message and the
+/// exit code, so nothing in the kernel — not `SessionComposition`, not
+/// `AgentSession` — knows trust exists.
 ///
 /// The gate covers the WORKSPACE root only. The user store and `extensions.paths`
-/// are trusted by construction (a checkout can reach neither: DESIGN §7.2/§9.5),
-/// and the read-only projections (`ext list`, `ext inspect`, `skill list`) are
-/// deliberately ungated — they are the tools for deciding whether to trust.
+/// are trusted by construction (a checkout can reach neither), and the read-only
+/// projections (`ext list`, `ext inspect`, `skill list`) are deliberately
+/// ungated — they are the tools for deciding whether to trust.
 pub fn ensureWorkspaceStoreTrusted(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -906,17 +855,16 @@ pub fn ensureWorkspaceStoreTrusted(
     return error.WorkspaceStoreUntrusted;
 }
 
-/// The workspace store's absolute real path when it HOLDS extensions — when
-/// trusting it therefore means something — else null. ONE predicate answers both
-/// halves of the mechanism, so the gate, `ext trust` and `ext build`'s
-/// auto-trust cannot disagree about whether a store is occupied.
+/// The workspace store's absolute real path when it HOLDS extensions, else null.
+/// ONE predicate, so the gate, `ext trust` and `ext build`'s auto-trust cannot
+/// disagree about whether a store is occupied.
 ///
 /// "Holds" means an id with a `current` pointer or with at least one built
 /// version: exactly the things a session can compose (`Roots.listActive`,
 /// `--with`) or a CLI can execute (`ext run <id>@<version>`). A bare `<id>/`
 /// directory with neither — a draft, or the empty shell a failed `ext build`
 /// leaves behind around its `<id>/.lock` — holds nothing: it is inert source
-/// until something local builds it, and that local build is what records trust.
+/// until something local builds it, and that local build records trust.
 /// Caller owns the result.
 pub fn occupiedWorkspaceStore(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) !?[]u8 {
     var root = store.openRoot(io, cwd, store.workspace_root_rel) catch |err| switch (err) {
@@ -1191,9 +1139,8 @@ test "the user credential file answers api_key_env names, after the config key a
     // No file yet: nothing to find, and nothing to fail about either.
     try std.testing.expectEqual(CredentialSource.none, credentialSource(alloc, io, openai_profile, &env));
 
-    // The permission warning is a one-shot and this test is about the VALUE; a
-    // unit test that writes to a shared runner's stderr is noise, and the mode a
-    // freshly written temp file lands on is the umask's business, not ours.
+    // This test is about the VALUE, not the permission warning: the mode a
+    // freshly written temp file lands on is the umask's business.
     warned_credentials_mode = true;
     try tmp.dir.writeFile(io, .{
         .sub_path = credentials_file,
@@ -1204,7 +1151,7 @@ test "the user credential file answers api_key_env names, after the config key a
     // and the profile's own config is untouched.
     try std.testing.expectEqual(CredentialSource.file, credentialSource(alloc, io, openai_profile, &env));
     try std.testing.expect(credentialAvailable(alloc, io, openai_profile, &env));
-    // …and that is enough to freeze a real identity rather than degrade (§9.5).
+    // …and that is enough to freeze a real identity rather than degrade.
     try std.testing.expectEqualStrings("openai", resolveDescriptor(alloc, io, prov, &env, "openai", null).provider);
 
     // Precedence, both directions: the environment beats the file for the length
@@ -1379,7 +1326,7 @@ test "only the local environment backend runs; sandbox is refused, not silently 
     local.deinit();
 
     // …and a backend this build cannot honour fails rather than running the
-    // tools locally under a config that asked for isolation (DESIGN §8).
+    // tools locally under a config that asked for isolation.
     cfg.environment.backend = .sandbox;
     try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, "", &.{}));
 }
@@ -1387,10 +1334,9 @@ test "only the local environment backend runs; sandbox is refused, not silently 
 test "an exec target is refused before anything is built, and the two refusals differ" {
     try std.testing.expectEqual(@as(?[]const u8, null), execTargetRefusal(""));
     try std.testing.expectEqual(@as(?[]const u8, null), execTargetRefusal("local"));
-    // The exec-target `ssh:<dest>` spelling was retired 2026-08-30
-    // (goals/remote-env.md §7.1): it is refused with a SPECIFIC sentence
-    // naming the replacement, distinct from the generic "unrecognized" a typo
-    // gets (which happens to also mention `remote:ssh:` as part of the whole
+    // The retired exec-target `ssh:<dest>` spelling is refused with a SPECIFIC
+    // sentence naming the replacement, distinct from the generic "unrecognized"
+    // a typo gets (which also mentions `remote:ssh:` as part of the whole
     // vocabulary, so the two are told apart by identity, not substring).
     try std.testing.expectEqualStrings(legacy_ssh_hint, execTargetRefusal("ssh:me@box").?);
     // A typo and an unreachable target are different problems with different

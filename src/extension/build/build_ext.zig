@@ -1,5 +1,4 @@
-//! `nulya ext build` — compile an extension into an immutable version (DESIGN
-//! §7.4, §10).
+//! `nulya ext build` — compile an extension into an immutable version.
 //!
 //! The AI never runs `zig build` itself. This module fixes every knob (zig
 //! identity, optimize, target, output location) so a given package snapshot maps
@@ -25,9 +24,9 @@ const seal_file = integrity.seal_file;
 
 pub const BuildResult = struct {
     /// The manifest's id — which `<id>/` under the store root this landed in.
-    /// The draft's directory name does not have to be it (DESIGN §7.4), and a
-    /// caller that has to name what it just built (`activate`, a listing) needs
-    /// the id the store actually used.
+    /// The draft's directory name does not have to be it, and a caller that has
+    /// to name what it just built (`activate`, a listing) needs the id the
+    /// store actually used.
     id: []u8,
     /// Content-addressed immutable version id (`v-<hash>`).
     version: []u8,
@@ -35,14 +34,14 @@ pub const BuildResult = struct {
     /// Pure contribution packages without runtime do not have one.
     entry_rel: ?[]u8,
     /// True when this exact version already existed — an immutable, reproducible
-    /// no-op (DESIGN §7.4).
+    /// no-op.
     already_built: bool,
-    /// Index into the caller's `donors` when this version was COPIED from another
-    /// store root rather than produced here (DESIGN §7.4). Null otherwise, so a
-    /// caller that passed no donors never has to look at it.
+    /// Index into the caller's `donors` when this version was copied from another
+    /// store root rather than produced here. Null otherwise, so a caller that
+    /// passed no donors never has to look at it.
     copied_from: ?usize = null,
     /// False when the compiler rejected the source; `stderr` then holds the
-    /// diagnostics for the model to correct against (DESIGN §6.2 spirit).
+    /// diagnostics for the model to correct against.
     compile_ok: bool,
     stderr: []u8,
 
@@ -66,34 +65,31 @@ pub const Mode = enum { build, plan };
 /// questions asked by different callers: `ext sync` supplies donors and never a
 /// target, `ext build --target` the reverse.
 pub const Options = struct {
-    /// The OTHER store roots this machine searches, in that order, as places
-    /// this version may already exist (DESIGN §7.2, §7.4).
+    /// The other store roots this machine searches, in that order, as places
+    /// this version may already exist.
     donors: []const std.Io.Dir = &.{},
-    /// Build for another machine instead of this one (DESIGN §7.4). The two
-    /// words go into the version id and the seal exactly as a host build's do,
-    /// so a per-target build is simply ANOTHER VERSION of the same package —
-    /// no new store layout, no new seal field, and `findMatchingVersion`
-    /// already keys on the target it is asked about.
+    /// Build for another machine instead of this one. The two words go into
+    /// the version id and the seal exactly as a host build's do, so a
+    /// per-target build is simply another version of the same package —
+    /// `findMatchingVersion` already keys on the target it is asked about.
     ///
     /// Refused for a `data` or `script` package (`error.TargetNotApplicable`):
     /// their identity is the snapshot alone and is the same everywhere, so
-    /// naming a target for one is a request with no meaning rather than a
-    /// request this build declines to serve.
+    /// naming a target for one is a request with no meaning.
     target: ?target_mod.Target = null,
 };
 
 /// The compiler a run of builds uses: which executable, plus its identity
-/// (`zig version`) asked of the host AT MOST ONCE.
+/// (`zig version`) asked of the host at most once.
 ///
-/// The identity enters every compiled version id (DESIGN §7.4), so every build
-/// needs it — and getting it is a subprocess. `ext sync` builds every draft in a
-/// root, which used to mean one `zig version` spawn per compiled draft for an
-/// answer that cannot change mid-run.
+/// The identity enters every compiled version id, so every build needs it —
+/// and getting it is a subprocess; `ext sync` builds every draft in a root, so
+/// probing once instead of per-draft avoids a redundant `zig version` spawn
+/// for an answer that cannot change mid-run.
 ///
-/// The probe runs with the build's `workspace` as its cwd, and a version-manager
-/// shim answers differently from different directories (DESIGN §10) — so one
-/// value belongs to one run over one workspace, which is exactly how `ext build`
-/// (one draft) and `ext sync` (every draft under one root) use it.
+/// The probe runs with the build's `workspace` as its cwd, because a
+/// version-manager shim can answer differently from different directories —
+/// so one value belongs to one run over one workspace.
 pub const Zig = struct {
     /// The executable to invoke. Empty means "this machine named none", which is
     /// not fatal until something actually has to compile.
@@ -142,19 +138,18 @@ pub const Zig = struct {
 };
 
 /// Build the draft at `ext_dir_rel` (relative to `workspace`) into an immutable
-/// version under `dest_root`, a store root (DESIGN §7.2). Stops at the "built"
-/// state — activation is a separate, explicit step (DESIGN §7.4).
+/// version under `dest_root`, a store root. Stops at the "built" state —
+/// activation is a separate, explicit step.
 ///
-/// **Where a version lands is decided by the manifest id and the store root, not
-/// by where the draft happens to sit**: `<dest_root>/<manifest.id>/versions/<v>`.
+/// Where a version lands is decided by the manifest id and the store root, not
+/// by where the draft happens to sit: `<dest_root>/<manifest.id>/versions/<v>`.
 /// A draft inside a store root builds exactly where it always did (its directory
-/// IS `<root>/<id>`); a draft anywhere else — a `modes/` or `extensions/`
-/// directory kept in git, say — now produces a version `activate` can actually
-/// find, instead of an orphan `versions/` next to the source.
+/// IS `<root>/<id>`); a draft anywhere else — a directory kept in git, say —
+/// still produces a version `activate` can find.
 ///
 /// Everything the compiler touches lives inside the version directory, so the
 /// build runs with `dest_root` as its working directory and never needs an
-/// absolute sub-path (a user root is an absolute path).
+/// absolute sub-path.
 ///
 /// The error set is inferred: it folds manifest/source unreadability, manifest
 /// parse/validate errors, compiler identity errors, and filesystem errors from
@@ -188,21 +183,20 @@ pub fn planExtension(
     return build(alloc, io, workspace, ext_dir_rel, dest_root, zig, .{ .donors = donors }, .plan);
 }
 
-/// `buildExtension`, plus what `Options` adds: the OTHER store roots this
-/// machine searches — in that order — as places the version may already exist
-/// (DESIGN §7.2, §7.4), and the target to build for.
+/// `buildExtension`, plus what `Options` adds: the other store roots this
+/// machine searches — in that order — as places the version may already exist,
+/// and the target to build for.
 ///
 /// A version is content-addressed, so a root that holds this exact package
 /// snapshot (same digest, same target and, when this machine can name its
 /// compiler, the same compiler identity) holds the bytes a local build would
 /// produce. Copying that tree in and validating it again is therefore the same
-/// version by construction — and it is what makes a second workspace, or a
-/// machine with no toolchain at all, able to use a capability the user store
-/// already carries without spending a compile.
+/// version by construction — which lets a second workspace, or a machine with
+/// no toolchain at all, use a capability the user store already carries
+/// without spending a compile.
 ///
-/// Which roots those are is the caller's decision (nothing here knows about
-/// search order); the destination root is searched first regardless, since a
-/// copy already there is `already_built`.
+/// Which roots those are is the caller's decision; the destination root is
+/// searched first regardless, since a copy already there is `already_built`.
 pub fn buildExtensionReusing(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -247,21 +241,20 @@ fn build(
     const package_digest = try integrity.packageDigestHex(alloc, snapshot);
     defer alloc.free(package_digest);
 
-    // Only a COMPILED extension's identity depends on the toolchain: its binary
+    // Only a compiled extension's identity depends on the toolchain: its binary
     // is a function of the compiler and host target. `data` (no runtime) and
     // `script` (frozen, run as-is) are pure snapshots — compiler = "" and
     // target = "", so their version id is stable across platforms and needs no
-    // zig at all (DESIGN §7.1, §7.4).
+    // zig at all.
     const kind = manifest.implementationKind(m);
     const compiled = kind == .compiled;
-    // Refused before anything is written or leased: a data or script version is
-    // the same everywhere, so "build it for that machine" is a request with no
-    // meaning — and answering it by quietly producing the ordinary version would
-    // leave the caller believing something happened.
+    // Refused before anything is written or leased, rather than quietly
+    // producing the ordinary version and leaving the caller believing
+    // something happened.
     if (opts.target != null and !compiled) return error.TargetNotApplicable;
     const target = if (compiled) (if (opts.target) |t| t.words() else target_mod.host) else "";
     // Ask for the compiler identity, but do not fail on its absence yet: a
-    // machine with no toolchain cannot COMPILE this package, and can still adopt
+    // machine with no toolchain cannot compile this package, and can still adopt
     // a copy some other root already holds. Not knowing it only widens the search
     // below, from one version id to "any build of these bytes for this target".
     const compiler: ?[]const u8 = if (compiled) try zig.resolve(alloc, io, workspace) else "";
@@ -273,15 +266,14 @@ fn build(
     var held: ?std.Io.File = if (mode == .build) try store.Store.init(io, dest_root).lease(alloc, m.id) else null;
     defer if (held) |*h| h.close(io);
 
-    // `entry_rel` is the BUILT binary path — compiled extensions only. A script's
-    // entry is frozen inside `package/` and located via `store.versionScriptEntryPath`.
-    // A compiled entry is never per-OS (`manifest.validate` refuses the object
+    // `entry_rel` is the built binary path — compiled extensions only. A
+    // compiled entry is never per-OS (`manifest.validate` refuses the object
     // form for `bin/` paths), so the host's variant is the one that was written.
     const declared_entry: []const u8 = if (compiled)
         m.runtime.?.entry.forHost() orelse return error.EntryUnsupportedOnHost
     else
         "";
-    // The suffix belongs to the TARGET, not to this machine: a version built
+    // The suffix belongs to the target, not to this machine: a version built
     // here for Linux has `bin/x`, and one built anywhere for Windows has
     // `bin/x.exe`. `target` is the host's own words when nothing was named, so
     // the ordinary build is the same expression, not a second branch.
@@ -345,11 +337,9 @@ fn build(
     // `-target` is asked of `target_mod.effectiveTriple`, which answers for a
     // host build too: the two words this build is about to record ARE the
     // invocation, so a build that named nothing must compile the way a cross
-    // build for those same words would. Letting a host build stay native was the
-    // older arrangement, and it left one id able to name two different compiles
-    // — glibc here, musl from over there — which only stayed invisible while
-    // ids never left a store. They do now (`ext push` answers by id alone, and
-    // `exec_version` names one id as what runs on the far machine).
+    // build for those same words would — otherwise one id could name two
+    // different compiles (glibc here, musl from over there) once a version
+    // leaves the store that built it.
     //
     // Null for a host whose own pair is outside the `--target` vocabulary: it
     // compiles natively, since nothing can cross-build for words that cannot be
@@ -439,14 +429,8 @@ fn accessError(io: std.Io, dir: std.Io.Dir, path: []const u8) ?anyerror {
 /// Windows answers `FileNotFound` for BOTH a missing executable and a missing
 /// working directory, and those are opposite repairs — install a toolchain,
 /// versus find out why the directory this build runs in went away. The name
-/// alone cannot separate them, so the two get looked up.
-///
-/// The lookup is then reported as what it found, never rounded to the likeliest
-/// story. "Not there at all" and "there, but this process cannot reach it" are
-/// different facts and different repairs, and a person told the wrong one goes
-/// and looks, finds the opposite, and starts distrusting the sentence instead
-/// of the machine. So the answers stay separate — including the one where the
-/// probe finds nothing wrong and hands back the bare error name.
+/// alone cannot separate them, so the two get looked up and reported as what
+/// they found, never rounded to the likeliest story.
 fn spawnNote(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -484,17 +468,11 @@ fn spawnNote(
 }
 
 /// `zig <version>` as this host reports it, or `error.ZigVersionUnreadable`
-/// with `why` set to what stopped it.
-///
-/// The three failures are three different repairs — the executable would not
-/// run at all (a path that is not there, a file something else has open, a
-/// spawn the OS refused), it ran and exited non-zero (a version-manager shim
-/// that wants a `build.zig.zon` it cannot find from this cwd says exactly
-/// this, and says so ON STDERR), or it ran and printed nothing. One error name
-/// covers all three, so the account travels out through `why`: without it the
-/// person reading `could not report its version` cannot tell "install a
-/// toolchain" from "something is holding your zig.exe", and both sentences end
-/// in the same shrug.
+/// with `why` set to what stopped it: the executable did not run at all, it
+/// ran and exited non-zero (a version-manager shim that wants a
+/// `build.zig.zon` it cannot find from this cwd says so on stderr), or it ran
+/// and printed nothing. One error name covers all three, so the distinguishing
+/// account travels out through `why` instead of being lost at the return.
 fn compilerIdentity(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -546,13 +524,12 @@ fn compilerIdentity(
 /// Find a built version of `id` in `root` that IS what this build would produce:
 /// the same package snapshot (by digest) for the same target and, when this
 /// machine can name its compiler, from that same compiler. Such a version is
-/// this build's output by content addressing (DESIGN §7.4) — in the destination
-/// root that makes the build a no-op, and in another root it makes the version
-/// copyable.
+/// this build's output by content addressing — in the destination root that
+/// makes the build a no-op, and in another root it makes the version copyable.
 ///
-/// The matching itself is `Store.findSealed`, because a session whose tools run
-/// on another machine asks the very same question of the very same key
-/// (`Roots.resolveForTarget`, goals/remote-env.md §3.1). Caller owns the result.
+/// The matching itself is `Store.findSealed`, the same lookup a session whose
+/// tools run on another machine uses to resolve that same key. Caller owns
+/// the result.
 fn findMatchingVersion(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -638,15 +615,14 @@ fn validateSystemPrompts(alloc: std.mem.Allocator, m: manifest.Manifest, snapsho
     }
 }
 
-/// Every `contributes.ui` entry names a module some front end loads (DESIGN
-/// §7.2.1, tui-plugin D10) — a declared path this build must actually be able
-/// to freeze, the same existence half `validateSystemPrompts` checks for a
-/// system prompt file. EVERY host's, not just the one this machine happens to
+/// Every `contributes.ui` entry names a module some front end loads — a
+/// declared path this build must actually be able to freeze, the same
+/// existence check `validateSystemPrompts` runs for a system prompt file.
+/// Checked for every host's variant, not just the one this machine happens to
 /// run: one version serves them all, so the build is the only chance to notice
-/// that a declared module was never written (`validateScriptEntries`' reason).
-/// No size ceiling here: `prompt.max_system_prompt_bytes` bounds what is fed to
-/// a MODEL, and this file never is (it is front-end source, read by a plugin
-/// host, not by `prompt.zig`).
+/// that a declared module was never written. No size ceiling here:
+/// `prompt.max_system_prompt_bytes` bounds what is fed to a model, and this
+/// file never is (it is front-end source, read by a plugin host).
 fn validateUi(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integrity.PackageSnapshot) !void {
     for (m.ui) |u| {
         const rel = try integrity.canonicalRel(alloc, u.entry);
@@ -655,12 +631,11 @@ fn validateUi(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integrit
     }
 }
 
-/// EVERY declared script entry is in the snapshot — not just this host's
-/// (DESIGN §7.1, §7.4). `validateSystemPrompts`' existence half, applied to a
-/// field that can now name several files: a per-OS entry freezes one version for
-/// all platforms, so the machine that builds it is the only chance to notice
-/// that the Windows variant was never written. A compiled entry is skipped here
-/// because it does not exist yet — the build is what produces it.
+/// Every declared script entry is in the snapshot — not just this host's. A
+/// per-OS entry freezes one version for all platforms, so the machine that
+/// builds it is the only chance to notice that the Windows variant was never
+/// written. A compiled entry is skipped here because it does not exist yet —
+/// the build is what produces it.
 fn validateScriptEntries(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integrity.PackageSnapshot) !void {
     const rt = m.runtime orelse return;
     if (!manifest.isScript(rt)) return;
@@ -688,22 +663,12 @@ fn expectCompiled(label: []const u8, result: BuildResult) !void {
     return error.ExtensionBuildFailed;
 }
 
-/// A destination store the two COMPILING tests below share across runs. Their
-/// subject is the version id, not the compile: both need two real builds of a
-/// trivial program to compare, and a real build is a real `zig build-exe`
-/// (~7s each, four of them in this file).
-///
-/// A version is content-addressed and immutable, so pointing them at a store
-/// that outlives the process costs the compiles exactly once per snapshot: the
-/// next run finds the same version already built and `buildExtension` answers
-/// `already_built` without spending a compiler. Nothing is assumed about what is
-/// in there — a version that no longer validates is deleted and rebuilt by the
-/// same code path any user's store takes, a toolchain change gives every version
-/// a new id, and deleting `.zig-cache` is the reset.
-///
-/// The DRAFT still lives in each test's own fresh tmp dir; only the store the
-/// frozen version lands in is shared, and neither test looks inside it. Caller
-/// closes the handle.
+/// A destination store the compiling tests below share across runs, so a real
+/// `zig build-exe` (~7s each) is paid once per snapshot: a version is
+/// content-addressed and immutable, so the next run finds it already built and
+/// `buildExtension` answers `already_built`. The draft still lives in each
+/// test's own fresh tmp dir; only the store the frozen version lands in is
+/// shared. Caller closes the handle.
 fn sharedVersionStore(io: std.Io) !std.Io.Dir {
     const rel = ".zig-cache" ++ std.fs.path.sep_str ++ "nulya-unit-versions";
     const cwd = std.Io.Dir.cwd();

@@ -1,8 +1,7 @@
-//! Plumbing every `nulya` verb file shares (DESIGN §14): stdout/stderr writing,
-//! argv scanning, the workspace cwd, and the ordered store-root search each
-//! `ext` / `skill` / `session` command opens. Nothing here decides anything
-//! about a verb — a helper lands in this file exactly when two verb files need
-//! it, so `cli.zig` itself can stay a dispatcher over the files beside it.
+//! Plumbing every `nulya` verb file shares: stdout/stderr writing, argv
+//! scanning, the workspace cwd, and the ordered store-root search each `ext` /
+//! `skill` / `session` command opens. Nothing here decides anything about a
+//! verb — a helper lands here exactly when two verb files need it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -13,20 +12,16 @@ const composition = @import("../composition.zig");
 const launch = @import("../launch.zig");
 const environment = @import("../environment.zig");
 
-/// The ordered store roots this invocation searches (DESIGN §7.2), opened once.
-/// Every `ext` / `skill` command goes through this instead of assuming the
-/// workspace store is the only one: an extension may live in the user's
-/// `~/.nulya/extensions` or in a trusted `extensions.paths` entry, and the first
-/// root holding an ACTIVE version of an id wins.
+/// The ordered store roots this invocation searches, opened once. An extension
+/// may live in the workspace store, the user's `~/.nulya/extensions`, or a
+/// trusted `extensions.paths` entry; the first root holding an ACTIVE version
+/// of an id wins.
 pub const RootSearch = struct {
     specs: []const []const u8,
     /// The merged config's `[extensions] with` — the ids that are a member of
-    /// every session opened here (DESIGN §5.1). Owned alongside `specs`.
-    ///
-    /// It rides with the roots because it comes out of the same config load and
-    /// answers the other half of one question: the roots say where an id's code
-    /// may come from, this says whether a session gets it. Loading the chain a
-    /// second time for it would be two answers where the caller wants one.
+    /// every session opened here. Owned alongside `specs`, and read from the
+    /// same config load: the roots say where an id's code may come from, this
+    /// says whether a session gets it.
     with: []const []const u8,
     roots: roots_mod.Roots,
 
@@ -94,13 +89,13 @@ pub fn takeUserFlag(alloc: std.mem.Allocator, args: []const []const u8) !struct 
     return .{ .user = user, .rest = try rest.toOwnedSlice(alloc) };
 }
 
-/// The root spec an `activate` / `deactivate` acts on. `--user`
-/// names the user store outright. Otherwise the root whose copy of `id` is IN
-/// EFFECT (`Roots.firstActive`, DESIGN §7.2): the operation lands on what a
-/// session would use — an activate there takes effect, an activate anywhere
-/// else would succeed and change nothing. Only when no root has an active copy
-/// does a `version` pick the first root that holds it built. Null means there
-/// is nowhere to act (and, for `--user`, no home directory). Caller owns it.
+/// The root spec an `activate` / `deactivate` acts on. `--user` names the user
+/// store outright. Otherwise the root whose copy of `id` is IN EFFECT
+/// (`Roots.firstActive`), so the operation lands on what a session would use;
+/// an activate anywhere else would succeed and change nothing. Only when no
+/// root has an active copy does `version` pick the first root holding it built.
+/// Null means there is nowhere to act (and, for `--user`, no home directory).
+/// Caller owns it.
 pub fn targetRootSpec(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -119,16 +114,14 @@ pub fn targetRootSpec(
     return try alloc.dupe(u8, search.roots.entries[index].spec);
 }
 
-/// The id of the session this process is running INSIDE, or null when it is not.
-/// `session step` publishes it as `NULYA_SESSION_ID` to everything it runs
-/// (DESIGN §5.3), so anything the model starts can name the session it is in
-/// without being told. Caller owns the result.
+/// The id of the session this process is running INSIDE, or null when it is
+/// not: `session step` publishes it as `NULYA_SESSION_ID` to everything it
+/// runs. Caller owns the result.
 ///
-/// The ID, not the stem of `NULYA_SESSION`: every caller here wants an identity
-/// — a journal column, the default session of a task verb, the `by:` of an
-/// outcome — and a session whose workspace lives on another machine has an
-/// identity there but no session file. The path variable stays, for the callers
-/// that genuinely need a file (`ext activate`'s capability note).
+/// The ID, not the stem of `NULYA_SESSION`: callers here want an identity (a
+/// journal column, a task verb's default session, an outcome's `by:`), and a
+/// session whose workspace lives on another machine has an identity there but
+/// no session file. `NULYA_SESSION` stays for callers that need the file.
 pub fn envSessionId(alloc: std.mem.Allocator) !?[]u8 {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();

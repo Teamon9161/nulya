@@ -1,4 +1,4 @@
-//! The milestone's first sentence (DESIGN §16): "Nulya ships one tool. The
+//! The milestone's first sentence: "Nulya ships one tool. The
 //! second is created by Nulya itself." A shell-only session manufactures a real
 //! extension through the real CLI, usage alone never promotes it, and a pin —
 //! from config or `--pin` — puts it on the next session's tool face.
@@ -46,9 +46,9 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
     //   `nulya ext init/build/activate/run` to manufacture a brand-new capability
     //   and records its usage. The tool never becomes native mid-session.
     //     -> Session B, opened with no pin, STILL sees only shell: the
-    //        usage journal is evidence, never a decision (DESIGN §5.1, §5.5).
+    // usage journal is evidence, never a decision.
     //     -> Promotion is someone naming the package. The scaffold writes no
-    //        `surface`, which means `auto` (DESIGN §7.2.1), so the axis that
+    // `surface`, which means `auto`, so the axis that
     //        promotes it is MEMBERSHIP — both spellings through the real CLI:
     //        `[extensions] with` in the project layer's `.nulya/config.toml`,
     //        and `session new --with`. Either way the header records the tool
@@ -83,7 +83,7 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
     // NULYA_ZIG is not secret-shaped, so it survives sanitization and reaches the
     // model's `nulya ext build` grandchild (test -> shell -> nulya -> zig).
     try lenv.env.put("NULYA_ZIG", zig_exe);
-    // The model's `ext build` records this workspace store as trusted (DESIGN §9)
+    // The model's `ext build` records this workspace store as trusted
     // in the USER layer, so it must see the same isolated home `runCli` gives the
     // `session new` below — otherwise the store the model just built is trusted in
     // one home and refused from the other, which is the developer's real `~`.

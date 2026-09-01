@@ -1,36 +1,18 @@
-//! `nulya journal …` (DESIGN §14): the append-only JSONL file discipline that
-//! `journals/journal.zig` already implements for the three kernel journals
-//! (tool usage, session outcomes, trusted stores — DESIGN §3.3), exposed as a
-//! CLI verb so ANY extension — a script one especially, which cannot `import`
-//! `src/` — gets the same lease-serialized append and crash-tail repair
-//! instead of hand-rolling it. `extensions/agent/src/record.zig`'s own header
-//! comment says it copied that discipline by hand because it had no other way
-//! to reach it; this is the other way, for the next one.
+//! `nulya journal append|read` — the append-only JSONL discipline of
+//! `journals/journal.zig` (lease-serialized append, crash-tail repair) exposed
+//! as a CLI verb, so an extension that cannot `import` `src/` need not
+//! hand-roll it.
 //!
-//! Two verbs only, and nothing in between:
+//!   * `append <path>` reads exactly one record from STDIN (never argv: a
+//!     Windows command line caps out around 32 KiB), requires one line of
+//!     valid JSON with no embedded newline, and appends it — or writes not one
+//!     byte. No `--stamp`: an `at` field belongs to the caller's schema.
+//!   * `read <path>` prints back every COMPLETE line, dropping a torn tail. A
+//!     missing file is not a missing FACT: no output, exit 0.
 //!
-//!   * `append <path>` reads exactly one record from STDIN (never argv — a
-//!     Windows command line caps out around 32 KiB, and `extensions/agent`'s
-//!     message-file convention exists for the same reason), requires it to be
-//!     one line of valid JSON with no embedded newline, and appends it through
-//!     `journal.appendLine` — or writes not one byte. There is no `--stamp`:
-//!     v1 is the pure primitive, and a caller that wants an `at` field writes
-//!     one into the JSON itself, the way the three kernel journals do.
-//!   * `read <path>` prints back every COMPLETE line (`journal.readAll`,
-//!     dropping the same torn tail an interrupted append would repair). A
-//!     missing file is not a missing FACT: it prints nothing and exits 0.
-//!
-//! No third verb. A mailbox (put/peek/ack, with its own delivery contract) is
-//! a stronger promise that only earns its keep once a second consumer needs
-//! it — `extensions/agent`'s own `mailbox.zig` already grew one by hand, and
-//! this is deliberately not it.
-//!
-//! Both verbs pass `cwd = "."` to `journal.zig` and the caller's raw `path` as
-//! `file_rel`, whether it is relative or absolute: `Dir.createFile` /
-//! `Dir.createDirPath` on `Dir.cwd()` accept an absolute sub_path exactly as
-//! `createFileAbsolute` does (it is defined as that call), so one code path
-//! serves both spellings — `cli/ext.zig`'s `ext build <path>` already relies
-//! on the same property.
+//! Both verbs pass `cwd = "."` and the caller's raw `path` as `file_rel`,
+//! relative or absolute: `Dir.createFile` / `Dir.createDirPath` on `Dir.cwd()`
+//! accept an absolute sub_path, so one code path serves both spellings.
 
 const std = @import("std");
 const journal = @import("../journals/journal.zig");
@@ -39,9 +21,8 @@ const printErr = common.printErr;
 const printErrFmt = common.printErrFmt;
 const printRaw = common.printRaw;
 
-/// A record this harness will ever append is a fact, not a payload: this caps
-/// what `append` reads from stdin before refusing, so a caller that pipes the
-/// wrong file in gets a fast, clear refusal instead of an unbounded read.
+/// Caps what `append` reads from stdin, so a caller that pipes the wrong file
+/// in gets a fast refusal instead of an unbounded read.
 const max_record_bytes: usize = 1 << 20;
 
 pub fn dispatchJournal(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -72,9 +53,9 @@ fn journalAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     };
     defer alloc.free(raw);
 
-    // A trailing newline is how a record normally arrives (`echo`, `printf
-    // '...\n'`); anything left after stripping it is the record, and an
-    // embedded newline there means stdin was never one line to begin with.
+    // A trailing newline is how a record normally arrives; anything left after
+    // stripping it is the record, and an embedded newline there means stdin was
+    // never one line to begin with.
     const trimmed = std.mem.trimEnd(u8, raw, "\r\n");
     if (trimmed.len == 0) {
         try printErr(io, "journal append: stdin is empty\n");
@@ -111,8 +92,7 @@ fn journalRead(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         return 1;
     };
     defer if (bytes) |b| alloc.free(b);
-    // Missing file = no facts yet (`journal.readAll`'s own rule): empty output,
-    // exit 0 — not an error a driver has to special-case.
+    // Missing file = no facts yet: empty output, exit 0.
     if (bytes) |b| try printRaw(io, b);
     return 0;
 }

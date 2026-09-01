@@ -76,11 +76,11 @@ pub const Seal = struct {
     }
 };
 
-/// How thoroughly a frozen version directory is checked (DESIGN §7.4). Two
-/// questions, not one: "is this directory a complete extension version?" and
-/// "are these still the bytes that were sealed?". They used to be answered
-/// together, which made every read-only listing pay a full-tree sha256 of
-/// megabytes of built binary.
+/// How thoroughly a frozen version directory is checked. Two questions, not
+/// one: "is this directory a complete extension version?" and "are these
+/// still the bytes that were sealed?" — answering them together would make
+/// every read-only listing pay a full-tree sha256 of megabytes of built
+/// binary.
 pub const Level = enum {
     /// Structure only: the directory is there, its `seal.json` parses, its
     /// manifest parses, validates and names this id, and every path the manifest
@@ -245,14 +245,9 @@ pub fn packageDigestHex(alloc: std.mem.Allocator, snapshot: PackageSnapshot) ![]
     return digestHex(alloc, canonical);
 }
 
-/// Digest a file on disk, hashed as it is read rather than after it is held.
-///
-/// This used to read the whole file under `max_snapshot_file_bytes`, which put
-/// the COMPILER'S OUTPUT under a cap meant for one source file inside a package
-/// snapshot — a ceiling nobody chose for a binary, and one that announced
-/// itself as `VersionEntryNotFound`: what a person read was "that version has no
-/// entry", what had happened was "the entry is 18 MB". Nothing on this path
-/// wants the bytes, only their digest, so there is no size left to cap.
+/// Digest a file on disk, hashed as it is read rather than after it is held —
+/// nothing on this path wants the bytes, only their digest, so there is no
+/// size cap on a built binary.
 ///
 /// A file that will not open stays `VersionEntryNotFound` — that IS the entry
 /// missing, and `store.isExtensionFault` reads it as a broken extension. A read
@@ -361,10 +356,8 @@ pub fn openVersion(
     level: Level,
 ) !manifest.Manifest {
     // Integrity checks map I/O failures to descriptive `Version*` errors, but a
-    // cancellation is host execution control, not corruption — it must propagate
-    // as `error.Canceled` so callers on cancellation-sensitive paths (note sync,
-    // manifest reads) can record a canceled step instead of a spurious integrity
-    // failure. `cancelable` re-raises it and folds everything else into `fallback`.
+    // cancellation is host execution control, not corruption — `cancelable`
+    // re-raises it as `error.Canceled` and folds everything else into `fallback`.
     root.access(io, version_rel, .{}) catch |err| return cancelable(err, error.VersionNotFound);
 
     const seal_sub = try std.fs.path.join(alloc, &.{ version_rel, seal_file });
@@ -412,11 +405,11 @@ pub fn openVersion(
             // A compiled entry is never per-OS (`manifest.validate` refuses the
             // object form for `bin/` paths), so the host always has one.
             //
-            // The SUFFIX comes off the seal, not off this machine: a version
-            // cross-built for another target (`ext build --target`, DESIGN §7.4)
-            // is validated here — on the host that produced it, and again on the
-            // machine it was pushed to — and asking `builtin` would send both of
-            // them looking for a file named for the wrong platform.
+            // The suffix comes off the seal, not off this machine: a version
+            // cross-built for another target is validated here — on the host
+            // that produced it, and again on the machine it was pushed to —
+            // and asking `builtin` would send both of them looking for a file
+            // named for the wrong platform.
             const compiled_entry = rt.entry.forHost() orelse return error.VersionEntryNotFound;
             const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ compiled_entry, target_mod.exeSuffixFor(seal.target) });
             defer alloc.free(entry);
@@ -564,15 +557,9 @@ fn collectTree(
 }
 
 /// Free a snapshot that was never finished: the strings each entry owns AND the
-/// list holding them.
-///
-/// On the success path `finishSnapshot` hands the buffer on with
-/// `toOwnedSlice`, so nothing here runs. Every path that REFUSES arrives here
-/// instead — a declared file that will not read, a duplicate path — and freeing
-/// only the entries left the list itself behind. That leak was reachable only
-/// by a build that had already decided to refuse, so what it corrupted was the
-/// refusal: the allocator's report printed its stack traces underneath the
-/// sentence the author is supposed to read.
+/// list holding them. On the success path `finishSnapshot` hands the buffer on
+/// with `toOwnedSlice`, so nothing here runs; every path that refuses (a
+/// declared file that will not read, a duplicate path) arrives here instead.
 fn deinitPartialSnapshot(alloc: std.mem.Allocator, files: *std.ArrayList(SnapshotFile)) void {
     for (files.items) |file| {
         alloc.free(file.rel);

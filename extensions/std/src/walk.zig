@@ -1,31 +1,23 @@
 //! The directory walk under `grep` and `glob`: one thread, gitignore-aware,
 //! a fixed prune table, a wall-clock deadline, and a callback per regular file.
+//! Ported from tcode search.rs; here it is a recursive `std.Io.Dir` iteration,
+//! entries in byte order — so a partial result under the deadline is
+//! deterministic — with `vendor/ignore.zig` for the gitignore rules.
 //!
-//! Ported from tcode search.rs (`walk_builder`, `PRUNE_DIRS`, `PruneReport`,
-//! `path_arg_allows_pruned_descend`, `SEARCH_DEADLINE`), where the walk itself
-//! was the `ignore` crate's parallel walker with `.hidden(false)`. Here it is a
-//! recursive `std.Io.Dir` iteration, entries in byte order — so a partial
-//! result under the deadline is deterministic — with `vendor/ignore.zig` for
-//! the gitignore rules and `vendor/globpat.zig` beneath that.
-//!
-//! What is skipped, in the order it is decided for each entry:
-//!   1. the deadline: past it, the walk stops where it is and the report says so;
-//!   2. an entry excluded by `.gitignore` / `.rgignore` / `.ignore` (its own
-//!      directory's files and every ancestor's, outermost first, last match wins;
-//!      an ignored directory is never entered, so nothing below it can come back);
-//!   3. a directory named in `prune_dirs` (VCS metadata, build outputs, caches),
-//!      unless the caller's `path` argument pointed inside one — counted for
-//!      the "[N pruned directories were skipped …]" note;
-//!   4. a symlink: a directory symlink is skipped and counted unless
-//!      `follow_symlinks` (then entered once — a loop guard remembers the real
-//!      paths it has entered through links); a file symlink is followed only
-//!      under `follow_symlinks`; a dangling one is skipped silently.
-//! Dotfiles and dot-directories are searched (`.github/`, `.config/`): only the
-//! prune table and ignore files decide.
+//! What is skipped, in the order it is decided for each entry: (1) the
+//! deadline — past it, the walk stops where it is and the report says so; (2)
+//! an entry excluded by `.gitignore` / `.rgignore` / `.ignore` (outermost
+//! ancestor first, last match wins; an ignored directory is never entered);
+//! (3) a directory named in `prune_dirs`, unless the caller's `path` argument
+//! pointed inside one; (4) a symlink — a directory symlink is skipped and
+//! counted unless `follow_symlinks` (then entered once, guarded against
+//! cycles by the real paths already entered), a file symlink followed only
+//! under `follow_symlinks`. Dotfiles and dot-directories are searched
+//! (`.github/`, `.config/`): only the prune table and ignore files decide.
 //!
 //! The tail of the file holds what both search tools need to SHOW a walked
-//! path (`relDisplay` / `display`, tcode's `rel_display`) and to hand any text
-//! to the model as valid UTF-8 (`lossyUtf8` / `sanitize`).
+//! path (`relDisplay` / `display`) and to hand any text to the model as
+//! valid UTF-8 (`lossyUtf8` / `sanitize`).
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
@@ -387,9 +379,7 @@ pub fn display(alloc: std.mem.Allocator, base_display: []const u8, rel: []const 
 /// ancestors) to the nearest one that IS an existing directory. A filesystem
 /// root always exists, so this terminates. Used when a search `path` names
 /// something absent: the answer can then point at real ground — "here is
-/// what actually exists" — instead of just saying no. (docs/goals/std.md,
-/// the "existence answers" note: no tcode equivalent, since tcode always
-/// searched a workspace root that existed by construction.)
+/// what actually exists" — instead of just saying no.
 pub fn nearestExistingAncestor(io: std.Io, path: []const u8) []const u8 {
     var candidate = path;
     while (true) {

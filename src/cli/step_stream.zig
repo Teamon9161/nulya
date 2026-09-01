@@ -1,9 +1,8 @@
-//! The `session step --stream` line protocol (tui.md §2.2): one JSON object per
-//! line on stdout, written AS the step runs instead of once it is over.
+//! The `session step --stream` line protocol: one JSON object per line on
+//! stdout, written AS the step runs instead of once it is over.
 //!
-//! Its own file because it is a wire format, not a verb: `session.zig` decides
-//! whether to stream, this decides what a streamed line looks like — and a TUI
-//! parses every byte of it, so the format is worth reading in one piece.
+//! A wire format, not a verb: `session.zig` decides whether to stream, this
+//! decides what a streamed line looks like.
 
 const std = @import("std");
 const ledger = @import("../ledger.zig");
@@ -16,23 +15,19 @@ const printErr = @import("common.zig").printErr;
 /// stdout carries nothing else — diagnostics become
 /// `{"stream":"run","event":"error"}`.
 ///
-/// This is the whole protocol in one place: `loop.StepObserver` hands it facts,
-/// it turns them into lines. It never touches the session, so it stays pure
-/// observation (physics: model-visible state changes only by `append`).
+/// `loop.StepObserver` hands it facts, it turns them into lines. It never
+/// touches the session: pure observation.
 pub const StepStream = struct {
     alloc: std.mem.Allocator,
     out: *std.Io.Writer,
     /// Ledger index of the first event not yet flushed as a line.
     printed: usize = 0,
-    /// A read-only handle on the session's ledger, so events can be reported the
-    /// moment they EXIST rather than only when the step is over.
-    ///
-    /// The one event that exists before the model is asked anything is a
-    /// `user_text` the step boundary drained from the inbox (DESIGN §3.4), and a
-    /// front end that shows a turn optimistically has no way to learn it landed
-    /// until the line arrives: for a whole step it goes on saying "queued" about
-    /// a message the model is visibly already answering. Absent, this behaves
-    /// exactly as before — every line at `stepEnd`.
+    /// A read-only handle on the session's ledger, so events can be reported
+    /// the moment they EXIST rather than only when the step is over. The one
+    /// event that exists before the model is asked anything is a `user_text`
+    /// the step boundary drained from the inbox, and a front end showing a turn
+    /// optimistically needs it to learn the message landed. Absent, every line
+    /// is emitted at `stepEnd`.
     ledger_view: ?*const ledger.Ledger = null,
     /// How the most recent step ended, for the `run done` line's `stopped`.
     last_status: loop.StepStatus = .completed,
@@ -58,13 +53,12 @@ pub const StepStream = struct {
 
     fn onModelEvent(ptr: *anyopaque, event: provider.StreamEvent) void {
         const self: *StepStream = @ptrCast(@alignCast(ptr));
-        // A complete reasoning item is opaque provider bytes kept for replay, not
-        // something to render; `thinking_delta` is the display channel (§2.2).
+        // A complete reasoning item is opaque provider bytes kept for replay,
+        // not something to render; `thinking_delta` is the display channel.
         if (event == .reasoning_item) return;
         // The turn is under way, so the step boundary is behind us and whatever
-        // it drained is already a ledger fact. Report it before the first delta:
-        // the ORDER a reader sees is then "the message landed, and here is the
-        // answer to it", which is the order it actually happened in.
+        // it drained is already a ledger fact. Emit it before the first delta,
+        // so a reader sees "the message landed" before the answer to it.
         if (event == .started) {
             if (self.ledger_view) |l| self.flushEvents(l.view()) catch |e| self.note(e);
         }
@@ -269,7 +263,7 @@ pub const StepStream = struct {
     }
 };
 
-/// `session step --gate`: the approval half of the protocol (DESIGN §14).
+/// `session step --gate`: the approval half of the protocol.
 ///
 /// One request line out on the same stdout the stream uses, then one verdict
 /// line in on stdin, per tool call, while the loop is between calls. It is a
@@ -369,7 +363,7 @@ pub const StepGate = struct {
     }
 };
 
-test "session step --stream emits the tui.md §2.2 line protocol in order" {
+test "session step --stream emits the line protocol in order" {
     const environment = @import("../environment.zig");
     const launch = @import("../launch.zig");
     const session = @import("../session.zig");
@@ -530,7 +524,7 @@ test "a reply cut by max_tokens is recorded replayable, closed with a marker, re
     const written = out.written();
     try std.testing.expect(std.mem.indexOf(u8, written, "\"calls\":[{\"id\":\"c1\",\"tool\":\"shell\",\"args\":\"{\\\"command\\\":\\\"echo hel\"}]") != null);
     // …and the projection — what a provider would be sent — carries a complete
-    // JSON value in their place (DESIGN §4).
+    // JSON value in their place.
     const prompt = @import("../prompt.zig");
     const ir = try prompt.project(alloc, sess.l.view());
     defer ir.deinit(alloc);

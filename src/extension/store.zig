@@ -1,45 +1,17 @@
-//! Extension version store — immutable versions + one atomic `activate`
-//! (DESIGN §7.4).
+//! Extension version store — immutable versions + one atomic `activate`.
 //!
-//! Nulya never overwrites a running tool's binary. Every build produces an
-//! IMMUTABLE version whose id is `hash(package_snapshot + compiler + target)`;
-//! versions accumulate side by side and a single `current` pointer selects the
-//! active one. Switching is an atomic rename, so going back is just `activate`
-//! pointed at an older version — B breaking never disturbs A.
+//! Every build produces an immutable version, id
+//! `hash(package_snapshot + compiler + target)`; versions accumulate side by
+//! side and a `current` pointer selects the active one via atomic rename, so
+//! going back is just `activate` pointed at an older version.
 //!
-//! Layout under the store root (`.nulya/extensions`):
-//!
-//!   <id>/
-//!     versions/
-//!       v-<hash>/
-//!         extension.json
-//!         package/src/...       # frozen runtime source, when runtime exists
-//!         package/skills/...    # frozen declared skill directories
-//!         bin/<entry>           # only when the manifest declares runtime
-//!     current              # text file holding "v-<hash> apply=<auto|manual>"
-//!     .lock                # writer lease: held while build / activate / deactivate mutate <id>/
-//!
-//! `current` is a plain file, not a symlink: symlinks need privilege on Windows
-//! and buy nothing here.
-//!
-//! It carries a second column because `activate` is the one moment a version's
-//! manifest is verified against its seal, and "does this package join every
-//! session" (`apply`, DESIGN §5.1) is a question every fresh session asks about
-//! every activated id. Answering it by reading the frozen `extension.json` at
-//! session time meant reading it WITHOUT integrity — the read has to be cheap
-//! enough to do for a whole store — and an unverified read is one that
-//! corruption can answer: an edit turning `auto` into `manual` silently took a
-//! standing system prompt out of every session with nothing anywhere failing.
-//! So the answer is recorded when it is proven, in the same atomic write that
-//! moves the pointer, and discovery believes only the record (`Active`).
-//!
-//! A root — the user store above all — is shared by every workspace on the
-//! machine, so two processes can build or activate the same id at once. Every
-//! mutation of `<id>/` (a build writing `versions/<v>`, an activate rewriting
-//! `current` through `.current.tmp`, a deactivate) runs under `<id>/.lock`, an
-//! exclusive advisory lease taken blocking for the mutation's duration — the
-//! same primitive as the session writer's `<id>.lock`. Readers take nothing:
-//! `current` flips atomically and a version directory is validated by its seal.
+//! Layout under a store root (`.nulya/extensions`):
+//!   <id>/versions/v-<hash>/{extension.json, package/{src,skills}/..., bin/<entry>}
+//!   <id>/current  — plain text file: "v-<hash> apply=<auto|manual>". `apply`
+//!                   is written by `activate` from the manifest it just
+//!                   verified against the seal, not re-read from
+//!                   `extension.json` later — an edit cannot change it.
+//!   <id>/.lock    — writer lease held by build / activate / deactivate.
 
 const std = @import("std");
 const manifest = @import("manifest.zig");
@@ -53,8 +25,8 @@ pub const version_prefix = integrity.version_prefix;
 /// questions, and a default would silently answer one with the other.
 pub const Level = integrity.Level;
 /// The workspace-level store root, relative to the workspace — the first root
-/// of every search (`Roots`, DESIGN §7.2) and the default for a session that
-/// names no others.
+/// of every search (`Roots`) and the default for a session that names no
+/// others.
 pub const workspace_root_rel = ".nulya/extensions";
 const current_file = "current";
 const lock_file = ".lock";
@@ -71,7 +43,7 @@ pub const Active = struct {
     version: []u8,
     /// The version above declared `apply: "auto"` when `activate` verified and
     /// recorded it: this package is a member of every fresh session in this
-    /// workspace (DESIGN §5.1). False for a pointer written without the record.
+    /// workspace. False for a pointer written without the record.
     standing: bool,
 };
 
@@ -85,7 +57,7 @@ pub const Store = struct {
     }
 
     /// Inputs that make a build reproducible; identical inputs -> identical
-    /// version id (DESIGN §7.4, §10).
+    /// version id.
     pub const VersionInputs = struct {
         snapshot: []const u8,
         compiler: []const u8,
@@ -141,10 +113,9 @@ pub const Store = struct {
     /// Caller owns the result.
     ///
     /// `error.EntryUnsupportedOnHost` when the frozen manifest declares entries
-    /// per OS and names none for this one (DESIGN §7.1). A real state of a
-    /// perfectly valid version — the package simply does not run here — so it is
-    /// its own error rather than an integrity fault; `Roots.Resolved.entryPathAbs`
-    /// is where it gets named.
+    /// per OS and names none for this one — a real state of a perfectly valid
+    /// version (the package simply does not run here), so its own error rather
+    /// than an integrity fault.
     pub fn versionRuntimeEntryPath(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, rt: manifest.Runtime) ![]u8 {
         const entry = rt.entry.forHost() orelse return error.EntryUnsupportedOnHost;
         if (manifest.isScript(rt)) return self.versionScriptEntryPath(alloc, id, version, entry);
@@ -158,10 +129,9 @@ pub const Store = struct {
 
     /// Take `<id>/.lock`, the writer lease every mutation of `<id>/` runs under
     /// (build, activate, deactivate). Blocking, and held for the whole
-    /// mutation — for a compiled build that is the entire `zig build-exe`, which
-    /// is deliberate: a second writer wants the result, not a refusal, and waiting
-    /// is simpler and more correct than staging directories. Creates `<id>/` when
-    /// missing. Closing the returned handle releases the lease.
+    /// mutation — for a compiled build that is the entire `zig build-exe`,
+    /// since a second writer wants the result, not a refusal. Creates `<id>/`
+    /// when missing. Closing the returned handle releases the lease.
     pub fn lease(self: Store, alloc: std.mem.Allocator, id: []const u8) !std.Io.File {
         if (!manifest.isValidId(id)) return error.InvalidId;
         try self.root.createDirPath(self.io, id);
@@ -177,18 +147,13 @@ pub const Store = struct {
     /// intact. One file, one rename: the two can never disagree, so there is no
     /// third state for a reader to interpret.
     pub fn activate(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !void {
-        // Lease first, then validate: activate is a writer, and writers of one id
-        // serialize. Validating outside the lease would read a version another
-        // process is still building and report it as missing/unsealed — harmless
-        // to the store, but a refusal where waiting for the build would have
-        // succeeded.
+        // Lease first, then validate: validating outside the lease could read
+        // a version another process is still building and report a spurious
+        // refusal where waiting for the build would have succeeded.
         var held = try self.lease(alloc, id);
         defer held.close(self.io);
-        // `.sealed`: activation is the rare, explicit decision to make these
-        // bytes run in every future session — the one place worth re-digesting
-        // the whole version even though a listing no longer does. It is also
-        // what makes the `apply` record below TRUSTWORTHY: the manifest it is
-        // read from is, at this instant, proven to be the sealed one.
+        // `.sealed`: this is what makes the `apply` record below trustworthy —
+        // the manifest it is read from is, at this instant, proven sealed.
         var m = try self.readManifest(alloc, id, version, .sealed);
         defer m.deinit();
 
@@ -223,12 +188,8 @@ pub const Store = struct {
     /// wants. Nothing here picks for the caller.
     pub fn readManifest(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, level: Level) !manifest.Manifest {
         // Validate directly rather than through `versionExists`: that boolean
-        // convenience collapses EVERY error to `false`, including `error.Canceled`,
-        // which would then surface as a spurious `VersionIntegrityInvalid`. On a
-        // cancellation-sensitive path the real error must propagate unchanged.
-        //
-        // Validation already reads, parses and validates this manifest, so it
-        // hands it back rather than leaving a second read to happen here.
+        // convenience collapses every error to `false`, including
+        // `error.Canceled`, which must propagate unchanged instead.
         try validateIdentity(id, version);
         const version_rel = try self.versionDir(alloc, id, version);
         defer alloc.free(version_rel);
@@ -236,19 +197,9 @@ pub const Store = struct {
     }
 
     /// Everything `<id>/current` says: which version this root activates, and
-    /// whether an `activate` recorded that version as declaring `apply: "auto"`
-    /// (DESIGN §5.1). Null when this root has no `current` for the id. Caller
-    /// owns `version`.
-    ///
-    /// `standing` is a RECORD, not a reading of the package: it is written by
-    /// `activate`, from the manifest that activation had just verified against
-    /// the seal, in the same atomic write as the pointer. Session composition
-    /// believes it and nothing else, which is what makes the frozen
-    /// `extension.json` unable to change a package's reach by being edited —
-    /// in either direction. A `manual` package doctored to say `auto` was never
-    /// recorded and is never composed; a standing package doctored at all fails
-    /// its `.sealed` resolve and fails the session LOUDLY, instead of quietly
-    /// reading as `manual` and taking its system prompt out of every session.
+    /// whether `activate` recorded that version as declaring `apply: "auto"`
+    /// (see the module doc). Null when this root has no `current` for the id.
+    /// Caller owns `version`.
     ///
     /// A `current` with no `apply=` column at all — written before this column
     /// existed — reads as `false`: an unknown is not a claim, and the repair is
@@ -300,26 +251,21 @@ pub const Store = struct {
 
     /// The built version of `id` in this root whose seal records THESE package
     /// bytes built for `target` — and, when the caller can name one, by that
-    /// compiler.
-    ///
-    /// One matcher, two questions. A build asks it about its own machine ("have
-    /// I already produced this?", `build_ext`); a session whose tools run
-    /// elsewhere asks it about another one ("which of my versions is the one
-    /// that machine can run?", `Roots.resolveForTarget`). Both are the same key
-    /// — the seal's triple — and two implementations of it is how the two would
-    /// come to disagree about what "the same package" means.
+    /// compiler. Used both by a build asking about its own machine ("have I
+    /// already produced this?") and by a session whose tools run elsewhere
+    /// ("which of my versions can that machine run?") — same key, one matcher.
     ///
     /// Without a compiler identity several builds of one source can match, one
-    /// per compiler that ever produced it, so the search runs over SORTED
-    /// version ids: which copy answers must not depend on the order a directory
-    /// listing happens to arrive in. A half-written or otherwise broken version
-    /// directory is skipped rather than reported; host faults propagate. Null
-    /// when this root holds no such version. Caller owns the result.
+    /// per compiler that ever produced it, so the search runs over sorted
+    /// version ids: which copy answers must not depend on directory listing
+    /// order. A half-written or otherwise broken version directory is skipped
+    /// rather than reported; host faults propagate. Null when this root holds
+    /// no such version. Caller owns the result.
     ///
     /// The check is `.structural`, not `.sealed`: the caller that is about to
-    /// RUN or FREEZE these bytes validates them itself (composition, `ext run`,
-    /// `exec.Resolver`, `adoptVersionDir`), and re-digesting every built binary
-    /// here would make `ext sync --dry-run` hash the whole store on every run.
+    /// run or freeze these bytes validates them itself, and re-digesting every
+    /// built binary here would make `ext sync --dry-run` hash the whole store
+    /// on every run.
     pub fn findSealed(
         self: Store,
         alloc: std.mem.Allocator,
@@ -397,33 +343,23 @@ pub const Store = struct {
 
 /// Store/manifest faults that mean "this directory is not a usable extension".
 /// What a caller does with one is the caller's rule: a read-only listing skips
-/// it, `composition.resolveApplyAutoExtensions` fails the session on it, and a
-/// version lookup (`Roots.resolveVersion`) skips that root and keeps searching.
-/// Anything else — host cancellation, `OutOfMemory`, real I/O failures — is a
-/// host fault and must propagate: an OOM must never masquerade as a broken
-/// extension or as `PinNamesUnknownExtension`.
+/// it, session composition fails on it, and a version lookup skips that root
+/// and keeps searching. Anything else — host cancellation, `OutOfMemory`, real
+/// I/O failures — is a host fault and must propagate.
 ///
-/// Derived from the error sets `manifest.zig` declares (plus the handful of
-/// version/store-integrity errors below) by REFLECTION, the same construction
-/// `cli/ext.zig`'s `isManifestFault` uses — so a new `manifest.ValidateError`
-/// member is covered here automatically. A hand-written `switch` was the
-/// previous shape, and it had already drifted: `InvalidTimeout`,
-/// `InvalidSurface`, and `DuplicateSkillPath` had each
-/// been added to `manifest.zig` without a matching case here, so a manifest
-/// that failed validation for one of those reasons was propagated as a host
-/// fault instead of being treated as a broken extension.
+/// Derived from the error sets `manifest.zig` declares (plus the version/
+/// store-integrity errors below) by reflection rather than a hand-written
+/// `switch`, so a new `manifest.ValidateError` member is covered here
+/// automatically instead of silently propagating as a host fault until
+/// someone notices and adds a case.
 pub fn isExtensionFault(err: anyerror) bool {
-    // BOTH manifest sets, not just `ValidateError`: `ParseError` carries
+    // Both manifest sets, not just `ValidateError`: `ParseError` carries
     // manifest-shape refusals of its own (a mistyped field is as much a broken
-    // draft as one that fails a rule), and hand-copying its members here
-    // would be the drift this function was rewritten to end. Its one
-    // non-manifest rider, `OutOfMemory` (via `Allocator.Error`), is skipped
-    // below — the doc comment's host-fault rule.
+    // draft as one that fails a rule). `OutOfMemory` (via `Allocator.Error`)
+    // is skipped below — the doc comment's host-fault rule.
     const Faults = manifest.ParseError || manifest.ValidateError ||
         error{
-            // Invalid extension identity.
             InvalidVersion,
-            // Bad `current` pointer or a frozen version failing integrity.
             VersionNotFound,
             VersionSealInvalid,
             VersionManifestIdMismatch,
@@ -566,7 +502,7 @@ test "current records the apply the activated version declared, and only activat
     }
 
     // Editing the frozen manifest cannot change the record — that is the whole
-    // point of recording it (DESIGN §5.1). What such an edit DOES do is break
+    // point of recording it. What such an edit DOES do is break
     // the seal, so the version stops resolving, loudly, for whoever composes it.
     const manifest_sub = try store.versionManifestPath(alloc, "mode", standing);
     defer alloc.free(manifest_sub);
@@ -619,7 +555,7 @@ test "activate moves the current pointer atomically, forwards and back" {
     }
 
     // Going back is the same verb pointed at the older version: there is nothing
-    // a separate `rollback` could have done that this does not (DESIGN §7.4).
+    // a separate `rollback` could have done that this does not.
     try store.activate(alloc, id, first);
     {
         const active = (try store.activeVersion(alloc, id)).?;

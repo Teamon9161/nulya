@@ -1,7 +1,7 @@
-//! `nulya ext …` (DESIGN §7, §14): the extension lifecycle as a CLI — scaffold,
-//! build into an immutable version, point `current` at one, run one, and read
-//! what the store roots hold. The model reaches all of it through `shell`; none
-//! of it is a model-facing tool.
+//! `nulya ext …` — the extension lifecycle as a CLI: scaffold, build into an
+//! immutable version, point `current` at one, run one, and read what the store
+//! roots hold. The model reaches all of it through `shell`; none of it is a
+//! model-facing tool.
 
 const std = @import("std");
 const environment = @import("../environment.zig");
@@ -13,8 +13,7 @@ const manifest = @import("../extension/manifest.zig");
 const target_mod = @import("../extension/target.zig");
 const templates = @import("../extension/build/templates.zig");
 const notes = @import("../extension/notes.zig");
-// `tool` is a common local name below (a tool NAME), so the module keeps a
-// distinct one rather than forcing every call site to rename.
+// `tool` is a common local name below (a tool NAME), hence the distinct import.
 const tool_mod = @import("../tool.zig");
 const tool_stats = @import("../journals/tool_stats.zig");
 const trust = @import("../journals/trust.zig");
@@ -68,12 +67,9 @@ pub fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
 fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const flags = try takeUserFlag(alloc, args);
     defer alloc.free(flags.rest);
-    // A script is the default (PLAN §0.1 #3): the manufacturing loop happens on
-    // the machine the AI is on, and friction there decides how many attempts get
-    // made. `--zig` is for when a compiled runtime has been MEASURED to be
-    // needed. `--script` says what is now the default, so it is accepted and does
-    // nothing — the drafts and docs already written with it keep working — and it
-    // is no longer listed.
+    // A script is the default; `--zig` is for when a compiled runtime has been
+    // measured to be needed. `--script` names the default, so it is accepted
+    // and does nothing.
     var want_zig = false;
     var positional: std.ArrayList([]const u8) = .empty;
     defer positional.deinit(alloc);
@@ -116,7 +112,7 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         // Both platforms at once, in ONE version: the manifest names an entry
         // and an interpreter per OS, and the snapshot carries both files, so
         // `v-…` is the same package everywhere and only which script runs
-        // differs (DESIGN §7.1).
+        // differs.
         const manifest_bytes = try templates.scriptManifestJson(alloc, id, tool);
         defer alloc.free(manifest_bytes);
         const sh = try templates.scriptSh(alloc, id);
@@ -145,9 +141,8 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     const flags = try takeUserFlag(alloc, args);
     defer alloc.free(flags.rest);
 
-    // `--target` is parsed here, before anything is opened: an unrecognized
-    // spelling has to name the vocabulary it failed against, and the two words
-    // are a closed set precisely so this refusal can list them.
+    // Parsed before anything is opened, so an unrecognized spelling can name
+    // the closed set of words it failed against.
     var cross: ?target_mod.Target = null;
     if (flagValue(flags.rest, "--target")) |spec| {
         cross = target_mod.parse(spec) catch {
@@ -184,8 +179,8 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     defer alloc.free(dest_spec);
 
     // Was the workspace store empty BEFORE this build? If so, and if this build
-    // fills it, the store was born here — see `recordBirthTrust` below. Asked now
-    // because after the build the answer is always "occupied".
+    // fills it, the store was born here (`recordBirthTrust`). Asked now because
+    // after the build the answer is always "occupied".
     const workspace_store_was_empty = blk: {
         const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse break :blk true;
         alloc.free(occupied);
@@ -195,9 +190,9 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     var dest_root = try store.openOrCreateRoot(io, cwd_path, dest_spec);
     defer dest_root.close(io);
 
-    // The other roots this machine searches, in that order: a version is content
-    // addressed, so one of them already holding these exact bytes means this
-    // build is a copy rather than a compile (DESIGN §7.4).
+    // The other roots this machine searches, in that order: a version is
+    // content addressed, so one of them already holding these exact bytes makes
+    // this build a copy rather than a compile.
     var donors = try donorRoots(alloc, &search, dest_spec);
     defer donors.deinit(alloc);
 
@@ -214,15 +209,13 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         .target = cross,
     }) catch |err| switch (err) {
         // Only a compiled package has a binary, so only a compiled package has
-        // a target. Say what the draft is rather than what the flag is: the
-        // author asked for something their package cannot have.
+        // a target. Say what the draft is rather than what the flag is.
         error.TargetNotApplicable => {
             try printErrFmt(alloc, io, "ext build --target: '{s}' declares no compiled runtime, and a package without one is the same version on every machine\n", .{ext_dir});
             return 1;
         },
         // Either nothing answered, or what answered could not say its own
-        // version — and that difference is the whole repair hint, so it is not
-        // flattened into one sentence.
+        // version — that difference is the whole repair hint.
         error.ZigVersionUnreadable => {
             const hint = try cli_toolchain.noZigHint(alloc);
             defer alloc.free(hint);
@@ -234,28 +227,23 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
             return 1;
         },
         // A path that holds no `extension.json` is a mistyped positional, not a
-        // broken host: `ext build` takes a draft directory, and pointing at the
-        // wrong one is the commonest way to get here.
+        // broken host.
         error.ManifestUnreadable => {
             try printErrFmt(alloc, io, "ext build: no readable extension.json in '{s}'; `nulya ext init <id>` scaffolds one\n", .{ext_dir});
             return 1;
         },
         else => {
-            // Everything the manifest itself can refuse is a fault in the draft
-            // being built — the author's own file, edited seconds ago. A host
-            // fault (allocation, a failed write) still propagates.
+            // Everything the manifest itself can refuse is a fault in the
+            // draft being built. A host fault (allocation, a failed write)
+            // still propagates.
             if (isManifestFault(err)) {
                 try printErrFmt(alloc, io, "ext build: {s}/extension.json is not a valid manifest ({s}); `nulya ext api` prints the wire contract and `nulya ext init` a working manifest\n", .{ ext_dir, @errorName(err) });
                 return 1;
             }
             // The manifest parses but names a file this build cannot freeze: a
-            // system prompt that is missing, too large or not UTF-8, a skill
-            // whose frontmatter is wrong, a declared entry or front-end module
-            // that was never written. This is the moment the AUTHOR can learn
-            // it — the alternative is a `session step` that gets a 400 out of
-            // the provider on every step of somebody else's session — so it is
-            // a sentence, not a stack trace. `ext sync` has always answered
-            // these; only this verb was missing them.
+            // missing / oversized / non-UTF-8 system prompt, a skill with bad
+            // frontmatter, a declared entry or front-end module never written.
+            // Build is the moment the AUTHOR can learn it.
             if (isDraftFault(err)) {
                 try printErrFmt(alloc, io, "ext build: {s} declares a file this build cannot freeze ({s}); `nulya ext api manifest` says what each contribution must be\n", .{ ext_dir, @errorName(err) });
                 return 1;
@@ -288,9 +276,8 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
 /// Whether `err` is one of the manifest's own structural or rule errors — a
 /// fault in the `extension.json` being built, never in the host. Derived from
 /// the error sets `manifest.zig` declares, so a new rule there needs no edit
-/// here; `OutOfMemory` is deliberately left out of the union, because reporting
-/// a resource fault as a bad manifest would send the author editing a file that
-/// is fine.
+/// here. `OutOfMemory` is deliberately left out: reporting a resource fault as
+/// a bad manifest would send the author editing a file that is fine.
 fn isManifestFault(err: anyerror) bool {
     const Faults = manifest.ValidateError || error{ InvalidJson, NotAnObject, MissingField, WrongType };
     inline for (@typeInfo(Faults).error_set.?) |candidate| {
@@ -299,21 +286,19 @@ fn isManifestFault(err: anyerror) bool {
     return false;
 }
 
-/// Trust a workspace store this build just BROUGHT INTO EXISTENCE (DESIGN §9).
+/// Trust a workspace store this build just BROUGHT INTO EXISTENCE.
 ///
 /// The gate on `.nulya/extensions` distinguishes "born on this machine" from
-/// "arrived with a checkout", and the only thing that can tell them apart is
-/// where the store came from — so the moment a local `ext build` puts the first
-/// version into an empty (or absent) workspace store, that store is by
-/// construction local, and saying so here is what keeps the self-evolution loop
-/// free of prompts: an agent building and activating its own capability is the
-/// harness working, not an event to confirm. A store that ALREADY held something
-/// is deliberately not trusted by this path — that is exactly the case a person
-/// has to look at, through `nulya ext trust`.
+/// "arrived with a checkout", and the only thing that tells them apart is where
+/// the store came from: the moment a local `ext build` puts the first version
+/// into an empty (or absent) workspace store, that store is by construction
+/// local. A store that ALREADY held something is deliberately not trusted by
+/// this path — that is the case a person has to look at, through
+/// `nulya ext trust`.
 ///
 /// Best-effort in one direction only: a machine with no home has nowhere to
-/// record trust, and failing the build the model just did would be worse than
-/// leaving the gate to explain itself at `session new`. Real I/O faults propagate.
+/// record trust, and the gate explains itself at `session new` anyway. Real I/O
+/// faults propagate.
 fn recordBirthTrust(alloc: std.mem.Allocator, io: std.Io, cwd_path: []const u8) !void {
     const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse return;
     defer alloc.free(occupied);
@@ -326,10 +311,9 @@ fn recordBirthTrust(alloc: std.mem.Allocator, io: std.Io, cwd_path: []const u8) 
 }
 
 /// Which store root a build lands in: `--user` forces the user store; otherwise
-/// a draft that already lives inside one of the search roots builds into THAT
-/// root (so `.nulya/extensions/<id>` keeps building exactly where it always
-/// did), and a draft anywhere else — one kept in git, say — builds into the
-/// workspace store. Caller owns the result; null means `--user` with no home.
+/// a draft already inside one of the search roots builds into THAT root, and a
+/// draft anywhere else (one kept in git, say) builds into the workspace store.
+/// Caller owns the result; null means `--user` with no home.
 fn buildDestRoot(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -393,12 +377,10 @@ fn isInside(dir: []const u8, path: []const u8) bool {
     return path[dir.len] == std.fs.path.sep or path[dir.len] == '/';
 }
 
-/// Errors that are a fault in the DRAFT rather than in this machine: everything
-/// `ext build` answers with one line about a source tree — the manifest's own
-/// rules plus what freezing the package can find wrong with the files it names.
-/// A host fault (out of memory, a failed read of a directory that is there) is
-/// deliberately absent, so `ext sync` keeps going past a bad draft but not past
-/// a broken machine.
+/// Errors that are a fault in the DRAFT rather than in this machine: the
+/// manifest's own rules plus what freezing the package can find wrong with the
+/// files it names. A host fault is deliberately absent, so `ext sync` keeps
+/// going past a bad draft but not past a broken machine.
 fn isDraftFault(err: anyerror) bool {
     if (isManifestFault(err)) return true;
     return switch (err) {
@@ -425,21 +407,18 @@ fn isDraftFault(err: anyerror) bool {
     };
 }
 
-/// `nulya ext sync [--user] [--activate] [--dry-run]` — build every draft a store
-/// root holds (DESIGN §7.2, §7.4).
+/// `nulya ext sync [--user] [--activate] [--dry-run]` — build every draft a
+/// store root holds.
 ///
-/// The layout has always been that a draft lives at `<root>/<id>/` with its
-/// frozen versions beside it. What was missing was the verb for "make what is in
-/// this directory usable", so installing an extension meant knowing to run
-/// `ext build` on each one by name. With this, putting the source in
-/// `<root>/<id>/` and running this once IS the installation — and on a machine
+/// A draft lives at `<root>/<id>/` with its frozen versions beside it, so
+/// putting source there and running this once IS the installation. On a machine
 /// with no toolchain it still works for anything another root already holds,
-/// because a build adopts such a copy rather than compiling (§7.4).
+/// because a build adopts such a copy rather than compiling.
 ///
-/// One draft failing never stops the others: a root is a directory of
-/// independent things, and stopping at the first bad manifest would hide every
-/// id after it. Building is mechanical, so it is the default; `--activate` is
-/// separate because pointing `current` somewhere is a decision (§7.4).
+/// One draft failing never stops the others: stopping at the first bad manifest
+/// would hide every id after it. Building is mechanical, so it is the default;
+/// `--activate` is separate because pointing `current` somewhere is a
+/// decision.
 fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const flags = try takeUserFlag(alloc, args);
     defer alloc.free(flags.rest);
@@ -459,11 +438,9 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         }
     }
 
-    // `--seed` is `ext seed [--user]` (never `--force`: sync should not
-    // overwrite someone's edited draft on their behalf) followed by this same
-    // sync, sharing `--dry-run` with it — the drafts it writes (or, dry-run,
-    // only plans to write) are picked up by the build loop below like any
-    // other draft (DESIGN §7.2). `ext_seed.extSeed` owns the printing; its
+    // `--seed` is `ext seed [--user]` (never `--force`: sync must not overwrite
+    // someone's edited draft on their behalf) followed by this same sync,
+    // sharing `--dry-run` with it. `ext_seed.extSeed` owns the printing; its
     // exit code folds into this command's.
     var seed_failed = false;
     if (seed) {
@@ -531,18 +508,19 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var failed: usize = 0;
     for (drafts) |draft| {
         // The draft is inside this root, so the root is both the tree the build
-        // reads from and the store it writes into — no absolute sub-path anywhere,
-        // which is what makes an absolute user root work the same as `.nulya/…`.
+        // reads from and the store it writes into — no absolute sub-path
+        // anywhere, which is what makes an absolute user root work the same as
+        // `.nulya/…`.
         var result = (if (dry_run)
             build_ext.planExtension(alloc, io, root_dir, draft, root_dir, &zig, donors.dirs.items)
         else
             build_ext.buildExtensionReusing(alloc, io, root_dir, draft, root_dir, &zig, .{ .donors = donors.dirs.items })) catch |err| switch (err) {
             error.ZigVersionUnreadable => {
                 failed += 1;
-                // Two different walls behind one word: no compiler at all, or one
-                // that answered `zig version` with a failure from this directory
-                // (a version-manager shim that reads a build.zig.zon from the
-                // cwd does exactly that in a store root). Name which.
+                // Two different walls behind one word: no compiler at all, or
+                // one that answered `zig version` with a failure from this
+                // directory (a version-manager shim reading a build.zig.zon
+                // from the cwd does exactly that in a store root). Name which.
                 if (zig_exe) |z| {
                     try printOut(alloc, io, "{s}: needs zig (compiled draft; the zig at {s} ({s}) could not report its version from the store root — {s}; {s})\n", .{ draft, z.path, z.origin(), zig.whyUnreadable() orelse "`zig version` failed there", no_zig_hint });
                 } else {
@@ -611,11 +589,11 @@ const SyncMode = struct { activate: bool, dry_run: bool, user: bool };
 /// The tail of a sync line: what `current` says about this version, and what
 /// `--activate` did about it.
 ///
-/// The rule is one sentence (DESIGN §7.4): sync points `current` at a version it
-/// just brought into this root, and at a draft's version for an id that has no
-/// `current` at all — but never over a `current` that names something else. That
-/// pointer was somebody's decision (a rollback, an activate), and a sync that
-/// silently undid it would make rollback survive only until the next start-up.
+/// The rule is one sentence: sync points `current` at a version it just brought
+/// into this root, and at a draft's version for an id that has no `current` at
+/// all — but never over a `current` that names something else. That pointer was
+/// somebody's decision, and undoing it would make a rollback survive only until
+/// the next start-up.
 fn appendActivation(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -635,17 +613,11 @@ fn appendActivation(
     if (result.already_built and current != null) {
         return out.print(" (current stays {s})", .{current.?});
     }
-    // `--activate` activates. It used to refuse this one case — a package
-    // declaring `apply: "auto"` with no `current` yet — on the grounds that
-    // turning a mode on is not a bulk decision. Two things were wrong with
-    // that. The guard had a hole it could not close: `apply` is a per-version
-    // field, so v1 (manual, current) -> v2 (auto) walked in through the branch
-    // above, and auto -> manual walked out, both silently — "moving the pointer
-    // changes the version, not the reach" is simply false across a change of
-    // `apply`. And the flag is typed by a person: an unattended sync is a
-    // FRONT END's problem, and the one that has it (the TUI's start-up sync)
-    // has its own guard. So this verb means the same thing as `ext activate`
-    // now, and says the same sentence when the consequence is a standing one.
+    // `--activate` activates everything, `apply: "auto"` packages included, and
+    // says the same sentence `ext activate` does when the consequence is a
+    // standing one. Guarding that case here cannot work: `apply` is a
+    // per-version field, so v1 (manual) -> v2 (auto) walks in through the
+    // branch above either way. Unattended activation is a front end's policy.
     try warnUserScope(alloc, io, result.id, result.version, mode.user);
     try st.activate(alloc, result.id, result.version);
     depositSessionNote(alloc, io, root_dir, result.id, result.version) catch {};
@@ -653,18 +625,15 @@ fn appendActivation(
     try out.writeAll(" -> current");
 }
 
-/// `nulya ext prune [--user] [<id>] [--dry-run]` — drop the version directories a
-/// store root keeps that `current` does not name (DESIGN §7.4).
+/// `nulya ext prune [--user] [<id>] [--dry-run]` — drop the version directories
+/// a store root keeps that `current` does not name.
 ///
-/// Versions accumulate on purpose: every build of a changed draft is a new
-/// immutable directory, and that is what makes rollback a pointer move. The cost
-/// is disk, and after a few dozen iterations of one compiled tool it is real. So
-/// this is the counterweight, and it is deliberately narrow: only `current` is
-/// safe to keep by rule, so an id whose `current` is missing keeps EVERYTHING —
-/// with no pointer there is nothing to preserve it BY, and guessing (newest?
-/// biggest?) would delete the one somebody meant to roll back to.
+/// Deliberately narrow: only `current` is safe to keep by rule, so an id whose
+/// `current` is missing keeps EVERYTHING — with no pointer there is nothing to
+/// preserve it BY, and guessing (newest? biggest?) would delete the one
+/// somebody meant to roll back to.
 ///
-/// What it costs is printed rather than assumed: a session frozen on a deleted
+/// The cost is printed rather than assumed: a session frozen on a deleted
 /// version can no longer resume, and the way back is the draft — building the
 /// same source yields the same version id.
 fn extPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -718,9 +687,9 @@ fn extPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     var kept: usize = 0;
     var bytes_freed: u64 = 0;
     for (ids) |id| {
-        // Look before leasing: an id with nothing built is nothing to prune, and
-        // taking the writer lease would CREATE `<id>/` — a mistyped id would then
-        // leave a directory behind instead of doing nothing.
+        // Look before leasing: taking the writer lease would CREATE `<id>/`, so
+        // a mistyped id would leave a directory behind instead of doing
+        // nothing.
         {
             const versions = try st.listVersions(alloc, id);
             defer {
@@ -772,8 +741,8 @@ fn extPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         kept,
         (bytes_freed + 1023) / 1024,
     });
-    // Said plainly, because it is the one thing a pruner cannot undo by rerunning
-    // this command — and the one thing that IS recoverable, from the draft.
+    // The one thing rerunning this command cannot undo, and the one thing that
+    // IS recoverable, from the draft.
     try printOut(alloc, io, "note: a session frozen on a removed version can no longer resume; rebuilding the same source restores the same version id\n", .{});
     return 0;
 }
@@ -828,16 +797,12 @@ fn treeSize(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, sub_path: []
 /// level only — a version's frozen manifest lives further down and is not a
 /// draft. Caller owns the result.
 ///
-/// Ordered, so a sync reads the same way twice, and ordered in TWO groups: the
-/// drafts that need no compiler first (`data` / `script`, whose identity is the
-/// snapshot alone — DESIGN §7.4), then the compiled ones, alphabetically inside
-/// each. A pass over the bundled set is six compiled packages and two data ones,
-/// and a reader watching it has no way to tell a slow first build from a hung
-/// one; putting the instant answers first means the count starts moving at once
-/// and the wait that remains is visibly a compile. Nothing downstream depends on
-/// the order — each draft is built independently and the summary counts totals —
-/// so this is presentation, and it is here because this is where the sequence is
-/// decided.
+/// Ordered, so a sync reads the same way twice, and in TWO groups: the drafts
+/// that need no compiler first (`data` / `script`, whose identity is the
+/// snapshot alone), then the compiled ones, alphabetically inside each. Putting
+/// the instant answers first means a watching reader sees the count move at
+/// once and the wait that remains is visibly a compile. Presentation only:
+/// each draft is built independently and the summary counts totals.
 fn draftIds(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir) ![][]u8 {
     const Draft = struct { id: []u8, compiled: bool };
     var out: std.ArrayList(Draft) = .empty;
@@ -906,16 +871,16 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             } else try positional.append(alloc, args[i]);
         }
     }
-    // The tool is required (C2, ext-review-2 §2): [id, tool] is the shortest
-    // legal shape, JSON args (or lack of them) come after.
+    // The tool is required: [id, tool] is the shortest legal shape, JSON args
+    // (or lack of them) come after.
     if (positional.items.len < 2) {
         try printErr(io, ext_run_usage);
         return 1;
     }
     // `<id>` runs the version in effect; `<id>@<version>` runs exactly that
     // built version, active or not — how a session invokes a tool it composed
-    // with `--with <id>@<version>` (DESIGN §14), and how anything else names a
-    // frozen version without touching `current`.
+    // with `--with <id>@<version>`, and how anything else names a frozen
+    // version without touching `current`.
     const with_ref = withRef(positional.items[0]);
     const id = with_ref.id;
     const tool = positional.items[1];
@@ -930,11 +895,11 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const cwd_path = try cwdRealPath(io, &cwd_real);
 
     // Whichever root holds the version — the first active copy of the id, or
-    // the first copy of the pinned version (DESIGN §7.2). One shared lookup
-    // (`Roots.Resolved`) does search order, integrity validation, and the
-    // frozen manifest, so this path cannot drift from session composition.
-    // That frozen manifest is the runtime truth: the source tree's may already
-    // have changed while `current` still points at an older immutable version.
+    // the first copy of the named version. One shared lookup (`Roots.Resolved`)
+    // does search order, integrity validation and the frozen manifest, so this
+    // path cannot drift from session composition. That frozen manifest is the
+    // runtime truth: the source tree's may already have changed while `current`
+    // still points at an older immutable version.
     var search = try RootSearch.open(alloc, io, cwd_path);
     defer search.deinit(alloc);
     const resolved: roots_mod.Roots.Resolved = if (with_ref.version) |v|
@@ -982,8 +947,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 
     // Build the arguments JSON: from --arg pairs (typed by the tool's input
     // schema) when given, otherwise the trailing positional JSON if there is
-    // one beyond [id, tool], otherwise `{}` — the tool is required, its
-    // arguments are optional (C2, ext-review-2 §2).
+    // one beyond [id, tool], otherwise `{}`.
     const owned_args: ?[]u8 = if (use_args) try buildArgsJson(alloc, pairs.items, spec.?.input_schema) else null;
     defer if (owned_args) |a| alloc.free(a);
     const args_json = owned_args orelse
@@ -997,15 +961,12 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_roots = search.specs });
     defer lenv.deinit();
 
-    // `ext run` applies NO timeout by default (D6, DESIGN §7.3/§7.8): the
-    // manifest's own `timeout_ms` bounds a call reaching a model's tool face
-    // (a natively pinned tool, or the loop path a `session step` drives) —
-    // that path is unchanged. A driver running the same tool in its own
-    // process, on its own clock, opts into a bound with `--timeout-ms`; given,
-    // it is clamped to the same ceiling a manifest-declared timeout would be
-    // (`extension_max_ms`). `std.math.maxInt(u32)` (~49.7 days) is the
-    // practical "no bound" sentinel `invoke.Options.timeout_ms` accepts —
-    // there is no `?u32` on that type to carry an explicit "none" through.
+    // `ext run` applies NO timeout by default: the manifest's own `timeout_ms`
+    // bounds a call reaching a model's tool face, and a driver running the same
+    // tool on its own clock opts into a bound with `--timeout-ms` (clamped to
+    // the same `extension_max_ms` ceiling). `std.math.maxInt(u32)` (~49.7 days)
+    // is the practical "no bound" sentinel `invoke.Options.timeout_ms` accepts;
+    // that type carries no explicit "none".
     const timeout_ms: u32 = if (timeout_ms_arg) |raw| blk: {
         const parsed = std.fmt.parseInt(u32, raw, 10) catch {
             try printErr(io, "--timeout-ms must be a positive integer\n");
@@ -1025,14 +986,13 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         .timeout_ms = timeout_ms,
         .max_output_bytes = 1 << 20,
     }) catch |err| switch (err) {
-        // A per-OS `runtime.entry` that names no variant for this machine
-        // (DESIGN §7.1). The resolver already named the package and the host on
-        // stderr, so this only decides the exit code.
+        // A per-OS `runtime.entry` that names no variant for this machine. The
+        // resolver already named the package and the host on stderr, so this
+        // only decides the exit code.
         error.EntryUnsupportedOnHost => return 1,
         // The trailing positional IS the arguments, so a malformed one is a
-        // usage error rather than a host fault — and `ext run <id> <tool>` with
-        // no JSON at all arrives here too, its tool name having been read as the
-        // arguments. Either way the reader needs a sentence, not a stack trace.
+        // usage error rather than a host fault. `ext run <id> <tool>` with no
+        // JSON arrives here too, its tool name having been read as arguments.
         error.InvalidArgumentsJson, error.ArgumentsNotObject => {
             try printErr(io, "ext run: the last argument must be a JSON object (use '{}' for no arguments), or pass --arg k=v instead\n");
             return 1;
@@ -1043,14 +1003,13 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 
     // Resolution already proved both `id` and `tool` against the frozen
     // manifest, so the durable stats id is exactly `ext:<id>/<tool>` —
-    // version-free on purpose, the same stable identity a natively exposed
-    // ToolDefinition.id carries, so CLI usage accumulates across versions.
+    // version-free, the same stable identity a natively exposed
+    // `ToolDefinition.id` carries, so CLI usage accumulates across versions.
     const stable_id = try std.fmt.allocPrint(alloc, "ext:{s}/{s}", .{ id, tool });
     defer alloc.free(stable_id);
     // This command reaches the model through `shell`, whose env names the live
-    // session (DESIGN §5.3) — so a tool invoked through the CLI, which is how
-    // every UNPINNED extension tool is used, lands in the journal attributed to
-    // the same session a natively pinned one would be.
+    // session, so a tool invoked through the CLI lands in the journal
+    // attributed to the same session a natively pinned one would be.
     const in_session = try envSessionId(alloc);
     defer if (in_session) |s| alloc.free(s);
     try tool_stats.append(alloc, io, cwd_path, .{
@@ -1058,9 +1017,8 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         .ok = invocation.ok,
         .session = in_session,
         // …and beside that version-free identity, the implementation that
-        // actually ran: whichever version resolution settled on above, whether
-        // the caller named it or `current` chose it. The one resolution this
-        // command already performed answers it — no second lookup can disagree.
+        // actually ran: whichever version resolution settled on above. No
+        // second lookup, so nothing can disagree with it.
         .version = resolved.version,
     });
 
@@ -1127,8 +1085,7 @@ fn writeTypedValue(jw: *std.json.Stringify, val: []const u8, ty: ?[]const u8) !v
 
 /// `nulya ext activate [--user] <id> <version>` — point `current` at one built
 /// version. There is no second verb for going backwards: a rollback IS this,
-/// aimed at an older version (DESIGN §7.4), and a `rollback` that shared every
-/// line of this function only made the CLI look like it had two powers.
+/// aimed at an older version.
 fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const flags = try takeUserFlag(alloc, args);
     defer alloc.free(flags.rest);
@@ -1164,12 +1121,11 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         return 1;
     };
 
-    // What is IN EFFECT now (`Roots.firstActive`, DESIGN §7.2) — not merely
-    // what this root's `current` says: an earlier root's active copy still wins.
-    // Only a version that is actually in effect gets announced to a live session
-    // (NULYA_SESSION names its file) by depositing a capability note into its
-    // inbox for the next step boundary (DESIGN §3, §5.3). Best-effort: a
-    // note-deposit failure never fails the activation the model just performed.
+    // What is IN EFFECT now (`Roots.firstActive`) — not merely what this root's
+    // `current` says, since an earlier root's active copy still wins. Only a
+    // version actually in effect is announced to a live session, by depositing
+    // a capability note into its inbox for the next step boundary. Best-effort:
+    // a failed deposit never fails the activation the model just performed.
     var search = try RootSearch.open(alloc, io, cwd_path);
     defer search.deinit(alloc);
     const effective = try search.roots.firstActive(alloc, id);
@@ -1192,20 +1148,15 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 }
 
 /// One stderr line naming the `manual` tools this version recommends switching
-/// on (`manifest.ToolSpec.recommended`, DESIGN §5.1/§7.2.1).
+/// on (`manifest.ToolSpec.recommended`).
 ///
-/// It is a NOTE and not a write: which tools a person's sessions carry is their
-/// config, and no kernel verb edits that file. But activation used to say
-/// nothing at all here, so installing a package of `manual` tools by hand — the
-/// documented way to install `extensions/std` — left every one of them off the
-/// model face with no sign that anything was missing, while the same package
-/// activated from a front end came up with all six on. Two installers, two
-/// different outcomes, because neither had anything to read. Now the package
-/// says which ones, and both do the same thing with the answer.
+/// A NOTE and not a write: which tools a person's sessions carry is their
+/// config, and no kernel verb edits that file. Without it, installing a package
+/// of `manual` tools by hand leaves every one of them off the model face with
+/// no sign that anything is missing.
 ///
 /// Silent when the version recommends nothing: a package of `auto` or
-/// `internal` tools has no pin to suggest, and a line saying so is noise on
-/// every activation of every such package.
+/// `internal` tools has no pin to suggest.
 fn noteRecommendedPins(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1213,9 +1164,9 @@ fn noteRecommendedPins(
     id: []const u8,
     version: []const u8,
 ) !void {
-    // `.structural`: this reads what a version DECLARES, the same reason
-    // `contributionMarker` does — the bytes about to run are checked where they
-    // run, and the activation just above verified this version's seal.
+    // `.structural`: this reads what a version DECLARES. The bytes about to
+    // run are checked where they run, and the activation just above verified
+    // this version's seal.
     const resolved = roots.resolveVersion(alloc, id, version, .structural) catch return;
     defer resolved.deinit(alloc);
 
@@ -1236,17 +1187,16 @@ fn noteRecommendedPins(
     );
 }
 
-/// One stderr line when the package just activated declares `apply: "auto"`
-/// (DESIGN §5.1): activation is normally only "which version `<id>` means", and
-/// for this package it is also "every new session composes it from now on" —
-/// its system prompt in every prefix, its `surface: auto` tools on every face.
-/// The precedent is `warnUserScope`: the act is allowed and is not refused, but
-/// it must not be INVISIBLE. `ext activate` says it only when this copy is the
-/// one in effect, for the same reason the capability note is deposited only
-/// then; `ext sync --activate` says it for each id it just switched on.
+/// One stderr line when the package just activated declares `apply: "auto"`:
+/// activation is normally only "which version `<id>` means", and for this
+/// package it is also "every new session composes it from now on" — its system
+/// prompt in every prefix, its `surface: auto` tools on every face. Allowed,
+/// but it must not be INVISIBLE. `ext activate` says it only when this copy is
+/// the one in effect, the same condition the capability note has;
+/// `ext sync --activate` says it for each id it just switched on.
 ///
-/// Read from the pointer this activation just wrote (`Store.readCurrent`),
-/// which is where the answer now lives — not from the manifest a second time.
+/// Read from the pointer this activation just wrote (`Store.readCurrent`), not
+/// from the manifest a second time.
 fn noteStandingMembership(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1266,17 +1216,13 @@ fn noteStandingMembership(
 
 /// Say, on stderr, when a model running inside a session reaches OUT of that
 /// session's workspace: `--user` moves `current` in the user store, so `<id>`
-/// means this version for every workspace on this machine (DESIGN §7.2). It is
-/// not refused — the model is allowed to do this, and a refusal here would be a
-/// policy in the kernel's shell. What is not allowed is doing it INVISIBLY.
-/// Silent outside `--user`, and silent when no session is running.
+/// means this version for every workspace on this machine. Not refused — what
+/// is not allowed is doing it INVISIBLY. Silent outside `--user`, and silent
+/// when no session is running.
 ///
-/// The sentence used to have a second half about the package's system prompt
-/// entering every future session. That is no longer what activating does: a
-/// package joins a session only when somebody names it (config's `[extensions]
-/// with`, or `--with`, DESIGN §5.1), so this move changes WHICH VERSION those
-/// sessions get and nothing about who gets it. Which is why no manifest is read
-/// here any more.
+/// No manifest is read here: a package joins a session only when somebody names
+/// it, so this move changes WHICH VERSION those sessions get and nothing about
+/// who gets it.
 fn warnUserScope(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1329,8 +1275,8 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     try store.Store.init(io, ext_root).deactivate(alloc, id);
     try printOut(alloc, io, "{s}: deactivated\n", .{id});
 
-    // Deactivating the copy in effect can UNSHADOW one in a later root — say so,
-    // or "I deactivated it, why is it still in my session?" is the next question.
+    // Deactivating the copy in effect can UNSHADOW one in a later root — say
+    // so, or "why is it still in my session?" is the next question.
     var search = try RootSearch.open(alloc, io, cwd_path);
     defer search.deinit(alloc);
     if (try search.roots.firstActive(alloc, id)) |still| {
@@ -1341,24 +1287,19 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 }
 
 /// Every extension directory in every root, in search order, with the root it
-/// came from. The second column is exactly what `current` points at, and nothing
-/// more: which version `<id>` means when somebody names it without one. An id
-/// whose `current` an earlier root also sets is marked `(shadowed)` — only the
-/// first is ever used (`Roots.firstActive`), and silently hiding the duplicate is
-/// how a stale user-level copy becomes a mystery. A directory with no `current`
-/// shadows nothing and says `(no current)` for its root alone — unless it holds
-/// no built version either, in which case it is a bare writer lease, not an
-/// extension, and is skipped.
+/// came from. The second column is exactly what `current` points at: which
+/// version `<id>` means when somebody names it without one. An id whose
+/// `current` an earlier root also sets is marked `(shadowed)` — only the first
+/// is ever used (`Roots.firstActive`). A directory with no `current` says
+/// `(no current)` for its root alone — unless it holds no built version either,
+/// in which case it is a bare writer lease, not an extension, and is skipped.
 ///
-/// Two more markers, and between them they answer "will a session have this?".
+/// Two more markers answer "will a session have this?".
 /// `[tools skills prompt]` is what the version CONTRIBUTES, from its frozen
-/// manifest, plus `standing` when that manifest says `apply: "auto"` — this
-/// package is in every new session for as long as it has a `current` (DESIGN
-/// §5.1). `[with]` says this id is in the merged config's `[extensions] with`,
-/// the person's own standing list. Without one of those two, `prompt` reads as
-/// a threat it is not: a system prompt costs a session nothing until something
-/// puts its package in one.
-/// Unreadable manifest → no contribution marker, never a failed listing.
+/// manifest, plus `standing` when the recorded pointer says `apply: "auto"`.
+/// `[with]` says this id is in the merged config's `[extensions] with`.
+///
+/// Unreadable manifest -> no contribution marker, never a failed listing.
 fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
@@ -1382,14 +1323,12 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
             });
             defer if (active) |a| alloc.free(a.version);
             // A directory with neither an active pointer nor a built version is
-            // not an extension — it is where `<id>/.lock` lives. Both `ext build`
-            // and `ext activate` take that lease before they validate anything, so
-            // a typo'd id or a manifest that failed to parse leaves an empty shell
-            // behind; listing it invents an extension nobody made. A directory
-            // holding versions is real whether or not one is active (a draft, a
-            // deactivated copy), and so is one with a `current` pointer even if
-            // its versions are gone — that one is broken, and saying so beats
-            // hiding it.
+            // not an extension — it is where `<id>/.lock` lives, and both
+            // `ext build` and `ext activate` take that lease before validating
+            // anything, so a typo leaves an empty shell behind. A directory
+            // holding versions is real whether or not one is active, and so is
+            // one with a `current` pointer whose versions are gone: that one is
+            // broken, and saying so beats hiding it.
             if (active == null) {
                 const versions = try st.listVersions(alloc, dir_entry.name);
                 defer {
@@ -1425,19 +1364,17 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
 /// Caller owns the result.
 fn contributionMarker(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, entry: roots_mod.Roots.ActiveEntry) ![]u8 {
     // `.structural`: this column reports what a version DECLARES. Re-digesting
-    // every megabyte of built binary to print `[tools]` made `ext list` cost
-    // most of a second in a store with a few compiled extensions — and a front
-    // end runs it constantly. What is about to run is checked where it runs.
+    // every megabyte of built binary to print `[tools]` costs most of a second
+    // in a store with a few compiled extensions, and a front end runs this
+    // constantly. What is about to run is checked where it runs.
     const resolved = roots.resolveEntry(alloc, entry, .structural) catch return alloc.dupe(u8, "");
     defer resolved.deinit(alloc);
     const m = resolved.manifest;
-    // The one word here that is NOT read from the manifest: this column answers
-    // "will a session have this?", and the answer to that lives in `current`,
-    // written when the activation verified it (`store.Active`, DESIGN §5.1). A
-    // manifest declaring `apply: "auto"` that no activation ever recorded — an
-    // edited version directory, a pointer written before the record existed —
-    // is not standing, and a listing that said otherwise would be describing a
-    // session nobody is going to get.
+    // The one word here NOT read from the manifest: "will a session have this?"
+    // is answered by `current`, written when the activation verified it
+    // (`store.Active`). A manifest declaring `apply: "auto"` that no activation
+    // ever recorded — an edited version directory, a pointer written before the
+    // record existed — is not standing.
     const standing = entry.standing;
     if (!standing and m.tools.len == 0 and m.skills.len == 0 and m.system_prompts.len == 0) return alloc.dupe(u8, "");
 
@@ -1469,18 +1406,17 @@ fn sliceHasString(list: []const []const u8, needle: []const u8) bool {
     return false;
 }
 
-/// `nulya ext trust` — say, once and explicitly, that this workspace's extension
-/// store may take part in sessions (DESIGN §9).
+/// `nulya ext trust` — say, once and explicitly, that this workspace's
+/// extension store may take part in sessions.
 ///
 /// What gets recorded is the STORE, not a hash of what is in it: an agent that
-/// builds and activates its own tools would otherwise invalidate the record every
-/// loop. So this is a judgement about origin, and the only honest way to make it
-/// is to look — which is why the inventory is printed BEFORE the record is
-/// written, and why `ext list` / `ext inspect` are never gated.
+/// builds and activates its own tools would otherwise invalidate the record
+/// every loop. It is a judgement about origin, so the inventory is printed
+/// BEFORE the record is written, and `ext list` / `ext inspect` are never
+/// gated.
 ///
 /// There is no `untrust`: withdrawing means deleting the line from
-/// `~/.nulya/trusted-stores.jsonl` by hand. A verb for it can wait for someone
-/// who needs one.
+/// `~/.nulya/trusted-stores.jsonl` by hand.
 fn extTrust(alloc: std.mem.Allocator, io: std.Io) !u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
@@ -1511,11 +1447,10 @@ fn extTrust(alloc: std.mem.Allocator, io: std.Io) !u8 {
     return 0;
 }
 
-/// The stderr block a session prints when it refuses an untrusted workspace store
-/// (DESIGN §9). It names the store, shows what composing it would bring in, and
-/// points at the two read-only verbs plus `ext trust` — everything a person needs
-/// to decide, without having to trust anything first. The caller adds its own
-/// one-line verdict, the same shape `ActiveExtensionBroken` uses.
+/// The stderr block a session prints when it refuses an untrusted workspace
+/// store. It names the store, shows what composing it would bring in, and
+/// points at the two read-only verbs plus `ext trust`. The caller adds its own
+/// one-line verdict.
 ///
 /// Best-effort about the inventory: a store this machine cannot fully read is
 /// still refused, and a half-listed refusal beats a failed one.
@@ -1528,11 +1463,9 @@ pub fn printUntrustedStoreRefusal(alloc: std.mem.Allocator, io: std.Io, cwd_path
 }
 
 /// One indented line per extension the WORKSPACE store holds: `<id>@<version>`
-/// with the contribution marker `ext list` uses (`prompt` is the load-bearing
-/// one — an active version's system prompt enters every session's system
-/// blocks), and the ids that hold built versions without activating one, since
-/// `--with` and `ext run <id>@<version>` reach those too. Written to stderr when
-/// `to_err`, else stdout.
+/// with the contribution marker `ext list` uses, then the ids that hold built
+/// versions without activating one, since `--with` and `ext run <id>@<version>`
+/// reach those too. Written to stderr when `to_err`, else stdout.
 fn printStoreInventory(alloc: std.mem.Allocator, io: std.Io, cwd_path: []const u8, to_err: bool) !void {
     var roots = try roots_mod.Roots.open(alloc, io, cwd_path, &.{store.workspace_root_rel});
     defer roots.deinit();
@@ -1574,25 +1507,18 @@ fn printLine(alloc: std.mem.Allocator, io: std.Io, to_err: bool, comptime fmt: [
     return printOut(alloc, io, fmt, args);
 }
 
-/// `<id>` prints the manifest of the version IN EFFECT (`Roots.firstActive`) —
-/// what a plain `session new` would compose if it named this id — with NO
-/// draft fallback (D9: inspect answers the STORE; a draft is asked for by
-/// where it lives, below). No active version is a named refusal, not a
-/// silent read of whatever happens to be lying around.
+/// `<id>` prints the manifest of the version IN EFFECT (`Roots.firstActive`),
+/// with NO draft fallback. No active version is a named refusal.
 /// `<id>@<version>` prints the FROZEN manifest of that exact built version,
 /// from the first root holding it — the shape a session header records for
-/// every member (DESIGN §3.4), so this is how anything answering a question
-/// ABOUT A RUNNING SESSION — a driver's approval policy, a reader of
-/// `session list` — reads the manifest that session actually composed with,
-/// instead of whatever `current` points at today.
-/// `<path>` — an argument that names a directory holding `extension.json`,
-/// which a bare separator already makes unambiguous — prints THAT draft,
-/// unbuilt and unfrozen: the one form that answers "what would `ext build`
-/// freeze next", spelled exactly the way `ext build <path>` already takes it.
+/// every member, so a question ABOUT A RUNNING SESSION reads the manifest that
+/// session composed with rather than whatever `current` points at today.
+/// `<path>` — a directory holding `extension.json` — prints THAT draft, unbuilt
+/// and unfrozen: what `ext build` would freeze next, spelled the way
+/// `ext build <path>` takes it.
 /// A path never falls back to an id lookup, and an id never falls back to a
-/// draft: the two questions ("what does this workspace have lying around" vs.
-/// "what does the store say") are asked with different arguments, not
-/// disambiguated by guessing which one the caller meant.
+/// draft: the two questions are asked with different arguments, not
+/// disambiguated by guessing.
 fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
         try printErr(io, "usage: nulya ext inspect <id>[@<version>] | <path>\n");
@@ -1600,20 +1526,17 @@ fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     }
     const arg = args[0];
 
-    // Try it as a path first — a bare directory name (no separator) that
-    // happens to hold `extension.json` counts too, the same as `ext build .`
-    // would take it. This can only ever answer for a PATH, never for an
-    // `<id>[@<version>]` reference: `manifest.isValidId` forbids a separator
-    // in an id, so a real id can never collide with this check.
+    // Try it as a path first — a bare directory name (no separator) holding
+    // `extension.json` counts too, as `ext build .` would take it. A real id
+    // cannot collide: `manifest.isValidId` forbids a separator in an id.
     if (try draftManifestAtPath(alloc, io, arg)) |bytes| {
         defer alloc.free(bytes);
         try printOut(alloc, io, "{s}\n", .{bytes});
         return 0;
     }
     // A path with nothing readable at it is a mistyped path, not an id in
-    // disguise — `nulya ext build <path>` reports the identical fault the
-    // identical way, and falling back to an id lookup here would silently
-    // answer a different question than the one asked.
+    // disguise: falling back to an id lookup would silently answer a different
+    // question than the one asked.
     if (looksLikePathArg(arg)) {
         try printErrFmt(alloc, io, "ext inspect: no readable extension.json in '{s}'\n", .{arg});
         return 1;
@@ -1639,8 +1562,8 @@ fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
         return 1;
     }
 
-    // Bare id: the version IN EFFECT, never a draft (D9) — a draft is the
-    // `<path>` form above, tried and ruled out before we ever got here.
+    // Bare id: the version IN EFFECT, never a draft — the `<path>` form above
+    // was tried and ruled out before we got here.
     if (try search.roots.firstActive(alloc, ref.id)) |active| {
         defer alloc.free(active.version);
         const manifest_rel = try search.roots.store(active.root).versionManifestPath(alloc, ref.id, active.version);
@@ -1679,13 +1602,10 @@ fn draftManifestAtPath(alloc: std.mem.Allocator, io: std.Io, arg: []const u8) !?
     return bytes;
 }
 
-/// `ext api` is a curated `nulya src` (PLAN §3.10): the wire-protocol topic prints
-/// the REAL `extension/protocol.zig`, so the ABI the model reads can never drift
-/// from the code that implements it. `manifest` and `examples` stay short notes
-/// (authority, the manifest's three tiers, and CLI usage — not source that drifts).
-///
-/// The topic was called `permissions` while the manifest had a field by that
-/// name. Both are gone; `manifest` is what this is about.
+/// `ext api` is a curated `nulya src`: the wire-protocol topic prints the REAL
+/// `extension/protocol.zig`, so the ABI the model reads can never drift from
+/// the code that implements it. `manifest` and `examples` stay short notes —
+/// authority, the manifest's three tiers, and CLI usage.
 fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const topic = if (args.len >= 1) args[0] else "protocol";
     if (std.mem.eql(u8, topic, "manifest")) {

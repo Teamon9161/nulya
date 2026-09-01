@@ -13,10 +13,10 @@
 //! matches, `N- text` for context, `--` between disjoint context blocks of one
 //! file; append the notes that explain what was left out.
 //!
-//! One thing tcode did not have: a total output budget of `max_output_bytes`
-//! (docs/goals/std.md D5). The page is cut at match granularity to fit under it,
-//! so the paging note's `offset=` is exact and the kernel's own output guard
-//! never has to clip a listing and eat the notes.
+//! One thing tcode did not have: a total output budget of `max_output_bytes`.
+//! The page is cut at match granularity to fit under it, so the paging note's
+//! `offset=` is exact and the kernel's own output guard never has to clip a
+//! listing and eat the notes.
 //!
 //! Every answer that is not a host fault is TEXT: "no matches", "offset past
 //! the end" and a search path that does not exist are results a model can act
@@ -53,9 +53,8 @@ pub const max_context: u64 = 30;
 /// places. Trades depth in one file — reachable with `path` — for breadth.
 pub const max_matches_per_file: usize = 30;
 
-/// Whole-answer ceiling (docs/goals/std.md D5): below the kernel's 128 KB
-/// output guard, so a listing is cut here, at match granularity, and its notes
-/// always arrive.
+/// Whole-answer ceiling, below the kernel's 128 KB output guard, so a listing
+/// is cut here, at match granularity, and its notes always arrive.
 pub const max_output_bytes: usize = 100 * 1024;
 /// Room kept for the notes after the listing body.
 const note_reserve_bytes: usize = 1536;
@@ -229,8 +228,7 @@ fn answer(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
 
 /// `base` (already known not to exist as a directory) is a wrong path, not a
 /// broken tool: the answer names the nearest real ancestor so the model can
-/// correct course with `glob` rather than guessing again. (docs/goals/std.md
-/// "existence answers".)
+/// correct course with `glob` rather than guessing again.
 fn notFoundAnswer(alloc: std.mem.Allocator, io: std.Io, base: []const u8, cwd: []const u8) !rpc.Outcome {
     const ancestor = walk.nearestExistingAncestor(io, base);
     const base_disp = try walk.relDisplay(alloc, base, cwd);

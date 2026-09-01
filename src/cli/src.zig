@@ -1,5 +1,7 @@
-//! `nulya src` (PLAN §3.10): this binary printing its own embedded source, so
-//! an agent reading the kernel reads the exact bytes it was built from.
+//! `nulya src`: this binary printing its own embedded source, so an agent
+//! reading the kernel reads the exact bytes it was built from. No path lists
+//! the tree; a path prints one file with its `test` blocks stripped, or
+//! verbatim with `--tests` / `--raw`.
 
 const std = @import("std");
 const source = @import("../source.zig");
@@ -7,12 +9,6 @@ const common = @import("common.zig");
 const printOut = common.printOut;
 const printRaw = common.printRaw;
 const printErr = common.printErr;
-
-// ── `nulya src` (PLAN §3.10) ─────────────────────────────────────────────────
-//
-// Print this binary's own embedded source. No path lists the tree; a path prints
-// one file with its `test` blocks stripped (the agent usually wants structure, not
-// test tokens), or verbatim with `--tests` / `--raw` (Zig-style reference).
 
 pub fn dispatchSrc(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var include_tests = false;

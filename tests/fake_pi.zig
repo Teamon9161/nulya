@@ -1,11 +1,10 @@
 //! A `pi --mode rpc` that answers the protocol and never leaves this machine.
 //!
 //! **Why this exists.** The Pi runner (`extensions/agent/src/pi.zig`) is a
-//! conversation with another harness over its stdio, and everything worth pinning
-//! down about it is on THIS side of that conversation: which flags the runner
-//! passes, when it writes a prompt, that the interrupt marker becomes `abort`,
-//! and that a tool outside a read-only ceiling stops the run. None of it needs a
-//! model, and a test that needed one would be a test nobody runs.
+//! conversation with another harness over its stdio: which flags it passes,
+//! when it writes a prompt, that the interrupt marker becomes `abort`, and that
+//! a tool outside a read-only ceiling stops the run — all on THIS side of that
+//! conversation, needing no real model.
 //!
 //! **What it answers.** `--version` prints one line and exits. Otherwise it reads
 //! stdin as newline-delimited JSON and, for each `{"type":"prompt"}`, emits the
@@ -14,11 +13,10 @@
 //! message produced which report), and `agent_settled`.
 //!
 //! **It never reads while a run is going**, the same choice `tests/fake_codex.zig`
-//! and `tests/fake_claude.zig` made and for the same reason: watching stdin
-//! mid-run needs a thread or a non-blocking read to avoid deadlocking against a
-//! client that is itself blocked reading. The evidence a test needs is the log —
-//! the argv at launch and one line per message stdin carried, the ones sent
-//! mid-run as soon as the run is over.
+//! and `tests/fake_claude.zig` made: watching stdin mid-run needs a thread or a
+//! non-blocking read to avoid deadlocking against a client itself blocked
+//! reading. The evidence a test needs is the log — the argv at launch and one
+//! line per message stdin carried, mid-run ones as soon as the run is over.
 //!
 //! **How a test bends it**, through the environment:
 //!

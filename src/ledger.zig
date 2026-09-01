@@ -1,10 +1,13 @@
-//! The immutable conversation ledger (DESIGN §1, §3).
+//! The immutable conversation ledger.
 //!
-//! The ledger is append-only. Its ENTIRE mutable API is `append`. Reads hand
-//! back a const view. There is deliberately no edit / delete / reorder: a
-//! correction is a new appended event, never an in-place change. This is what
-//! lets the PromptIR stable-block prefix stay stable within a cache generation,
-//! which is what keeps the prompt cache hitting (DESIGN §1).
+//! Append-only: the ENTIRE mutable API is `append`, reads hand back a const
+//! view, and a correction is a new appended event rather than an in-place
+//! change. That is what keeps the PromptIR prefix stable, and the prompt cache
+//! hitting.
+//!
+//! Also here: the durable session file (one JSONL file per session, header line
+//! + one line per event), its single-writer lease, and the cross-process inbox
+//! other processes deposit events into.
 
 const std = @import("std");
 
@@ -27,11 +30,10 @@ pub const ToolResultEntry = struct {
     presentation: ?[]const u8 = null,
 };
 
-/// What one model step cost, as the provider reported it. A FACT about the turn
-/// (like `assistant.reasoning`), never projected into PromptIR: the model does
-/// not read its own bill. Declared here — the ledger depends on nothing — and
-/// re-exported by `provider.zig` as `provider.Usage`, so what a provider reports
-/// and what the ledger records are one struct, not two shapes and a copy.
+/// What one model step cost, as the provider reported it. A FACT about the turn,
+/// never projected into PromptIR. Declared here (the ledger depends on nothing)
+/// and re-exported by `provider.zig`, so what a provider reports and what the
+/// ledger records are one struct.
 pub const Usage = struct {
     /// Non-cached input tokens.
     input_tokens: u64 = 0,
@@ -44,10 +46,7 @@ pub const Usage = struct {
             self.cache_read_tokens == 0 and self.cache_write_tokens == 0;
     }
 
-    /// Add `other` in place. Summing usage is field-wise everywhere it happens
-    /// — a session's running total, a listing's per-session and per-episode
-    /// totals — so it is one method here rather than the same four lines in
-    /// each of them.
+    /// Add `other` in place; summing usage is field-wise everywhere.
     pub fn add(self: *Usage, other: Usage) void {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
@@ -57,10 +56,8 @@ pub const Usage = struct {
 };
 
 /// Why the model stopped producing a turn, as the provider reported it. A FACT
-/// about the turn (like `Usage`), never projected. Declared here — the ledger
-/// depends on nothing — and re-exported by `provider.zig` as
-/// `provider.StopReason`, so what a provider reports and what the ledger records
-/// are one enum, not two and a conversion.
+/// about the turn, never projected. Declared here and re-exported by
+/// `provider.zig`, so provider and ledger share one enum.
 pub const StopReason = enum {
     end_turn,
     tool_use,
@@ -68,119 +65,89 @@ pub const StopReason = enum {
     other,
 };
 
-/// One image inlined into a user turn (DESIGN §3.1). `data` is base64 TEXT —
-/// what goes on the wire and what sits in the line — and the ledger neither
-/// decodes nor validates it: storing the fact is this type's whole job. Which
-/// media types are acceptable, how big an image may be and whether the session's
-/// frozen model can even see one are decisions, and decisions live in the shell
-/// (`cli/session.zig`, DESIGN §9) — a file that already holds an odd value still
-/// reads back.
+/// One image inlined into a user turn. `data` is base64 TEXT — what goes on the
+/// wire and what sits in the line — and the ledger neither decodes nor validates
+/// it. Which media types are acceptable, how big an image may be, and whether
+/// the session's model can see one at all are decided in the shell
+/// (`cli/session.zig`); a file already holding an odd value still reads back.
 pub const Image = struct {
     media_type: []const u8,
     data: []const u8,
 };
 
 /// A user turn: text, plus zero or more images inlined with it. Both are
-/// model-visible, so both are projected (unlike `assistant.usage`, which is a
-/// fact about the turn and has no field in the projection).
+/// model-visible, so both are projected.
 pub const UserText = struct {
     text: []const u8,
     images: []const Image = &.{},
 };
 
-/// The event log's alphabet. Kept minimal for the skeleton; DESIGN §3 lists the
-/// full set (capability_note, registry_selection, compaction, …).
+/// The event log's alphabet.
 pub const Event = union(enum) {
     user_text: UserText,
     assistant: struct {
         /// The turn's reasoning as the provider emitted it: a JSON array of
-        /// opaque, provider-owned items (signed / encrypted chain-of-thought), or
-        /// `""` when there was none. A FACT about the turn, not model-visible
-        /// text: the kernel never reads inside it; the projection hands it back
-        /// to the provider, which replays it verbatim to the same model so the
-        /// model's own reasoning survives across tool steps (DESIGN §13). It is
-        /// model-locked by construction — the session's `model_identity` is
-        /// frozen (§3.4), so nothing else ever sees it.
+        /// opaque, provider-owned items, or `""` when there was none. The kernel
+        /// never reads inside; the projection hands it back to the provider,
+        /// which replays it verbatim to the SAME model — which is why a rebind
+        /// stops it being replayed (`reasoningFloor`).
         reasoning: []const u8 = "",
         text: []const u8,
-        /// Zero or more tool calls. Multiple calls in one assistant turn are the
-        /// batch the loop executes together (DESIGN §0.2, §4).
+        /// Zero or more tool calls: the batch the loop executes together.
         calls: []const ToolCall,
         /// What this step cost, when the provider said (null when it reported
-        /// nothing, and for every line written before this field existed). Like
-        /// `reasoning`, it is a fact about the turn and is NOT projected: cost
-        /// is evidence for the slow loop and for front ends, not model-visible
-        /// text. A step canceled during the provider phase has no assistant
-        /// event to hang usage on, so its cost is simply not recorded — honest,
-        /// and not worth a new event kind.
+        /// nothing, and on every line written before this field existed). A fact
+        /// about the turn, NOT projected. A step canceled during the provider
+        /// phase has no assistant event, so its cost is simply not recorded.
         usage: ?Usage = null,
-        /// Why the provider stopped this turn. A fact like `usage`, and equally
-        /// NOT projected (`prompt.Turn.Assistant` has no field for it): the model
-        /// does not read its own stop reason. `end_turn` and `tool_use` are both
-        /// readable off the turn's SHAPE (`calls.len`) and so are not written to
-        /// the line; `max_tokens` and `other` are not, and so are. `max_tokens`
-        /// is the load-bearing one: a reply cut before it wrote a call is
-        /// byte-identical to one that finished, and the consequence outlives the
-        /// process that saw it — replaying that tail as the last message asks the
-        /// provider to continue it as a prefill, which is rejected outright when
-        /// thinking is on (DESIGN §4).
+        /// Why the provider stopped this turn. A fact like `usage`, equally not
+        /// projected. `end_turn` / `tool_use` are readable off the turn's SHAPE
+        /// (`calls.len`) and are not written to the line; `max_tokens` / `other`
+        /// are. `max_tokens` is the load-bearing one: a reply cut before it wrote
+        /// a call looks byte-identical to one that finished, and replaying that
+        /// tail asks the provider to continue it as a prefill — rejected outright
+        /// when thinking is on.
         stop_reason: StopReason = .end_turn,
     },
     /// Exactly ONE user turn carrying every result from a batch. Never split
-    /// per-tool — that would be one model round-trip per tool (DESIGN §0.2).
+    /// per-tool — that would be one model round-trip per tool.
     tool_results: []const ToolResultEntry,
-    /// A capability that became available mid-conversation (DESIGN §5.3). It is
-    /// an APPEND, never a change to `tools[]`: the prompt prefix stays stable so
-    /// the cache keeps hitting, and the model can invoke the new extension via
-    /// `shell` on its next step. `text` is the model-facing announcement; `id` and
-    /// `version` are structured so reconciliation never parses presentation text.
+    /// A capability that became available mid-conversation. An APPEND, never a
+    /// change to `tools[]`, so the prompt prefix stays stable. `text` is the
+    /// model-facing announcement; `id` / `version` are structured so
+    /// reconciliation never parses presentation text.
     capability_note: struct {
         id: []const u8,
         version: []const u8,
         text: []const u8,
     },
-    /// A background command this session started has ended (DESIGN §3.1). Same
-    /// genre as `capability_note`: a FACT about the environment that arrived
-    /// from another process, deposited into the inbox and drained at a step
-    /// boundary, projected as one more user-role turn.
+    /// A background command this session started has ended. Same genre as
+    /// `capability_note`: a fact from another process, deposited into the inbox,
+    /// drained at a step boundary, projected as one more user-role turn.
     ///
-    /// Deliberately NOT a `tool_results` entry: the call that started the task
-    /// already has its result ("started"), and one assistant batch maps to
-    /// exactly one matching `tool_results` (DESIGN §4) — a late arrival would
-    /// break that invariant and be rejected on every wire we speak besides.
-    /// Deliberately not a `user_text` either: the ledger would then claim a
-    /// person said this.
+    /// Not a `tool_results` entry — the call that started the task already has
+    /// its result, and one assistant batch maps to exactly one `tool_results`.
+    /// Not a `user_text` either — the ledger would then claim a person said it.
     ///
     /// `task` is the full name `<session-id>/t<N>`, `exit_code` is what the
-    /// supervisor saw the direct child exit with, and `text` is the whole of
-    /// what the model reads. Only `text` is projected — `task` / `exit_code`
-    /// are structured facts for readers and front ends, exactly as a note's
-    /// `id` / `version` are.
+    /// supervisor saw the direct child exit with, `text` is what the model reads
+    /// and the only part projected.
     task_finished: struct {
         task: []const u8,
         exit_code: u8,
         text: []const u8,
     },
-    /// From here on, this session runs on a different model (DESIGN §3.4, §9.5;
-    /// goals/model-rebind.md).
+    /// From here on, this session runs on a different model.
     ///
-    /// The header freezes ONE identity, and a header cannot be rewritten
-    /// (physics #1), so a change of identity is an APPEND like everything else
-    /// that changes what the model sees (physics #3). `identity` is the already
-    /// RESOLVED descriptor, frozen exactly as the header's is and for the same
-    /// reason — whoever asked for the change resolved it against config with the
-    /// credential in hand, so what runs is still what was frozen; there is now
-    /// simply more than one point where freezing happened. `profile` is the
-    /// profile NAME, kept for the same display / effort lookup the header keeps
-    /// its own for.
+    /// The header freezes ONE identity and cannot be rewritten, so a change of
+    /// identity is an APPEND. `identity` is the already RESOLVED descriptor,
+    /// frozen exactly as the header's is: whoever asked for the change resolved
+    /// it against config with the credential in hand. `profile` is the profile
+    /// NAME, for the same display / effort lookup the header's is used for.
     ///
-    /// It is NOT a turn: `prompt.zig` gives it no `Turn`, because the model has
-    /// no more business reading that it was swapped than it has reading its own
-    /// `stop_reason`. What it DOES change is what may still be replayed — an
-    /// assistant turn's `reasoning` is opaque, provider-owned and model-locked,
-    /// so everything recorded before the last rebind stops being projected
-    /// (goals/model-rebind.md §3). That is the whole mechanism: the ledger keeps
-    /// every fact, and the projection hands back only what is legal to send.
+    /// NOT a turn — `prompt.zig` gives it no `Turn`. What it changes is what may
+    /// still be REPLAYED: `reasoning` is model-locked, so everything recorded
+    /// before the last rebind stops being projected (`reasoningFloor`).
     model_rebind: struct {
         profile: []const u8 = "",
         identity: ModelDescriptor,
@@ -188,13 +155,12 @@ pub const Event = union(enum) {
 };
 
 /// Which model this session runs on NOW: the last `model_rebind`, or the
-/// header's frozen identity when there has been none (goals/model-rebind.md §7).
+/// header's frozen identity when there has been none.
 ///
-/// The one answer to that question. A second freezing point is only safe while
-/// every reader agrees where to look, so nothing outside this function may ask
-/// `header.model_identity` what a session is running on — it answers what the
-/// session STARTED on, which is a different question and, after a rebind, a
-/// wrong answer to this one.
+/// The one answer to that question for a reader INSIDE a step, where every fact
+/// is committed. Nothing else may ask `header.model_identity` what a session
+/// runs on — that answers what it STARTED on, a different question. Outside a
+/// step, deposits count too: ask `scanSession`.
 pub const Identity = struct { profile: []const u8, identity: ModelDescriptor };
 
 pub fn effectiveIdentity(header: Header, events: []const Event) Identity {
@@ -202,12 +168,10 @@ pub fn effectiveIdentity(header: Header, events: []const Event) Identity {
 }
 
 /// Do these two name the same running model? The whole `Identity`, profile
-/// included — the descriptor says which model over which wire, and the profile
-/// says which credential reaches it, so two identities that differ only there
-/// are two different ways to be answered. Every "is this already what we run
-/// on" test asks this one, rather than picking the fields it happens to care
-/// about: the `Identity` is the unit that gets frozen, and a comparison that
-/// covers less of it makes a real change look like a no-op.
+/// included: the descriptor says which model over which wire, the profile says
+/// which credential reaches it. Every "is this already what we run on" test asks
+/// THIS one — a comparison covering less of the frozen unit makes a real change
+/// look like a no-op, and a no-op is silent.
 pub fn identityEqual(a: Identity, b: Identity) bool {
     return std.mem.eql(u8, a.profile, b.profile) and
         std.mem.eql(u8, a.identity.provider, b.identity.provider) and
@@ -228,17 +192,15 @@ fn lastRebindIndex(events: []const Event) ?usize {
 }
 
 /// The last `model_rebind`, or null when this session still runs on what its
-/// header froze — which is every session that never rebound, and every session
-/// written before rebinding existed.
+/// header froze.
 pub fn lastRebind(events: []const Event) ?Identity {
     const at = lastRebindIndex(events) orelse return null;
     const r = events[at].model_rebind;
     return .{ .profile = r.profile, .identity = r.identity };
 }
 
-/// How many events precede the identity in force — the index the projection
-/// stops replaying `reasoning` before (goals/model-rebind.md §3). Zero when the
-/// session never rebound, which is every session that existed before this did.
+/// How many events precede the identity in force — the index before which the
+/// projection stops replaying `reasoning`. Zero when the session never rebound.
 pub fn reasoningFloor(events: []const Event) usize {
     const at = lastRebindIndex(events) orelse return 0;
     return at + 1;
@@ -247,23 +209,20 @@ pub fn reasoningFloor(events: []const Event) usize {
 pub const Ledger = struct {
     alloc: std.mem.Allocator,
     /// Every byte an appended event owns. A ledger is append-only and released
-    /// whole, so its payloads have exactly one lifetime — the ledger's — and one
-    /// arena expresses that directly instead of a clone/free chain per event
-    /// shape. `append`'s snapshot contract is unchanged: what goes in is copied
-    /// here, and the caller's slices are free the moment it returns.
+    /// whole, so its payloads have exactly one lifetime and one arena expresses
+    /// it. `append` copies what it is given; the caller's slices are free the
+    /// moment it returns.
     arena: std.heap.ArenaAllocator,
     events: std.ArrayList(Event),
-    /// When set, every appended event is also persisted as one JSONL line to the
-    /// session file (DESIGN §3). A ledger created with `init` is pure memory (the
-    /// test/in-process shape); `createDurable` / `openDurable` add the backend.
+    /// When set, every appended event is also persisted as one JSONL line. A
+    /// ledger created with `init` is pure memory; `createDurable` /
+    /// `openDurable` add the backend.
     durable: ?Durable = null,
-    /// Delivery ids of inbox proposals already applied to this ledger (DESIGN
-    /// §3.4). A drained event persists its inbox filename(s) as `origin` or
-    /// `origins` on its JSONL line; this set is rebuilt from both on replay.
-    /// That makes inbox application EXACTLY-once: a crash between "append to
-    /// ledger" and "delete inbox file" leaves the file behind; the next drain
-    /// sees the origin already here and skips it. Never projected into PromptIR:
-    /// this is delivery bookkeeping, not model-visible state.
+    /// Delivery ids of inbox proposals already applied. A drained event persists
+    /// its inbox filename(s) as `origin` / `origins` on its line, and this set is
+    /// rebuilt from both on replay — which is what makes inbox application
+    /// EXACTLY-once: a crash between appending and deleting the inbox file leaves
+    /// the file behind, and the next drain skips it. Never projected.
     origins: std.StringHashMapUnmanaged(void) = .empty,
 
     pub fn init(alloc: std.mem.Allocator) Ledger {
@@ -282,12 +241,10 @@ pub const Ledger = struct {
 
     /// The only mutation. Appends one event to the end. No other write exists.
     ///
-    /// `append` takes a snapshot of the event payload. Callers may free, reset,
-    /// or reuse every slice passed in after this returns successfully; ledger
-    /// history remains stable because all nested bytes are ledger-owned. When the
-    /// ledger is durable, the event is persisted as one JSONL line before the call
-    /// returns; a persistence failure rewinds the in-memory append so memory and
-    /// file never diverge.
+    /// Takes a SNAPSHOT of the payload: callers may free or reuse every slice
+    /// passed in once this returns. When the ledger is durable the event is
+    /// persisted before the call returns, and a persistence failure rewinds the
+    /// in-memory append so memory and file never diverge.
     pub fn append(self: *Ledger, e: Event) !void {
         return self.appendInternal(e, &.{});
     }
@@ -356,9 +313,9 @@ pub const Ledger = struct {
     }
 };
 
-/// Deep-copy `e` into the ledger's arena. `a` is always `Ledger.arena`, which is
-/// why there is no unwind path here: a copy that fails half way leaves its
-/// finished pieces in the arena, and the arena is released as one.
+/// Deep-copy `e` into the ledger's arena. `a` is always `Ledger.arena`, hence no
+/// unwind path: a copy that fails half way leaves its pieces in the arena, which
+/// is released as one.
 fn cloneEvent(a: std.mem.Allocator, e: Event) !Event {
     return switch (e) {
         .user_text => |u| .{ .user_text = .{
@@ -427,24 +384,20 @@ fn cloneToolResults(a: std.mem.Allocator, results: []const ToolResultEntry) ![]c
     return owned;
 }
 
-// ── Durable session file (DESIGN §3.4) ──────────────────────────────────────
+// ── Durable session file ──────────────────────────────────────
 //
 // A session is one JSONL file: line 1 is the frozen header, every later line is
 // one `{"seq":n,...}` event. One file = one generation = one cache scope, so the
-// PromptIR stable-block prefix invariant is a filesystem property (a file only
-// grows). The header freezes the session composition (active extension versions
-// + the native tool selection), so any process that reopens the file rebuilds
-// the identical composition without re-scanning `current` or re-ranking usage.
+// prefix invariant is a filesystem property (a file only grows). The header
+// freezes the composition, so any process reopening the file rebuilds the
+// identical composition without re-scanning `current`.
 //
-// The file has exactly ONE writer, enforced by an exclusive advisory lock taken
-// atomically when the writer opens the file: a second writer's open fails fast
-// with `error.SessionBusy` rather than racing. The lock is held for the writer's
-// whole lifetime and released by the OS when the handle closes (so a crashed
-// writer leaves no stale lock). Every other process — a `nulya ext activate` in
-// the model's shell, a driver's `session append` — PROPOSES events through the
-// sibling inbox directory (below), and the writer appends them at its next step
-// boundary. Readers open the file read-only (no lock), so the lease never blocks
-// them. `persist`'s length guard stays as a second-layer assertion.
+// Exactly ONE writer, enforced by an exclusive advisory lock taken when the
+// writer opens the file: a second writer fails fast with `error.SessionBusy`
+// rather than racing, and the OS releases the lock when the handle closes.
+// Every other process PROPOSES events through the sibling inbox directory
+// (below), and the writer appends them at its next step boundary. Readers open
+// read-only and take no lock, so the lease never blocks them.
 
 /// A parent pointer for fork / compaction: the file and cut point a session
 /// branched from. Absent for a root session.
@@ -455,66 +408,55 @@ pub const ParentRef = struct {
 
 /// One member extension of a session, frozen: which immutable version this
 /// session composed. Reopening reads this exact version, never the live
-/// `current`. "Frozen" here is about the VERSION — it says nothing about whether
-/// any of the extension's tools take a native slot (that is `native_tools`).
+/// `current`. Says nothing about whether its tools take a native slot — that is
+/// `native_tools`.
 pub const ExtensionRef = struct {
     id: []const u8,
     version: []const u8,
-    /// Which frozen version of this package actually SERVES a tool call, when
-    /// that is not `version` itself: a session whose tools run on another
-    /// machine (DESIGN §8.2) needs the build for THAT machine's target, and a
-    /// compiled package's two builds are two versions of one package.
-    ///
-    /// Empty for every ordinary session — and for a data or script member, whose
-    /// identity does not depend on a target at all — so an old header reads back
-    /// exactly as it always did (`usage?` / `images` / `environment`, the same
-    /// discipline: an optional column, header `v` unchanged).
+    /// Which frozen version actually SERVES a tool call, when that is not
+    /// `version` itself: a session whose tools run on another machine needs the
+    /// build for THAT machine's target, and a compiled package's two builds are
+    /// two versions of one package. Empty for every ordinary session, and for
+    /// data / script members, whose identity does not depend on a target.
     exec_version: []const u8 = "",
 };
 
 /// The session composition frozen into the header.
 ///
-/// `active` is every MEMBER extension of this session at its frozen version —
-/// what was activated when the session began PLUS whatever `session new --with`
-/// brought in unactivated (DESIGN §14). The key name is a v1 wire leftover from
-/// when membership could only come from activation; it is the struct field name,
-/// so it is also the JSON key (`Header` is `std.json`-typed both ways), and
-/// renaming it would break every existing session file. Rename it when the
-/// header schema next changes version, not before.
+/// `active` is every MEMBER extension at its frozen version — what was activated
+/// when the session began plus whatever `session new --with` brought in. The
+/// name is a v1 wire leftover from when membership could only come from
+/// activation; the struct field name IS the JSON key, so renaming it would break
+/// every existing session file. Rename it at the next header version, not before.
 ///
-/// `native_tools` is the subset of stable tool ids exposed directly to the
-/// model this session (DESIGN §5.1).
+/// `native_tools` is the subset of stable tool ids exposed directly to the model.
 ///
-/// `prompts` is the per-session system prompt text handed to `session new
-/// --prompt <file>` — bytes, not a reference. Empty for every session that did
-/// not ask for one, which is why the field is optional-by-default rather than a
-/// header version bump.
+/// `prompts` is the per-session system prompt text from `session new --prompt`
+/// — bytes, not a reference.
 pub const FrozenComposition = struct {
     active: []const ExtensionRef = &.{},
     native_tools: []const []const u8 = &.{},
     prompts: []const InlinePrompt = &.{},
 };
 
-/// One system prompt frozen into the header by VALUE (DESIGN §3, §5).
+/// One system prompt frozen into the header by VALUE.
 ///
-/// Text whose lifetime is one session's has its home in the session file, the
-/// way `ModelDescriptor` does: a store reference would make resume depend on a
-/// shared artifact still being there (`ext prune` would break it) and a file
-/// path would drift. `source` is an opaque label the kernel only carries — it
-/// names the block in `PromptIR` and never means anything to the kernel; who
-/// wrote it decides what it says.
+/// Text whose lifetime is one session's lives in the session file: a store
+/// reference would make resume depend on a shared artifact still existing
+/// (`ext prune` would break it) and a path would drift. `source` is an opaque
+/// label the kernel only carries — it names the block in `PromptIR` and means
+/// nothing to the kernel.
 pub const InlinePrompt = struct {
     source: []const u8 = "",
     text: []const u8 = "",
 };
 
-/// The RESOLVED model identity frozen at session creation (DESIGN §3, physics
-/// §2/§5): config chooses the model when a session is created; config can never
-/// change the model of an existing session. On resume the writer reconstructs
-/// exactly this model, re-resolving only the credential from `api_key_env` in
-/// the environment — no secret is stored, and there is no silent fallback to a
-/// different provider. `provider == ""` marks a legacy header with no frozen
-/// identity (treated as scripted).
+/// The RESOLVED model identity frozen at session creation: config chooses the
+/// model when a session is created and can never change an existing session's.
+/// On resume the writer reconstructs exactly this model, re-resolving only the
+/// credential named by `api_key_env` — no secret is stored, and there is no
+/// silent fallback to a different provider. `provider == ""` marks a legacy
+/// header with no frozen identity (treated as scripted).
 pub const ModelDescriptor = struct {
     /// `"scripted"` | `"openai"` (the `config.ProviderKind` tag name).
     provider: []const u8 = "",
@@ -528,16 +470,15 @@ pub const ModelDescriptor = struct {
 
 /// Which nulya created a session — PROVENANCE ONLY, never enforcement.
 ///
-/// The kernel system prompt and the builtin tool definition are compile-time
+/// The kernel system prompt and the builtin tool definitions are compile-time
 /// constants of the BINARY, yet they enter every session's frozen model-visible
-/// state (DESIGN §5.1, §7.5). So upgrading nulya silently changes the frozen
-/// system prompt / `tools[]` of every existing session — the one hole in physics
-/// §2 that freezing composition into the header cannot close, because those
-/// bytes were never in the header. Recording them makes it VISIBLE: `version` is
-/// the build's version string (`build.zig.zon`), `kernel_hash` a digest over the
-/// kernel prompt plus every builtin definition (`composition.kernelHash`). A
-/// resume whose hash differs warns and runs; an empty stamp is a header written
-/// before this existed — unknown, and never a warning.
+/// state, so upgrading nulya changes them for every existing session — the one
+/// thing freezing the composition into the header cannot cover, since those
+/// bytes were never in it. Recording them makes it visible: `version` is the
+/// build's version string, `kernel_hash` a digest over the kernel prompt plus
+/// every builtin definition (`composition.kernelHash`). A resume whose hash
+/// differs warns and runs; an empty stamp is a header written before this
+/// existed — unknown, never a warning.
 pub const Stamp = struct {
     version: []const u8 = "",
     kernel_hash: []const u8 = "",
@@ -550,10 +491,12 @@ pub const Stamp = struct {
 /// future format as if it were this one.
 pub const format_version: u32 = 1;
 
-/// The first line of a session file. Its JSON shape IS this struct — encoded and
-/// decoded by `std.json` typed (de)serialization — so the wire format and the
-/// type cannot drift. Everything the model sees is a pure function of this
-/// header plus the appended events.
+/// The first line of a session file. Its JSON shape IS this struct — field names
+/// are the on-disk keys — so the format and the type cannot drift. Everything
+/// the model sees is a pure function of this header plus the appended events.
+///
+/// New facts are added as DEFAULTED fields, never a version bump: an old header
+/// then reads back exactly as it always did and `v` stays 1.
 pub const Header = struct {
     kind: []const u8 = "header",
     v: u32 = format_version,
@@ -566,28 +509,17 @@ pub const Header = struct {
     model_identity: ModelDescriptor = .{},
     /// WHERE this session's `shell` commands run: `""` = this host, `wsl`,
     /// `wsl:<distro>` (`environment.ExecTarget`'s spec), or a `remote:…` spec
-    /// (§8.2) that moves the whole workspace rather than just the command.
+    /// that moves the whole workspace rather than just the command.
     ///
-    /// Frozen for the same reason `model_identity` is, and not for cache
-    /// reasons — it never reaches the model's prompt. A transcript only means
-    /// something against the machine that produced it: paths, the platform the
-    /// model believes it is on, and which files a later step can still see all
-    /// come from here. A session that ran twenty steps inside a distro and
-    /// resumed on the host would be a different conversation wearing the same
-    /// id. Empty for every session that never asked, which is why this is a
-    /// defaulted field rather than a header version bump (DESIGN §3.4, §8).
+    /// Frozen because a transcript only means something against the machine that
+    /// produced it — paths, the platform the model believes it is on, and which
+    /// files a later step can still see all come from here. It never reaches the
+    /// model's prompt.
     environment: []const u8 = "",
     /// The absolute directory ON THAT MACHINE this session works in — set only
-    /// when `environment` names the remote backend (`remote:…`), where the
-    /// workspace itself lives elsewhere and "." has to mean something over
-    /// there. Empty for every other session, including every one written before
-    /// this existed, which is why it is a defaulted field and not a header
-    /// version bump — the same discipline `environment` and `usage` follow
-    /// (DESIGN §3.4, §8.1).
-    ///
-    /// Frozen for the same reason the target is: a transcript whose paths mean
-    /// one directory for twenty steps and another after a resume is two
-    /// conversations wearing one id.
+    /// when `environment` names the remote backend, where the workspace lives
+    /// elsewhere and "." has to mean something over there. Frozen for the same
+    /// reason the target is.
     remote_workspace: []const u8 = "",
     created: []const u8 = "",
     /// Which binary wrote this session (see `Stamp`). Provenance, not a gate.
@@ -623,12 +555,10 @@ const json_opts: std.json.ParseOptions = .{ .allocate = .alloc_always, .ignore_u
 const Durable = struct {
     io: std.Io,
     file: std.Io.File,
-    /// The writer lease: an exclusive advisory lock on the sibling `<stem>.lock`
-    /// file, held for this writer's whole lifetime and released by the OS when
-    /// the handle closes (so a crash leaves no stale lock). The lock lives on a
-    /// dedicated sidecar, never on the session file itself: on Windows a file's
-    /// own lock is mandatory and would block readers, so locking `<stem>.lock`
-    /// instead keeps `readHeader` / `events` tails unblocked.
+    /// The writer lease: an exclusive advisory lock on the sibling `<stem>.lock`,
+    /// held for this writer's whole lifetime and released by the OS when the
+    /// handle closes. It lives on a sidecar and never on the session file itself:
+    /// on Windows a file's own lock is mandatory and would block readers.
     lock_file: std.Io.File,
     /// Byte offset where the next line is written (end of file).
     end: u64,
@@ -644,10 +574,9 @@ const Durable = struct {
         const line = try encodeEventLineOrigins(alloc, e, seq, origins);
         defer alloc.free(line);
         // No concurrency check here: the exclusive `<id>.lock` lease is the sole
-        // single-writer primitive, so no other cooperating writer can be at this
-        // offset. A non-cooperating external edit is a corruption concern, caught
-        // by replay / seq / JSON validation on the next open — not something an
-        // extra `length()` syscall per append should half-guard against.
+        // single-writer primitive, so no cooperating writer can be at this
+        // offset. An external edit is corruption, caught by replay / seq / JSON
+        // validation on the next open.
         try self.file.writePositionalAll(self.io, line, self.end);
         self.end += line.len;
     }
@@ -824,8 +753,7 @@ pub fn encodeHeaderLine(alloc: std.mem.Allocator, hdr: Header) ![]u8 {
 }
 
 /// Parse one header LINE (the file's first line). `readHeader` is the usual
-/// entry point; this is public for readers that already hold the file's bytes
-/// and would otherwise read it twice (`nulya session list`).
+/// entry point; this is public for readers that already hold the file's bytes.
 pub fn parseHeaderLine(gpa: std.mem.Allocator, line: []const u8) !OwnedHeader {
     const parsed = std.json.parseFromSlice(Header, gpa, std.mem.trim(u8, line, " \t\r\n"), json_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -844,8 +772,8 @@ pub fn encodeEventLine(alloc: std.mem.Allocator, e: Event, seq: u64) ![]u8 {
     return encodeEventLineOrigins(alloc, e, seq, &.{});
 }
 
-/// Persist one or more inbox delivery ids. Keep the old singular field for one
-/// proposal so existing session lines stay byte-for-byte stable.
+/// Persist one or more inbox delivery ids. One id keeps the singular `origin`
+/// field, so ordinary lines stay byte-for-byte stable.
 pub fn encodeEventLineOrigins(alloc: std.mem.Allocator, e: Event, seq: u64, origins: []const []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
@@ -867,15 +795,16 @@ pub fn encodeEventLineOrigins(alloc: std.mem.Allocator, e: Event, seq: u64, orig
 
 /// Encode just the event body (kind + payload), without the `seq` envelope. Used
 /// for inbox event files, where `seq` is assigned on drain.
+///
+/// One rule runs through every optional field below: it is written ONLY when it
+/// has something to say, so a line that predates the field keeps its exact
+/// shape and reads back identically.
 pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
     try jw.objectField("kind");
     switch (e) {
         .user_text => |u| {
             try jw.write("user_text");
             try writeField(jw, "text", u.text);
-            // Written only when the turn carries images, so a text-only line
-            // keeps its pre-existing shape byte-for-byte (the `usage`
-            // discipline, one column further).
             if (u.images.len != 0) {
                 try jw.objectField("images");
                 try jw.write(u.images);
@@ -883,9 +812,8 @@ pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
         },
         .assistant => |as| {
             try jw.write("assistant");
-            // Written only when present, so lines without reasoning keep their
-            // pre-existing shape byte-for-byte. Carried as a JSON *string* (the
-            // provider's array, escaped): the ledger stores it, never parses it.
+            // A JSON *string* (the provider's array, escaped): stored, never
+            // parsed.
             if (as.reasoning.len != 0) try writeField(jw, "reasoning", as.reasoning);
             try writeField(jw, "text", as.text);
             try jw.objectField("calls");
@@ -898,16 +826,12 @@ pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
                 try jw.endObject();
             }
             try jw.endArray();
-            // Written only when the provider reported a cost, so a line without
-            // usage keeps its pre-existing shape byte-for-byte.
             if (as.usage) |u| {
                 try jw.objectField("usage");
                 try jw.write(u);
             }
-            // Same discipline, one step further: written only when the SHAPE
-            // cannot already say it. `end_turn` / `tool_use` are `calls.len == 0`
-            // / `!= 0`, so every line that ended normally keeps its pre-existing
-            // shape byte-for-byte; only `max_tokens` / `other` need the field.
+            // Written only when the SHAPE cannot already say it: `end_turn` /
+            // `tool_use` are `calls.len == 0` / `!= 0`.
             switch (as.stop_reason) {
                 .max_tokens, .other => try writeField(jw, "stop_reason", @tagName(as.stop_reason)),
                 .end_turn, .tool_use => {},
@@ -968,37 +892,26 @@ pub const WireEvent = struct {
     origins: ?[]const []const u8 = null,
     kind: []const u8,
     text: ?[]const u8 = null,
-    /// Images inlined with a user turn (see `Event.user_text`); absent on lines
-    /// written before the field existed, and on turns without any. The domain
-    /// type is the wire type — its two field names ARE the JSON keys — exactly
-    /// as `usage` is.
+    /// Images inlined with a user turn. For these domain types the wire type IS
+    /// the domain type: their field names are the JSON keys.
     images: ?[]const Image = null,
-    /// Assistant reasoning items (see `Event.assistant.reasoning`); absent on
-    /// lines written before the field existed, and on turns without any.
     reasoning: ?[]const u8 = null,
-    /// What the step cost (see `Event.assistant.usage`); absent on lines written
-    /// before the field existed, and on turns the provider priced at nothing.
     usage: ?Usage = null,
-    /// Why the turn stopped (see `Event.assistant.stop_reason`); absent when the
-    /// turn's shape already says it (`end_turn` / `tool_use`) and on lines
-    /// written before the field existed.
+    /// Absent when the turn's shape already says it (`end_turn` / `tool_use`).
     stop_reason: ?[]const u8 = null,
-    /// LEGACY INPUT ONLY — the boolean `stop_reason` replaced. It is never
-    /// written again; a line carrying `"truncated":true` and no `stop_reason`
-    /// reads back as `.max_tokens`, which is exactly what it meant.
+    /// LEGACY INPUT ONLY — what the `stop_reason` field replaced. Never written
+    /// again; `"truncated":true` with no `stop_reason` reads back as
+    /// `.max_tokens`, which is what it meant.
     truncated: bool = false,
     calls: ?[]const WireCall = null,
     results: ?[]const ToolResultEntry = null,
     id: ?[]const u8 = null,
     version: ?[]const u8 = null,
     /// A finished background task's full name `<session-id>/t<N>` and the exit
-    /// code its supervisor observed (see `Event.task_finished`); absent on every
-    /// other kind.
+    /// code its supervisor observed.
     task: ?[]const u8 = null,
     exit_code: ?u8 = null,
-    /// The profile name and resolved descriptor of a `model_rebind` (see
-    /// `Event.model_rebind`); absent on every other kind. The domain type is
-    /// the wire type, exactly as `usage` and `images` are.
+    /// The profile name and resolved descriptor of a `model_rebind`.
     profile: ?[]const u8 = null,
     identity: ?ModelDescriptor = null,
 };
@@ -1078,15 +991,14 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
     return error.CorruptLedger;
 }
 
-// ── Cross-process inbox (DESIGN §3.4) ───────────────────────────────────────
+// ── Cross-process inbox ───────────────────────────────────────
 //
 // The session file has one writer. Any other process proposes an event by
 // depositing one `<name>.json` file (an event body, no `seq`) into the sibling
-// directory `<stem>.inbox/`; the writer drains the inbox at its next step
-// boundary — after repairing any interrupted batch, before the model runs — so
-// a drained event never lands inside a tool batch and the prompt prefix stays
-// append-only. Deposits are atomic (write `.tmp`, rename), so a drain never
-// reads a half-written body.
+// directory `<stem>.inbox/`; the writer drains it at its next step boundary —
+// after repairing any interrupted batch, before the model runs — so a drained
+// event never lands inside a tool batch. Deposits are atomic (write `.tmp`,
+// rename), so a drain never reads a half-written body.
 
 /// `<dir>/<stem><suffix>` for a session file path: the naming rule for every
 /// per-session sibling (`.inbox`, `.cancel`). Purely lexical, so it preserves
@@ -1104,23 +1016,19 @@ pub fn inboxPath(alloc: std.mem.Allocator, session_path: []const u8) ![]u8 {
 }
 
 /// Deposit `e` as `<inbox>/<name>.json`, creating the inbox if needed. `base` is
-/// the directory `session_path` is relative to. `name` must be filesystem-safe:
-/// a depositor wanting idempotence picks a deterministic name (capability notes
-/// use `note-<id>-<version>`); one wanting a distinct event every time picks a
-/// fresh one. Two deposits with the same name collapse to one event.
+/// the directory `session_path` is relative to.
 ///
-/// A depositor wanting a distinct event every time takes its name from
-/// `freshDeliveryName` rather than inventing one.
+/// `name` is the exactly-once key and must be filesystem-safe: two deposits
+/// under one name collapse into one event. A depositor wanting idempotence picks
+/// a deterministic name (capability notes use `note-<id>-<version>`); one
+/// wanting a distinct event every time takes it from `freshDeliveryName`.
 ///
-/// An event too large to be read back is refused HERE (`InboxEventTooLarge`),
-/// before a byte is written: see `max_inbox_event_bytes`.
+/// An event too large to be read back is refused HERE
+/// (`InboxEventTooLarge`), before a byte is written.
 ///
-/// Deposits under the inbox's own lease (`acquireDepositLease`) — that is what
-/// makes this the entry point a NEW depositor should reach for: the rule is the
-/// inbox's, not any one command's, so obeying it cannot depend on remembering
-/// to. A caller already holding the lease across a read-then-deposit calls
-/// `depositEventLeased` instead (taking it twice would deadlock against
-/// itself).
+/// Takes the inbox's lease, so a new depositor gets the rule without having to
+/// remember it. A caller already holding the lease across a read-then-deposit
+/// calls `depositEventLeased` instead (taking it twice deadlocks).
 pub fn depositEvent(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8, name: []const u8, e: Event) !void {
     var lease = try acquireDepositLease(alloc, io, base, session_path, .block);
     defer lease.close(io);
@@ -1134,33 +1042,27 @@ pub fn depositEvent(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, sess
 /// "somebody is depositing right now" is an answer, not a queue to join.
 pub const DepositWait = enum { block, fail_fast };
 
-/// The exclusive right to deposit into this session's inbox.
-///
-/// Held by every writer of the inbox, for two rules that are the inbox's own
-/// rather than any one command's:
+/// The exclusive right to deposit into this session's inbox. Held by EVERY
+/// writer of the inbox, for two rules:
 ///
 ///   * A gate that READS the session and then deposits must be one act.
 ///     `append --image` refuses a picture the model in force cannot see, and
 ///     `rebind` refuses a model that cannot see the pictures already here; run
-///     at the same time, both read the old state, both pass, and the pair they
-///     exist to refuse is exactly what lands. The same goes for a delivery id,
-///     which is minted from what is already waiting (`freshDeliveryName`).
+///     concurrently, both read the old state, both pass, and exactly the pair
+///     they exist to refuse lands. Same for a delivery id, which is minted from
+///     what is already waiting (`freshDeliveryName`).
 ///   * A session may not be taken away between a depositor's check and its
-///     write. `pruneSession` removes a session only while holding this and the
-///     writer lease, so "nothing holds this" stays true for as long as it takes
-///     to act on it; every deposit re-checks the session under the lease
-///     (`depositEventLeased`), which closes the window from the other side.
+///     write. `pruneSession` removes one only while holding this and the writer
+///     lease; every deposit re-checks the session under this lease
+///     (`depositEventLeased`), closing the window from the other side.
 ///
-/// It lives INSIDE the inbox, where the deposits go and where the agent
-/// package's mailbox keeps the same lease for the same reason. Neither the drain
-/// nor a scan looks at anything but `*.json` there, and this is emphatically NOT
-/// the session's `.lock`: that one belongs to `step`, and every gate above has
-/// to work while a step is running.
+/// It lives INSIDE the inbox, and is emphatically NOT the session's `.lock`:
+/// that one belongs to `step`, and every gate above must work while a step runs.
+/// Neither the drain nor a scan looks at anything but `*.json` there.
 ///
-/// Lock order: nothing takes the writer lease and then this one (`step` never
-/// deposits), and `pruneSession` — the one place both are held — takes this one
-/// first and the writer lease non-blocking, so neither direction can wait on
-/// the other.
+/// LOCK ORDER: nothing takes the writer lease and then this one (`step` never
+/// deposits); `pruneSession`, the one place both are held, takes this one first
+/// and the writer lease non-blocking.
 pub fn acquireDepositLease(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1190,9 +1092,8 @@ fn depositLockPath(alloc: std.mem.Allocator, session_path: []const u8) ![]u8 {
 
 /// `depositEvent` for a caller that ALREADY holds the deposit lease.
 pub fn depositEventLeased(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8, name: []const u8, e: Event) !void {
-    // Under the lease, so it is not a guess: `pruneSession` cannot remove a
-    // session between here and the rename below, and one already removed gets
-    // no durable fact deposited for a reader that will never exist.
+    // Under the lease, so it is not a guess: `pruneSession` cannot remove the
+    // session between here and the rename below.
     base.access(io, session_path, .{}) catch return error.NoSuchSession;
 
     const inbox = try inboxPath(alloc, session_path);
@@ -1216,53 +1117,39 @@ pub fn depositEventLeased(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir
     try base.rename(tmp_rel, base, final_rel, io);
 }
 
-/// The largest one deposited event may be, encoded — the size of the biggest
-/// legal user turn, not a read buffer that happened to be big enough.
+/// The largest one deposited event may be, encoded.
 ///
-/// It is enforced at the DEPOSIT (`depositEvent` refuses), because the failure
-/// it prevents is not a rejected command: an event accepted here and too large
-/// to read back is a durable fact that stops the session dead. Every step
-/// boundary re-reads the inbox, so that one file makes `drainInbox` fail
-/// forever — worse than the provider error the gates upstream are there to turn
-/// into a clean refusal. One number, enforced where events are written and used
-/// where they are read (`drainInbox`, `scanSession`).
+/// The invariant it holds: whatever the inbox ACCEPTS, a step boundary can read
+/// back. Enforced at the deposit, because an event accepted and then too large
+/// to read is a durable fact that makes every later `drainInbox` fail. One
+/// number, enforced where events are written and used where they are read
+/// (`drainInbox`, `scanSession`).
 ///
 /// Sized against what the shell already accepts for one turn: an 8 MiB `--file`
 /// text plus several images, each up to 5 MiB raw and ~4/3 that as base64.
 pub const max_inbox_event_bytes: usize = 32 << 20;
 
-/// A delivery id for one more fact. Two properties, both load-bearing:
+/// A delivery id for one more fact. Two load-bearing properties:
 ///
-/// **Distinct on every call**, because the name IS the exactly-once key — so
-/// choosing it is choosing between "the same fact again" and "another fact": a
-/// capability note names itself `note-<id>-<version>` so a redeposit collapses
-/// into the one event, while a user turn and a rebind are new facts every time
-/// and must never collapse. Getting that wrong is silent: the second deposit is
-/// deleted at the next drain and never reaches the ledger. Distinct by
-/// construction only within one inbox: the stamp is stepped past what is
-/// WAITING there, and a name already drained is gone from the directory.
-/// Against a drained one it is a collision-resistance argument (a 128-bit
-/// nonce), not a proof.
+/// **Distinct on every call**, because the name IS the exactly-once key. Getting
+/// it wrong is silent — a colliding second deposit is deleted at the next drain
+/// and never reaches the ledger. Distinct by CONSTRUCTION only within one inbox
+/// (the stamp steps past what is still waiting there); against an
+/// already-drained name it is a 128-bit nonce's collision resistance, not a
+/// proof.
 ///
-/// **Sorting after every name still waiting in this inbox under the same
-/// prefix**, because `drainInbox` applies files in filename order — the name is
-/// not only an identity, it is the queue position. That set is exactly the one
-/// whose order carries meaning: two queued messages merge into one turn in this
-/// order, and of two waiting rebinds the last one is what the session ends on.
-/// A wall clock alone does not give it (it can repeat a value or step
-/// backwards, and then the random tail decides), so the mint reads the inbox
-/// and steps past the newest stamp it finds there. Already-committed events
-/// need no such care: anything still waiting is applied after all of them, and
-/// both `drainInbox` and `scanSession` are built on that.
+/// **Sorts after every name still waiting in this inbox under the same prefix**,
+/// because `drainInbox` applies files in filename order: the name is also the
+/// QUEUE POSITION. That set is exactly the one whose order means something (two
+/// queued messages merge into one turn in this order; of two waiting rebinds the
+/// last is what the session ends on). A wall clock alone does not give it — it
+/// can repeat or step backwards, and then the random tail decides — so the mint
+/// reads the inbox and steps past the newest stamp there. Committed events need
+/// no such care: anything still waiting is applied after all of them.
 ///
-/// Not defended: two mints racing each other (the two commands where that would
-/// matter, `append --image` and `rebind`, serialize on the inbox's deposit
-/// lease — `acquireDepositLease`), and order ACROSS prefixes, which is the
-/// prefix's order rather than time's and is cosmetic here (a rebind is not a
-/// turn at all).
-///
-/// Why these scopes and not a stronger uniqueness proof or a separate ordering
-/// channel: goals/model-rebind.md §8, §9, §10.
+/// NOT defended: two mints racing (the commands where that matters serialize on
+/// the deposit lease) and order ACROSS prefixes (cosmetic — a rebind is not a
+/// turn).
 pub fn freshDeliveryName(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1286,23 +1173,21 @@ pub fn freshDeliveryName(
     });
 }
 
-/// The widest stamp the name's fixed-width field can hold. Nanoseconds reach it
-/// in the year 2286; a name beyond it could only be planted by hand, and all it
-/// costs is the ordering step above (the id is still distinct).
+/// The widest stamp the name's fixed-width field can hold (nanoseconds reach it
+/// in 2286). A name beyond it costs only the ordering step above; the id is
+/// still distinct.
 const max_stamp: u64 = 9_999_999_999_999_999_999;
 
 /// True for exactly the inbox entries that count as one deposited fact: a
-/// `.json` file. The lease file (`.deposit.lock`) and anything else living
-/// alongside the deposits is not this — `drainInbox`, `scanInbox` and
-/// `latestWaitingStamp` all filter on it.
+/// `.json` file. The lease file and anything else alongside the deposits is not
+/// — every reader of the inbox filters on this.
 fn isInboxDeposit(kind: anytype, name: []const u8) bool {
     return kind == .file and std.mem.endsWith(u8, name, ".json");
 }
 
 /// The newest stamp among the names this prefix already has waiting, or null
-/// when the inbox holds none (or does not exist). A name this cannot read a
-/// stamp out of is skipped: it is either a foreign name or one from a shape
-/// this function did not write, and neither is something to order against.
+/// when the inbox holds none. A name with no readable stamp is skipped: it is
+/// foreign, and not something to order against.
 fn latestWaitingStamp(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1327,9 +1212,7 @@ fn latestWaitingStamp(
     return newest;
 }
 
-/// Whether a drainable event is waiting in this session's inbox. Only `*.json`
-/// counts — the directory also holds the deposit lease, which is not a fact
-/// about the session (`acquireDepositLease`).
+/// Whether a drainable event is waiting in this session's inbox.
 pub fn inboxHoldsDeposit(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) !bool {
     const inbox = try inboxPath(alloc, session_path);
     defer alloc.free(inbox);
@@ -1347,18 +1230,16 @@ pub fn inboxHoldsDeposit(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir,
 
 /// How much of a session `pruneSession` may take away.
 pub const PruneOptions = struct {
-    /// Remove a session that HOLDS something: events recorded in its ledger,
-    /// deposits waiting in its inbox, or both. It lifts exactly the refusals
-    /// that are about WHAT THIS SESSION HOLDS; the ones about who is holding it
-    /// right now (a step writing it, a deposit in flight) are not a caller's to
-    /// override, because they are not judgments — they are locks.
+    /// Remove a session that HOLDS something: recorded events, waiting
+    /// deposits, or both. It lifts only the refusals about what the session
+    /// holds; the ones about who holds it right now (a step, a deposit in
+    /// flight) are locks, not judgments, and cannot be overridden.
     force: bool = false,
 };
 
 /// What `pruneSession` took away, for a caller that has to say so out loud.
 pub const PruneReport = struct {
-    /// Events recorded in the ledger. The header line is not one of them: a
-    /// header with no events is not a ledger, it is a name.
+    /// Events recorded in the ledger, not counting the header line.
     events: usize,
     /// Deposits waiting in the inbox that no step ever drained.
     deposits: usize,
@@ -1368,32 +1249,22 @@ pub const PruneReport = struct {
 /// and every sibling that is part of it (`.cancel`, both lease files, the inbox)
 /// — or refuse and leave every byte where it is.
 ///
-/// The one primitive that REMOVES a session, and it lives here rather than in a
-/// command because what it has to know is the inbox's and the ledger's own:
-/// which files constitute a session, and which two facts forbid taking it away.
-/// Both of those facts are LOCKS — a step writing it, a deposit in flight — and
-/// a lock can only be answered by taking it, not by looking at it. A caller that
-/// probes instead (is there a lock file? can I read byte 0 of it?) is guessing,
-/// and its guess is wrong exactly when it matters: while another process sits
-/// between its own check and its deposit. Here every check and the removal
-/// happen under BOTH leases, so "nothing holds this" stays true for as long as
-/// it takes to act on it — and the inbox lease it takes is held by every
-/// depositor there is (`acquireDepositLease`), not an agreement between two
-/// commands: a supervisor delivering a task report and an activation depositing
-/// a capability note are as much a reason to leave a session alone as a queued
-/// turn is.
+/// The two facts that forbid removal are LOCKS (a step writing it, a deposit in
+/// flight), and a lock can only be answered by TAKING it: a caller that probes
+/// instead guesses wrong exactly when it matters, while another process sits
+/// between its own check and its deposit. So every check and the removal happen
+/// under BOTH leases, and the inbox lease is the one every depositor takes — a
+/// supervisor delivering a task report is as much a reason to leave a session
+/// alone as a queued turn is.
 ///
-/// What is NOT here, deliberately: which sessions deserve removing (a judgment,
-/// so it stays with the caller, which names one id), and anything outside the
-/// session's own files — the scratch tree, the journals. Journal rows about a
-/// pruned session simply stay: "no row = unknown" is already the discipline
-/// (§3.3), and a row is evidence about something that happened, not part of the
-/// session file.
+/// NOT here: which sessions deserve removing (a judgment; the caller names one
+/// id), and anything outside the session's own files. Journal rows about a
+/// pruned session stay — "no row = unknown" is the discipline, and a row is
+/// evidence about something that happened.
 ///
-/// Refusals, each one a distinct error so a caller can say which: `NoSuchSession`
-/// (nothing here), `SessionBusy` (a step holds the writer lease), `DepositInFlight`
-/// (somebody is depositing — an answer, not a queue to join), and, unless
-/// `force`, `HasEvents` and `HoldsDeposits`.
+/// Refusals are distinct errors so a caller can say which: `NoSuchSession`,
+/// `SessionBusy` (a step holds the writer lease), `DepositInFlight`, and —
+/// unless `force` — `HasEvents` and `HoldsDeposits`.
 pub fn pruneSession(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1417,10 +1288,9 @@ pub fn pruneSession(
     var writer_open = true;
     defer if (writer_open) writer.close(io);
 
-    // Asked again under the leases: another prune could have finished between
-    // the answer above and this one, and taking the deposit lease recreated the
-    // inbox it had just removed. Best effort on the way back out, because there
-    // is nothing left to be careful about — the session is already gone.
+    // Asked again under the leases: another prune could have finished in
+    // between, and taking the deposit lease recreated the inbox it just removed.
+    // Best effort on the way out — the session is already gone.
     base.access(io, session_path, .{}) catch {
         writer.close(io);
         writer_open = false;
@@ -1449,10 +1319,10 @@ pub fn pruneSession(
         if (names.len != 0) return error.HoldsDeposits;
     }
 
-    // The session file first: its absence is what every other process reads as
-    // "gone" (both depositors re-check it under the lease this still holds).
-    // Then each lease is closed before its own file is removed — Windows will
-    // not unlink a file that is open, and here the opener is us.
+    // The session file FIRST: its absence is what every other process reads as
+    // "gone", and depositors re-check it under the lease this still holds. Then
+    // each lease is closed before its own file is removed — Windows will not
+    // unlink an open file, and here the opener is us.
     try base.deleteFile(io, session_path);
     try deleteSibling(alloc, io, base, session_path, ".cancel");
     writer.close(io);
@@ -1465,9 +1335,9 @@ pub fn pruneSession(
     return .{ .events = events, .deposits = names.len };
 }
 
-/// Remove the deposit lock, the named deposits (the ones this prune counted),
-/// and then the inbox directory itself — which goes only if it is empty, since
-/// anything else in there is something this prune never accounted for.
+/// Remove the deposit lock, the deposits this prune counted, and then the inbox
+/// directory — which goes only if empty, since anything else in there is
+/// something this prune never accounted for.
 fn removeInbox(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1503,10 +1373,9 @@ fn deleteIfPresent(io: std.Io, base: std.Io.Dir, path: []const u8) !void {
 }
 
 /// Every deposited `.json` in this inbox, sorted in the order `drainInbox`
-/// applies them — lexical by filename, which is the queue position
-/// (`freshDeliveryName`). A missing inbox directory reads as empty, not an
-/// error. Names are allocated with `alloc`: a plain allocator's caller frees
-/// each name and the returned slice, an arena's caller lets `deinit` do it.
+/// applies them — lexical by filename, which is the queue position. A missing
+/// inbox directory reads as empty, not an error. Names are allocated with
+/// `alloc`; the caller frees each name and the slice (or passes an arena).
 fn listInboxDeposits(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) ![][]u8 {
     const inbox = try inboxPath(alloc, session_path);
     defer alloc.free(inbox);
@@ -1545,13 +1414,13 @@ fn stampOf(name: []const u8, prefix: []const u8) ?u64 {
 }
 
 /// Drain every deposited `.json` in filename order. Consecutive user messages
-/// are one delivery batch: the model receives one user turn with texts separated
-/// by a blank line and all images retained in FIFO order. Non-user facts remain
-/// separate events and delimit batches.
+/// become ONE delivery batch: one user turn, texts separated by a blank line,
+/// images in FIFO order. Non-user facts stay separate events and delimit
+/// batches.
 ///
-/// Application remains EXACTLY-once: a merged line persists every source
-/// filename in `origins`, so a crash after append but before any delete makes a
-/// reopen skip every member of that batch.
+/// EXACTLY-once holds through merging: the line persists every source filename
+/// in `origins`, so a crash after append but before any delete makes a reopen
+/// skip every member of that batch.
 pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io.Dir, session_path: []const u8) !void {
     const inbox = try inboxPath(alloc, session_path);
     defer alloc.free(inbox);
@@ -1629,21 +1498,19 @@ fn flushInboxUsers(
 }
 
 /// What a session on disk will run on at its NEXT step, for a reader that is
-/// not the writer (goals/model-rebind.md §7).
+/// not the writer.
 ///
-/// `effectiveIdentity` answers the same question for the writer INSIDE a step,
-/// where every fact is already committed. Outside it there is a third place an
-/// identity can be: the inbox. A deposited `model_rebind` is as decided as an
-/// appended one — nothing can take it back, and the very next step boundary
-/// applies it — so a reader that stops at the committed events answers with a
-/// model this session is about to stop running on. Every such reader (the
+/// `effectiveIdentity` answers the same question INSIDE a step, where every fact
+/// is committed. Outside one there is a third place an identity can be: the
+/// inbox. A deposited `model_rebind` is as decided as an appended one — the very
+/// next step boundary applies it — so a reader stopping at the committed events
+/// answers with a model the session is about to leave. Every such reader (the
 /// vision gates, the rebind no-op, what a fork continues on) asks HERE.
 ///
-/// It does not open the ledger: `openDurable` takes the writer lease, and each
-/// of those readers must work while a step is running (`session append` and
-/// `session rebind` both deposit for exactly that reason, DESIGN §3.4). So it
-/// reads bytes and honours the same crash-tail rule replay does. Being
-/// concurrent with the writer is what shapes the rest — see `scanSession`.
+/// It does not open the ledger: `openDurable` takes the writer lease, and these
+/// readers must work while a step is running. So it reads bytes and honours the
+/// same crash-tail rule replay does; being concurrent with the writer shapes the
+/// rest (see `scanSession`).
 pub const SessionScan = struct {
     arena: std.heap.ArenaAllocator,
     /// The last rebind this session has been told about, committed or pending;
@@ -1671,16 +1538,14 @@ pub const SessionScan = struct {
         self.arena.deinit();
     }
 
-    /// The cheap pre-filter both passes share: return the decoded line, or null
-    /// when it cannot say anything this scan cares about. A body it cannot
-    /// decode is skipped rather than fatal — these are gates, and the writer is
-    /// the one that gets to declare a ledger corrupt. Images are folded in here
-    /// because they are the same question in both passes: they only ever
-    /// accumulate, and either pass may be the one that sees them.
+    /// The pre-filter both passes share: the decoded line, or null when it says
+    /// nothing this scan cares about. An undecodable body is SKIPPED rather than
+    /// fatal — only the writer gets to declare a ledger corrupt. Images fold in
+    /// here because they only accumulate, so either pass may be the one to see
+    /// them.
     fn look(self: *SessionScan, a: std.mem.Allocator, body: []const u8) ?WireEvent {
         // The substring tests keep a gate from decoding a whole transcript; the
-        // decoded `kind` is what decides (the same discipline `session list`
-        // follows).
+        // decoded `kind` is what decides.
         const may_be_rebind = std.mem.indexOf(u8, body, "\"kind\":\"model_rebind\"") != null;
         const may_have_images = !self.has_images and std.mem.indexOf(u8, body, "\"images\":") != null;
         if (!may_be_rebind and !may_have_images) return null;
@@ -1703,9 +1568,8 @@ pub const SessionScan = struct {
     fn observeCommitted(self: *SessionScan, a: std.mem.Allocator, body: []const u8) void {
         const line = self.look(a, body) orelse return;
         self.committed = identityOfLine(line);
-        // The same fact, seen twice: this line IS the deposit the inbox pass
-        // read, drained between the two passes. Knowing that is what lets the
-        // ledger speak again — see `scanSession`.
+        // The same fact seen twice: this line IS the deposit the inbox pass
+        // read, drained between the two passes.
         if (self.pending) |p| {
             if (line.origin) |o| {
                 if (std.mem.eql(u8, o, p.name)) self.pending_drained = true;
@@ -1723,27 +1587,23 @@ pub fn scanSession(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, sessi
     errdefer scan.arena.deinit();
     const a = scan.arena.allocator();
 
-    // The INBOX first and the ledger second, which is the opposite of the order
-    // the drain applies them in — because a drain moves an event by appending it
-    // to the ledger and THEN deleting its file. A reader that looked at the
-    // ledger first and the inbox second could see a fact in NEITHER place:
+    // The INBOX first and the ledger second — the opposite of the order the
+    // drain applies them in, because a drain appends to the ledger and THEN
+    // deletes the file. Ledger-first would let a fact be in NEITHER pass:
     // committed just after the ledger was read, deleted just before the inbox
-    // was listed. Read this way round, every fact decided before the scan began
-    // is in at least one of the two passes.
+    // was listed. This way round, every fact decided before the scan began shows
+    // up in at least one pass.
     try scanInbox(&scan, a, io, base, session_path);
     try scanLedger(&scan, a, io, base, session_path);
 
-    // Which of the two answers is the next step's. A file still waiting is
-    // applied AFTER everything already committed, so it wins — but only if it is
-    // still genuinely waiting. That caveat is the whole subtlety: the inbox pass
-    // reads files one at a time, so a drain running alongside it can commit and
-    // delete a LATER deposit between two of those reads, leaving this scan
-    // holding an earlier one and unable to see the later one anywhere it looked.
-    // Answering "pending wins" flatly would then name a model that is already
-    // two facts out of date. The deposit's own delivery id settles it: if the
-    // ledger carries it as an `origin`, the drain has been through here and its
-    // last committed rebind is the newer truth (that is also, for free, the
-    // right answer for a file left behind by a crash between append and delete).
+    // A file still waiting is applied AFTER everything committed, so it wins —
+    // but only while it is still genuinely waiting. The inbox pass reads files
+    // one at a time, so a concurrent drain can commit AND delete a LATER deposit
+    // between two of those reads, leaving this scan holding an earlier one and
+    // blind to the later one. The deposit's own delivery id settles it: if the
+    // ledger carries it as an `origin`, the drain has been through and its last
+    // committed rebind is the newer truth (also the right answer for a file left
+    // behind by a crash between append and delete).
     const pending_wins = scan.pending != null and !scan.pending_drained;
     scan.rebound = if (pending_wins) scan.pending.?.id else scan.committed;
     return scan;
@@ -1949,9 +1809,8 @@ test "a header from a future ledger version is refused, not read as v1" {
     try std.testing.expectEqual(format_version, ours.value.v);
 }
 
-/// How many events `writeSampleEvents` writes — a name so the round-trip tests
-/// below say "all of them" instead of restating a number that changes whenever
-/// the alphabet grows one more kind.
+/// How many events `writeSampleEvents` writes, so the round-trip tests below
+/// say "all of them" rather than restating a number.
 const sample_event_count = 5;
 
 fn writeSampleEvents(l: *Ledger) !void {
@@ -1994,9 +1853,9 @@ test "the model a session runs on is the last rebind, or the header when there i
 }
 
 test "a reader outside the step sees the rebind that is still in the inbox" {
-    // goals/model-rebind.md §7: a deposited rebind is as decided as an appended
-    // one — the next step boundary applies it — so a gate that stopped at the
-    // committed events would judge against a model already on its way out.
+    // A deposited rebind is as decided as an appended one — the next step
+    // boundary applies it — so a gate stopping at the committed events would
+    // judge against a model already on its way out.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2017,10 +1876,10 @@ test "a reader outside the step sees the rebind that is still in the inbox" {
         try std.testing.expect(!scan.has_images);
     }
 
-    // Two more, deposited and not yet drained. The drain applies files in
-    // filename order, so the last name is the one in force — the names here are
-    // spelled out rather than minted, because the RULE under test is the order
-    // the drain reads them in, not how well a clock separates two calls.
+    // Two more, deposited and not yet drained: the drain applies files in
+    // filename order, so the last name is the one in force. Names are spelled
+    // out rather than minted — the rule under test is the drain's order, not how
+    // well a clock separates two calls.
     try depositEvent(alloc, io, tmp.dir, spath, "rebind-0001", .{ .model_rebind = .{ .profile = "p", .identity = .{ .provider = "openai", .model = "pending-1" } } });
     try depositEvent(alloc, io, tmp.dir, spath, "rebind-0002", .{ .model_rebind = .{ .profile = "p", .identity = .{ .provider = "openai", .model = "pending-2" } } });
     try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{
@@ -2042,11 +1901,9 @@ test "a reader outside the step sees the rebind that is still in the inbox" {
 }
 
 test "a rebind still waiting outranks one already committed" {
-    // `scanSession` reads the inbox BEFORE the ledger so the drain cannot move
-    // an event out from under it, which puts the two passes in the opposite
-    // order from the one they are applied in. This is the rule that repairs
-    // that: what is still waiting is applied after everything committed, so it
-    // is the answer even though it was read first.
+    // The passes run in the opposite order from the one events are applied in,
+    // so this is the rule that repairs it: what is still waiting is applied
+    // after everything committed, and wins even though it was read first.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2067,14 +1924,10 @@ test "a rebind still waiting outranks one already committed" {
 }
 
 test "a deposit the ledger already applied does not outrank what came after it" {
-    // The interleaving this defends against: the inbox pass reads its files one
-    // at a time, and a drain running alongside can commit AND delete a later
-    // deposit between two of those reads. The scan is then holding an earlier
-    // deposit and cannot see the later one in either place it looked — and
-    // "what is waiting wins" would answer with a model two facts out of date.
-    // The state below is that moment frozen: the file the scan read is one the
-    // ledger has already applied (its delivery id is right there as `origin`),
-    // and a newer rebind is committed behind it.
+    // The interleaving this defends against, frozen as state: the file the scan
+    // read has already been applied (its delivery id is right there as
+    // `origin`), and a newer rebind is committed behind it. A flat "waiting
+    // wins" would answer with a model two facts out of date.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2096,9 +1949,7 @@ test "a deposit the ledger already applied does not outrank what came after it" 
 }
 
 test "an event too large to read back is refused at the deposit" {
-    // The invariant: whatever the inbox accepts, a step boundary can read. Take
-    // it away and `session append` can accept a durable fact that makes every
-    // later `drainInbox` fail — a session accepted into a state it cannot leave.
+    // The invariant: whatever the inbox accepts, a step boundary can read back.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2117,8 +1968,7 @@ test "an event too large to read back is refused at the deposit" {
         depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{ .text = oversized } }),
     );
 
-    // Refused before a byte is written: nothing is waiting, and the drain that
-    // would have choked on it has nothing to do.
+    // Refused before a byte is written: nothing is left waiting.
     var l = try openDurable(alloc, io, tmp.dir, spath);
     defer l.deinit();
     try drainInbox(alloc, io, &l, tmp.dir, spath);
@@ -2126,11 +1976,10 @@ test "an event too large to read back is refused at the deposit" {
 }
 
 test "a delivery id is distinct, and sorts after what is already waiting" {
-    // Distinctness is the exactly-once key. Order is the queue position, and it
-    // is a PROPERTY OF THE INBOX, not of the clock: the deposit below carries a
-    // stamp from the far future, and the next name still has to land after it —
-    // which is what makes two rebinds issued in a row apply in that order even
-    // if the clock repeated or stepped back between them.
+    // Order is a property of the INBOX, not of the clock: the deposit below
+    // carries a stamp from the far future and the next name still has to land
+    // after it — which is what makes two rebinds issued in a row apply in that
+    // order even if the clock repeated or stepped back.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2179,8 +2028,8 @@ test "pruneSession removes what a session is made of, and refuses history unless
         try std.testing.expectError(error.NoSuchSession, pruneSession(alloc, io, tmp.dir, spath, .{}));
     }
 
-    // History, and a turn nobody drained: two separate reasons to say no, and
-    // one flag that means both.
+    // History, and a turn nobody drained: two reasons to say no, one flag that
+    // lifts both.
     {
         const spath = "held.jsonl";
         var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "held" });
@@ -2221,10 +2070,9 @@ test "pruneSession removes what a session is made of, and refuses history unless
 }
 
 test "the inbox lease is exclusive, and a deposit into a session that is gone is refused" {
-    // Both halves of the rule the lease carries: a depositor and `session
-    // prune` cannot both be inside it, and a deposit re-checks the session
-    // there — so removing one and depositing into it cannot interleave into a
-    // durable fact nobody will ever drain.
+    // Both halves of the rule the lease carries: a depositor and a prune cannot
+    // both be inside it, and a deposit re-checks the session there — so removal
+    // and deposit cannot interleave into a fact nobody will ever drain.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2323,8 +2171,8 @@ test "assistant usage round-trips as a fact on the line, and legacy lines read a
     defer alloc.free(unpriced);
     try std.testing.expectEqualStrings("{\"seq\":2,\"kind\":\"assistant\",\"text\":\"t\",\"calls\":[]}\n", unpriced);
 
-    // …and such a line (every line written before M5b) reads back as null, not
-    // as a zero cost: "not recorded" and "cost nothing" are different facts.
+    // …and reads back as null, not a zero cost: "not recorded" and "cost
+    // nothing" are different facts.
     const legacy = try parseEventLine(alloc, "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"old\",\"calls\":[]}");
     defer legacy.deinit();
     try std.testing.expect((try toEvent(legacy.arena.allocator(), legacy.value)).assistant.usage == null);
@@ -2354,13 +2202,12 @@ test "user images round-trip on the line, and a text-only turn keeps its pre-ima
     const back = try toEvent(parsed.arena.allocator(), parsed.value);
     try expectEventsEqual(&.{shot}, &.{back});
 
-    // Absent: byte-for-byte the line every writer before images produced.
+    // Absent: byte-for-byte the line a writer without images produces.
     const plain = try encodeEventLine(alloc, .{ .user_text = .{ .text = "hi" } }, 2);
     defer alloc.free(plain);
     try std.testing.expectEqualStrings("{\"seq\":2,\"kind\":\"user_text\",\"text\":\"hi\"}\n", plain);
 
-    // …and such a line reads back with no images, not an error: the column is
-    // optional in exactly the way `usage` is.
+    // …and reads back with no images, not an error.
     const legacy = try parseEventLine(alloc, "{\"seq\":1,\"kind\":\"user_text\",\"text\":\"old\"}");
     defer legacy.deinit();
     const old = try toEvent(legacy.arena.allocator(), legacy.value);
@@ -2459,8 +2306,8 @@ test "a task report deposited into the inbox is applied exactly once" {
     var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
     defer l.deinit();
     // The supervisor's delivery name is DETERMINISTIC (`task-<sid>-t<N>`), so a
-    // redelivery is the same name — and the origin column alone makes applying
-    // it twice impossible. There is no content dedup arm for this kind.
+    // redelivery is the same name and the origin column alone makes applying it
+    // twice impossible. There is no content dedup arm for this kind.
     try depositEvent(alloc, io, tmp.dir, spath, "task-s-t3", done);
     try drainInbox(alloc, io, &l, tmp.dir, spath);
     try depositEvent(alloc, io, tmp.dir, spath, "task-s-t3", done);
@@ -2478,8 +2325,8 @@ test "a task report deposited into the inbox is applied exactly once" {
 test "a stop reason the shape cannot say is written; the two it can are not" {
     const alloc = std.testing.allocator;
 
-    // The whole point of the field: this event and a finished one differ in
-    // nothing else. `calls` is empty in both, so the shape cannot tell them apart.
+    // This event and a finished one differ in nothing else: `calls` is empty in
+    // both, so the shape cannot tell them apart.
     const cut: Event = .{ .assistant = .{ .text = "half a sen", .calls = &.{}, .stop_reason = .max_tokens } };
     const line = try encodeEventLine(alloc, cut, 1);
     defer alloc.free(line);
@@ -2491,9 +2338,8 @@ test "a stop reason the shape cannot say is written; the two it can are not" {
     defer parsed.deinit();
     try expectEventsEqual(&.{cut}, &.{try toEvent(parsed.arena.allocator(), parsed.value)});
 
-    // A reply that ended on its own is written exactly as it was before the field
-    // existed — no `"stop_reason"` on the overwhelming majority of lines, because
-    // an empty `calls` array already says `end_turn`.
+    // A reply that ended on its own carries no `"stop_reason"`: an empty `calls`
+    // array already says `end_turn`.
     const whole = try encodeEventLine(alloc, .{ .assistant = .{ .text = "half a sen", .calls = &.{} } }, 1);
     defer alloc.free(whole);
     try std.testing.expectEqualStrings("{\"seq\":1,\"kind\":\"assistant\",\"text\":\"half a sen\",\"calls\":[]}\n", whole);
@@ -2512,14 +2358,13 @@ test "a stop reason the shape cannot say is written; the two it can are not" {
     defer call_parsed.deinit();
     try expectEventsEqual(&.{calling}, &.{try toEvent(call_parsed.arena.allocator(), call_parsed.value)});
 
-    // A line written before the field existed reads back as "ended on its own",
-    // which is what every such line meant.
+    // A line with neither field reads back as "ended on its own".
     const legacy = try parseEventLine(alloc, "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"old\",\"calls\":[]}");
     defer legacy.deinit();
     try std.testing.expectEqual(StopReason.end_turn, (try toEvent(legacy.arena.allocator(), legacy.value)).assistant.stop_reason);
 
-    // And the boolean this field replaced still reads: `truncated:true` is
-    // `max_tokens`, the only thing it ever meant. It is never written again.
+    // The boolean this field replaced still reads: `truncated:true` is
+    // `max_tokens`. It is never written again.
     const old_bool = try parseEventLine(alloc, "{\"seq\":9,\"kind\":\"assistant\",\"text\":\"half a sen\",\"calls\":[],\"truncated\":true}");
     defer old_bool.deinit();
     try std.testing.expectEqual(StopReason.max_tokens, (try toEvent(old_bool.arena.allocator(), old_bool.value)).assistant.stop_reason);
@@ -2558,8 +2403,8 @@ test "durable create then open replays a block-identical ledger with monotonic s
     try std.testing.expect(std.mem.indexOf(u8, raw, "\"seq\":1,") != null);
     try std.testing.expect(std.mem.indexOf(u8, raw, std.fmt.comptimePrint("\"seq\":{d},", .{sample_event_count})) != null);
 
-    // Appending after reopen continues the seq sequence and persists. Close this
-    // writer before the next opens — the lease permits only one writer at a time.
+    // Appending after reopen continues the seq sequence. Close this writer
+    // before the next opens: the lease permits only one at a time.
     try reopened.append(.{ .user_text = .{ .text = "again" } });
     const reopened_events = reopened.len();
     reopened.deinit();
@@ -2590,8 +2435,7 @@ test "openDurable drops a torn final line and truncates it" {
     try std.testing.expectEqual(@as(usize, 1), l.len());
     try std.testing.expectEqualStrings("kept", l.view()[0].user_text.text);
 
-    // The torn tail was truncated, so the next append lands cleanly. Close this
-    // writer before reopening — the lease permits only one writer at a time.
+    // The torn tail was truncated, so the next append lands cleanly.
     try l.append(.{ .user_text = .{ .text = "next" } });
     l.deinit();
 
@@ -2716,8 +2560,7 @@ test "inbox: deposits drain in name order, dedupe notes, and never touch the mai
     try drainInbox(alloc, io, &l, tmp.dir, spath);
     try std.testing.expectEqual(@as(usize, 2), l.len());
 
-    // Everything drained is on disk in order. Close this writer before reopening
-    // — the lease permits only one writer at a time.
+    // Everything drained is on disk in order.
     l.deinit();
 
     var reopened = try openDurable(alloc, io, tmp.dir, spath);

@@ -1,13 +1,12 @@
-//! `extension.json` — the manifest (DESIGN §7.2).
+//! `extension.json` — the manifest.
 //!
-//! The manifest is the SINGLE source of truth for an extension's identity and
+//! The manifest is the single source of truth for an extension's identity and
 //! model-facing schema. Nulya never starts a binary just to ask what tools it
-//! has: that would split truth across source / manifest / runtime describe().
-//! Runtime processes only ever handle calls declared by the manifest.
+//! has; runtime processes only ever handle calls declared by the manifest.
 //!
 //! `parse` loads the structure into arena-owned memory (so the caller may free
-//! the source bytes); `validate` enforces the kernel's deterministic rules
-//! (DESIGN §7.4, §12). Whether a tool is "good taste" is policy, not validation.
+//! the source bytes); `validate` enforces the kernel's deterministic rules.
+//! Whether a tool is "good taste" is policy, not validation.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,27 +14,20 @@ const tool = @import("../tool.zig");
 
 pub const schema_id = "nulya.extension/v2";
 
-/// The builtin name is permanently reserved; an extension may not shadow it
-/// (DESIGN §5.2, §6). One name, because there is one builtin — `edit` left this
-/// list when it became a tool of the bundled `std` extension (DESIGN §7.8).
+/// Tool names permanently reserved for the kernel builtin; an extension may
+/// not declare a tool by this name.
 pub const reserved_tool_names = [_][]const u8{"shell"};
 
-/// A runtime string that may differ per host OS (DESIGN §7.1). Written either
-/// as a bare string — one value everywhere — or as an object keyed by
-/// `builtin.os.tag` names plus an optional `"default"`:
+/// A runtime string that may differ per host OS. Written either as a bare
+/// string — one value everywhere — or as an object keyed by `builtin.os.tag`
+/// names plus an optional `"default"`:
 ///
 ///     "entry": "src/run.sh"
 ///     "entry": { "windows": "src/run.ps1", "default": "src/run.sh" }
 ///
 /// One package, one version id: the snapshot already collects the whole `src/`
 /// tree, so every platform's variant is inside the same content-addressed
-/// version. That is the point — `v-…` names the same package on every machine,
-/// and only WHICH file runs differs.
-///
-/// Both forms are one representation, so every consumer iterates `variants`
-/// without asking which shape was written; `per_os` records WHICH shape the
-/// manifest used, because the two mean different things about the same list
-/// (one value for every host, versus one value per named host).
+/// version — only WHICH file runs differs per host.
 pub const PlatformValue = struct {
     variants: []const Variant,
     /// The manifest wrote an object. False = a bare string, in which case
@@ -76,11 +68,11 @@ pub const PlatformValue = struct {
 
 pub const Runtime = struct {
     /// Relative path to the runtime entry within the package, possibly per-OS
-    /// (`PlatformValue`). A `bin/<name>` entry is a COMPILED Zig extension
+    /// (`PlatformValue`). A `bin/<name>` entry is a compiled Zig extension
     /// (built from `src/main.zig`); any other entry (e.g. `src/run.ps1`) is a
-    /// SCRIPT extension frozen as-is — see `isScript`. The per-OS form is for
+    /// script extension frozen as-is — see `isScript`. The per-OS form is for
     /// scripts only: a compiled extension's cross-platform story is cross
-    /// compilation, which this field is not.
+    /// compilation, not this field.
     entry: PlatformValue,
     /// For a script extension, the executable used to run `entry` (e.g. `sh`,
     /// `powershell`, `python3`), possibly per-OS. Absent means the entry is
@@ -90,11 +82,9 @@ pub const Runtime = struct {
 };
 
 /// A script extension is frozen and run as-is (no compilation); a compiled Zig
-/// extension outputs a binary under `bin/`. The `bin/` prefix is the sole,
-/// purely-syntactic distinguisher, so every consumer decides identically without
-/// probing the filesystem — and it is asked of EVERY declared variant, so a
-/// per-OS entry cannot be one kind here and another kind there (`validate`
-/// refuses the mixture outright).
+/// extension outputs a binary under `bin/`. The `bin/` prefix is the sole
+/// distinguisher, checked on EVERY declared variant — a per-OS entry cannot be
+/// one kind here and another kind there (`validate` refuses the mixture).
 pub fn isScript(rt: Runtime) bool {
     for (rt.entry.variants) |v| {
         if (std.mem.startsWith(u8, v.value, "bin/")) return false;
@@ -102,14 +92,14 @@ pub fn isScript(rt: Runtime) bool {
     return true;
 }
 
-/// How an extension version is materialized — the one axis that decides what
-/// belongs in its content-addressed identity (DESIGN §7.1, §7.4):
+/// How an extension version is materialized — the axis that decides what
+/// belongs in its content-addressed version id:
 ///   - `data`     : no runtime at all (pure skills / system prompts). Identity is
 ///                  the package snapshot alone; building needs no compiler.
 ///   - `script`   : a runtime entry frozen and run as-is (`src/…`). Same as data
 ///                  for identity purposes: no compilation, so no compiler/target.
 ///   - `compiled` : a Zig runtime built into `bin/…`. Its binary depends on the
-///                  compiler and host target, so BOTH enter the version id.
+///                  compiler and host target, so both enter the version id.
 /// Only `compiled` requires a toolchain; `data` and `script` never touch zig.
 pub const ImplementationKind = enum { data, script, compiled };
 
@@ -118,25 +108,20 @@ pub fn implementationKind(m: Manifest) ImplementationKind {
     return if (isScript(rt)) .script else .compiled;
 }
 
-/// Where this tool belongs in a session's capability surface — three words
-/// that answer one question: given that this package IS a member of a session,
-/// does this tool reach the model, and how?
+/// Where this tool belongs in a session's capability surface — given that
+/// this package IS a member of a session, does this tool reach the model,
+/// and how?
 ///
 ///   - `auto`     : it reaches the model as soon as the package is a member
 ///                  (`--with`, config `[extensions] with`, `apply: "auto"`, or
-///                  a driver's equivalent). THE DEFAULT: a package a person
-///                  composed in is a package whose tools they meant to use, and
-///                  a scaffolded extension should work the moment it is named.
-///                  Membership is membership: a package a pin brought in is a
-///                  member like any other, so its `auto` tools reach the model
-///                  too (DESIGN §5.1).
+///                  a driver's equivalent). THE DEFAULT. Membership is
+///                  membership: a package a pin brought in is a member like
+///                  any other, so its `auto` tools reach the model too.
 ///   - `manual`   : membership is not enough; a person has to name this tool
 ///                  (`session new --pin ext:<id>/<tool>`, config
 ///                  `[registry] pinned_native_tools`). The only surface a pin
-///                  accepts, so it is what a package writes for a tool that
-///                  should take a native slot only when somebody says so —
-///                  `extensions/std`, whose six tools are a face a person
-///                  assembles, is the case that exists.
+///                  accepts — what a package writes for a tool that should
+///                  take a native slot only when somebody says so.
 ///   - `internal` : never on the model face at all; called by outside code
 ///                  through `nulya ext run`. A driver's tool.
 pub const Surface = enum {
@@ -152,24 +137,20 @@ pub const Surface = enum {
     }
 };
 
-/// What ACTIVATING this package means for the sessions that follow (DESIGN
-/// §5.1) — the package author's DEFAULT on the membership axis, and the only
-/// thing a manifest may say about reach:
+/// What ACTIVATING this package means for the sessions that follow — the
+/// package author's default on the membership axis, and the only thing a
+/// manifest may say about reach:
 ///
 ///   - `manual` : the default. Activation says which version `<id>` means and
 ///                nothing more; the package joins the sessions that name it
 ///                (config `[extensions] with`, `session new --with`, or a pin
 ///                that implies membership).
 ///   - `auto`   : while this package has a `current`, it is a standing member of
-///                every fresh, non-`--bare` session on this machine. What a
-///                "mode" package wants — a system prompt that is the point of
-///                installing it — and what a tool package that should always be
-///                there wants.
+///                every fresh, non-`--bare` session on this machine.
 ///
 /// It is a DEFAULT, never a ceiling: config's `[extensions] with` can always
 /// add a package the author left at `manual`, and `nulya ext deactivate <id>`
-/// is how a person turns `auto` off. Reach stays the person's decision
-/// (physics #6); the author only gets to say what installing SHOULD mean.
+/// is how a person turns `auto` off.
 pub const Apply = enum {
     auto,
     manual,
@@ -181,20 +162,18 @@ pub const Apply = enum {
     }
 };
 
-/// Where this package's system prompt block sits among the OTHER packages'
-/// (DESIGN §5.6) — the one thing a manifest may say about system-prompt order,
-/// and a closed three-word vocabulary like `surface` and `apply`:
+/// Where this package's system prompt block sits among the OTHER packages' —
+/// the one thing a manifest may say about system-prompt order, a closed
+/// three-word vocabulary like `surface` and `apply`:
 ///
-///   - `early`  : before the packages that said nothing. Framing a later prompt
-///                is meant to be read against.
+///   - `early`  : before the packages that said nothing.
 ///   - `normal` : THE DEFAULT. Member order decides, as it always did.
-///   - `late`   : after the packages that said nothing. The closing word a mode
-///                package wants when another package's prompt is the body.
+///   - `late`   : after the packages that said nothing.
 ///
 /// Its scope is exactly the extension band of `PromptIR.system_blocks`: the
 /// kernel block stays first, `--prompt` inline text stays after every extension,
 /// and `skills:catalog` stays last (`composition.buildSystemPrompts`). Within one
-/// position the existing member order is untouched, so this is a partition of the
+/// position the existing member order is untouched — this is a partition of the
 /// band, not a sort key a package can use to jump the kernel.
 pub const PromptPosition = enum {
     early,
@@ -214,13 +193,11 @@ pub const PromptPosition = enum {
 ///
 ///     "system_prompts": ["prompts/base.md", {"path": "prompts/tail.md", "position": "late"}]
 ///
-/// The bare string stays legal and means `normal` — it is what every package in
-/// this repository writes, and a field nobody needs should not have to be typed.
+/// The bare string stays legal and means `normal`.
 pub const SystemPromptSpec = struct {
     path: []const u8,
     /// This prompt's band, kept as WRITTEN. Read through `positionOf`, which
-    /// supplies the default. Silence is a DEFAULT, not a "did not say" (the same
-    /// reasoning as `ToolSpec.surface`): every block lands somewhere whether or
+    /// supplies the default `normal` — every block lands somewhere whether or
     /// not the manifest names a band.
     position: ?[]const u8 = null,
 
@@ -230,26 +207,21 @@ pub const SystemPromptSpec = struct {
     }
 };
 
-/// A tool's front-end rendering hints (DESIGN §7.2.1, tui-plugin D12) — the
-/// FRONT-END tier of the manifest: an open vocabulary, never refused by
-/// `validate`, and read by nobody but whoever draws a tool's calls on a
-/// screen.
+/// A tool's front-end rendering hints — the front-end tier of the manifest:
+/// an open vocabulary, never refused by `validate`, and read by nobody but
+/// whoever draws a tool's calls on a screen.
 pub const ToolUi = struct {
-    /// A rendering HINT for whoever draws this tool's calls — a word from an
+    /// A rendering hint for whoever draws this tool's calls — a word from an
     /// OPEN vocabulary (`"checklist"`, `"markdown"`, more later), kept as
-    /// WRITTEN and NEVER refused by `validate`. Unlike `surface` (a closed
-    /// three-word set the kernel can exhaustively check), this vocabulary is
-    /// expected to grow, so an unrecognized word is the READER's decision —
-    /// fall back to a plain card and move on — not a build-time refusal.
-    /// Absent is null, not any particular word: the same "silence is not a
-    /// claim" discipline as `readonly`.
+    /// WRITTEN and never refused by `validate`. An unrecognized word is the
+    /// reader's decision (fall back to a plain card), not a build-time
+    /// refusal. Absent is null, not any particular word.
     render: ?[]const u8 = null,
-    /// The package's request that the LATEST call of this tool also be
+    /// The package's request that the latest call of this tool also be
     /// projected as a persistent, foldable widget above the input — the
     /// degraded display a front end with no plugin code can still give a
-    /// progress indicator (tui-plugin D12). A DECLARATION like the rest of
-    /// this struct: absent is null, not `false`, and the kernel does not act
-    /// on it.
+    /// progress indicator. A declaration: absent is null, not `false`, and
+    /// the kernel does not act on it.
     panel: ?bool = null,
 };
 
@@ -258,82 +230,50 @@ pub const ToolSpec = struct {
     description: []const u8,
     /// Raw JSON of the tool's `input` schema. Only fed to the model when the
     /// extension is promoted into `tools[]`; otherwise pure discoverability
-    /// metadata (DESIGN §7.2 note).
+    /// metadata.
     input_schema: []const u8,
-    /// Wall-clock cap for one call of THIS tool, when it knows the host default
-    /// (`tool.Timeouts.extension_ms`, 30s) is not enough — a driver tool that
-    /// steps a real model is the case that exists (`extensions/compact`). Absent
-    /// means the default; the ceiling is `tool.Timeouts.extension_max_ms`. The
-    /// manifest is the one place this can be said, because the manifest is the
-    /// single source of truth about a tool (DESIGN §7.2.1).
+    /// Wall-clock cap for one call of THIS tool, when the host default
+    /// (`tool.Timeouts.extension_ms`, 30s) is not enough. Absent means the
+    /// default; the ceiling is `tool.Timeouts.extension_max_ms`.
     timeout_ms: ?u32 = null,
-    /// The package's claim that this tool only READS: it makes no change a
-    /// person would want to approve first. A DECLARATION (DESIGN §9) — the
-    /// kernel parses it, records it in the frozen manifest, and enforces
-    /// nothing. What consumes it is a driver's
-    /// approval policy (`loop.ToolGate`, DESIGN §4), which is free to ignore it;
-    /// a real boundary needs OS enforcement (PLAN §3.8), not a boolean.
-    ///
-    /// Absent means the package did not say, which is not the same as `false`
-    /// and must not be read as one.
+    /// The package's claim that this tool only reads: it makes no change a
+    /// person would want to approve first. A declaration — the kernel parses
+    /// it, records it in the frozen manifest, and enforces nothing; the
+    /// consumer is a driver's own approval policy. Absent means the package
+    /// did not say, which is not the same as `false`.
     readonly: ?bool = null,
     /// This tool's placement (see `Surface`), kept as WRITTEN. Read through
     /// `surfaceOf`, which supplies the default.
     surface: ?[]const u8 = null,
-    /// Should whoever INSTALLS this package switch this `manual` tool on?
-    ///
-    /// A DECLARATION addressed to the installer, not to the kernel: the kernel's
-    /// tool face is unchanged by it (a `manual` tool reaches the model when, and
-    /// only when, a pin names it — DESIGN §5.1). What reads it is the code that
-    /// turns a package on and has to decide WHICH pins to write: `/ext`'s Enter,
-    /// and anything else that materialises a recommended set.
-    ///
-    /// `true` — the default — is what `manual` means in practice: on once the
-    /// package is installed, and closable one tool at a time, which is the whole
-    /// difference from `auto` (on because the package is in, with no separate
-    /// switch because the package IS that capability). `false` is the one thing
-    /// this field exists to let a package say: an EXTRA, off until somebody asks
-    /// for it, in a package whose other tools are the point.
-    ///
-    /// Kept as WRITTEN and read through `recommendedOf`, which supplies the
-    /// default — the `surface` / `surfaceOf` shape, and for the same reason:
-    /// `validate` has to be able to tell "wrote `true`" from "wrote nothing" to
-    /// refuse the key on a non-`manual` tool (`InvalidRecommended`), where an
-    /// `auto` tool is already on and an `internal` one can never be pinned, so
-    /// the key could only mislead. The MEANING has no third state: every
-    /// `manual` tool is either recommended or not.
+    /// Should whoever installs this package switch this `manual` tool on?
+    /// Only meaningful for `manual` tools — an `auto` tool is already on, an
+    /// `internal` one can never be pinned, so `validate` refuses the key on
+    /// either (`InvalidRecommended`). `true` (the default) is on once the
+    /// package is installed; `false` marks an extra, off until asked for.
+    /// Kept as WRITTEN and read through `recommendedOf`.
     recommended: ?bool = null,
     /// This tool's front-end rendering hints (see `ToolUi`), or null when the
-    /// package made neither claim. Grouped under one FRONT-END key, distinct
-    /// from `readonly` / `surface` above: those two are read by the kernel's
-    /// gate and by `--pin`/`--with` composition, this one only by whoever
-    /// draws a call on a screen.
+    /// package made neither claim.
     ui: ?ToolUi = null,
 
-    /// This tool's placement, defaulting to `auto` — a tool in a package
-    /// somebody composed in is a tool they meant to have. Silence is a DEFAULT
-    /// here, not a "did not say" (unlike `readonly`): every tool has a
-    /// placement whether or not the manifest names one, so there is nothing for
-    /// a null to mean. `validate` refuses a word outside the three, so the
-    /// unwrap is safe on any validated manifest.
+    /// This tool's placement, defaulting to `auto`. `validate` refuses a word
+    /// outside the three, so the unwrap is safe on any validated manifest.
     pub fn surfaceOf(self: ToolSpec) Surface {
         if (self.surface) |s| return Surface.fromString(s).?;
         return .auto;
     }
 
     /// Would an installer switch this tool on? Meaningful only for `manual`
-    /// tools — the other two surfaces answer the question by themselves — so
-    /// callers ask it about those, and `validate` is what keeps the key off the
-    /// rest.
+    /// tools.
     pub fn recommendedOf(self: ToolSpec) bool {
         return self.recommended orelse true;
     }
 };
 
-/// A slash command this package offers whoever DRIVES a session (DESIGN
-/// §7.2.1, tui-plugin D1/D2/D8). Declared in the manifest — not in a sidecar
-/// the front end alone reads — so any driver, headless or not, sees the same
-/// commands a session's frozen composition actually carries.
+/// A slash command this package offers whoever drives a session. Declared in
+/// the manifest — not in a sidecar the front end alone reads — so any driver,
+/// headless or not, sees the same commands a session's frozen composition
+/// actually carries.
 pub const Command = struct {
     name: []const u8,
     description: []const u8,
@@ -341,7 +281,7 @@ pub const Command = struct {
     action: Action,
 };
 
-/// A command's verb, written as an object with EXACTLY ONE key:
+/// A command's verb, written as an object with exactly one key:
 ///
 ///     "action": { "with": true }
 ///     "action": { "with": "Review the recent sessions and their outcomes…" }
@@ -349,27 +289,15 @@ pub const Command = struct {
 ///     "action": { "skill": "review/checklist" }
 ///
 /// The key is the verb and the value is its argument — a bare `true` when the
-/// verb takes none, a string when it does. That is the whole shape rule, and
-/// it is verb-INDEPENDENT on purpose: the vocabulary is OPEN (`ToolUi.render`'s
-/// discipline), so an unrecognized key is the READER's decision (warn and
-/// skip), never a `validate` refusal. What `validate` does check is the shape
-/// itself — one key, no more and no fewer (`InvalidCommandAction`) — and the
-/// one closed reference inside it: a `run` command's `<tool>` must name a tool
-/// this SAME manifest declares (`UnknownCommandTool`), which is a fact about
-/// this file's own shape rather than a member of the vocabulary.
+/// verb takes none, a string when it does. The vocabulary is open, so an
+/// unrecognized key is the reader's decision (warn and skip), never a
+/// `validate` refusal. `validate` checks only the shape — one key, no more
+/// and no fewer (`InvalidCommandAction`) — and that a `run` command's
+/// `<tool>` names a tool this same manifest declares (`UnknownCommandTool`).
 ///
-/// `with`'s string form is not a second verb, it is the SAME shape every other
-/// verb already had: a string argument. `true` means "wear the package and
-/// wait for the person to say something"; a string means "wear it AND say
-/// this" — the package's own default first message, sent verbatim as the
-/// opening user turn when the person typed the command bare. Typing text
-/// after the command (`/evolve fix the shell timeout`) still wins over
-/// whatever default the manifest wrote — that argument is a person's own
-/// words, not the package's.
-///
-/// The object replaced a string mini-language (`"run propose"`), which had the
-/// reader splitting on a space to find out what it was holding. That form is
-/// gone: a string `action` is a `WrongType` like any other mistyped field.
+/// `with`'s string argument is the package's own default first message, sent
+/// verbatim as the opening user turn when the person typed the command bare;
+/// text typed after the command still wins over it.
 pub const Action = struct {
     /// The single key. Empty only when the object had no keys at all, which
     /// `validate` refuses.
@@ -391,9 +319,9 @@ pub const Action = struct {
 
     /// The default first message a `with` command sends when typed bare
     /// (`{"with": "…"}`), or null when the verb is not `with`, or is `with`
-    /// but wrote `true` (wear-and-wait, the original shape). A caller still
-    /// prefers whatever the person typed after the command name over this —
-    /// this is only the fallback.
+    /// but wrote `true` (wear-and-wait). A caller still prefers whatever the
+    /// person typed after the command name over this — this is only the
+    /// fallback.
     pub fn withPrompt(self: Action) ?[]const u8 {
         if (!std.mem.eql(u8, self.verb, "with")) return null;
         return self.target;
@@ -401,20 +329,13 @@ pub const Action = struct {
 };
 
 /// The narrowing this package asks an approval policy to apply while it is a
-/// member of a session's frozen composition (DESIGN §7.2.1, tui-plugin
-/// D2/D3). A DECLARATION exactly like `ToolSpec.readonly`
-/// beside it: the kernel parses it, freezes it into the version, and
-/// enforces nothing — the consumer is a driver's own approval policy (TUI's
-/// `approvals.decide`).
+/// member of a session's frozen composition. A declaration like
+/// `ToolSpec.readonly`: the kernel parses it, freezes it into the version,
+/// and enforces nothing — the consumer is a driver's own approval policy.
 ///
-/// One field, and it can only NARROW. There were three (`readonly` / `deny` /
-/// `ask`, mirroring the tables an approval policy already reads), with an
-/// `allow` key refused outright because a package that could add an entry to
-/// an allow table would be authority growing implicitly through membership
-/// alone (physics #6). The two list fields had no reader that a single
-/// `readonly` did not already serve, and a shape that is one optional bool
-/// CANNOT widen anything — so the rule that used to need a parse-time refusal
-/// is now carried by the shape itself, and `allow` is just another unknown key.
+/// One field, and the shape can only narrow: an optional bool has no way to
+/// add an entry to an allow table, so a key like `allow` is refused nowhere
+/// special — it is just another unknown key.
 pub const Policy = struct {
     /// Same three-state discipline as `ToolSpec.readonly`: absent is null,
     /// not `false` — the package said nothing, which is not the same as
@@ -422,34 +343,26 @@ pub const Policy = struct {
     readonly: ?bool = null,
 };
 
-/// One front end's module declaration inside `contributes.ui` (DESIGN §7.2.1,
-/// tui-plugin D1/D10) — the FRONT-END tier's own code layer. A DECLARATION
-/// only: the kernel validates the SHAPE (a known-charset host name, a safe
-/// relative path, a non-zero API version) and never loads or executes
-/// anything — loading is a front end's job, not this layer's.
+/// One front end's module declaration inside `contributes.ui` — the
+/// front-end tier's own code layer. A declaration only: the kernel validates
+/// the shape (a known-charset host name, a safe relative path, a non-zero
+/// API version) and never loads or executes anything.
 pub const UiHost = struct {
     /// WHICH front end this module is for — the object key in
-    /// `"ui": {"tui": {…}}`. An OPEN vocabulary (`ToolUi.render`'s
-    /// discipline): the kernel checks the charset (`[a-z0-9-]+`,
-    /// `InvalidUiHost`) and never the word, because the kernel's schema must
-    /// not name one concrete front end. A front end reads its own key and
-    /// skips a package that has none — "this package has no plugin for me" is
-    /// an ordinary answer, not a warning.
+    /// `"ui": {"tui": {…}}`. An open vocabulary: the kernel checks the
+    /// charset (`[a-z0-9-]+`, `InvalidUiHost`) and never the word. A front
+    /// end reads its own key and skips a package that has none.
     host: []const u8,
     /// Package-relative path to the module that front end loads. Same
     /// path-safety rule as `system_prompts` (`isSafeRelPath`, checked in
-    /// `validate`), and once a build actually collects the package snapshot,
-    /// the same existence check `validateSystemPrompts` runs for a system
-    /// prompt file (`extension/build/build_ext.zig`) — a declared entry that
-    /// is not there is a fault in the draft, not something discovered at
-    /// load time.
+    /// `validate`); a build that collects the package snapshot also checks
+    /// the file exists.
     entry: []const u8,
-    /// The plugin-host API version this module was written against. Kept as
-    /// a bare number rather than a word set, because API versions are
-    /// linearly ordered and a front end's compatibility check is "is my
-    /// major version at least this" (warn-and-skip on mismatch, a front-end
-    /// policy) — not membership in a vocabulary. Zero can never be a real
-    /// version, so it is the one value `validate` refuses (`InvalidUiApi`).
+    /// The plugin-host API version this module was written against. A bare
+    /// number: API versions are linearly ordered and a front end's
+    /// compatibility check is "is my major version at least this"
+    /// (warn-and-skip on mismatch). Zero can never be a real version, so it
+    /// is the one value `validate` refuses (`InvalidUiApi`).
     api: u32,
 };
 
@@ -468,18 +381,17 @@ pub const Manifest = struct {
     commands: []const Command = &.{},
     /// This package's approval-policy narrowing (see `Policy`), or null when
     /// the package never wrote `contributes.policy` at all — so null and
-    /// present-but-every-field-empty (`{}`) stay different VALUES a reader
+    /// present-but-every-field-empty (`{}`) stay different values a reader
     /// can still tell apart. `NoContributions` reads them the same, though
-    /// (`policyContributes`): an empty `{}` narrows nothing, so it counts as
-    /// having said nothing, exactly like never writing the key.
+    /// (`policyContributes`): an empty `{}` narrows nothing.
     policy: ?Policy = null,
     /// This package's front-end modules, one per host (see `UiHost`). Absent
     /// reads as empty — same convention as `skills` / `system_prompts`.
     ui: []const UiHost = &.{},
     /// What activating this package means for the sessions that follow (see
     /// `Apply`), kept as WRITTEN. Read through `applyOf`, which supplies the
-    /// default. A TOP-LEVEL key rather than one under `contributes`: it is not
-    /// a contribution, it is what the author thinks installing the whole
+    /// default. A top-level key rather than one under `contributes`: it is
+    /// not a contribution, it is what the author thinks installing the whole
     /// package should mean.
     apply: ?[]const u8 = null,
 
@@ -488,17 +400,16 @@ pub const Manifest = struct {
         self.* = undefined;
     }
 
-    /// This package's membership default, `manual` unless it says otherwise —
-    /// the conservative half, because the other one puts a system prompt in
-    /// front of every model on this machine. `validate` refuses a word outside
-    /// the two, so the unwrap is safe on any validated manifest.
+    /// This package's membership default, `manual` unless it says otherwise.
+    /// `validate` refuses a word outside the two, so the unwrap is safe on
+    /// any validated manifest.
     pub fn applyOf(self: Manifest) Apply {
         if (self.apply) |s| return Apply.fromString(s).?;
         return .manual;
     }
 
-    /// Enforce the deterministic kernel rules (DESIGN §7.4, §12). Whether a tool
-    /// is "good taste" is policy, checked elsewhere — not here.
+    /// Enforce the deterministic kernel rules. Whether a tool is "good taste"
+    /// is policy, checked elsewhere — not here.
     pub fn validate(self: Manifest) ValidateError!void {
         if (!std.mem.eql(u8, self.schema, schema_id)) return error.UnsupportedSchema;
         if (!isValidId(self.id)) return error.InvalidId;
@@ -519,13 +430,10 @@ pub const Manifest = struct {
                 if (!isSafeRelPath(v.value)) return error.InvalidEntry;
                 // A compiled entry lives under `bin/` (the build output); a
                 // script entry lives under `src/` (frozen with the source tree).
-                // Anything else is rejected so every consumer can locate the
-                // entry the same way. In the per-OS form EVERY variant must be a
-                // script: a package that is compiled on one platform and a
-                // script on another is two implementation kinds under one
-                // version id, and the version id would have to be two things at
-                // once (DESIGN §7.4). Cross-platform compiled means cross
-                // compilation, not this field.
+                // In the per-OS form EVERY variant must be a script: a package
+                // compiled on one platform and a script on another would be two
+                // implementation kinds under one version id. Cross-platform
+                // compiled means cross compilation, not this field.
                 if (per_os or isScript(rt)) {
                     if (!std.mem.startsWith(u8, v.value, "src/")) return error.InvalidEntry;
                 }
@@ -552,21 +460,14 @@ pub const Manifest = struct {
                 if (ms == 0 or ms > tool.Timeouts.extension_max_ms) return error.InvalidTimeout;
             }
             // A word outside the three is refused rather than read as the
-            // default: a package that meant `internal` and typed `internl`
-            // would otherwise land its driver tool on the model's face, which
-            // is the exact outcome the field exists to prevent. The words the
-            // three used to be spelled with (`pin` / `with` / `driver`) are
-            // refused by the same rule — a rename that silently kept reading
-            // the old word would leave two vocabularies in the wild.
+            // default: a typo meaning `internal` would otherwise land its
+            // driver tool on the model's face.
             if (t.surface) |s| {
                 if (Surface.fromString(s) == null) return error.InvalidSurface;
             }
-            // `recommended` is advice about a pin, so it can only be said about
-            // a tool a pin is the way in for. On an `auto` tool it would read as
-            // a switch that does not exist, and on an `internal` one as a face
-            // it can never reach — both are a package believing something the
-            // installer will not do. Refused after `surface`, so a manifest with
-            // both wrong is told about the word it misspelled first.
+            // `recommended` is advice about a pin, so it only makes sense on a
+            // `manual` tool. Checked after `surface`, so a manifest with both
+            // wrong is told about the word it misspelled first.
             if (t.recommended != null and t.surfaceOf() != .manual) return error.InvalidRecommended;
             for (self.tools[i + 1 ..]) |other| {
                 if (std.mem.eql(u8, t.name, other.name)) return error.DuplicateToolName;
@@ -582,10 +483,8 @@ pub const Manifest = struct {
 
         for (self.system_prompts, 0..) |p, i| {
             if (!isSafeRelPath(p.path)) return error.InvalidSystemPromptPath;
-            // A closed vocabulary refused rather than read as the default, for
-            // `surface`'s reason: a package that meant `late` and typed `latte`
-            // would silently land in the middle of the band, and the author
-            // would see a wrong prompt order with nothing to explain it.
+            // A closed vocabulary refused rather than read as the default: a
+            // typo would silently land the prompt in the wrong band.
             if (p.position) |s| {
                 if (PromptPosition.fromString(s) == null) return error.InvalidPromptPosition;
             }
@@ -601,9 +500,7 @@ pub const Manifest = struct {
             }
             // The two things `validate` asks of an otherwise open verb
             // vocabulary (see `Action`): the object holds exactly one key, and
-            // a `run` command names a tool THIS manifest itself declares — a
-            // closed, in-package reference, not a member of a word list that
-            // might grow.
+            // a `run` command names a tool this manifest itself declares.
             if (c.action.keys != 1 or c.action.verb.len == 0) return error.InvalidCommandAction;
             if (c.action.runTarget()) |target| {
                 var found = false;
@@ -617,8 +514,7 @@ pub const Manifest = struct {
             }
         }
 
-        // `policy` needs no check at all: its one field is the same three-state
-        // bool as `ToolSpec.readonly`, and a shape that is one optional bool
+        // `policy` needs no check: its one field is an optional bool, which
         // cannot say anything a `validate` rule would have to refuse.
 
         for (self.ui) |u| {
@@ -629,11 +525,11 @@ pub const Manifest = struct {
     }
 };
 
-/// Whether a declared `policy` says anything at all (D3, D5) — `{}` does
-/// not, and reads the same as `null` here even though the two stay
-/// distinguishable VALUES on `Manifest.policy` itself. Used only by
-/// `NoContributions`: a policy that narrows nothing is not a reason a
-/// manifest with nothing else in it should be allowed to build.
+/// Whether a declared `policy` says anything at all — `{}` does not, and
+/// reads the same as `null` here even though the two stay distinguishable
+/// values on `Manifest.policy` itself. Used only by `NoContributions`: a
+/// policy that narrows nothing is not a reason a manifest with nothing else
+/// in it should be allowed to build.
 fn policyContributes(p: ?Policy) bool {
     const policy = p orelse return false;
     return policy.readonly != null;
@@ -721,14 +617,12 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     const commands = try dupCommands(a, contributes);
     const policy = try readPolicy(contributes);
     const ui = try dupUi(a, contributes);
-    // Every field is read into a local BEFORE the result is built, and `apply`
-    // is not an exception it can afford to be. `.arena = arena` copies the
-    // arena's state by value, and struct fields are evaluated in written order,
-    // so an allocation made through `a` in a LATER field mutates the local
-    // arena the copy has already snapshotted: if that allocation needs a fresh
-    // chunk, the chunk is not in the returned arena and nothing ever frees it.
-    // Invisible whenever the current chunk happens to have room, which is why
-    // it looked like it depended on how long the declared paths were.
+    // Every field must be read into a local BEFORE the result is built.
+    // `.arena = arena` copies the arena's state by value, and struct fields
+    // are evaluated in written order, so an allocation made through `a` in a
+    // LATER field would mutate the local arena after the copy already
+    // snapshotted it: if that allocation needs a fresh chunk, the chunk is
+    // not in the returned arena and nothing ever frees it.
     const apply = try optionalString(a, obj, "apply");
     return .{
         .arena = arena,
@@ -747,16 +641,12 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
 
 /// A slash command name: `[a-z0-9-]+`. Deliberately narrower than
 /// `isValidId` (lowercase only, no `.` / `_`) — a command name is typed by a
-/// person after `/`, not carried as an opaque id, so the charset matches
-/// what a driver's slash dispatcher already expects everywhere else (DESIGN
-/// §7.2.1, tui-plugin §3 U1).
+/// person after `/`, not carried as an opaque id.
 fn isValidCommandName(s: []const u8) bool {
     return isLowerDashWord(s);
 }
 
-/// A `contributes.ui` host key: `[a-z0-9-]+`, the same charset a command name
-/// uses and for the same reason — it is a short word a person writes and a
-/// front end matches, never an opaque id.
+/// A `contributes.ui` host key: `[a-z0-9-]+`, same charset as a command name.
 fn isValidUiHost(s: []const u8) bool {
     return isLowerDashWord(s);
 }
@@ -781,10 +671,8 @@ pub fn isValidId(s: []const u8) bool {
 }
 
 /// An OS key in a per-OS `entry` / `interpreter` object: a `std.Target.Os.Tag`
-/// name, or `"default"`. A CLOSED vocabulary the kernel can enumerate, so a typo
-/// (`"win"`) is refused here rather than silently meaning "no entry on Windows"
-/// — the same reason `surface` refuses a word it cannot read, and the failure
-/// this catches would otherwise surface a session away, at `session new`.
+/// name, or `"default"`. A closed vocabulary, so a typo (`"win"`) is refused
+/// here rather than silently meaning "no entry on Windows".
 fn isKnownOsKey(key: []const u8) bool {
     if (std.mem.eql(u8, key, PlatformValue.default_key)) return true;
     return std.meta.stringToEnum(std.Target.Os.Tag, key) != null;
@@ -818,9 +706,8 @@ fn dupRuntime(a: std.mem.Allocator, obj: std.json.ObjectMap) ParseError!?Runtime
 }
 
 /// A runtime string written either bare or keyed by OS (`PlatformValue`).
-/// Anything that is neither a string nor an object is a `WrongType`, the same
-/// strictness every other manifest field applies — a mistyped entry must not
-/// read as "absent".
+/// Anything that is neither a string nor an object is a `WrongType` — a
+/// mistyped entry must not read as "absent".
 fn dupPlatformValue(a: std.mem.Allocator, value: std.json.Value) ParseError!PlatformValue {
     switch (value) {
         .string => |s| {
@@ -873,9 +760,8 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
 }
 
 /// `contributes.system_prompts` (see `SystemPromptSpec`): each entry is a bare
-/// path or an object carrying `path` plus an optional `position`. Anything else
-/// is a `WrongType` — a mistyped entry must not read as "absent", the strictness
-/// every other manifest field applies.
+/// path or an object carrying `path` plus an optional `position`. Anything
+/// else is a `WrongType`.
 fn dupSystemPrompts(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]const SystemPromptSpec {
     const list = switch (contributes.get("system_prompts") orelse return a.alloc(SystemPromptSpec, 0)) {
         .array => |arr| arr,
@@ -930,13 +816,8 @@ fn dupCommands(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError
 
 /// A command's `action` (see `Action`): one key, whose value is a bare `true`
 /// (the verb takes no argument) or a string (it does). Anything else under the
-/// key is a `WrongType` rather than a silently argument-less verb — the
-/// strictness `optionalU32` / `optionalBool` already apply, for their reason.
-/// The COUNT of keys is not checked here: `validate` owns that, so a caller
-/// that only parses still gets the object it was given.
-///
-/// A string is a `WrongType` like any other mistyped field. It used to be a
-/// mini-language (`"run propose"`) folded by splitting at the first space.
+/// key is a `WrongType`. The count of keys is not checked here: `validate`
+/// owns that, so a caller that only parses still gets the object it was given.
 fn dupAction(a: std.mem.Allocator, value: std.json.Value) ParseError!Action {
     switch (value) {
         .object => |o| {
@@ -968,10 +849,9 @@ fn readPolicy(contributes: std.json.ObjectMap) ParseError!?Policy {
     return .{ .readonly = try optionalBool(policy_obj, "readonly") };
 }
 
-/// `contributes.ui`, keyed by host (see `UiHost`). There is one shape: a FLAT
-/// `{"entry": …, "api": …}` (the pre-M6 spelling, before a second front end was
-/// conceivable) now reads as a host named `entry` whose value is a string, so
-/// `WrongType` — the schema does not name one concrete front end.
+/// `contributes.ui`, keyed by host (see `UiHost`). A flat `{"entry": …, "api":
+/// …}` reads as a host named `entry` whose value is a string, so `WrongType`
+/// — the schema does not name one concrete front end.
 fn dupUi(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]const UiHost {
     const value = contributes.get("ui") orelse return a.alloc(UiHost, 0);
     const ui_obj = switch (value) {
@@ -997,7 +877,10 @@ fn dupUi(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]con
 
 /// Read an optional non-negative integer field. A value that is not an integer,
 /// or does not fit, is a WrongType — never a silently dropped field, because
-/// a mistyped timeout would otherwise read as "use the default".
+/// Read an optional non-negative integer field. Absent stays absent; a value
+/// that is not an integer, or does not fit, is a `WrongType` rather than a
+/// silently ignored key — the same strictness `optionalBool` / `optionalString`
+/// below apply.
 fn optionalU32(obj: std.json.ObjectMap, key: []const u8) ParseError!?u32 {
     return switch (obj.get(key) orelse return null) {
         .integer => |n| std.math.cast(u32, n) orelse error.WrongType,
@@ -1005,10 +888,7 @@ fn optionalU32(obj: std.json.ObjectMap, key: []const u8) ParseError!?u32 {
     };
 }
 
-/// Read a required non-negative integer field. Missing is a `MissingField`,
-/// the same split `dupString` makes for a required string; a value that is
-/// not an integer, or does not fit, is a `WrongType` — `optionalU32`'s
-/// strictness, minus the "absent is fine" case.
+/// `optionalU32`, but missing is a `MissingField`.
 fn requiredU32(obj: std.json.ObjectMap, key: []const u8) ParseError!u32 {
     return switch (obj.get(key) orelse return error.MissingField) {
         .integer => |n| std.math.cast(u32, n) orelse error.WrongType,
@@ -1016,9 +896,6 @@ fn requiredU32(obj: std.json.ObjectMap, key: []const u8) ParseError!u32 {
     };
 }
 
-/// Read an optional boolean field. Absent stays absent — "the package did not
-/// say" is its own answer — and a non-boolean is a WrongType rather than a
-/// silently ignored key, for the same reason `optionalU32` is strict.
 fn optionalBool(obj: std.json.ObjectMap, key: []const u8) ParseError!?bool {
     return switch (obj.get(key) orelse return null) {
         .bool => |b| b,
@@ -1026,9 +903,6 @@ fn optionalBool(obj: std.json.ObjectMap, key: []const u8) ParseError!?bool {
     };
 }
 
-/// Read an optional string field. Absent stays absent, and a non-string is a
-/// WrongType rather than a silently ignored key — the same strictness as
-/// `optionalU32` / `optionalBool`, for the same reason.
 fn optionalString(a: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ParseError!?[]const u8 {
     return switch (obj.get(key) orelse return null) {
         .string => |s| try a.dupe(u8, s),
@@ -1355,7 +1229,7 @@ test "a tool may declare itself readonly; the kernel records the claim and enfor
     defer m.deinit();
     // Nothing in `validate` looks at it: the claim is for a driver's approval
     // policy to read, and a package that lies about it is exactly as dangerous
-    // as one that lies about anything else it declares (DESIGN §9).
+    // as one that lies about anything else it declares.
     try m.validate();
     try std.testing.expectEqual(@as(?bool, true), m.tools[0].readonly);
     try std.testing.expectEqual(@as(?bool, false), m.tools[1].readonly);
@@ -1789,7 +1663,7 @@ test "policy is one optional bool, so nothing it can say has to be refused" {
     const alloc = std.testing.allocator;
 
     // `allow` used to be a parse-time refusal — a package placing authority
-    // INTO an approval table (physics #6). With one narrow-only field left,
+    // INTO an approval table. With one narrow-only field left,
     // that rule is carried by the SHAPE: `allow` is simply an unknown key, and
     // a policy that says nothing this build reads contributes nothing.
     var allow = try parse(alloc,

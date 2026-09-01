@@ -1,21 +1,17 @@
 //! `nulya ext push <id>@<version> --env <spec>` — copy one immutable extension
-//! version into another machine's user store (DESIGN §7.4, §8.2).
+//! version into another machine's user store.
 //!
-//! It is `build_ext.adoptVersionDir` with a channel where the second directory
-//! handle used to be: read a version this machine holds, write it somewhere it
-//! is not yet, and let the destination validate the copy against its own seal
-//! before that copy becomes a version anyone can compose. Content addressing
-//! does the rest — the hash IS the check, so pushing twice is a no-op and there
-//! is nothing to negotiate about staleness.
+//! Read a version this machine holds, write it where it is not yet, and let the
+//! destination validate the copy against its own seal before it becomes a
+//! version anyone can compose. Content addressing does the rest: pushing twice
+//! is a no-op.
 //!
-//! **Only `remote:` specs.** An exec target (`--env wsl`) runs commands
-//! elsewhere but keeps the workspace and the store HERE, so pushing to one would
-//! be copying a version into the store it just came out of.
+//! Only `remote:` specs. An exec target (`--env wsl`) runs commands elsewhere
+//! but keeps the workspace and the store HERE, so pushing to one would copy a
+//! version into the store it came out of.
 //!
-//! **What this does not do.** It does not activate anything over there, and it
-//! does not decide when a version should travel. Which machines hold which
-//! capabilities is a person's decision, and the record of it is the store's own
-//! contents (goals/remote-env.md §3.5) — not a fourth journal.
+//! Nothing is activated on the far side, and nothing here decides when a
+//! version should travel.
 
 const std = @import("std");
 const integrity = @import("../extension/integrity.zig");
@@ -56,9 +52,8 @@ pub fn extPush(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         try printErr(io, usage);
         return 1;
     });
-    // The version is required, not defaulted to `current`. What "the version in
-    // effect" means is a property of THIS machine, and a push is about the other
-    // one: naming it is how the two ends can be talked about in one sentence.
+    // Required, never defaulted to `current`: "the version in effect" is a
+    // property of THIS machine, and a push is about the other one.
     const version = ref.version orelse {
         try printErrFmt(alloc, io, "ext push: name the exact version, as <id>@<version> ({s} has none)\n", .{ref.id});
         return 1;
@@ -74,10 +69,9 @@ pub fn extPush(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         return 1;
     }
 
-    // Validate the local copy at `.sealed` BEFORE opening a channel: bytes this
-    // machine has not verified are not bytes to hand another machine, and the
-    // failure is about this store, so it should not arrive dressed as a
-    // connection problem.
+    // Validate the local copy at `.sealed` BEFORE opening a channel: unverified
+    // bytes are not bytes to hand another machine, and a failure about this
+    // store should not arrive dressed as a connection problem.
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
     var search = try RootSearch.open(alloc, io, cwd_path);
@@ -132,9 +126,9 @@ pub fn extPush(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         _ = try round(alloc, io, &ch, spec, .{
             .op = protocol.Op.store_put.wire(),
             .path = rel,
-            // The store's layout is the whole rule: `bin/` holds the compiled
-            // entry and nothing else does (DESIGN §7.4). No manifest read, and
-            // no second answer to "which file is the program".
+            // The store layout is the whole rule: `bin/` holds the compiled
+            // entry and nothing else does. No manifest read, so there is no
+            // second answer to "which file is the program".
             .exec = std.mem.startsWith(u8, rel, "bin/"),
             .bytes = bytes.len,
         }, bytes) orelse return 1;
@@ -146,10 +140,10 @@ pub fn extPush(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     return 0;
 }
 
-/// One request, with both ways it can fail already spoken: a channel that broke
-/// (this machine's account of it) and a refusal (that machine's own sentence).
-/// Null means "already reported, exit 1" — the caller then stops, which is what
-/// leaves the far side's staging directory unnamed under `versions/`.
+/// One request, with both failure modes already reported: a broken channel and
+/// a refusal from the far side. Null means "already reported, exit 1"; the
+/// caller then stops, leaving the far side's staging directory unnamed under
+/// `versions/`.
 fn round(
     alloc: std.mem.Allocator,
     io: std.Io,

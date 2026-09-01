@@ -1,86 +1,18 @@
 //! `compact` — compaction as a driver, outside the kernel.
 //!
-//! Nulya has no "replace the history" verb and will not grow one: a ledger only
-//! appends, and nothing may rewrite what the model has already seen. So
-//! compaction is not an edit but a **fork** — ask the session to summarise
-//! itself, open a new session file whose header points back at the old one, and
-//! carry the summary over as its first turn. The old file stays on disk, whole
-//! (DESIGN §11, PLAN §3.4).
-//!
-//! Two things follow, and they shape the whole procedure:
-//!
-//!  1. **The summary is produced INSIDE the old session.** Compaction fires
-//!     exactly when the cached prefix is at its largest, so asking the old
-//!     session to summarise itself is one nearly-free cache-hit request. A
-//!     fresh sub-session would re-send the entire transcript as uncached input
-//!     — paying full price for the very thing being compacted. The cost is that
-//!     the request and its summary become two real events in the old ledger,
-//!     which is honest: that file now records why it ended.
-//!
-//!  2. **Nothing here is a kernel concept.** `session append`, `session step`
-//!     and `session new --parent` already exist; this is a procedure over them
-//!     (PLAN §3.6), and the kernel neither knows nor cares that a compaction
-//!     happened. When to compact is policy, what to keep is the model's
-//!     judgement — neither belongs in the kernel (physics #8).
-//!
-//! **Why compiled Zig rather than a shell script.** A driver has to PARSE what
-//! `nulya session step` prints: JSONL ledger events. `sh` has no JSON reader
-//! (jq is not guaranteed), Windows has neither jq nor a guaranteed python, and
-//! PowerShell/sh would mean two implementations of the same procedure. Zig with
-//! `std.json` is the zero-dependency choice that runs identically on every host
-//! nulya builds for — precisely the case PLAN §0.1 #3 keeps open for compiled
-//! extensions ("Zig is the optimisation for when measurement calls for it").
-//! Scripts remain the default for extensions that only wrap a command.
-//!
-//! The procedure, in seven steps (see `compact`):
-//!   1. find the harness (`NULYA_EXE`, set by the kernel for its children);
-//!   2. `session append` the compaction request into the OLD session;
-//!   3. `session step` it, and read the ledger lines it prints;
-//!   4. no summary → nothing moves, the old session is still the live one;
-//!   5. `session new --parent <old>:<seq>` — the fork;
-//!   6. `session append` the summary into the new session;
-//!   7. report `{session, parent, summary_bytes}`.
-//!
-//! **Two fork-only branches.** When the brief already EXISTS, steps 2-4 are
-//! skipped outright: no request is appended, the old session is not stepped, and
-//! its file is left byte-identical. The fork point is then the old ledger's
-//! current tail (`session events <old>`, last line's `seq`), which is the same
-//! place the summary path forks at — the difference is only who produced the
-//! brief. A parent with no events at all is refused without forking: a fork that
-//! carries nothing forward is a conversation thrown away.
-//!
-//!  - **`brief=latest` (or `brief_seq=<n>`): the brief is in the ledger.** The
-//!    model called `extensions/handoff`, and that call — its four sections and
-//!    all — is already a frozen event in the old session (DESIGN §11). So this
-//!    reads the last `handoff` call the kernel ACCEPTED out of
-//!    `session events <old>` and renders the markdown brief from its arguments.
-//!    Nothing was written to disk for it to find, which is the point: a driver
-//!    watching a directory is a convention every driver has to learn and no
-//!    machine enforces, and it stops working the moment the workspace lives
-//!    somewhere else (goals/remote-env.md §3.2). `brief_seq` names one specific
-//!    call instead of the newest, for a caller that is looking further back.
-//!  - **`brief_file=<path>`: the brief is a file the caller wrote.** For a
-//!    package that renders its own brief and hands over the path —
-//!    `extensions/plan`'s `approve` is the one consumer today.
-//!
-//! Rendering the handoff brief lives HERE rather than in `extensions/handoff`
-//! because these are two separate binaries: whoever turns the four sections into
-//! markdown must be whoever carries them, or the shape is implemented twice and
-//! the two copies drift. `handoff` is left with what only it can do — telling
-//! the model, at the moment of the call, that a section is missing.
-//!
-//! Both branches append the SAME parent-pointer footer to the carried text, in
-//! code rather than by asking the model to remember it (PLAN §3.4.1): the old
-//! ledger is still on disk and the new session has a shell, so lossy compaction
-//! degrades into lazy retrieval.
-//!
-//! Wall clock: steps 2-3 wait for a real model, which the host's 30s default for
-//! an extension call (`tool.Timeouts.extension_ms`) does not cover. A tool that
-//! knows it is slow says so in its manifest, so `contributes.tools[].timeout_ms`
-//! here asks for the ceiling (600000 ms, `tool.Timeouts.extension_max_ms`,
-//! DESIGN §7.3). If even that runs out, nothing has moved except the two
-//! appended turns in the old ledger, and the compaction can simply be asked for
-//! again.
+//! Nulya's ledger only appends, so compaction is not an edit but a FORK: ask
+//! the session to summarise itself, open a new session file whose header
+//! points back at the old one, and carry the summary over as its first turn.
+//! The old file stays on disk, whole. The summary is produced INSIDE the old
+//! session — compaction fires when the cached prefix is largest, so this is
+//! one cache-hit request rather than a fresh sub-session re-sending the whole
+//! transcript uncached. Nothing here is a kernel concept: `session append`,
+//! `session step` and `session new --parent` already exist, and this is a
+//! procedure over them — compiled Zig rather than a script, since this driver
+//! parses `nulya session step`'s JSONL events, which neither `sh` nor
+//! PowerShell can do without an external JSON tool neither platform
+//! guarantees. The seven-step procedure and the two fork-only shortcuts are
+//! documented at `compact` and its `briefFrom*` helpers below.
 
 const std = @import("std");
 
@@ -186,9 +118,9 @@ pub fn main(init: std.process.Init) !void {
     var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
     const request = try reader.interface.allocRemaining(alloc, .limited(1 << 20));
 
-    // The wire is `plain` (DESIGN §7.3): stdin is this call's arguments as one
-    // JSON object, and this package has one tool, so `NULYA_TOOL` says nothing
-    // it does not already know.
+    // The wire is `plain`: stdin is this call's arguments as one JSON object,
+    // and this package has one tool, so `NULYA_TOOL` says nothing it does not
+    // already know.
     var outcome: Outcome = .{ .failed = "compact expects this call's arguments as one JSON object on stdin" };
 
     if (std.json.parseFromSlice(std.json.Value, alloc, request, .{})) |parsed| {
@@ -234,13 +166,13 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     };
 
     // 4b. Assemble what will be carried, and CHECK it — before anything moves.
-    //     `session append` refuses bytes that are not valid UTF-8 (a header that
-    //     is not §3's shape, BUGS #22), and everything below is irreversible:
-    //     checking after the fork would leave a child that can never receive its
-    //     summary, holding the parent's tasks, with nobody reading either. So
-    //     the order is render → validate → fork, and it stays that way for
-    //     whatever bad bytes a future brief source brings (`brief_file` reads a
-    //     file this package did not write).
+    //     `session append` refuses bytes that are not valid UTF-8, and
+    //     everything below is irreversible: checking after the fork would
+    //     leave a child that can never receive its summary, holding the
+    //     parent's tasks, with nobody reading either. So the order is render
+    //     → validate → fork, and it stays that way for whatever bad bytes a
+    //     future brief source brings (`brief_file` reads a file this package
+    //     did not write).
     //
     //     The parent pointer is written by code (see `parent_footer`).
     const footer = try std.fmt.allocPrint(alloc, parent_footer, .{ args.session, found.seq, args.session });
@@ -256,8 +188,8 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     // 5. The fork. The kernel checks the parent exists and carries its frozen
     //    model identity over (a compaction must not change who the conversation
     //    is with); composition is resolved fresh, because a new session is
-    //    exactly where new pins and newly activated versions take hold
-    //    (DESIGN §11) — so no `--with` / `--pin` here.
+    //    exactly where new pins and newly activated versions take hold — so
+    //    no `--with` / `--pin` here.
     const parent_ref = try std.fmt.allocPrint(alloc, "{s}:{d}", .{ args.session, found.seq });
     const forked = try runNulya(alloc, io, exe, &.{ "session", "new", "--parent", parent_ref });
     const new_id = std.mem.trim(u8, forked.stdout, " \t\r\n");
@@ -290,13 +222,12 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     // up to 4 MiB, and `tasks_footer` grows with however many tasks this
     // session had running. All of that landing on a command line risks the
     // OPERATING SYSTEM's argv length limit, not `session append`'s own, and
-    // Windows's is well within reach of a legitimate brief. Hitting it here
-    // would mean the child session already exists and its tasks are already
-    // retargeted — the orphan continuation step 4's ordering exists to
-    // prevent, just reached from the other end. `session append --file`
-    // already exists for exactly this (up to 8 MiB), so this writes the brief
-    // to a scratch file this compaction owns (named after the child session
-    // id, which is unique) and hands over the path instead.
+    // Windows's is well within reach of a legitimate brief — and hitting it
+    // here would mean the child session already exists and its tasks are
+    // already retargeted, but with nothing carried over. `session append
+    // --file` already exists for exactly this (up to 8 MiB), so this writes
+    // the brief to a scratch file this compaction owns (named after the
+    // child session id, which is unique) and hands over the path instead.
     const scratch_dir = ".nulya/scratch/compact";
     try std.Io.Dir.cwd().createDirPath(io, scratch_dir);
     const brief_path = try std.fmt.allocPrint(alloc, "{s}/{s}.md", .{ scratch_dir, new_id });
@@ -333,8 +264,7 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
 /// nothing to move and `task retarget` leaves the notify pointer untouched —
 /// a real no-op, not merely a harmless one: writing that pointer anyway would
 /// make a long-finished, already-read task follow every future compaction
-/// down the fork chain forever (`cli/task.zig`'s `taskRetarget`,
-/// `docs/goals/review-fork-remote.md`).
+/// down the fork chain forever (`cli/task.zig`'s `taskRetarget`).
 ///
 /// The footer is still only the live ones: it promises "their results will
 /// arrive here", and a task whose result has already been read is not part of
@@ -383,8 +313,7 @@ fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: 
             // answer again), but NOT folded into the same sentence as `moved`:
             // that sentence says "still running", a claim about a machine this
             // host cannot currently reach. Saying nothing instead would drop
-            // the fact that a result may still arrive — the same shape `⑤`'s
-            // `unreachable` state exists to avoid one level down.
+            // the fact that a result may still arrive.
             if (first_unknown.len == 0) first_unknown = name;
             try unknown.append(alloc, try std.fmt.allocPrint(alloc, "{s} ({s})", .{ name, command }));
             continue;
@@ -461,8 +390,8 @@ fn briefFromFile(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Ar
     }
 
     // The fork point is where the old ledger stands right now. `session events`
-    // is a read-only tail (DESIGN §14), so asking costs the old file nothing —
-    // but it is the WHOLE tail, so this reads with `runNulyaScan`'s bigger cap.
+    // is a read-only tail, so asking costs the old file nothing — but it is
+    // the WHOLE tail, so this reads with `runNulyaScan`'s bigger cap.
     const listed = try runNulyaScan(alloc, io, exe, &.{ "session", "events", args.session });
     if (listed.code != 0) {
         return .{ .failed = try fail(alloc, "cannot read the events of {s}: {s}", .{ args.session, detail(listed) }) };
@@ -490,9 +419,9 @@ fn briefFromLedger(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: 
         return .{ .failed = try fail(alloc, "brief '{s}' is not a word compact knows; the only one is `latest` (or name one call with brief_seq)", .{args.brief}) };
     }
 
-    // `session events` is a read-only tail (DESIGN §14), so asking costs the old
-    // file nothing — but it is the WHOLE tail, so this reads with
-    // `runNulyaScan`'s bigger cap.
+    // `session events` is a read-only tail, so asking costs the old file
+    // nothing — but it is the WHOLE tail, so this reads with `runNulyaScan`'s
+    // bigger cap.
     const listed = try runNulyaScan(alloc, io, exe, &.{ "session", "events", args.session });
     if (listed.code != 0) {
         return .{ .failed = try fail(alloc, "cannot read the events of {s}: {s}", .{ args.session, detail(listed) }) };
@@ -599,8 +528,8 @@ fn contains(haystack: []const []const u8, needle: []const u8) bool {
 /// away for no continuation.
 ///
 /// `args_json` is the ledger's copy of what the model sent, so it can be torn
-/// (a reply cut by `max_tokens` records the fragment verbatim, DESIGN §4): a
-/// parse failure here is a refusal, never a crash.
+/// (a reply cut by `max_tokens` records the fragment verbatim): a parse
+/// failure here is a refusal, never a crash.
 fn renderHandoff(alloc: std.mem.Allocator, session_id: []const u8, args_json: []const u8) !?[]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, args_json, .{}) catch return null;
     if (parsed.value != .object) return null;
@@ -624,14 +553,14 @@ fn renderHandoff(alloc: std.mem.Allocator, session_id: []const u8, args_json: []
 
 /// One section, trimmed and capped. Whitespace-only is empty, and the cut lands
 /// on a CHARACTER boundary, never inside one: the rendered brief goes through
-/// `session append`, which refuses bytes that are not valid UTF-8 (BUGS #22),
-/// so a cap that fell mid-character would turn a perfectly good handoff into a
-/// refused one — and it would do it only for the briefs long enough to be cut,
-/// which is the worst kind of rarely.
+/// `session append`, which refuses bytes that are not valid UTF-8, so a cap
+/// that fell mid-character would turn a perfectly good handoff into a refused
+/// one — and it would do it only for the briefs long enough to be cut, which
+/// is the worst kind of rarely.
 ///
 /// Same rule `emit.validUtf8PrefixLen` follows in the kernel. The two cannot
-/// share code: an extension is compiled from its own frozen snapshot and reaches
-/// nothing under `src/` (DESIGN §7.4).
+/// share code: an extension is compiled from its own frozen snapshot and
+/// reaches nothing under `src/`.
 fn handoffSection(obj: std.json.ObjectMap, key: []const u8) []const u8 {
     const raw = stringField(obj, key) orelse return "";
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
@@ -685,8 +614,8 @@ fn briefFromSession(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args:
 
 const Harvest = struct { summary: []const u8, seq: u64 };
 
-/// Read a `session step` stdout (one ledger event per line, DESIGN §14) and pull
-/// out the brief plus the sequence number to fork at.
+/// Read a `session step` stdout (one ledger event per line) and pull out the
+/// brief plus the sequence number to fork at.
 ///
 /// The brief is every assistant text that came after the request line, joined.
 /// An assistant turn carrying tool calls means the model did NOT answer with the
@@ -735,10 +664,9 @@ fn harvest(alloc: std.mem.Allocator, stdout: []const u8) !?Harvest {
 }
 
 /// The highest `seq` in a `session events` dump — the fork point when the caller
-/// brought its own brief. Null means the parent has no events at all. The lines
-/// are the ledger's own bytes (DESIGN §14), so this reads them the same
-/// forgiving way `harvest` does: a shape this build does not know is skipped
-/// rather than fatal.
+/// brought its own brief. Null means the parent has no events at all. Read the
+/// same forgiving way `harvest` does: a shape this build does not know is
+/// skipped rather than fatal.
 fn lastSeq(alloc: std.mem.Allocator, stdout: []const u8) ?u64 {
     var seq: u64 = 0;
     var lines = std.mem.splitScalar(u8, stdout, '\n');
@@ -758,9 +686,9 @@ fn lastSeq(alloc: std.mem.Allocator, stdout: []const u8) ?u64 {
 }
 
 /// Read a file named by the caller, workspace-relative or absolute (this
-/// process's cwd IS the workspace, DESIGN §7.6). Null means it is not there;
-/// anything else is the real I/O error, because "cannot read the brief" and
-/// "there is no brief" deserve different messages.
+/// process's cwd IS the workspace). Null means it is not there; anything
+/// else is the real I/O error, because "cannot read the brief" and "there is
+/// no brief" deserve different messages.
 fn readFileMaybe(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !?[]u8 {
     const file = if (std.fs.path.isAbsolute(path))
         std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
@@ -783,23 +711,21 @@ const Run = struct { code: u8, stdout: []u8, stderr: []u8 };
 
 /// The largest ledger tail the two fork-only branches will read in one gulp —
 /// `briefFromFile` and `briefFromLedger` both ask `session events <old>` with
-/// no `--since`, which is the WHOLE ledger (DESIGN §14: a read-only tail, but
-/// an unbounded one). `max_child_output` (4 MiB) is sized for a bounded
-/// child's output; a long-lived session is exactly what compaction exists to
-/// shorten, so the longer it ran before someone compacted it, the bigger this
-/// read gets — hitting the ordinary cap here would mean the session most in
-/// need of compacting is the one these two branches refuse to look at,
-/// exactly backwards from what they are for (`briefFromSession`'s default
-/// path never hits this: it reads one `session step`'s new events, not the
-/// ledger's history). Still a cap, not `.unlimited`, for the reason
-/// `protocol.zig`'s `max_payload_bytes` is one: a size no real ledger will
-/// reach, not a budget tuned to the common case; a true streaming scan is a
-/// later optimisation, not needed to fix this.
+/// no `--since`, which is the WHOLE ledger (a read-only tail, but an
+/// unbounded one). `max_child_output` (4 MiB) is sized for a bounded child's
+/// output; a long-lived session is exactly what compaction exists to
+/// shorten, so the longer it ran before someone compacted it, the bigger
+/// this read gets — hitting the ordinary cap here would mean the session
+/// most in need of compacting is the one these two branches refuse to look
+/// at (`briefFromSession`'s default path never hits this: it reads one
+/// `session step`'s new events, not the ledger's history). Still a cap, not
+/// `.unlimited`: a size no real ledger will reach, not a budget tuned to the
+/// common case.
 const max_ledger_scan_bytes: usize = 64 << 20;
 
 /// One `nulya <args…>` invocation, in this process's working directory — which
-/// is the workspace, because that is where the host spawns an extension
-/// (DESIGN §7.6). Output is captured, never inherited: stdout here is data.
+/// is the workspace, because that is where the host spawns an extension.
+/// Output is captured, never inherited: stdout here is data.
 fn runNulya(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, tail: []const []const u8) !Run {
     return runNulyaLimited(alloc, io, exe, tail, max_child_output);
 }
@@ -879,9 +805,9 @@ fn stringField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
 }
 
 /// The answer, then exit — the whole runtime contract. A success is JSON on
-/// stdout because a driver reads the new session id out of it; a refusal is the
-/// message on stderr, and the non-zero exit is what makes it a failed call
-/// (DESIGN §7.3).
+/// stdout because a driver reads the new session id out of it; a refusal is
+/// the message on stderr, and the non-zero exit is what makes it a failed
+/// call.
 fn answer(alloc: std.mem.Allocator, io: std.Io, outcome: Outcome) !noreturn {
     switch (outcome) {
         .done => |done| {

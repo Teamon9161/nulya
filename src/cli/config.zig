@@ -1,7 +1,7 @@
-//! `nulya config show` (DESIGN §14): the read-only projection of the effective
-//! provider profiles and model catalog a picker — or the agent, through `shell`
-//! — reads before opening a session. It decides nothing and never prints a
-//! secret: only the env var NAME and whether a credential is usable right now.
+//! `nulya config show`: the read-only projection of the effective provider
+//! profiles and model catalog a picker — or the agent, through `shell` — reads
+//! before opening a session. It decides nothing and never prints a secret: only
+//! the env var NAME and whether a credential is usable right now.
 
 const std = @import("std");
 const codex = @import("../providers/codex.zig");
@@ -15,10 +15,7 @@ const sliceHasFlag = common.sliceHasFlag;
 
 pub fn dispatchConfig(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len == 0) return common.usageSection(io, common.config_usage);
-    // Two verbs, because they are two different acts: `show` reads three files
-    // and prints; `refresh` goes to the network first. A flag on `show` made the
-    // one command in this family that never touched the network sometimes touch
-    // it, which is exactly the property a reader wants to be able to rely on.
+    // `show` never touches the network; `refresh` goes there first.
     if (std.mem.eql(u8, args[0], "show")) return configShow(alloc, io, .{
         .as_json = sliceHasFlag(args[1..], "--json"),
     });
@@ -32,8 +29,8 @@ pub fn dispatchConfig(alloc: std.mem.Allocator, io: std.Io, args: []const []cons
 
 const ShowOptions = struct {
     as_json: bool,
-    /// Ask each usable codex profile's endpoint for its live model catalogue and
-    /// write it to the Codex CLI's cache before projecting. Set only by
+    /// Ask each usable codex profile's endpoint for its live model catalogue
+    /// and write it to the Codex CLI's cache before projecting. Set only by
     /// `config refresh`, the one verb in this family that goes to the network.
     refresh: bool = false,
 };
@@ -41,30 +38,27 @@ const ShowOptions = struct {
 /// The projection a picker (or the agent, via shell) reads: the EFFECTIVE
 /// provider profiles after the whole config chain, each with whether its
 /// credential is usable right now, plus the model catalog. Never a secret —
-/// only the env var NAME and a boolean. Shell-level, like `session new`: it
-/// decides nothing, it shows what `session new` would see.
+/// only the env var NAME and a boolean. It shows what `session new` would see.
 const ConfigView = struct {
     /// Where the chain reads from, so a front end writes to the same place it
-    /// shows — never a second guess at "where is home".
+    /// shows.
     paths: Paths,
     active_profile: []const u8,
     profiles: []const ProfileView,
     models: []const config.ModelParams,
     /// The merged `[registry]` — the tool face this workspace opens a session
-    /// with. Effective values only, not which layer contributed them: the
-    /// question a reader has is "what are today's pins", and answering it here
-    /// is what keeps them from reading the config files themselves, one of
-    /// which may hold an inline `api_key`. Typed as `config.Registry`, so the
-    /// two names printed are the two keys to write back.
+    /// with. Effective values only, not which layer contributed them. Typed as
+    /// `config.Registry`, so the two names printed are the two keys to write
+    /// back.
     registry: config.Registry,
     /// The other standing axis: which packages are a member of every session
-    /// opened here (DESIGN §5.1). Projected for the pins' reason exactly — a
-    /// reader who cannot see it here goes and reads the three config files
-    /// itself, and one of those may hold an inline `api_key`.
+    /// opened here. Projected for the same reason as the pins: a reader who
+    /// cannot see it here goes and reads the config files, one of which may
+    /// hold an inline `api_key`.
     ///
     /// `extensions.paths` is deliberately not projected: it names directories
-    /// this machine will run code from, which is not a question a picker or a
-    /// model has, and a store root is visible as such in `nulya ext list`.
+    /// this machine will run code from, and `nulya ext list` already shows a
+    /// store root as such.
     extensions: ExtensionsView,
 
     const ExtensionsView = struct {
@@ -97,13 +91,11 @@ const ConfigView = struct {
         /// What THIS profile's own endpoint says about the ids in `models`,
         /// parallel to it (`catalog[i]` describes `models[i]`). Null — every
         /// profile but codex — means "look the id up in the top-level `models`
-        /// catalog", which is where an id is described once for all the
-        /// endpoints that serve it.
+        /// catalog".
         ///
-        /// Only a ChatGPT subscription contradicts that: it serves several of
-        /// the same ids with a smaller window, an extra effort level and its own
-        /// defaults, and it states them itself (`codex.Catalog`), so this is the
-        /// only honest description of what a session on this profile would get.
+        /// A ChatGPT subscription serves several of the same ids with a smaller
+        /// window, an extra effort level and its own defaults, so only its own
+        /// `codex.Catalog` describes what a session on it would get.
         catalog: ?[]const config.ModelParams = null,
     };
 };
@@ -117,8 +109,8 @@ fn configShow(alloc: std.mem.Allocator, io: std.Io, opts: ShowOptions) !u8 {
     defer paths.deinit(alloc);
 
     // Before the projection, so what prints below is what was just fetched. A
-    // failed refresh does not stop the projection — whatever is on disk is still
-    // the answer to "what would a session see" — but it does decide the exit code.
+    // failed refresh still projects whatever is on disk, but decides the exit
+    // code.
     const refreshed = if (opts.refresh) try refreshCodexCatalogs(alloc, io, &cfg, &host) else true;
 
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -186,10 +178,9 @@ fn configShow(alloc: std.mem.Allocator, io: std.Io, opts: ShowOptions) !u8 {
 }
 
 /// The catalogue this profile's own endpoint publishes, when it publishes one
-/// and the profile has not been told what it serves. Today that is exactly one
-/// case: a codex profile with no `models` list reads the Codex CLI's cache. An
-/// explicit `models` in any config layer wins — the profile said what it serves,
-/// and a discovered list must never overrule a written one.
+/// and the profile has not been told what it serves: today, a codex profile
+/// with no `models` list reads the Codex CLI's cache. An explicit `models` in
+/// any config layer wins — a discovered list never overrules a written one.
 ///
 /// `io` and the environment are arguments rather than looked up here, so a test
 /// can point `CODEX_HOME` at a fixture and this stays the one code path.
@@ -234,9 +225,8 @@ fn orderByDefault(
 /// `nulya config refresh`: fetch today's catalogue for every codex profile whose
 /// subscription credential is present right now, and write it to the file the
 /// projection reads. Returns false when the refresh did not happen — a failure,
-/// or nothing to refresh at all — which the caller turns into exit 1: the
-/// projection is still printed, but a refresh that silently did nothing would be
-/// indistinguishable from a fresh one.
+/// or nothing to refresh at all — which the caller turns into exit 1; the
+/// projection is still printed either way.
 fn refreshCodexCatalogs(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -275,9 +265,8 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
         }
         if (p.effort) |e| try w.print(" effort={s}", .{e});
         try w.print("\n      model: {s}", .{p.model});
-        // A profile with its own catalogue prints it in full below instead: the
-        // whole point of reading it is that these ids are NOT described by the
-        // shared catalog at the bottom.
+        // A profile with its own catalogue prints it in full below instead —
+        // those ids are NOT described by the shared catalog at the bottom.
         if (p.catalog == null and p.models.len > 1) {
             try w.writeAll("  [");
             for (p.models, 0..) |m, i| {
@@ -298,9 +287,9 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
     }
     try w.writeAll("\nmodels:\n");
     for (view.models) |m| try writeModelLine(w, m);
-    // The tool face, under the exact key names a reader writes back into a
-    // config file. An empty pin list is printed as such rather than omitted:
-    // "no extension tool is native here" is the answer, not a missing section.
+    // Under the exact key names a reader writes back into a config file. An
+    // empty list prints as "(none)": that is an answer, a missing section is
+    // not.
     try w.print("\nregistry:\n  max_tools            {d}\n  pinned_native_tools  ", .{view.registry.max_tools});
     if (view.registry.pinned_native_tools.len == 0) {
         try w.writeAll("(none)");
@@ -310,9 +299,8 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
             try w.writeAll(pin);
         }
     }
-    // The membership axis, beside the tool face and under its own key name. An
-    // empty list is printed as such for the pins' reason: "no package joins
-    // every session here" is the answer, not a missing section.
+    // The membership axis, beside the tool face, empty-prints for the same
+    // reason.
     try w.writeAll("\n\nextensions:\n  with                 ");
     if (view.extensions.with.len == 0) {
         try w.writeAll("(none)");
@@ -330,8 +318,8 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
 fn writeModelLine(w: *std.Io.Writer, m: config.ModelParams) !void {
     try w.print("  {s: <22} {s: <18}", .{ m.id, m.label });
     if (m.context_window) |c| try w.print("  ctx {d: >7}", .{c});
-    // Only when true: the absence of the word is the absence of the claim,
-    // which is exactly what the `--image` gate reads it as.
+    // Only when true: absence of the word is absence of the claim, which is
+    // how the `--image` gate reads it.
     if (m.vision) try w.writeAll("  vision");
     if (m.efforts.len != 0) {
         try w.writeAll("  effort ");
@@ -426,22 +414,15 @@ test "config show projects profiles with credential availability and the catalog
     try std.testing.expectEqual(@as(usize, 4), ms[0].object.get("efforts").?.array.items.len);
     try std.testing.expect(ms[0].object.get("default_effort").? == .null);
 
-    // The tool face rides along too. Without it the only way to see today's
-    // pins is to read the config files, and one of those layers may hold an
-    // inline `api_key` — which is how this section came to be projected.
     const registry = root.get("registry").?.object;
     try std.testing.expectEqual(@as(i64, 6), registry.get("max_tools").?.integer);
     const projected_pins = registry.get("pinned_native_tools").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), projected_pins.len);
     try std.testing.expectEqualStrings("ext:date.now/print_date", projected_pins[0].string);
-    // …and so does the other standing axis, for the same reason (DESIGN §5.1):
-    // which packages are a member of every session here is not something a
-    // reader should have to open `config.toml` to learn.
     const projected_with = root.get("extensions").?.object.get("with").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), projected_with.len);
     try std.testing.expectEqualStrings("guide", projected_with[0].string);
-    // `extensions.paths` is NOT projected: it says which directories may supply
-    // code, which is a different question and one `ext list` already answers.
+    // `extensions.paths` is NOT projected.
     try std.testing.expect(root.get("extensions").?.object.get("paths") == null);
 
     // The plain-text form mentions each profile and the model line.
@@ -574,9 +555,6 @@ test "config show prints both standing lists, empty ones as such rather than as 
     // "no extension tool is native here" is an answer; a silent section is not.
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "pinned_native_tools  (none)") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "max_tools            20") != null);
-    // …and the same for the other standing axis (DESIGN §5.1). Without it a
-    // reader cannot tell "nothing joins every session" from "this build does
-    // not project that", and goes back to reading the config files.
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "with                 (none)") != null);
 
     var filled: std.Io.Writer.Allocating = .init(alloc);

@@ -1,5 +1,5 @@
 //! The bundled `std` extension's search tools — `grep` / `glob` and the
-//! gitignore-aware walk under them (docs/goals/std.md §1.3). Owned by std-d;
+//! gitignore-aware walk under them. Owned by std-d;
 //! fixtures come from `std.zig`.
 //!
 //! Every case runs the real binary through `nulya ext run std@<v> <tool> '<json>'`
@@ -213,9 +213,8 @@ test "bundled std grep: hits, smart case, glob filter, context shape, per-file c
     // A pattern that will not compile refuses and teaches escaping — a real
     // malfunction, on this wire the message on stderr with `exit 1`. A search
     // path that does not exist is not one: the caller just named the wrong
-    // place, so the answer names the nearest real directory and exits 0
-    // (docs/goals/std.md "existence answers"). A missing required argument is
-    // still a refusal.
+    // place, so the answer names the nearest real directory and exits 0. A
+    // missing required argument is still a refusal.
     {
         const bad = try call(alloc, io, ws, exe, ref, "grep", "{\"pattern\":\"ZQX_(unclosed\"}", 1);
         defer alloc.free(bad);

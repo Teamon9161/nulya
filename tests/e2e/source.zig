@@ -1,4 +1,4 @@
-//! `nulya src` and `nulya ext api` (PLAN §3.10): the binary prints the exact
+//! `nulya src` and `nulya ext api`: the binary prints the exact
 //! `src/**` it was built from, so what an agent reads can never drift from what
 //! runs.
 

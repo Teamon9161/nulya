@@ -6,7 +6,7 @@
 //! delegation whitelist and the depth backstop, and each runner that can hold a
 //! delegation — a nulya session, Codex, Claude, pi (all three answered offline by
 //! the fakes `build.zig` builds for this) and somebody else's extension speaking
-//! the `agent_runner` contract (docs/goals/agent-runner.md).
+//! the `agent_runner` contract.
 //!
 //! These are the suite's slowest tests: every one drives at least one real
 //! background task through a real `nulya session step`. Isolating them is what

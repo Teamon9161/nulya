@@ -1,51 +1,30 @@
 //! `.nulya/delegations/<d-id>/` — what this package knows about one delegation.
 //!
-//! **Why a delegation has an identity of its own.** The model used to name a
-//! sub-agent by the SESSION it happened to run in (`agent{session:"s-…"}`).
-//! That works exactly as long as every sub-agent is a nulya session; the moment
-//! one is a Codex thread or a Claude process there is no `s-…` to name, and the
-//! model would need a different vocabulary per runner. So the thing the model
-//! names is the CONVERSATION — `d-<12 hex>` — and what is behind it (a nulya
-//! session, a thread id, a pid) is the runner's business.
-//!
-//! **Abstraction, not concealment (D2).** The record is an ordinary readable
-//! journal: it says which runner drives this delegation, which remote
-//! conversation that runner opened, and every turn anybody sent. A report still
-//! points at the remote transcript. Nothing here hides a fact — it gives the
-//! facts one name.
-//!
-//! **Why a journal and not a state file.** Two processes write to a delegation
-//! (the `agent` tool in the caller's step, and the `run` tool in a background
-//! task) and neither can be sure the other is not writing right now. Appending
-//! whole lines under a lock is the discipline `src/journals/journal.zig` already
-//! settled on for exactly that; this is that discipline, re-implemented, because
-//! an extension is compiled on its own and cannot import the kernel.
-//!
-//! **Layout.**
+//! A journal rather than a state file because TWO processes write it (the `agent`
+//! tool in the caller's step, the `run` tool in a background task): whole lines
+//! appended under a lock, `src/journals/journal.zig`'s discipline re-implemented
+//! because an extension cannot import the kernel.
 //!
 //!   `<d>/record.jsonl`   this journal: one `created` row, then one `turn` row
 //!                        per message anybody sent (the first task included).
-//!   `<d>/.runner.lock`   the runner's exclusive lease (D4). An OS advisory
-//!                        lock, so a runner that dies releases it — a marker
-//!                        file would strand the delegation for ever.
-//!   `<d>/interrupt`      "stop what you are doing and take the new message
-//!                        now" (D6). Empty; its existence is the message.
-//!   `<d>/inbox/`         messages for a runner that has no inbox of its own.
-//!                        The nulya runner delivers into the child session's
-//!                        own inbox instead (D5), so this stays empty here.
-//!
-//! The last two are a queue with a delivery contract rather than a record of
-//! what happened, so they live next door in `mailbox.zig`.
-//!   `<d>/persona.md`     the persona frozen for this delegation, for a harness
-//!                        that is told its system prompt on every process.
+//!   `<d>/.runner.lock`   the runner's exclusive lease. An OS advisory lock, so
+//!                        a runner that dies releases it — a marker file would
+//!                        strand the delegation for ever.
+//!   `<d>/interrupt`      "stop and take the new message now". Empty; its
+//!                        existence is the message.
+//!   `<d>/inbox/`         messages for a runner with no inbox of its own. The
+//!                        nulya runner delivers into the child session's own
+//!                        inbox instead, so this stays empty there.
+//!   `<d>/persona.md`     the persona frozen for this delegation.
 //!   `<d>/message.txt`    the one message a round is answering, staged where an
-//!                        EXTERNAL runner extension can read it (`external.zig`)
-//!                        — written only by whoever holds the lease, and only
-//!                        for as long as that round.
+//!                        EXTERNAL runner extension can read it — written only by
+//!                        whoever holds the lease, and only for that round.
+//!
+//! The last two of those are a queue with a delivery contract rather than a
+//! record of what happened, so they live in `mailbox.zig`.
 //!
 //! Every entry point takes the workspace directory rather than assuming the
-//! process's own: the callers pass `std.Io.Dir.cwd()` (an extension is spawned
-//! in the workspace, DESIGN §7.6) and the tests pass a temporary one.
+//! process's own: callers pass `std.Io.Dir.cwd()`, tests a temporary one.
 
 const std = @import("std");
 
@@ -53,56 +32,38 @@ const std = @import("std");
 pub const root = ".nulya/delegations";
 
 /// How a step knows which delegation it is running as. Set by the runner on the
-/// process it drives, beside `NULYA_AGENT_DEPTH` and for the same reasons: it is
-/// a fact about this chain rather than a secret, so it survives the environment
-/// sanitising every child gets (DESIGN §7.6), and it is what lets a delegated
-/// session read its OWN frozen policy instead of a definition file that may have
-/// been edited since (`main.allowedHere`).
+/// process it drives, beside `NULYA_AGENT_DEPTH`; not secret-shaped, so it
+/// survives the environment sanitising every child gets. It is what lets a
+/// delegated session read its OWN frozen policy rather than a definition file
+/// that may have been edited since (`main.allowedHere`).
 pub const delegation_var = "NULYA_AGENT_DELEGATION";
 
 pub const record_name = "record.jsonl";
 pub const lock_name = ".runner.lock";
 
-// ── how much a delegation may do (contract ar-h / D13) ──────────────────────
+// ── how much a delegation may do ────────────────────────────────────────────
 
 /// The one ceiling a delegation carries, in three words.
 ///
-/// **Why three and not a flag.** `readonly` answered one question — "may this
-/// sub-agent change anything" — and every harness has an answer for it. But the
-/// other side of that flag was doing two jobs at once: "work in this checkout
-/// the way an agent normally does" and "do whatever you are able to", and those
-/// are not the same grant. A definition that needs the second one had no way to
-/// say so, and a driver reading the record had no way to tell which one it got.
+/// `default` and `unsafe` behave identically on the nulya arm today: what
+/// differs is what the record says, which is what an external harness that HAS
+/// the distinction is told (Codex and Claude both do).
 ///
-/// **`default` and `unsafe` are the same thing on the nulya arm today (D13).**
-/// There is no gate between them and there is not going to be one built out of
-/// guessing at command strings: a ceiling made of string classification is a
-/// ceiling that reads convincingly and holds nothing (agents-and-review §1).
-/// Real separation is the sandbox (PLAN §3.8). What the two words DO differ in
-/// right now is what the record says, and that is not nothing — it is the
-/// frozen answer a sandbox will read when there is one, and it is what an
-/// external harness that HAS the distinction is told (Codex and Claude both do).
-///
-/// **Escalation is never inherited.** `unsafe` reaches a delegation from its
-/// definition or from the `agent` call that opened it, and nowhere else: no
-/// front end's mode, no environment variable, nothing about the parent. The
-/// call itself passes through the parent session's own gate, so a person
-/// watching an `ask`-mode conversation sees the word and can refuse it.
+/// ESCALATION IS NEVER INHERITED: `unsafe` reaches a delegation from its
+/// definition or from the `agent` call that opened it and nowhere else — no
+/// front end's mode, no environment variable, nothing about the parent.
 pub const Permissions = enum {
     /// Reads and nothing else. A hard ceiling every runner must be able to
-    /// enforce or refuse the delegation for (D10).
+    /// enforce, or refuse the whole delegation.
     readonly,
-    /// What an agent working in this checkout ordinarily does: read, write,
-    /// run things. The default, and what an unwritten field means.
+    /// Read, write, run things: the default, and what an unwritten field means.
     default,
-    /// Everything the harness is able to do, with its own guard rails off.
-    /// Written on purpose, by somebody who meant it.
+    /// Everything the harness can do, with its own guard rails off.
     unsafe,
 
     /// The word as a definition writes it and as the record freezes it. Null is
-    /// "not one of the three", which is never read as a default: a misspelling
-    /// that fell back to `default` would be a ceiling quietly widened, which is
-    /// the one outcome this field exists to prevent.
+    /// "not one of the three" and is never read as a default: a misspelling
+    /// falling back to `default` would be a ceiling quietly widened.
     pub fn parse(text: []const u8) ?Permissions {
         const word = std.mem.trim(u8, text, " \t");
         if (std.mem.eql(u8, word, "readonly")) return .readonly;
@@ -116,8 +77,7 @@ pub const Permissions = enum {
     }
 
     /// The read-only ceiling, asked as the one question the runners' own
-    /// mechanisms answer. A named predicate rather than `== .readonly` spelled
-    /// out in five files: the arms all ask this one thing.
+    /// mechanisms answer.
     pub fn isReadonly(self: Permissions) bool {
         return self == .readonly;
     }
@@ -143,8 +103,8 @@ pub fn isPlainId(id: []const u8) bool {
 }
 
 /// A fresh one. Randomness rather than a counter: two `agent` calls in the same
-/// step are two processes with no way to agree on the next number, and the id
-/// is a name, not an ordering.
+/// step are two processes with no way to agree on the next number, and the id is
+/// a name, not an ordering.
 pub fn mint(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
     var bytes: [6]u8 = undefined;
     io.random(&bytes);
@@ -153,12 +113,10 @@ pub fn mint(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
 
 /// A UUID (version 4), for a harness that names its conversations that way.
 ///
-/// Minted HERE rather than read back from the harness, and for the same reason
-/// the delegation id is: the record has to be able to name the remote
-/// conversation before a single turn has run, so the name must be something this
-/// side chose. `claude --session-id` requires this exact shape; `pi --session-id`
-/// takes any string and gets one anyway, because two harnesses naming their
-/// sessions two different ways would be a difference with nothing behind it.
+/// Minted HERE rather than read back from the harness: the record must be able
+/// to name the remote conversation before a single turn has run, so the name has
+/// to be one this side chose. `claude --session-id` requires this exact shape;
+/// `pi --session-id` takes any string and gets one anyway.
 pub fn mintUuid(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
     var b: [16]u8 = undefined;
     io.random(&b);
@@ -189,94 +147,65 @@ pub fn pathIn(alloc: std.mem.Allocator, id: []const u8, name: []const u8) ![]u8 
 
 /// The row a delegation opens with: everything about it that is decided once.
 ///
-/// Everything here is FROZEN for the same reason a session freezes its
-/// composition (physics #2): a delegation already under way is not re-decided by
-/// a file somebody edited since. The definition's job is to create NEW
-/// delegations; it is never consulted again about one that exists.
+/// Everything here is FROZEN, as a session freezes its composition: a delegation
+/// already under way is not re-decided by a file somebody edited since. The
+/// definition creates NEW delegations and is never consulted again about one
+/// that exists — that covers the runner, the ceiling, and the three policy
+/// numbers below (how many turns, how many steps a round may take, who it may
+/// pass work to).
 ///
-/// That covers the runner (every later turn goes to the same harness), the
-/// ceiling (a follow-up must not be able to widen it) and the three POLICY
-/// numbers below — how many turns this delegation may have, how many steps one
-/// of its rounds may take, and who it may pass work to. Those three used to be
-/// read from the definition as it reads TODAY, which made a live delegation's
-/// budget follow an edit and made deleting a definition file strand every
-/// conversation wearing it.
-///
-/// `runner_version` is the one column that is NOT uniformly a freeze, and the
-/// difference is written down rather than smoothed over (see it below).
+/// `runner_version` is the one column that is NOT uniformly a freeze; see it
+/// below.
 pub const Created = struct {
     agent: []const u8,
     runner: []const u8,
-    /// Which implementation of the runner this delegation opened on. **Two
-    /// strengths, one column, and only one of them is a pin.**
+    /// Which implementation of the runner this delegation opened on. Two
+    /// strengths in one column, and only one of them is a pin:
     ///
     ///   * `ext:<id>` — a PINNED EXECUTION IDENTITY. `current` is resolved once
     ///     at `op=open` and the `v-…` frozen here is what every later round
-    ///     actually calls. It can be a pin because the old version is still in
-    ///     the store: activating a new one decides what the NEXT delegation runs
-    ///     on, never what this conversation is answered by.
-    ///   * `claude` / `pi` — OBSERVED PROVENANCE. What `--version` said on the
-    ///     machine at the moment this opened, and nothing more: later rounds run
-    ///     whatever that name resolves to on PATH now. There is no pin available
-    ///     to make — an upgrade replaces the binary, and the version this names
-    ///     is usually no longer on the machine at all. Refusing on a mismatch
-    ///     would not restore reproducibility; it would only kill conversations
-    ///     that would have resumed perfectly well.
+    ///     calls; the old version stays in the store.
+    ///   * `claude` / `pi` — OBSERVED PROVENANCE. What `--version` said when this
+    ///     opened: later rounds run whatever that name resolves to on PATH now,
+    ///     and there is no pin available to make.
     ///   * `codex` (no version of its own over app-server) and `nulya` (this
-    ///     binary is the one writing the record) leave it empty.
-    ///
-    /// The rule the two follow is one rule: **claim only the freeze that can
-    /// actually be enforced.** A field that reads as a guarantee everywhere and
-    /// holds in one place out of three is worse than a field that says which is
-    /// which.
+    ///     binary writes the record) leave it empty.
     runner_version: []const u8 = "",
     /// What the runner opened to hold this conversation — a session id for the
     /// nulya runner, a thread id for Codex, whatever the harness calls it.
     remote: []const u8,
     parent: []const u8,
-    /// The ceiling this delegation was opened at, frozen with everything else
-    /// decided once. A row with no such column is not a row this build wrote,
-    /// and it is read back as `readonly` — the narrowest answer, because a
-    /// record that cannot say what it granted has not granted anything.
+    /// The ceiling this delegation was opened at. A row without this column is
+    /// read back as `readonly` — the narrowest answer, because a record that
+    /// cannot say what it granted has not granted anything.
     permissions: Permissions = .readonly,
     profile: []const u8 = "",
     model: []const u8 = "",
     /// What an EXTERNAL runner was asked to run on — an opaque string in that
-    /// harness's own vocabulary (D9), never a nulya profile/model pair.
-    ///
-    /// Its own column rather than reusing `model` on purpose: a row saying
-    /// `runner: "codex", model: "gpt-5"` would read as a nulya model id, and a
-    /// record that has to be interpreted before it can be read is the thing D2
-    /// says not to build.
+    /// harness's own vocabulary, never a nulya profile/model pair. Its own column
+    /// rather than reusing `model`, which would read as a nulya model id.
     ///
     /// Unlike `profile` and `model`, this one IS read back: claude, pi and an
-    /// external runner are told which model to use on every round, so each
-    /// `attach` takes it from here (`runner.run`). Codex is the exception it was
-    /// first written for — a thread froze its model when it was created, so a
-    /// later round has nothing to say.
+    /// external runner are told which model to use on every round. Codex is the
+    /// exception — a thread froze its model when it was created.
     runner_model: []const u8 = "",
     /// How many follow-up turns this delegation may have. Zero is "no limit",
-    /// which is what an unwritten `max_exchanges:` means — and what a row from
-    /// before this column means, which is the same answer those delegations
-    /// have been running under all along.
+    /// which is what an unwritten `max_exchanges:` means.
     max_exchanges: u32 = 0,
     /// The step budget one round of it may spend. Zero is the kernel's own.
     max_steps: u32 = 0,
     /// The personas this delegation may pass work to (`agents:`). Empty is a
-    /// LEAF — the narrow answer, and the right one for a row that predates this
-    /// column: a delegation opened before it was written froze no whitelist, and
-    /// inventing a wide one from today's definition is exactly the drift this
-    /// column exists to stop.
+    /// LEAF, which is also the right reading of a row without the column: it
+    /// froze no whitelist, and one invented from today's definition is the drift
+    /// this column exists to stop.
     agents: []const []const u8 = &.{},
 };
 
 /// A delegation, as its journal describes it.
 pub const State = struct {
     created: Created,
-    /// How many messages anybody has sent into it — the first task included.
-    /// THE count of exchanges (contract §1): it is the only one an external
-    /// runner can answer too, where "count the child session's user turns" is
-    /// a fact about nulya sessions and nothing else.
+    /// How many messages anybody has sent into it — the first task included. THE
+    /// count of exchanges: the only one an external runner can answer too.
     turns: u32 = 0,
 };
 
@@ -322,8 +251,7 @@ pub fn appendCreated(
         try jw.objectField("runner_model");
         try jw.write(c.runner_model);
     }
-    // The policy columns, written only when they say something. A delegation
-    // with no limits and no whitelist writes the same row it always did.
+    // The policy columns, written only when they say something.
     if (c.max_exchanges != 0) {
         try jw.objectField("max_exchanges");
         try jw.write(c.max_exchanges);
@@ -344,7 +272,7 @@ pub fn appendCreated(
 }
 
 /// One message sent into the delegation. `interrupt` says how it was sent, not
-/// what it is: a message is always an ordinary turn (D3).
+/// what it is: a message is always an ordinary turn.
 pub fn appendTurn(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -371,25 +299,17 @@ pub fn appendTurn(
 }
 
 /// A row that is there but cannot be believed. Distinct from "no delegation by
-/// that name" (null) on purpose — see the discipline on `read`.
+/// that name" (null) — see the discipline on `read`.
 pub const Corrupt = error{CorruptDelegationRecord};
 
-/// Read the journal back. Null when there is no delegation by that name, or
-/// when its journal has no `created` row yet — both mean "this tool has never
-/// opened a delegation called that", which is the one answer a caller needs.
+/// Read the journal back. Null when there is no delegation by that name, or when
+/// its journal has no `created` row yet — both mean "this tool has never opened a
+/// delegation called that".
 ///
-/// ── three answers, and which fields get which ──────────────────────────────
-///
-/// A TORN FINAL LINE is ignored: an append that was interrupted, or one in
-/// flight right now, is not a fact yet. That has not changed.
-///
-/// An ABSENT field reads as its default, because that is what a row written
-/// before the column existed means and those delegations have been running
-/// under that answer all along.
-///
-/// A field that is PRESENT AND UNREADABLE is where this record stopped being
-/// provenance and became an authority, and the answer depends on which
-/// direction its default points:
+/// A TORN FINAL LINE is ignored: an interrupted or in-flight append is not a
+/// fact yet. An ABSENT field reads as its default. A field PRESENT AND
+/// UNREADABLE is where the record is an authority, so the answer depends on
+/// which direction its default points:
 ///
 ///   | field                       | fallback | direction |
 ///   |-----------------------------|----------|-----------|
@@ -397,27 +317,16 @@ pub const Corrupt = error{CorruptDelegationRecord};
 ///   | `agents`                    | leaf     | narrowest |
 ///   | `max_exchanges` `max_steps` | 0        | UNLIMITED |
 ///
-/// The first two can fall back, and do: corruption there can only ever take a
-/// capability away, which is the same discipline the kernel's own standing
-/// records follow (DESIGN §5.1). The two budgets have no narrow reading
-/// available — zero means "no limit" and "the kernel's own" — so a damaged one
-/// cannot be read at all, and the whole record is refused instead. Reading
-/// `"max_exchanges": "2"` as "unlimited follow-ups" is precisely the fail-open
-/// this distinction exists to prevent.
+/// The first two fall back, since corruption there can only take a capability
+/// away. The two budgets have no narrow reading available — zero means "no
+/// limit" and "the kernel's own" — so a damaged one refuses the whole record.
 ///
-/// ── and the shape of the journal itself ────────────────────────────────────
-///
-/// Read as a two-state machine, because that is all it is: BEFORE the opening
-/// row only a `created` is legal, and after it only a `turn`. Anything else — a
-/// second `created`, a `kind` this build does not know, a line that is not JSON,
-/// a `v` from a schema that is not this one — refuses the whole record.
-///
-/// Strict rather than skipping, and for the reason the budget columns are: every
-/// row this cannot read LOWERS the exchange count, and a lower count is a wider
-/// budget. `{"kind":"turm"}` used to fall through both arms in silence and hand
-/// the delegation a free follow-up. The `v` check is the same rule pointed
-/// forward: a v2 row read by a v1 build would be guessed at rather than
-/// understood, and this file is an authority.
+/// The journal itself is a two-state machine: BEFORE the opening row only a
+/// `created` is legal, and after it only a `turn`. Anything else — a second
+/// `created`, an unknown `kind`, a line that is not JSON, a `v` from another
+/// schema — refuses the whole record. Strict rather than skipping, for the same
+/// reason as the budgets: every row this cannot read LOWERS the exchange count,
+/// and a lower count is a wider budget.
 pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) !?State {
     const path = try pathIn(alloc, id, record_name);
     const bytes = base.readFileAlloc(io, path, alloc, .limited(max_record_bytes)) catch |err| switch (err) {
@@ -455,8 +364,7 @@ pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const 
                     .remote = stringOf(obj, "remote") orelse "",
                     .parent = stringOf(obj, "parent") orelse "",
                     // Missing or unreadable is `readonly`, the narrowest of the
-                    // three: a delegation whose record cannot say what it was
-                    // opened at is not one to keep driving at the wider setting.
+                    // three.
                     .permissions = Permissions.parse(stringOf(obj, "permissions") orelse "") orelse .readonly,
                     .profile = stringOf(obj, "profile") orelse "",
                     .model = stringOf(obj, "model") orelse "",
@@ -475,11 +383,9 @@ pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const 
     return state;
 }
 
-/// One of the two budget columns. Absent is zero — no limit, the answer every
-/// row written before these columns existed carries. Anything else present is
-/// CORRUPTION rather than zero: zero is the widest reading there is here, so
-/// falling back to it would let a damaged row hand out an unlimited one (see
-/// the table on `read`).
+/// One of the two budget columns. Absent is zero — no limit. Anything else
+/// present is CORRUPTION rather than zero: zero is the widest reading here, so
+/// falling back to it would let a damaged row hand out an unlimited budget.
 fn budgetOf(obj: std.json.ObjectMap, key: []const u8) !u32 {
     return switch (obj.get(key) orelse return 0) {
         .integer => |i| if (i > 0 and i <= std.math.maxInt(u32)) @intCast(i) else Corrupt.CorruptDelegationRecord,
@@ -487,9 +393,8 @@ fn budgetOf(obj: std.json.ObjectMap, key: []const u8) !u32 {
     };
 }
 
-/// A list of strings, skipping anything in it that is not one. An absent column
-/// and an empty list are the same answer, which is what the callers want — and
-/// an unreadable one is that answer too, because here it is the NARROW one: a
+/// A list of strings, skipping anything in it that is not one. Absent, empty and
+/// unreadable are all the same answer, and here that answer is the NARROW one: a
 /// delegation that cannot say who it may delegate to is a leaf.
 fn stringsOf(alloc: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]const []const u8 {
     const items = switch (obj.get(key) orelse return &.{}) {
@@ -515,10 +420,9 @@ fn stringOf(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
 
 const max_record_bytes: usize = 4 << 20;
 
-/// Append one complete line, holding the journal's writer lease for the whole
-/// of it — measure, repair a crash tail, write — so two appenders serialize
-/// instead of landing on the same offset (`src/journals/journal.zig`'s rule,
-/// for its reason: many processes write this file).
+/// Append one complete line, holding the journal's writer lease for the whole of
+/// it — measure, repair a crash tail, write — so two appenders serialize instead
+/// of landing on the same offset. Many processes write this file.
 fn appendLine(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -568,8 +472,7 @@ fn repairCrashTail(file: std.Io.File, io: std.Io, size: u64) !u64 {
 }
 
 /// RFC3339 UTC, second granularity — the stamp every journal in this repository
-/// writes (`src/journals/journal.zig`), so a delegation's rows read the same way
-/// as a session's.
+/// writes, so a delegation's rows read the same way as a session's.
 fn rfc3339Now(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
     const ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
     const secs: u64 = if (ms < 0) 0 else @intCast(@divFloor(ms, 1000));
@@ -588,13 +491,13 @@ fn rfc3339Now(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
     });
 }
 
-// ── the runner's lease (D4) ─────────────────────────────────────────────────
+// ── the runner's lease ──────────────────────────────────────────────────────
 
 /// Take the delegation's runner lease, or null when somebody already holds it.
 ///
 /// An OS advisory lock, never a marker file: a runner is a background process
 /// that can be killed, and a marker left by a dead one would strand the
-/// delegation for ever with nothing able to tell the difference.
+/// delegation for ever.
 pub fn takeLease(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) !?std.Io.File {
     const dir = try dirOf(alloc, id);
     try base.createDirPath(io, dir);
@@ -611,13 +514,12 @@ pub fn takeLease(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []c
 }
 
 /// Is a runner driving this delegation right now? The sender's half of the wake
-/// invariant: probe after delivering, and start a runner only when nobody holds
-/// the lease. Probing by TAKING it and letting go is the only honest answer —
-/// the lock is the fact, and anything else would be a second one.
+/// invariant: probe AFTER delivering, and start a runner only when nobody holds
+/// the lease. Probing by taking it and letting go — the lock is the fact.
 ///
 /// Unreadable for any other reason counts as held: starting a second runner is
-/// the mistake this is here to avoid, and the holder's own release-then-recheck
-/// still catches the message.
+/// the mistake this avoids, and the holder's own release-then-recheck still
+/// catches the message.
 pub fn leaseHeld(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) bool {
     const probe = takeLease(alloc, io, base, id) catch return true;
     if (probe) |file| {
@@ -632,17 +534,15 @@ pub fn leaseHeld(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []c
 
 /// The persona a delegation was opened with, frozen beside its journal.
 ///
-/// The nulya runner does not need this — `session new --prompt` freezes those
-/// bytes into the session header (DESIGN §3) and Codex freezes them into the
-/// thread. A harness that is TOLD its system prompt on every process does: the
-/// rendered file follows the definition, and without a copy of its own a
+/// Only needed by a harness TOLD its system prompt on every process: the
+/// rendered file follows the definition, so without a copy of its own a
 /// delegation would silently become somebody else the moment that file was
-/// edited. One delegation, one persona, whichever harness holds it.
+/// edited. (`session new --prompt` and Codex both freeze it themselves.)
 pub const persona_name = "persona.md";
 
 /// Copy the rendered persona in, once, when the delegation opens. `too_long` is
-/// handed back rather than worded here: what the limit is FOR is the runner's
-/// business (a command line, a wire), and only it can say so.
+/// handed back rather than worded here: what the limit is FOR (a command line, a
+/// wire) is the runner's business.
 pub fn freezePersona(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -732,8 +632,8 @@ test "the record opens once and counts every turn, and a torn tail is not a fact
     try std.testing.expectEqual(Permissions.readonly, state.created.permissions);
     try std.testing.expectEqual(@as(u32, 2), state.turns);
 
-    // An append cut short mid-line is dropped rather than glued onto the next
-    // one, and it does not count as a turn while it is torn.
+    // An append cut short mid-line is dropped rather than glued onto the next,
+    // and it does not count as a turn while it is torn.
     const path = try pathIn(a, id, record_name);
     const existing = try ws.readFileAlloc(io, path, a, .unlimited);
     try ws.writeFile(io, .{
@@ -749,8 +649,8 @@ test "the ceiling is one of three words, and anything else is the narrowest one"
     try std.testing.expectEqual(Permissions.readonly, Permissions.parse("readonly").?);
     try std.testing.expectEqual(Permissions.default, Permissions.parse(" default ").?);
     try std.testing.expectEqual(Permissions.unsafe, Permissions.parse("unsafe").?);
-    // Never a default: a misspelling that widened the ceiling is the one
-    // outcome this field exists to prevent.
+    // Never a default: a misspelling that widened the ceiling is the one outcome
+    // this field exists to prevent.
     try std.testing.expect(Permissions.parse("true") == null);
     try std.testing.expect(Permissions.parse("read-only") == null);
     try std.testing.expect(Permissions.parse("") == null);
@@ -778,10 +678,8 @@ test "a created row this build did not write grants nothing" {
     });
     const state = (try read(a, io, ws, id)).?;
     try std.testing.expectEqual(Permissions.readonly, state.created.permissions);
-    // The policy columns are just as narrow when they are not there. Zero is
-    // "no limit" for the two budgets, which is what those delegations have been
-    // running under all along; an empty whitelist is a LEAF, because a row that
-    // froze no list must not be handed one invented from today's definition.
+    // The policy columns are just as narrow when they are not there: zero is "no
+    // limit" for the two budgets, and an empty whitelist is a LEAF.
     try std.testing.expectEqual(@as(u32, 0), state.created.max_exchanges);
     try std.testing.expectEqual(@as(u32, 0), state.created.max_steps);
     try std.testing.expectEqual(@as(usize, 0), state.created.agents.len);
@@ -854,8 +752,7 @@ test "a policy column that cannot be read refuses the record rather than reading
     for ([_][]const u8{
         // Not JSON at all.
         "{not json}\n",
-        // JSON, and a `kind` nothing answers to: this is the one that used to
-        // fall through both arms in silence and hand out a free follow-up.
+        // JSON, and a `kind` nothing answers to.
         "{\"v\":1,\"kind\":\"turm\"}\n",
         // A second opening row. A delegation opens once.
         "{\"v\":1,\"kind\":\"created\",\"agent\":\"y\",\"runner\":\"nulya\",\"remote\":\"s-9\",\"parent\":\"s-0\"}\n",

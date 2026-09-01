@@ -153,13 +153,13 @@ fn readTwoLevels(alloc: std.mem.Allocator, io: std.Io, tree: *Tree) !void {
 fn skip(name: []const u8) bool {
     if (name.len == 0 or name[0] == '.') return true;
     // POSIX file names are bytes, not text — nothing enforces that a directory
-    // entry is valid UTF-8. `render`'s document ends up in a header (BUGS #22:
-    // `std.json.Stringify` writes an invalid `[]const u8` as an array of
-    // numbers, not a string), so a bad name here would make `render` report
-    // success and push the failure onto `session new --prompt` instead. One
-    // unreadable name should cost this entry, not the section — the same
-    // "pass over, don't fail" rule `instructions.zig` applies to a candidate
-    // file that turns out not to be text.
+    // entry is valid UTF-8. `render`'s document ends up in a session header,
+    // and `std.json.Stringify` would write an invalid `[]const u8` as an
+    // array of numbers instead of a string, so a bad name here would make
+    // `render` report success and push the failure onto `session new
+    // --prompt` instead. One unreadable name should cost this entry, not the
+    // section — the same "pass over, don't fail" rule `instructions.zig`
+    // applies to a candidate file that turns out not to be text.
     if (!std.unicode.utf8ValidateSlice(name)) return true;
     for (uninformative) |bad| if (std.mem.eql(u8, name, bad)) return true;
     return false;

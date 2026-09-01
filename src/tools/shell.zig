@@ -1,15 +1,15 @@
-//! Builtin tool: shell (base-tools.md §4).
+//! Builtin tool: shell.
 //!
 //! `{ command, cwd?, timeout_ms?, background? }`. Hands the command to the
-//! execution Environment (which picks the dialect and provides a sanitized child
-//! env — DESIGN §8/§9), captures stdout+stderr, appends the exit code, and
-//! returns raw text. The agent loop applies `emit` uniformly after every
-//! executor returns.
+//! execution Environment (which picks the dialect and provides a sanitized
+//! child env), captures stdout+stderr, appends the exit code, and returns raw
+//! text. The agent loop applies `emit` uniformly after every executor
+//! returns.
 //!
-//! `background: true` is the other half (DESIGN §6.1): the command is started
-//! DETACHED and this returns at once with a receipt. It is a flag on this tool
-//! rather than a separate CLI verb on purpose — a gate and an approval policy
-//! read `shell`'s own `command`, and a `nulya task run -- rm -rf x` wrapper would
+//! `background: true` is the other half: the command is started DETACHED and
+//! this returns at once with a receipt. It is a flag on this tool rather than
+//! a separate CLI verb on purpose — a gate and an approval policy read
+//! `shell`'s own `command`, and a `nulya task run -- rm -rf x` wrapper would
 //! blind both of them.
 
 const std = @import("std");
@@ -35,7 +35,7 @@ pub const def: tool.Tool = .{
 
 /// What a background call is told when there is no session to report back to.
 /// Teaching, not just refusing: the tool says how to get one and what to do
-/// right now (base-tools.md §1).
+/// right now.
 const no_session_text = "background needs a durable session (nulya session new); run it in the foreground here";
 const remote_lost_text = "the connection to the machine this session's commands run on ended while this command was in flight; whether it ran, is still running, or never started there is unknown - do not assume either, and do not simply run it again";
 const remote_refused_text = "the machine this session's commands run on would not start a background task; check that it is answering (nulya remote check) and run it in the foreground here meanwhile";
@@ -76,8 +76,7 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
         // The channel to the machine this session runs on ended, or stopped
         // answering, while this command was in flight. What happened over there
         // is genuinely unknown, so an exit code is not invented and nothing is
-        // retried — a command that already ran must not run twice
-        // (goals/remote-env.md §3.6).
+        // retried — a command that already ran must not run twice.
         error.RemoteChannelLost, error.RemoteChannelStalled => return .{
             .ok = false,
             .output = try alloc.dupe(u8, remote_lost_text),
@@ -100,7 +99,7 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
     }
     // A timeout says so between the captured output and the exit line: what is
     // above is real but partial, and the exit code is the host's, not the
-    // command's (base-tools.md §3).
+    // command's.
     if (outcome.timed_out) {
         if (raw.items.len > 0 and raw.items[raw.items.len - 1] != '\n') try raw.append(alloc, '\n');
         try raw.print(alloc, "[timed out after {d} ms; process killed, output above is partial]", .{timeout_ms});
@@ -115,7 +114,7 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
 /// Start the command detached and answer immediately. The receipt is the whole
 /// of what the model gets now — a name, where the output is accumulating, and
 /// the three commands that ask about it — because the RESULT arrives later, as
-/// its own turn (DESIGN §3.1, §6.1).
+/// its own turn.
 fn startBackground(
     alloc: std.mem.Allocator,
     req: tool.ToolRequest,
@@ -137,9 +136,9 @@ fn startBackground(
         // Nowhere to report a result TO. Not a failure of the command — it was
         // never started — so the model is told what is missing, and what works.
         error.NoDurableSession => return .{ .ok = false, .output = try alloc.dupe(u8, no_session_text) },
-        // The machine this session's commands run on would not start it (DESIGN
-        // §8.2). Its own sentence cannot come back — a start either yields a
-        // receipt or an error — so this says which half failed and where to look.
+        // The machine this session's commands run on would not start it. Its
+        // own sentence cannot come back — a start either yields a receipt or
+        // an error — so this says which half failed and where to look.
         error.RemoteTaskRefused => return .{ .ok = false, .output = try alloc.dupe(u8, remote_refused_text) },
         else => return .{
             .ok = false,
@@ -170,7 +169,7 @@ fn backgroundFlag(args: std.json.Value) !bool {
 }
 
 /// A background task's budget: passed through as given, with NO default and NO
-/// ceiling (DESIGN §6.1). Outliving the step is the whole point of the flag, so
+/// ceiling. Outliving the step is the whole point of the flag, so
 /// the foreground's 120s / 600s would defeat it; what ends a task instead is
 /// `nulya task kill`. Only the "not a positive integer" refusal is shared.
 fn backgroundTimeoutMs(args: std.json.Value) !?u32 {
@@ -181,9 +180,9 @@ fn backgroundTimeoutMs(args: std.json.Value) !?u32 {
 }
 
 /// The command's wall-clock budget: the model's `timeout_ms` clamped into
-/// `[1, shell_max_ms]`, or the default when it said nothing (`tool.Timeouts`,
-/// base-tools.md §3). A non-integer or non-positive value is refused rather than
-/// rounded, so the model is told once instead of silently getting another number.
+/// `[1, shell_max_ms]`, or the default when it said nothing (`tool.Timeouts`).
+/// A non-integer or non-positive value is refused rather than rounded, so the
+/// model is told once instead of silently getting another number.
 fn timeoutMs(args: std.json.Value) !u32 {
     if (args != .object) return tool.Timeouts.shell_default_ms;
     const v = args.object.get("timeout_ms") orelse return tool.Timeouts.shell_default_ms;
@@ -206,25 +205,21 @@ test "a command that outruns its timeout_ms is killed and reported, not waited o
     // that is Git Bash, whose `bin\bash.exe` re-execs the real shell as a
     // grandchild that holds the pipe write-ends. Killing only the direct child
     // would leave the drain blocked for the command's full 5s, so the elapsed
-    // assertion below is the proof the whole process TREE dies (see `Tree` in
+    // assertion below is proof the whole process TREE dies (`Tree` in
     // environment.zig). Same on POSIX, where `bash -lc "a; b"` forks for `b`.
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
-    // Print first, then sleep far past the budget: the output above the kill must
-    // come back with the result (base-tools.md §3), not be thrown away.
+    // Print first, then sleep far past the budget: the output above the kill
+    // must come back with the result, not be thrown away.
     //
     // The budget has to clear the INTERPRETER's own startup, not just the
-    // command's: nothing is written until the shell is up, and the kill does not
-    // wait for that. Measured on this project's development machine, `bash -lc
-    // "echo …; sleep 5"` through the Git Bash launcher takes 268-425 ms (n=15,
-    // mean 309) to put its first byte in the pipe — so the 300 ms this test used
-    // to allow sat inside that spread, and roughly one run in eight killed the
-    // child before `echo` had run at all. That was the test asserting an ordering
-    // the OS never promised it, not output being lost after the write: with the
-    // budget clear of startup the marker is there every time. Keep it well above
-    // interpreter startup and well below the command's own sleep — both bounds
-    // are what the assertions below read.
+    // command's: nothing is written until the shell is up, and the kill does
+    // not wait for that. On this project's development machine, `bash -lc
+    // "echo …; sleep 5"` through the Git Bash launcher takes 268-425 ms
+    // (n=15, mean 309) to put its first byte in the pipe, so the budget must
+    // clear that with margin and still land well under the 5s sleep — both
+    // bounds are what the assertions below read.
     const args_json = switch (lenv.dialect_val) {
         .bash => "{\"command\":\"echo before-the-wait; sleep 5\",\"timeout_ms\":1500}",
         .powershell => "{\"command\":\"Write-Output before-the-wait; Start-Sleep -Seconds 5\",\"timeout_ms\":1500}",
@@ -252,7 +247,7 @@ test "a command that outruns its timeout_ms is killed and reported, not waited o
 test "timeout_ms is clamped to the max, and a non-integer teaches instead of guessing" {
     const alloc = std.testing.allocator;
 
-    // Missing: the kernel default (base-tools.md §3).
+    // Missing: the kernel default.
     const parsed_default = try std.json.parseFromSlice(std.json.Value, alloc, "{\"command\":\"x\"}", .{});
     defer parsed_default.deinit();
     try std.testing.expectEqual(tool.Timeouts.shell_default_ms, try timeoutMs(parsed_default.value));
@@ -319,7 +314,7 @@ test "background:true outside a durable session teaches instead of starting anyt
 test "a background timeout is passed through unclamped; a foreground one is still clamped" {
     const alloc = std.testing.allocator;
 
-    // No default and no ceiling: outliving the step is the point (DESIGN §6.1).
+    // No default and no ceiling: outliving the step is the point.
     const none = try std.json.parseFromSlice(std.json.Value, alloc, "{\"command\":\"x\"}", .{});
     defer none.deinit();
     try std.testing.expectEqual(@as(?u32, null), try backgroundTimeoutMs(none.value));

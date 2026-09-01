@@ -1,49 +1,18 @@
 //! `ask` — the model's way of putting a question to the person, outside the
-//! kernel (goals/tui-plugin.md D13, the second U4 consumer).
+//! kernel.
 //!
-//! **What it is.** One tool. The model calls it with a question and, when the
-//! answer is a choice, the options; this extension checks them and answers
-//! "recorded — end this turn now". It does NOT wait. Nothing here blocks, polls
-//! or reads an answer back: the question is in the ledger the moment the call is
-//! recorded, and the answer is an ordinary user turn that arrives later.
+//! One tool. The model calls it with a question and, when the answer is a
+//! choice, the options; this extension checks them and answers "recorded —
+//! end this turn now". It does NOT wait: nothing here blocks, polls or reads
+//! an answer back — the question is in the ledger the moment the call is
+//! recorded, and the answer is an ordinary user turn that arrives later,
+//! rather than the model's whole turn hanging on a person's reading speed.
 //!
-//! **Why it does not block** (goals/tui-plugin.md D7, the same shape
-//! `extensions/handoff` has). A tool that waited would put a step process — and
-//! the model's whole turn — on a person's reading speed, under a 600 s ceiling
-//! it cannot raise (`tool.Timeouts.extension_max_ms`). It would also make a
-//! headless driver hang on a question nobody is there to see. Returning at once
-//! costs nothing instead: the conversation is append-only, so an answer arriving
-//! as the next turn is one cache-cheap increment, and a front end that wants to
-//! offer a keystroke for it can (`tui/ask.ts`), while one that does not leaves
-//! the question sitting in the transcript where a person can simply type back.
-//!
-//! **Why it is a tool and not a sentence.** The same reason `handoff` is: a
-//! model "asking" in prose is a signal a driver can only guess at, and a front
-//! end cannot tell it apart from thinking aloud. A tool call is structured — a
-//! panel can list the options, a headless reader can still read the question —
-//! and it carries its own instructions, because the description is in front of
-//! the model for the whole session.
-//!
-//! **Where it wants to be composed**, unlike its sibling `extensions/plan`.
-//! That is not something a manifest can say — reach is the person's decision
-//! (config's `[extensions] with`, or one `session new --with`, DESIGN §5.1) —
-//! but the two packages want opposite answers, and the reason is worth writing
-//! down. `plan` is a MODE: wearing it says what THIS session is, a persona and
-//! a read-only stance, and a person decides that before the work starts.
-//! Nobody can decide in advance that a question will come up: the model finds
-//! that out in the middle of a task, so a package that only lived in sessions
-//! somebody had already earmarked for questions would be a package that never
-//! fires. So this one belongs in the standing membership list: `[extensions]
-//! with`. Its single tool is `surface: "auto"` (the default, written out here
-//! because it is the point), so membership puts it on the model face; one key
-//! still removes both the membership and the tool slot. For one session only, `--with ask` is the route, and the `/ask`
-//! command this manifest declares uses that route.
-//!
-//! **Why compiled Zig rather than a script.** Identical to `handoff`: a question
-//! and a list of options to validate as a group, so one retry is informed. `sh`
-//! has no JSON reader, Windows has neither `jq` nor a guaranteed python, and one
-//! manifest carries one `interpreter` — so a repo-shipped script tool would be a
-//! `.ps1` and a `.sh` that could never share a version id.
+//! A tool call rather than a sentence: prose a driver can only guess at,
+//! versus a structured call carrying its own instructions. Unlike its
+//! sibling `extensions/plan` (a MODE, worn deliberately before work starts),
+//! nobody can decide in advance a question will come up — so this one
+//! belongs in the standing membership list rather than being worn per-session.
 
 const std = @import("std");
 
@@ -68,14 +37,12 @@ const max_options: usize = 20;
 /// still ends in exactly one answer.
 const Outcome = union(enum) { text: []const u8, failed: []const u8 };
 
-/// `std.process.Init` rather than a bare `main()`: the io it hands over carries
-/// the real process environment, which is the shape every bundled extension in
-/// this repository uses.
+/// `std.process.Init` rather than a bare `main()`: the io it hands over
+/// carries the real process environment.
 ///
-/// The wire is `plain` (DESIGN §7.3, contract at the top of
-/// `src/extension/protocol.zig`): stdin is this call's arguments as one JSON
-/// object, and this package has one tool, so `NULYA_TOOL` says nothing it does
-/// not already know.
+/// The wire is `plain` (contract at the top of `src/extension/protocol.zig`):
+/// stdin is this call's arguments as one JSON object, and this package has
+/// one tool, so `NULYA_TOOL` says nothing it does not already know.
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     // One arena for the whole call: this process validates a few strings and
@@ -153,10 +120,10 @@ fn stringField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     };
 }
 
-/// The answer, then exit — the whole runtime contract. stdout reaches the model
-/// verbatim (DESIGN §7.3), which is what this tool wants: its answer is a
-/// sentence, not data. A refusal goes to stderr, and the non-zero exit is what
-/// makes it a failed call.
+/// The answer, then exit — the whole runtime contract. stdout reaches the
+/// model verbatim, which is what this tool wants: its answer is a sentence,
+/// not data. A refusal goes to stderr, and the non-zero exit is what makes it
+/// a failed call.
 fn answer(io: std.Io, outcome: Outcome) !noreturn {
     switch (outcome) {
         .text => |text| {

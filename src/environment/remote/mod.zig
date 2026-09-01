@@ -1,50 +1,22 @@
 //! The second `Environment` implementation: the session's commands run on
 //! ANOTHER machine, through one long-lived channel to a `nulya remote serve`
-//! there (DESIGN §8.1, `docs/goals/remote-env.md`).
+//! there. `--env wsl` (`environment.zig`) only WRAPS each command and leaves the
+//! workspace here; this MOVES the workspace and opens the channel once per
+//! session process.
 //!
-//! **How this differs from the exec target already in `environment.zig`.**
-//! `--env wsl` WRAPS each command in a launcher: the workspace stays here,
-//! extensions stay here, and every call pays a fresh connection. This one moves
-//! the workspace: the far side is where files are read and written, and the
-//! channel is opened once per session process. They are two points on the same
-//! axis, not two spellings of one thing, so they have different words. The
-//! exec target's own `ssh:<dest>` spelling was retired 2026-08-30
-//! (goals/remote-env.md §7.1) precisely because it collided with this family
-//! in the way that mattered most — `ssh:me@box` wrapped one command while
-//! `remote:ssh:me@box` moves the whole workspace, and the two are easy to
-//! confuse when only one of them still needs a machine reachable over ssh.
+//! All four verbs cross it. `startShellTask` starts a `nulya task supervise` on
+//! THAT machine, so a background command outlives this channel; its report is
+//! carried back by whoever next asks (`cli/task.zig`), since the ledger is here.
+//! `runExtension` sends an IDENTITY — `(id, version, tool)` plus the arguments —
+//! because which file a version means, and whether it still matches its seal,
+//! only the machine holding the bytes can say. `putWorkspaceFile` lands spilled
+//! bytes in the far workspace at the very path the model is told to open.
 //!
-//! **All four verbs move.** `runShell`, `runExtension`, `putWorkspaceFile` and
-//! `startShellTask` go over the channel. The last one starts a
-//! `nulya task supervise` on THAT machine — same binary, same role, same `Tree`
-//! — with the log and the status in the far workspace, so a background command
-//! runs where the foreground ones do and outlives this channel. Its report is
-//! carried back by whoever next asks (`cli/task.zig`), because the ledger it
-//! belongs in is here.
-//!
-//! `runExtension` is what ends the split brain this design exists to end: until
-//! it moved, `ext:std/read` was a process on the HOST reading the host's files
-//! while `shell` read the far machine's, and the two answered about different
-//! repositories. What crosses the channel is an IDENTITY — `(id, version, tool)`
-//! plus the arguments — because which file a version means, and whether it still
-//! matches its seal, are answers only the machine holding the bytes can give
-//! (goals/remote-env.md §3.1).
-//!
-//! `putWorkspaceFile` is what makes a spill footer true here (Phase 2): the
-//! bytes cross the channel and land in the far workspace at the very path the
-//! model is told to open. Before it, the file was written on the host and the
-//! footer carried a clause admitting the model could not reach it — honest, and
-//! useless to the reader.
-//!
-//! **What the far side is.** Not a purpose-built proxy — nulya itself, in a
-//! shell role, the way `nulya task supervise` is (DESIGN §6.1). So the process
-//! tree kill, the secret denylist, the wall-clock budget and the output capture
-//! on that machine are THE SAME CODE as here, not a second implementation of
-//! each. That is also why cancellation finally reaches the far side: the agent
-//! holds a real `Tree` around the command (goals/remote-env.md §3.6).
-//!
-//! **Nothing on the channel carries a credential** (protocol.zig rule 5). The
-//! model connection stays on the host; the far side only executes.
+//! The far side is nulya itself in a shell role: the process-tree kill, the
+//! secret denylist, the wall-clock budget and the output capture over there are
+//! THE SAME CODE as here, and cancellation reaches it because the agent holds a
+//! real `Tree` around the command. Nothing on the channel carries a credential
+//! (`protocol.zig` rule 5) — the model connection stays on the host.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -69,23 +41,22 @@ pub const Error = error{
     RemoteSpecUnsupportedOnHost,
     /// The channel is gone — the transport died, the agent exited, a frame did
     /// not parse. Never folded together with a command's own failure: what the
-    /// command did on that machine is then unknown, and saying so is the point.
+    /// command did on that machine is then UNKNOWN.
     RemoteChannelLost,
     /// The agent did not answer within the host's bound. Same honesty as above.
     RemoteChannelStalled,
     /// The far side speaks another protocol version (protocol.zig rule 4).
     RemoteVersionMismatch,
     /// The agent named a shell dialect this build does not know. Refused, not
-    /// guessed: `hello` is the one negotiation, and reading "fish" as bash
-    /// would quietly hand the model a wrong fact about every command it runs.
+    /// guessed: reading "fish" as bash would hand the model a wrong fact about
+    /// every command it runs.
     RemoteDialectUnknown,
     /// The agent refused the request and said why.
     RemoteRefused,
     /// The far machine would not start the background task (it could not create
-    /// the directory, or could not spawn a supervisor). Its own sentence does not
-    /// survive: `startShellTask` answers a `TaskStart` or an error, and there is
-    /// no failed-call shape to carry words in — the asymmetry with
-    /// `runExtension` is stated in goals/remote-env.md §6.1 deviation 5.
+    /// the directory, or could not spawn a supervisor). Its own sentence does
+    /// NOT survive: `startShellTask` answers a `TaskStart` or an error, with no
+    /// failed-call shape to carry words in (unlike `runExtension`).
     RemoteTaskRefused,
 };
 
@@ -98,16 +69,14 @@ pub const Launch = union(enum) {
     /// `ssh -o BatchMode=yes <destination> <nulya> remote serve`.
     ssh: []const u8,
     /// The general form: the payload IS the command that starts a process on
-    /// that machine, and `remote serve` is appended to it. This is what keeps
-    /// the kernel from ever having to learn the word "docker" (physics #8) —
-    /// and it is what makes the whole thing testable offline, by pointing it at
-    /// this very binary over a pipe.
+    /// that machine, and `remote serve` is appended to it. So the kernel never
+    /// has to learn the word "docker", and the whole thing is testable offline
+    /// by pointing it at this very binary over a pipe.
     exec: []const u8,
 };
 
 /// The program name the named launchers assume on the far side. Anything else
-/// is spelled out with `remote:exec:`, which is one rule instead of a config
-/// key nobody would find (goals/remote-env.md §3.4).
+/// is spelled out with `remote:exec:`.
 pub const default_remote_exe = "nulya";
 
 pub fn isSpec(spec: []const u8) bool {
@@ -154,13 +123,9 @@ pub fn supportedOnHost(launch: Launch) bool {
 /// WORDS are not — they are literals or subslices of `spec`, which must outlive
 /// the argv.
 ///
-/// `remote serve` is appended by us in every form, so a launcher only ever has
-/// to answer "how do I start a process over there". `exec:` is split on spaces
-/// and has no quoting: a program path containing a space cannot be spelled this
-/// way. That is a real limit, stated rather than papered over — the forms that
-/// need it (a container runtime, a test pointing at this binary) do not have
-/// one, and inventing a quoting dialect here would be a second shell language
-/// nobody asked for.
+/// `remote serve` is appended in every form, so a launcher only has to answer
+/// "how do I start a process over there". `exec:` is split on spaces and has NO
+/// quoting: a program path containing a space cannot be spelled this way.
 pub fn launcherArgv(alloc: std.mem.Allocator, launch: Launch, password: bool) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     errdefer argv.deinit(alloc);
@@ -205,13 +170,11 @@ pub const Hello = struct {
 
 /// How long the host waits before deciding the agent is not answering.
 ///
-/// Deliberately NOT the byte-level heartbeat `providers/wire.zig` uses, though
-/// it is the same `Select` race: a legitimate ten-minute build is silent on this
-/// channel BY DESIGN, so a heartbeat would kill the very work it is meant to
-/// protect. What makes a deadline the right shape instead is the agent's
-/// contract — one reply per request, within the request's own timeout — so the
-/// host's patience is that timeout plus a margin, and a fixed value only where
-/// the request carries no timeout of its own.
+/// A deadline, NOT the byte-level heartbeat `providers/wire.zig` uses: a
+/// legitimate ten-minute build is silent on this channel, so a heartbeat would
+/// kill the work it is meant to protect. The agent's contract is one reply per
+/// request within that request's own timeout, so the host's patience is that
+/// timeout plus a margin — a fixed value only where the request carries none.
 pub const Bounds = struct {
     /// For a request with no budget of its own (`hello`, `list-dir`). Generous:
     /// opening an ssh connection on a cold link is not fast, and being wrong
@@ -221,10 +184,8 @@ pub const Bounds = struct {
     /// the process; this margin only catches an agent that has stopped talking.
     reply_grace_ms: u32 = 60_000,
 
-    /// Shrinking these is the only way to OBSERVE the guard rather than wait it
-    /// out, which is why they are a parameter and not two constants — the same
-    /// reason `LocalOptions.dialect` is one. A driver on a link where 60 s is
-    /// the wrong number has the same lever.
+    /// A parameter rather than two constants so a test can shrink them, and so a
+    /// driver on a link where 60 s is the wrong number has the same lever.
     pub const default: Bounds = .{};
 };
 
@@ -255,9 +216,7 @@ pub const Channel = struct {
     bounds: Bounds = .default,
     hello: Hello = .{},
     /// The payload of the last `controlRound` reply, in the channel arena — so
-    /// valid until the next round resets it. A field rather than a return value
-    /// because the arena's lifetime is the round's, and a caller that wants the
-    /// bytes wants them exactly that long (`remote ls` decodes them and prints).
+    /// valid until the next round resets it.
     last_payload: []const u8 = &.{},
     /// Once true, nothing more is sent or read: a desynchronised channel that
     /// keeps being used answers questions with another request's reply.
@@ -278,9 +237,9 @@ pub const Channel = struct {
         const argv = try launcherArgv(alloc, launch, password != null);
         errdefer alloc.free(argv);
 
-        // Physics #6 on the transport itself: whatever `ssh` / `wsl.exe` gets
-        // is the stripped map, so there is no secret for `SendEnv` / `WSLENV`
-        // to forward even if someone configured them to.
+        // Whatever `ssh` / `wsl.exe` gets is the stripped map, so there is no
+        // secret for `SendEnv` / `WSLENV` to forward even if someone configured
+        // them to.
         var env = try environment.sanitizedChildEnv(alloc, io);
         errdefer env.deinit();
 
@@ -300,8 +259,6 @@ pub const Channel = struct {
             // The stripped map, explicitly: without it the transport — and
             // therefore the agent, and therefore every command it runs —
             // inherits this process's environment whole, secrets included.
-            // Physics #6 does not hold by default; it holds because this line
-            // is here.
             .environ_map = &env,
             .stdin = .pipe,
             .stdout = .pipe,
@@ -349,9 +306,8 @@ pub const Channel = struct {
     }
 
     pub fn deinit(self: *Channel) void {
-        // Closing stdin FIRST is the guarantee, not a courtesy: EOF is what
-        // tells the agent to kill whatever it is running and exit (protocol
-        // rule 2's other half). Killing the transport first would leave that
+        // Closing stdin FIRST: EOF is what tells the agent to kill whatever it
+        // is running and exit. Killing the transport first would leave that
         // signal unsent, and on a slow link the far command could outlive us.
         if (self.child.stdin) |stdin| {
             var f = stdin;
@@ -368,9 +324,8 @@ pub const Channel = struct {
 
     pub fn send(self: *Channel, req: protocol.Request, payload: []const u8) anyerror!void {
         // The reader refuses a claimed length over `max_payload_bytes` before
-        // allocating (protocol rule on lies) — but by then the payload bytes
-        // are already in the stream and the channel is dead. Refusing HERE is
-        // rule 6's other half: never write a frame the peer must refuse.
+        // allocating — but by then the payload bytes are already in the stream
+        // and the channel is dead. So never WRITE a frame the peer must refuse.
         if (payload.len > protocol.max_payload_bytes) return error.PayloadTooLarge;
         const line = try protocol.encodeRequest(self.alloc, req);
         defer self.alloc.free(line);
@@ -385,11 +340,10 @@ pub const Channel = struct {
         return error.RemoteChannelLost;
     }
 
-    /// A canceled read is THIS STEP being canceled, not the channel dying.
-    /// `std.Io.Reader` folds every underlying fault into `ReadFailed` and keeps
-    /// the real one in `reader.err`, so this is the only place the two can be
-    /// told apart — and they need different answers: one unwinds the step, the
-    /// other is a fact about the far machine the model must be told.
+    /// A canceled read is THIS STEP being canceled, not the channel dying, and
+    /// the two need different answers. `std.Io.Reader` folds every underlying
+    /// fault into `ReadFailed` and keeps the real one in `reader.err`, so this is
+    /// the only place they can be told apart.
     fn readFailure(self: *Channel) anyerror {
         if (self.reader.err) |e| {
             if (e == error.Canceled) return error.Canceled;
@@ -419,10 +373,8 @@ pub const Channel = struct {
     }
 
     /// One round that is not a command — `hello`, `list-dir`, `put-file` — under
-    /// the host's patience: an agent that never answers must not hang the
-    /// caller, and at handshake time that is the difference between "this
-    /// machine is unreachable" and a driver that never comes back. The reply's
-    /// payload, if any, is left in `last_payload`.
+    /// the host's patience, so an agent that never answers cannot hang the
+    /// caller. The reply's payload, if any, is left in `last_payload`.
     pub fn controlRound(self: *Channel, req: protocol.Request, payload: []const u8) anyerror!protocol.Reply {
         var ex: ControlExchange = .{ .ch = self, .req = req, .payload = payload };
         const Race = union(enum) { done: void, expired: void };
@@ -465,9 +417,9 @@ pub const Channel = struct {
     }
 };
 
-/// One payload-free round, as a task, so the bound above can race it. Same
-/// shape as `ShellExchange` and `tree.Waiter`: a canceled task leaves `out`
-/// null, which is how the caller tells "did not settle" from "settled badly".
+/// One payload-free round, as a task, so the bound above can race it. A canceled
+/// task leaves `out` null, which is how the caller tells "did not settle" from
+/// "settled badly".
 const ControlExchange = struct {
     ch: *Channel,
     req: protocol.Request,
@@ -483,9 +435,9 @@ const ControlExchange = struct {
     }
 };
 
-/// What a run of SOMETHING on the far side came back as. Deliberately one shape
-/// for both run verbs: `ShellOutcome` and `ExtensionOutcome` are the same four
-/// fields, and the reply frame does not distinguish them either.
+/// What a run of SOMETHING on the far side came back as. One shape for both run
+/// verbs: `ShellOutcome` and `ExtensionOutcome` are the same four fields, and
+/// the reply frame does not distinguish them either.
 const Captured = struct {
     stdout: []u8,
     stderr: []u8,
@@ -494,7 +446,7 @@ const Captured = struct {
     /// The agent refused the request, in its own words (owned). Kept rather than
     /// folded into an error because the two callers answer it differently: a
     /// refused SHELL is a host fault, and a refused EXTENSION is an ordinary
-    /// failed call the model gets to read (`invoke.zig`'s taxonomy, unchanged).
+    /// failed call the model gets to read.
     refusal: ?[]u8 = null,
 
     fn deinit(self: Captured, alloc: std.mem.Allocator) void {
@@ -515,8 +467,8 @@ const CommandExchange = struct {
 
     fn run(self: *CommandExchange) void {
         const result = self.round();
-        // A canceled exchange leaves `out` null: the caller then knows the task
-        // did not settle, exactly as `Waiter` does for a canceled `child.wait`.
+        // A canceled exchange leaves `out` null, so the caller knows the task
+        // did not settle.
         if (result) |_| {} else |err| {
             if (err == error.Canceled) return;
         }
@@ -568,12 +520,10 @@ fn sleepMs(io: std.Io, ms: u32) void {
 //
 // These take a `*Channel` rather than a `RemoteEnvironment` because their other
 // caller is `cli/task.zig`: `nulya task list` on this host has no session
-// environment, only a machine to ask. One implementation either way, so a
-// reading verb and a stepping one cannot disagree about what a task's state is.
+// environment, only a machine to ask.
 
 /// The two files that machine's supervisor writes, verbatim. The strings live in
-/// the channel arena — valid until the next round on it, which is exactly how
-/// long the caller wants them.
+/// the channel arena — valid until the next round on it.
 pub fn pollTaskOn(ch: *Channel, cwd: []const u8, task_name: []const u8) anyerror!protocol.TaskSnapshot {
     const rep = try ch.controlRound(.{
         .op = protocol.Op.task_poll.wire(),
@@ -586,7 +536,7 @@ pub fn pollTaskOn(ch: *Channel, cwd: []const u8, task_name: []const u8) anyerror
 
 /// Put the kill marker down over there. A marker rather than a signal, exactly
 /// as it is here: the supervisor owns the process tree and picks it up at its
-/// next poll (DESIGN §6.1).
+/// next poll.
 pub fn killTaskOn(ch: *Channel, cwd: []const u8, task_name: []const u8) anyerror!void {
     const rep = try ch.controlRound(.{
         .op = protocol.Op.task_kill.wire(),
@@ -609,25 +559,20 @@ pub const RemoteEnvironment = struct {
     /// Empty means "wherever the agent started", which `hello` reported.
     workspace: []u8,
     /// This session's IDENTITY, owned, published to everything the agent runs as
-    /// `NULYA_SESSION_ID` (DESIGN §5.3). Not the session file's path: that names
-    /// a file on the host, so sending it would be a lie a package could act on.
+    /// `NULYA_SESSION_ID`. Not the session file's path: that names a file on the
+    /// host, so sending it would be a lie a package could act on.
     /// Empty until a driver publishes one (`session step` does; `remote check`
     /// does not).
     session_id: []u8 = &.{},
     /// The session background tasks belong to, copied. Both halves stay on the
-    /// HOST even though the command will not: `session_path` is the file a
-    /// report is eventually deposited into, and `tasks_dir` is where this host
-    /// keeps the claimed `t<N>` — the far machine holds the log and the status,
-    /// this one holds the name and the delivery. Null = no session, so
-    /// `startShellTask` refuses exactly as the local one does.
+    /// HOST even though the command will not: the far machine holds the log and
+    /// the status, this one holds the name and the delivery. Null = no session,
+    /// so `startShellTask` refuses exactly as the local one does.
     session_path: ?[]u8 = null,
     tasks_dir: ?[]u8 = null,
     dialect_val: environment_mod.Dialect,
     bounds: Bounds = .default,
 
-    /// What `connect` needs. A struct because `bounds` is a knob almost nobody
-    /// sets, and a fourth positional string would be one more thing to get in
-    /// the wrong order.
     pub const ConnectOptions = struct {
         spec: []const u8,
         /// The absolute directory on that machine this session works in; empty
@@ -670,8 +615,7 @@ pub const RemoteEnvironment = struct {
 
         // The far side says which shell reads its commands; this host's config
         // and detection have nothing to say about another machine. A word this
-        // build does not know is refused, never guessed (`hello` is the one
-        // negotiation, and it does not guess about versions either).
+        // build does not know is refused, never guessed.
         const dialect_val: environment_mod.Dialect = if (std.mem.eql(u8, ch.hello.dialect, "powershell"))
             .powershell
         else if (std.mem.eql(u8, ch.hello.dialect, "bash"))
@@ -716,11 +660,9 @@ pub const RemoteEnvironment = struct {
     }
 
     /// What the agent is told to run in. The CALLER's `cwd` is deliberately
-    /// ignored: it is a path on THIS machine (`cli/session.zig` passes the
-    /// host's absolute workspace), and a host path means nothing over there.
-    /// Every model-facing path in a nulya session is workspace-relative
-    /// already, so each side reading "." as its own workspace is the whole of
-    /// the path story (goals/remote-env.md §3.3).
+    /// ignored: it is a path on THIS machine, and a host path means nothing over
+    /// there. Every model-facing path in a nulya session is workspace-relative,
+    /// so no path is ever translated — each side reads "." as its own workspace.
     fn remoteCwd(self: *const RemoteEnvironment) []const u8 {
         return if (self.workspace.len != 0) self.workspace else ".";
     }
@@ -769,8 +711,7 @@ pub const RemoteEnvironment = struct {
         var buf: [2]Race = undefined;
         var sel: std.Io.Select(Race) = .init(self.io, &buf);
         // If the io cannot give the pair their own units of concurrency the
-        // exchange runs unguarded: no false failure, just no guard — the same
-        // degradation `waitBounded` takes.
+        // exchange runs unguarded: no false failure, just no guard.
         sel.concurrent(.expired, sleepMs, .{ self.io, bound }) catch {
             CommandExchange.run(&ex);
             return ex.out orelse error.Canceled;
@@ -803,21 +744,19 @@ pub const RemoteEnvironment = struct {
         self.ch.dead = true;
     }
 
-    /// The extension runs on the far machine, against the far workspace — which
-    /// is the whole point of a remote session: `ext:std/read` and `shell` now
-    /// answer about the same repository.
+    /// The extension runs on the far machine, against the far workspace, so
+    /// `ext:std/read` and `shell` answer about the same repository.
     ///
-    /// Only the identity and the arguments cross. Not `presentation_file`: who
-    /// READS a file decides which machine it lives on (goals/remote-env.md §3.2),
-    /// and that one's reader is the front end, here. A package asked to render
-    /// over there simply sees no presentation file, exactly as it does when a
-    /// driver offers none.
+    /// Only the identity and the arguments cross. NOT `presentation_file`: who
+    /// READS a file decides which machine it lives on, and that one's reader is
+    /// the front end, here. A package asked to render over there sees no
+    /// presentation file, exactly as when a driver offers none.
     ///
     /// A version that machine does not hold comes back as the agent's own
-    /// sentence, and is answered as a FAILED CALL rather than a host error: the
-    /// sentence then reaches the model through the path every failed extension
-    /// call already uses (`invoke.zig`: exit code plus stderr), no new branch
-    /// anywhere, and the usage journal records an `ok=false` that is true.
+    /// sentence, answered as a FAILED CALL rather than a host error: it then
+    /// reaches the model through the path every failed extension call already
+    /// uses (exit code plus stderr), and the usage journal records a true
+    /// `ok=false`.
     fn runExtensionImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment_mod.ExtensionRequest) anyerror!environment_mod.ExtensionOutcome {
         const self: *RemoteEnvironment = @ptrCast(@alignCast(ptr));
         const captured = try self.runBounded(alloc, .{
@@ -844,23 +783,20 @@ pub const RemoteEnvironment = struct {
         };
     }
 
-    /// Start a background command on the far machine (Phase 4).
+    /// Start a background command on the far machine.
     ///
-    /// The NAME is claimed here and the WORK happens there, and the split is not
-    /// arbitrary: the name is what the ledger, the receipt and every `task` verb
-    /// speak, and the ledger is on this machine; the log, the status file and
-    /// the lease belong beside the command, which is over there. Both sides
-    /// spell the directory from the same name with the same rule
-    /// (`launch.sessionTasksDir`), each against its own workspace — no path
-    /// crosses the channel (goals/remote-env.md §3.3).
+    /// The NAME is claimed here and the WORK happens there: the name is what the
+    /// ledger, the receipt and every `task` verb speak, and the ledger is on this
+    /// machine; the log, the status file and the lease belong beside the command,
+    /// over there. Both sides spell the directory from the same name with the
+    /// same rule (`launch.sessionTasksDir`), each against its own workspace — no
+    /// path crosses the channel. The host directory claimed here holds what only
+    /// this machine can know: a retarget (`notify`) and whether a report has
+    /// already been delivered (`cli/task.zig`).
     ///
-    /// The host directory claimed here is not a copy of the far one: it is where
-    /// this machine keeps what only it can know — a retarget (`notify`) and the
-    /// fact that a report has already been delivered (`cli/task.zig`).
-    ///
-    /// The task outlives this channel by design. The far supervisor is detached
-    /// over there exactly as one here is, so closing the channel ends the agent
-    /// and not the task; the report is collected by whoever next asks.
+    /// The task outlives this channel: the far supervisor is detached over there
+    /// exactly as one here is, so closing the channel ends the agent and not the
+    /// task, and the report is collected by whoever next asks.
     fn startShellTaskImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment_mod.TaskRequest) anyerror!environment_mod.TaskStart {
         const self: *RemoteEnvironment = @ptrCast(@alignCast(ptr));
         const session_path = self.session_path orelse return error.NoDurableSession;
@@ -882,16 +818,11 @@ pub const RemoteEnvironment = struct {
             // The claim STAYS. Whether that machine started the task before the
             // channel broke is unknown, and releasing the name would make a task
             // that did start invisible here forever — nothing to poll, nothing
-            // to kill. A name held for a task that never started also reads
-            // `starting`, and that is the honest shape of "unknown" — but it
-            // does NOT resolve itself: `task-poll` answers empty for "no status
-            // yet" and "there is no such task directory over there" alike, so a
-            // request that never reached that machine reads `starting` forever,
-            // not just until it answers again. Retrying `start-task` would need
-            // it to be safe to ask twice (it is not, today — a second spawn is a
-            // second supervisor), so this is a known, narrow gap — a channel
-            // that drops between claiming the name and getting a reply — rather
-            // than a promise this code keeps.
+            // to kill. Known narrow gap: `task-poll` answers empty for "no status
+            // yet" and "no such task directory over there" alike, so a request
+            // that never reached that machine reads `starting` FOREVER, not just
+            // until it answers again. `start-task` is not safe to retry — a
+            // second spawn is a second supervisor.
             return err;
         };
         if (!rep.ok) {
@@ -905,8 +836,7 @@ pub const RemoteEnvironment = struct {
 
     /// Ask the far machine about one of this session's tasks: the two files its
     /// supervisor writes, verbatim. The returned strings live in the channel
-    /// arena — valid until the next round, which is exactly as long as the
-    /// caller needs them (`Channel.last_payload`'s reasoning).
+    /// arena — valid until the next round on it.
     pub fn pollTask(self: *RemoteEnvironment, task_name: []const u8) anyerror!protocol.TaskSnapshot {
         return pollTaskOn(&self.ch, self.remoteCwd(), task_name);
     }
@@ -918,8 +848,7 @@ pub const RemoteEnvironment = struct {
     /// The bytes cross the channel and the far agent writes them, relative to
     /// THIS session's workspace — the same directory its commands run in, which
     /// is why the frame carries `cwd` as well as the relative path. So a spill
-    /// footer names a file the model can actually open with the very next
-    /// command it runs (goals/remote-env.md §3.2).
+    /// footer names a file the model can open with the very next command it runs.
     fn putWorkspaceFileImpl(ptr: *anyopaque, rel_path: []const u8, bytes: []const u8) anyerror!void {
         const self: *RemoteEnvironment = @ptrCast(@alignCast(ptr));
         const rep = try self.ch.controlRound(.{

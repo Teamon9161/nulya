@@ -64,33 +64,9 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     }
 
     // One screen: this is read by a model that pays for every line of it. The
-    // budget moves only when a real capability arrives (`--image`, +2; `ext
-    // seed`, +1; `config refresh`, +1; `demo`, +1 — it stopped being what a bare
-    // `nulya` does, so it has to be listed; `nulya task`, +6 — a whole verb
-    // family, compressed to two entries whose continuation lines still have to
-    // carry `wait`'s three exit codes, which is the one thing a driver cannot
-    // guess; `session new --bare`, +1 — a session that ignores the config's two
-    // standing lists cannot be inferred from the other flags; `nulya journal`,
-    // +2 — the append-only JSONL discipline exposed to extensions, one line per
-    // verb since neither takes a flag worth documenting; `session new --env`,
-    // +1 — WHERE a session's shell commands run is not inferable from any other
-    // flag, and the three spellings are the whole of that vocabulary; `nulya
-    // remote`, +5 — a whole verb family (three verbs plus the spec vocabulary a
-    // driver cannot guess), and one more continuation line on `session new`,
-    // because moving the WORKSPACE and moving only the command are two different
-    // things that must not read as one; `ext push`, +1 — a new verb, and the one
-    // way an extension reaches a machine that has no toolchain and no checkout,
-    // while `ext build --target` paid nothing because a flag on an existing verb
-    // belongs on that verb's line; `session rebind`, +3 — a new verb, and its two
-    // continuation lines are the two things nobody can guess from the name: the
-    // transcript survives while the reasoning behind the switch does not, and a
-    // different provider is paid for in a cold cache; `session discard`, +1 — a
-    // new verb, and the only one in the whole surface that REMOVES something,
-    // which is not a thing to leave undiscoverable; its refusals cost nothing
-    // because the command says them itself when it refuses; that verb becoming
-    // `session prune --force`, +1 — the default and what the flag adds are two
-    // different amounts of deletion, and a reader who guesses wrong loses a
-    // conversation).
+    // budget grows only when a capability cannot be inferred from an existing
+    // line and needs one of its own; a flag on an existing verb belongs on that
+    // verb's line instead of costing a new one.
     try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 66);
 
     // The two flag spellings a terminal user reaches for reach the same text.
@@ -172,7 +148,7 @@ test "cli ext api: manifest and examples carry no document citations and walk sc
         "ext activate",       "--pin",           "--with",   "--user",
         "ext trust",          "session outcome", "ext sync", "ext prune",
         // The default scaffold is a script, so the worked
-        // path has to show what a script actually reads (DESIGN §7.1/§7.3).
+        // path has to show what a script actually reads.
         "NULYA_ARG_",         "--zig",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, examples.stdout, needle) != null) catch |err| {
@@ -522,9 +498,8 @@ test "cli ext run/build: malformed JSON arguments and an unbuildable draft are o
     defer alloc.free(ref);
 
     // The two shapes of genuinely malformed JSON: does not parse, and parses
-    // but is not an object. The tool is required (C2, ext-review-2 §2), so a
-    // separate case below covers no JSON at all — that is no longer one of
-    // these; it means `{}`.
+    // but is not an object. The tool is required, so a separate case below
+    // covers no JSON at all — that is not one of these; it means `{}`.
     for ([_][]const []const u8{
         &.{ exe_abs, "ext", "run", ref, "do_thing", "{bad" },
         &.{ exe_abs, "ext", "run", ref, "do_thing", "[]" },
@@ -557,7 +532,7 @@ test "cli ext run/build: malformed JSON arguments and an unbuildable draft are o
     }
 
     // No tool at all: usage on stderr, exit 1 — never a position inferred from
-    // the manifest's tool list (C2, ext-review-2 §2).
+    // the manifest's tool list.
     {
         const argv = [_][]const u8{ exe_abs, "ext", "run", ref };
         const run = try runCli(alloc, io, ws, &argv);

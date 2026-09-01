@@ -18,10 +18,10 @@
 //! back as a `reasoning` item whose `encrypted_content` (requested via
 //! `include`) only this model can read; each such item is emitted whole as a
 //! `reasoning_item`, kept on the ledger's `assistant` event, and sent back
-//! verbatim ahead of the function_call it preceded (DESIGN §3.1, §13). The
-//! backend accepts a history without them, but then the model re-derives its
-//! plan at every tool step; with them its reasoning is continuous across the
-//! whole tool loop, the way the Codex CLI itself replays it.
+//! verbatim ahead of the function_call it preceded. Without them the model
+//! re-derives its plan at every tool step; with them its reasoning is
+//! continuous across the whole tool loop, the way the Codex CLI itself
+//! replays it.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -202,9 +202,8 @@ pub const Auth = struct {
 
     /// Exchange the refresh token for fresh credentials and write them back to
     /// auth.json, exactly as the Codex CLI does, so the two stay interchangeable.
-    /// It lives on `Auth` rather than on the provider because the tokens and the
-    /// file are `Auth`'s: a 401 on the model stream and a 401 on the catalogue
-    /// fetch (`refreshCatalog`) are the same repair.
+    /// Used to repair a 401 both on the model stream and on the catalogue fetch
+    /// (`refreshCatalog`).
     pub fn refresh(
         self: *Auth,
         alloc: std.mem.Allocator,
@@ -284,11 +283,8 @@ fn homePath(alloc: std.mem.Allocator, env: *const std.process.Environ.Map, sub: 
 /// The subscription's own model line-up, read from the file the Codex CLI keeps
 /// it in (`$CODEX_HOME/models_cache.json`, else `~/.codex/models_cache.json`).
 ///
-/// A ChatGPT subscription decides which models it serves and with what dial;
-/// that is not something a person should have to restate in `config.toml`, and
-/// a hardcoded list is wrong the week after it is written. So the catalogue is
-/// read, never configured — `nulya config show` projects it for a picker
-/// (DESIGN §9.5) and `nulya config refresh` refills the file.
+/// Read only, never configured in `config.toml`: `nulya config show`
+/// projects it for a picker and `nulya config refresh` refills the file.
 ///
 /// The numbers are the subscription's, not the public API's: the same id is
 /// served here with a smaller window (`effective_context_window_percent` of the
@@ -369,8 +365,8 @@ fn parse(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}!?[]const
             .context_window = effectiveWindow(m),
             // Deliberately not claimed here even though the entry says whether
             // it takes images: the `session append --image` gate reads the
-            // id-keyed `[[models]]` catalog (DESIGN §3.1/§9.5), so a claim in
-            // this projection is one nothing honours.
+            // id-keyed `[[models]]` catalog, so a claim in this projection is
+            // one nothing honours.
             .vision = false,
         });
     }
@@ -401,7 +397,7 @@ fn nonEmptyString(value: ?[]const u8) ?[]const u8 {
 /// Fetch the live catalogue and write it into the Codex CLI's own cache file, so
 /// every later read — this binary's and the CLI's — sees today's line-up. There
 /// is no `codex login` in nulya, so nothing refreshes this on its own: the only
-/// trigger is `nulya config refresh` (DESIGN §14).
+/// trigger is `nulya config refresh`.
 ///
 /// `client_version` is this binary's version string (the endpoint takes it as a
 /// query parameter, as the CLI does). A 401 means the short-lived access token

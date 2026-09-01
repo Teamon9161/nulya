@@ -1,13 +1,13 @@
 //! Two facts the kernel already holds, stopped from being re-derived.
 //!
-//! **The gate request carries the frozen declaration** (DESIGN §4). A call names
+//! **The gate request carries the frozen declaration**. A call names
 //! a tool the way the model sees it; "which package is that" and "does it claim
 //! to only read" are answers the composition froze at `session new`. They now
 //! ride on the request line as `tool_id` and `readonly`, so nobody who answers
 //! the gate has to open a manifest — a derivation that three drivers each wrote
 //! separately, and that failed silently in one of them.
 //!
-//! **A pin implies membership** (DESIGN §5.1). A tool cannot take a native slot
+//! **A pin implies membership**. A tool cannot take a native slot
 //! in a session its package is not a member of, so `--pin ext:<id>/<tool>` brings
 //! that package in at `current`. The refusals stay distinguishable: a package no
 //! root holds is still `PinNamesUnknownExtension`, and one that is held but has
@@ -38,7 +38,7 @@ fn buildScriptPackage(
     /// JSON fragments spliced into the manifest: extra top-level keys, and extra
     /// keys inside the one tool spec. Each begins with its own comma. The tool
     /// is `surface: "manual"` because every test here pins it, and only a
-    /// `manual` tool can be pinned (DESIGN §5.1).
+    /// `manual` tool can be pinned.
     top_extra: []const u8,
     tool_extra: []const u8,
 ) ![]u8 {
@@ -211,7 +211,7 @@ test "pin: a package nothing else names joins the session that pins one of its t
     defer tmp.cleanup();
     const ws = tmp.dir;
 
-    // Activated, which says only that `optin` means this version (DESIGN §5.1)
+    // Activated, which says only that `optin` means this version
     // — and named by neither `[extensions] with` nor `--with`.
     const version = try buildScriptPackage(alloc, io, ws, exe_abs, "optin", "look", "", "");
     defer alloc.free(version);

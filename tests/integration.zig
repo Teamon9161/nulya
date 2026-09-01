@@ -1,5 +1,5 @@
-//! Live-provider integration checks (PLAN §1 M4 acceptance). Not part of
-//! `zig build test` or `zig build e2e` — those stay hermetic and offline. Run:
+//! Live-provider integration checks. Not part of `zig build test` or
+//! `zig build e2e` — those stay hermetic and offline. Run:
 //!
 //!   NULYA_INTEGRATION_PROFILE=deepseek-anthropic zig build integration
 //!
@@ -9,10 +9,10 @@
 //! is to be runnable on demand, never to fail a keyless machine.
 //!
 //! What it proves is the one thing a unit test cannot: that the cache invariant
-//! of DESIGN §1 shows up as real cache reads on a real endpoint. The kernel
-//! guarantees the PromptIR block prefix only grows; whether that actually earns
-//! a cache hit depends on the provider serializer and its breakpoints, and the
-//! only honest way to know is to look at the meter.
+//! shows up as real cache reads on a real endpoint. The kernel guarantees the
+//! PromptIR block prefix only grows; whether that actually earns a cache hit
+//! depends on the provider serializer and its breakpoints, and the only honest
+//! way to know is to look at the meter.
 
 const std = @import("std");
 const support = @import("support");
@@ -54,7 +54,7 @@ const Live = struct {
         }
 
         // A profile whose credential is missing resolves to the scripted
-        // identity (DESIGN §3) — measuring a canned provider's cache would
+        // identity — measuring a canned provider's cache would
         // prove nothing, so skip instead.
         const identity = launch.resolveDescriptor(alloc, io, cfg.provider, &env, profile, null);
         if (std.mem.eql(u8, identity.provider, "scripted")) {
@@ -116,7 +116,7 @@ const Live = struct {
     }
 
     /// Does this machine's catalog say the live model accepts images? The claim
-    /// is the user's to make (DESIGN §9.5), so an unmarked model means "not
+    /// is the user's to make, so an unmarked model means "not
     /// asked to be tested with images", not "broken".
     fn claimsVision(self: *const Live) bool {
         for (self.cfg.models) |m| {
@@ -127,7 +127,7 @@ const Live = struct {
 };
 
 /// A real 64x64 solid-red PNG, already base64 — which is exactly the form the
-/// ledger stores an image in (DESIGN §3.1), so the test needs no encoder and
+/// ledger stores an image in, so the test needs no encoder and
 /// nothing here has to be trusted to produce valid PNG bytes at run time.
 const red_square_png_b64 =
     "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAT0lEQVR42u3PQQkAAAgEsItw/VMZyQi+hcEKLNO+FgEBAQEBAQEB" ++
@@ -236,9 +236,9 @@ test "live provider: a batched tool turn round-trips through the real wire forma
     var sess = try live.newSession(alloc);
     defer sess.deinit();
 
-    // Two calls in one assistant turn come back as ONE tool_results event
-    // (DESIGN §0 rule 2). Serializing that batch is where the three wire formats
-    // differ most, so it is worth proving against a live endpoint.
+    // Two calls in one assistant turn come back as ONE tool_results event.
+    // Serializing that batch is where the three wire formats differ most, so
+    // it is worth proving against a live endpoint.
     try sess.appendUser("Using the shell tool, print `alpha` and print `beta`. Then say DONE.");
     const taken = try sess.run(12);
 
@@ -318,7 +318,7 @@ test "live provider: an image in a user turn reaches the model and it describes 
     var live = (try Live.open(alloc, io)) orelse return error.SkipZigTest;
     defer live.deinit();
 
-    // Only a model the catalog claims can see images (DESIGN §3.1, §14). Today
+    // Only a model the catalog claims can see images. Today
     // that is the codex profile's `gpt-5.5` and Anthropic's own models — but the
     // claim is written in the user's config, never guessed here, exactly as
     // `session append --image` reads it. DeepSeek's endpoints do not take

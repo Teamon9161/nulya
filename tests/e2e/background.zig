@@ -1,4 +1,4 @@
-//! Background tasks end to end (docs/goals/background.md): a real `nulya`
+//! Background tasks end to end: a real `nulya`
 //! process starts a detached command, a second real process supervises it, and
 //! the result arrives as a `task_finished` in the session's inbox.
 //!
@@ -21,9 +21,8 @@ const runCliStderr = support.runCliStderr;
 /// A budget, not a delay: every wait returns the instant the thing it waits for
 /// happens, so a large number costs nothing on a healthy run and is only paid
 /// when a test is already failing. A small one is paid whenever the machine is
-/// busy — as a red suite that says nothing about the code. The three other e2e
-/// groups run beside this one, so "busy" is the normal case
-/// (docs/goals/agent-runner.md §6, "测试提速").
+/// busy — as a red suite that says nothing about the code — and the three
+/// other e2e groups run beside this one, so "busy" is the normal case.
 ///
 /// The short, DELIBERATE budgets below (`--timeout-ms 300`, `1000`, `2000`) are
 /// not these: each is the subject of its own assertion.
@@ -467,7 +466,7 @@ test "background task: retargeting an already-drained `.done` task is a real no-
     // moved)", and no notify pointer left behind either. A pointer written
     // anyway would be invisible to this one call, but it is exactly what
     // would make the task follow every future compaction down the fork chain
-    // forever (`docs/goals/review-fork-remote.md`).
+    // forever.
     {
         const moved = try runCli(alloc, io, ws, &.{ exe, "task", "retarget", t1, "--to", child });
         defer alloc.free(moved.stdout);
@@ -615,7 +614,7 @@ test "background shell: the model starts a task, is told so, and reads the repor
 
     const report_at = std.mem.indexOf(u8, second.stdout, "\"kind\":\"task_finished\"") orelse return error.TestUnexpectedResult;
     const started_at = std.mem.indexOf(u8, second.stdout, "{\"stream\":\"model\",\"event\":\"started\"}") orelse return error.TestUnexpectedResult;
-    // The drained event is flushed BEFORE the first model delta (DESIGN §14):
+    // The drained event is flushed BEFORE the first model delta:
     // the reader sees "this landed" and then the answer to it, in that order.
     try std.testing.expect(report_at < started_at);
     try std.testing.expect(std.mem.indexOf(u8, second.stdout, support.launch.ScriptedProvider.background_marker) != null);
@@ -716,7 +715,7 @@ test "background shell: cancelling a step does not touch a task it already start
     try std.testing.expect(try waitUntilRunning(alloc, io, ws, exe, id));
 
     // Cancellation is about the STEP, and the only thing that ends a task is
-    // `nulya task kill` (DESIGN §4/§6.1). The step consumes the marker and does
+    // `nulya task kill`. The step consumes the marker and does
     // nothing; the task goes on and reports as usual.
     {
         const canceled = try runCli(alloc, io, ws, &.{ exe, "session", "cancel", id });
@@ -774,7 +773,7 @@ test "background task: an unreadable owner header never turns kill into a local 
     try std.testing.expectError(error.FileNotFound, ws.access(io, kill_path, .{}));
 }
 
-// ── Compaction hands its running tasks to the child (DESIGN §11) ────────────
+// ── Compaction hands its running tasks to the child ────────────
 
 test "background task: compact retargets the parent's running tasks and says so in the carried brief" {
     const alloc = std.testing.allocator;
@@ -1054,11 +1053,11 @@ test "background task: compact retargets an unreachable-machine task without cla
     defer alloc.free(child);
 
     // The carried brief is DEPOSITED, not stepped — compact never touches the
-    // child's environment (§6, "6. Carry the brief over ... deposited, not
-    // stepped"). Read it straight out of the inbox rather than stepping the
-    // child, which would inherit the parent's now-gone exec target (fork
-    // inherits `environment`/`remote_workspace` when `--env` is not given)
-    // and fail to step for the same reason the parent could not any more.
+    // child's environment. Read it straight out of the inbox rather than
+    // stepping the child, which would inherit the parent's now-gone exec
+    // target (fork inherits `environment`/`remote_workspace` when `--env` is
+    // not given) and fail to step for the same reason the parent could not
+    // any more.
     const deposited = try soleInboxFile(alloc, io, ws, child);
     defer alloc.free(deposited);
     for ([_][]const u8{

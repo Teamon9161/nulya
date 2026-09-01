@@ -117,17 +117,11 @@ pub fn listActive(
 
     for (active) |entry| {
         // Skip broken extensions, but let host cancellation propagate rather than
-        // be misread as a malformed extension. `resolveEntry` takes the root and
-        // version the listing already decided — no second `current` read.
-        //
-        // Deliberately softer than `composition.resolveActiveExtensions`, which
-        // fails the session on the same fault: this is a READ-ONLY listing, and
-        // showing the catalog it can beats refusing to show any of it. Nothing
-        // downstream of a listing is silently missing a capability.
-        //
-        // `.structural` for the same reason: a catalog only has to name what a
-        // complete version declares. Nothing here runs, and the paths that do
-        // (composition, `ext run`) ask for `.sealed` themselves.
+        // be misread as a malformed extension. This is a read-only listing, so
+        // showing the catalog it can beats refusing to show any of it.
+        // `.structural`: a catalog only has to name what a complete version
+        // declares — nothing here runs, and the paths that do ask `.sealed`
+        // themselves.
         const r = roots.resolveEntry(alloc, entry, .structural) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,

@@ -9,8 +9,7 @@
 //!
 //! So this stands where `ssh` or `wsl.exe` stands: it spawns the command it was
 //! given with one variable added, wires the pipes straight through, and exits
-//! with the child's code. It is a transport, not a fake peer — the nulya on the
-//! other side of it is the real one, which is the whole point of `exec:`.
+//! with the child's code. It is a transport, not a fake peer.
 //!
 //!     remote:exec:<this binary> <home> <nulya>   →   NULYA_HOME=<home> nulya remote serve
 //!

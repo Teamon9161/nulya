@@ -2,13 +2,11 @@
 //! failures a real `nulya remote serve` will never produce.
 //!
 //! **Why this exists, and why it is not the happy path.** The offline test for
-//! a working channel points `--env remote:exec:` at the real nulya binary: both
-//! ends are then the production code, over a pipe, which is a stronger test
-//! than any stand-in could be. What that cannot exercise is a peer that lies —
-//! answers a version it does not speak, stops talking mid-command, writes half
-//! a frame, or claims a payload length nobody can honour. Those are the four
-//! shapes the host's framing has to survive, and only a deliberately broken
-//! peer can produce them. Same reason `tests/fake_codex.zig` exists.
+//! a working channel points `--env remote:exec:` at the real nulya binary, both
+//! ends production code over a pipe. What that cannot exercise is a peer that
+//! lies — answers a version it does not speak, stops talking mid-command,
+//! writes half a frame, or claims a payload length nobody can honour — and only
+//! a deliberately broken peer can produce those shapes.
 //!
 //! **The mode is argv, not an environment variable**, because that is what the
 //! spec can carry: `remote:exec:<this binary> <mode>` splits on spaces and the

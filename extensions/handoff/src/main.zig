@@ -1,54 +1,16 @@
 //! `handoff` — the model's own end-of-phase signal, outside the kernel.
 //!
-//! **What it is.** One tool. The model calls it when a phase of work is really
-//! finished and the rest of the job no longer needs this phase's process detail:
-//! it hands over four sections (`done` / `next_task` / `keep` / `drop?`), this
-//! extension checks them, and answers "recorded — end this turn now". It does
-//! NOT fork. Forking is `extensions/compact` (DESIGN §11), and
-//! `session new --parent` stays called from exactly one place in this
-//! repository.
+//! One tool. The model calls it when a phase of work is finished: it hands
+//! over four sections (`done` / `next_task` / `keep` / `drop?`), this
+//! extension validates them, and answers "recorded — end this turn now". It
+//! writes nothing and does NOT fork — the four sections ARE the call's
+//! arguments, already frozen into the session's ledger, and forking is
+//! `extensions/compact`'s job (`compact --arg brief=latest` reads the last
+//! accepted `handoff` call out of the ledger and renders the brief from it).
 //!
-//! **Where the proposal lives: in the ledger.** This tool writes nothing. The
-//! four sections ARE the arguments of this call, and the kernel froze that call
-//! into the session's ledger before this process ever started — so a second copy
-//! on disk would be a second truth (physics #3). It used to write
-//! `.nulya/handoffs/<session>-<n>.md` and let drivers watch that directory;
-//! that shape made every driver learn a disk convention nobody enforced, meant
-//! two implementations on two platforms, and died outright once a workspace
-//! could live on another machine (the package runs there, the driver does not —
-//! goals/remote-env.md §3.2). What replaced it needs no convention at all:
-//! `compact --arg brief=latest` reads the last accepted `handoff` call out of
-//! the session's own ledger and renders the brief from its arguments.
-//!
-//! **Why a tool and not a text convention.** A model "announcing" a handoff in
-//! prose is a signal a driver can only guess at — forgotten, buried mid-answer,
-//! wrapped in a code fence, and the driver is left doing regex archaeology. A
-//! tool call is structured, is validated (a brief missing a section comes back
-//! as an error the model can fix), and carries its own instructions: the tool
-//! description is in front of the model for the whole session, so the rule
-//! "call it once, at a phase boundary, then stop" needs no extra prompting.
-//! Landing it here rather than as a third builtin is the same discipline: nulya
-//! has no "std tool" layer, and a tool that is always in front of every model
-//! costs a `max_tools` slot and prefix tokens in sessions that will never use it
-//! (PLAN §3.4.1). It ships with the repo, DEFAULT-OFF; a driver that wants it
-//! composes the package explicitly: `session new --with handoff@<v>`. Its
-//! manifest declares `surface: "auto"`, so that membership is the whole of
-//! putting the tool on the model face — no second flag.
-//!
-//! **How a driver consumes it.** A driver (`drivers/goal.sh` / `drivers/goal.ps1`,
-//! PLAN §3.6) steps the session and watches the step's own `--stream` lines for
-//! a `handoff` call; when one appears it runs
-//! `compact --arg session=<id> --arg brief=latest` — the fork path that leaves
-//! the old session byte-identical — and continues in the child. The model
-//! proposes, the driver decides (physics #3): nothing here opens, steps or forks
-//! a session.
-//!
-//! **Why compiled Zig rather than a script.** Identical to `extensions/compact`:
-//! four sections to validate as a group. `sh` has no JSON reader (jq is not
-//! guaranteed), Windows has neither jq nor a guaranteed python, and one manifest
-//! carries one `interpreter` — so a repo-shipped script tool would mean a `.ps1`
-//! and a `.sh` implementation of the same tool that could never share one
-//! version id. PLAN §0.1 #3 keeps compiled Zig open for exactly this.
+//! Ships DEFAULT-OFF; a driver composes it with `session new --with
+//! handoff@<v>` and watches `--stream` for the call to trigger the
+//! compact/fork itself — the model proposes, the driver decides.
 
 const std = @import("std");
 
@@ -76,10 +38,9 @@ const Brief = struct {
 
 /// `std.process.Init` rather than a bare `main()` for the io it hands over.
 ///
-/// The wire is `plain` (DESIGN §7.3, contract at the top of
-/// `src/extension/protocol.zig`): stdin is this call's arguments as one JSON
-/// object, and this package has one tool, so `NULYA_TOOL` says nothing it does
-/// not already know.
+/// The wire is `plain` (contract at the top of `src/extension/protocol.zig`):
+/// stdin is this call's arguments as one JSON object, and this package has
+/// one tool, so `NULYA_TOOL` says nothing it does not already know.
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     // One arena for the whole call: this process validates a brief and prints
@@ -161,8 +122,8 @@ fn stringField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     };
 }
 
-/// The answer, then exit — the whole runtime contract. A success is the sentence
-/// itself on stdout (a string result reaches the model verbatim, DESIGN §7.3);
+/// The answer, then exit — the whole runtime contract. A success is the
+/// sentence itself on stdout (a string result reaches the model verbatim);
 /// a failure is the teaching message on stderr, and the non-zero exit is what
 /// makes it a failed call.
 fn answer(io: std.Io, outcome: Outcome) !noreturn {

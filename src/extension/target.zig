@@ -1,55 +1,18 @@
-//! The build-target vocabulary: the two words a version's identity records
-//! (DESIGN §7.4).
+//! The build-target vocabulary: the two words a version's identity records.
 //!
 //! A compiled version id is `hash(snapshot + compiler + target)`, and `target`
-//! has always been the two words `<arch>-<os>` — never a full triple. So this
-//! module speaks exactly those two words: `ext build --target` accepts them, the
-//! seal records them, and a donor lookup matches on them. Taking a full zig
-//! triple at the CLI would put a third word into a key the store compares
-//! byte for byte, and `x86_64-linux-musl` would then be a DIFFERENT version from
-//! the `x86_64-linux` a native build on that machine writes.
-//!
-//! The abi half is therefore chosen here rather than asked for — one answer per
-//! os, for EVERY build of that os, cross or not:
+//! is always the two words `<arch>-<os>` — never a full triple, so a version id
+//! is one key the store compares byte for byte. The abi half is chosen here
+//! rather than asked for, one answer per os for every build, cross or not:
 //!
 //!   linux   -> musl   statically linked; no glibc version to match
 //!   windows -> gnu    what a native zig build on Windows already uses
 //!   macos   -> none   zig's own libSystem stubs; no SDK needed
 //!
-//! **The two words decide the compile, they do not merely describe it.** A
-//! version id names "these package bytes, built for this target, by this
-//! compiler", so two builds recording the same two words must issue the same
-//! compiler invocation. That is what `effectiveTriple` is for: a build that
-//! named no target is still given this host's own triple, so it is the same
-//! invocation a cross build for those words would be — same abi, same baseline
-//! cpu.
-//!
-//! It was not always so, and the reason the old arrangement had to go is worth
-//! keeping. A native build used to be left native: it detected the machine's own
-//! abi (glibc on Linux) while a cross build for the same two words picked musl,
-//! and both recorded `x86_64-linux`. Inside ONE store that never showed, because
-//! the reuse path (`build_ext.findMatchingVersion`) finds whichever copy is
-//! already there and builds nothing. But version ids leave a store: `ext push`
-//! asks the far machine "have you got this id" and it answers by id alone, and
-//! `exec_version` (DESIGN §3.4) names one id as the implementation that serves a
-//! call over there. Two stores could then hold one id over two builds that
-//! behave differently — one needing a glibc that machine may not have.
-//!
-//! **What the two words still do not distinguish.** Not the exact bytes: two
-//! machines running the same compiler for the same target can differ, and
-//! nothing here promises otherwise. What an id fixes is the invocation — one
-//! behavioural equivalence class — and every machine re-validates `.sealed`
-//! against the bytes IT holds (a donor copy, a pushed copy), so nothing ever
-//! runs bytes it did not verify.
-//!
-//! Nor the HOST, and that is the exception `effectiveTriple` keeps: a machine
-//! whose own pair is outside the vocabulary below (riscv64-linux, say) is left
-//! native, because `--target` cannot spell its words — so no cross build can
-//! collide with what it produces, and it must still be able to build for itself.
-//!
-//! The alternative — putting the abi, or the host, into the id — buys a
-//! distinction nobody asked a question about and costs the property the whole
-//! store rests on: one id, one answer to "have I got this already".
+//! The two words decide the compile, not merely describe it: two builds
+//! recording the same two words must issue the same compiler invocation, so
+//! `effectiveTriple` gives a build that named no target this host's own
+//! triple explicitly, same as a cross build for those words would.
 
 const std = @import("std");
 const builtin = @import("builtin");

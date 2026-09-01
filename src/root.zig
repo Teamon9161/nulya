@@ -12,8 +12,8 @@
 //!
 //! No stability promise yet: pre-release, the API moves when the kernel does.
 //! The stable integration surfaces remain the CLI (`nulya session *` for
-//! drivers, DESIGN §14) and the plain wire for extensions (DESIGN §7.3); this
-//! module is for embedding, not the only door in.
+//! drivers) and the plain wire for extensions; this module is for embedding,
+//! not the only door in.
 //!
 //! Keep it a thin re-export surface: add a line when a consumer (a test, an
 //! embedder) genuinely needs a core module, never any logic.

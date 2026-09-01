@@ -1,4 +1,4 @@
-//! The extension drafts this binary ships (DESIGN §7.8, `nulya ext seed`).
+//! The extension drafts this binary ships, backing `nulya ext seed`.
 //!
 //! build.zig `@embedFile`s the repo's own `extensions/**` tree — the same move
 //! as `src_embed` (`nulya src`), pointed at the bundled drafts. A distributed

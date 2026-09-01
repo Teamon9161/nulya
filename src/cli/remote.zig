@@ -1,23 +1,18 @@
-//! `nulya remote …` (DESIGN §8.1, §14): the two ends of the remote channel.
+//! `nulya remote …` — the two ends of the remote channel.
 //!
-//! `serve` is the FAR side — this same binary, in a shell role, exactly as
-//! `nulya task supervise` is (DESIGN §6.1). It reads frames on stdin, runs the
-//! commands they ask for through the ordinary `LocalEnvironment`, and writes
-//! the results back on stdout. That is the whole reason the remote side of a
-//! nulya session gets a real process-tree kill, a real secret denylist and a
-//! real wall-clock budget without a second implementation of any of them: over
-//! there, nulya IS the local environment.
+//! `serve` is the FAR side: this same binary in a shell role, as
+//! `nulya task supervise` is. It reads frames on stdin, runs the commands they
+//! ask for through the ordinary `LocalEnvironment`, and writes the results back
+//! on stdout — which is why the remote side gets a real process-tree kill, a
+//! real secret denylist and a real wall-clock budget with no second
+//! implementation of any of them.
 //!
-//! `check` and `ls` are the HOST side, and they exist because a driver needs
-//! two answers before it can offer a machine to a person: can I reach it, and
-//! what is on it. `ls` is a protocol verb rather than `ls -1p` parsed out of a
-//! shell call because a file name may contain a newline and a browser needs the
-//! kind anyway — parsing a listing back out of text would be a second, lossier
-//! answer to a question the agent can just answer.
+//! `check` and `ls` are the HOST side: can I reach that machine, and what is on
+//! it. `ls` is a protocol verb rather than a parsed `ls -1p` because a file name
+//! may contain a newline and a browser needs the kind anyway.
 //!
 //! **stdout on the serving side is the channel.** Nothing here may print to it
-//! except frames; every diagnostic goes to stderr, where the transport's own
-//! errors already go.
+//! except frames; every diagnostic goes to stderr.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -44,9 +39,9 @@ const printOut = common.printOut;
 const printRaw = common.printRaw;
 
 /// How many directory entries one `list-dir` reply carries. The entries travel
-/// as PAYLOAD (protocol rule 6), so this is no longer what keeps the frame
-/// readable — it is what keeps one answer to "what is in this directory" a size
-/// a person or a browser can use. Truncation is SAID, never silent.
+/// as PAYLOAD (protocol rule 6), so this is not about frame size — it keeps one
+/// answer a size a person or a browser can use. Truncation is SAID, never
+/// silent.
 const max_entries: usize = 1000;
 const remote_password_buffer_bytes = 4097;
 
@@ -196,11 +191,10 @@ const Agent = struct {
 
     /// One decided workspace, remembered for the life of this process.
     ///
-    /// A channel serves one session and a session has one workspace, so re-reading
-    /// the store and the journal on every call would answer the same question over
-    /// and over. Living no longer than the process is the other half: a person who
-    /// runs `nulya ext trust` over here is answered by the NEXT connection, without
-    /// any invalidation to get wrong.
+    /// A channel serves one session and a session has one workspace, so this is
+    /// asked once. It lives no longer than the process, so a person who runs
+    /// `nulya ext trust` over here is answered by the NEXT connection and there
+    /// is no invalidation to get wrong.
     const Gate = struct {
         /// The `cwd` this answer is about, owned.
         cwd: []u8,
@@ -240,12 +234,12 @@ const Agent = struct {
 
 /// A version being copied into THIS machine's user store, one file per frame.
 ///
-/// It is staged rather than written into `versions/<v>` directly for the reason
+/// Staged rather than written into `versions/<v>` directly, for the reason
 /// `build_ext.adoptVersionDir` copies-then-validates: a version directory that
-/// exists is a version other processes will compose and run, so it may only
-/// appear once these bytes have been checked against their own seal HERE. A
-/// channel that dies mid-push therefore leaves a staging directory (cleared by
-/// the next push of the same id) and nothing under `versions/`.
+/// exists is one other processes will compose and run, so it may only appear
+/// once these bytes have been checked against their own seal HERE. A channel
+/// that dies mid-push leaves a staging directory (cleared by the next push of
+/// the same id) and nothing under `versions/`.
 ///
 /// The id's writer lease is held for the whole sequence — the same lease a
 /// build or an activate of that id takes (`Store.lease`), so a push and a local
@@ -285,14 +279,13 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
 
-    // The ordinary local environment of THIS machine — the whole point. No
-    // session ref: an agent runs commands, it does not own a ledger, so
-    // `startShellTask` here would have nowhere to report and says so.
+    // The ordinary local environment of THIS machine. No session ref: an agent
+    // runs commands, it does not own a ledger.
     //
     // THIS machine's store roots, resolved the way every other nulya process on
-    // it resolves them: an extension version that arrived by `ext push` lands in
-    // the user store here, and a workspace over here may hold its own. The host
-    // never names a directory on this machine (goals/remote-env.md §3.3).
+    // it resolves them: a version that arrived by `ext push` lands in the user
+    // store here, and a workspace over here may hold its own. The host never
+    // names a directory on this machine.
     const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
     defer launch.freeExtensionRoots(alloc, ext_roots);
     var lenv = try launch.localEnvironment(alloc, io, &cfg, null, "", ext_roots);
@@ -337,11 +330,10 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 }
 
 fn serveOne(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
-    // Whichever verb this is, the session it belongs to is published to
-    // everything spawned from here (DESIGN §5.3). Only the IDENTITY exists on
-    // this machine — the session file is on the host — which is exactly why it
-    // is `NULYA_SESSION_ID` and not `NULYA_SESSION`. Idempotent: one channel
-    // serves one session, so after the first frame this is a no-op.
+    // The session this belongs to is published to everything spawned from here.
+    // Only the IDENTITY exists on this machine — the session file is on the
+    // host — which is why it is `NULYA_SESSION_ID` and not `NULYA_SESSION`.
+    // Idempotent: one channel serves one session.
     if (req.session.len != 0) {
         const known = agent.lenv.env.get("NULYA_SESSION_ID") orelse "";
         if (!std.mem.eql(u8, known, req.session)) try agent.lenv.env.put("NULYA_SESSION_ID", req.session);
@@ -391,9 +383,8 @@ fn serveHello(agent: *Agent, req: protocol.Request) !void {
     }, "", "");
 }
 
-/// Runs something while watching for a `cancel` frame, so a canceled step on the
-/// host actually ends the process HERE — the guarantee the exec target could not
-/// make (DESIGN §8.1's first honest limit).
+/// Runs something while watching for a `cancel` frame, so a canceled step on
+/// the host actually ends the process HERE.
 ///
 /// One task for both run verbs: a shell command and an extension call are the
 /// same thing to this side — a child of this machine's local environment, with
@@ -477,20 +468,17 @@ fn serveShell(agent: *Agent, req: protocol.Request, command: []const u8) !void {
     } });
 }
 
-/// Run one extension tool HERE, against this machine's workspace and this
-/// machine's store — which is the whole of what a remote session buys
-/// (goals/remote-env.md §3.1).
+/// Run one extension tool HERE, against this machine's workspace and store.
 ///
-/// The frame named `(id, version, tool)`; everything else about the call is
-/// decided on this side, by the same code a local session goes through:
-/// `extension/exec.zig` picks the entry variant for THIS OS, verifies that
-/// version against its own seal, and `extension/protocol.zig` derives
-/// `NULYA_TOOL` / `NULYA_ARG_<k>` from the arguments in the payload. There is no
-/// second implementation of any of it over here, because over here is nulya too.
+/// The frame named `(id, version, tool)`; everything else is decided on this
+/// side, by the same code a local session goes through: `extension/exec.zig`
+/// picks the entry variant for THIS OS and verifies the version against its own
+/// seal, and `extension/protocol.zig` derives `NULYA_TOOL` / `NULYA_ARG_<k>`
+/// from the arguments in the payload.
 ///
-/// Which is also why the workspace-store trust gate is asked HERE, before any of
-/// that (`workspaceStoreRefusal`): the store that could shadow a pushed version is
-/// this machine's, so this machine's trust journal is the one that answers.
+/// The workspace-store trust gate is asked HERE too (`workspaceStoreRefusal`):
+/// the store that could shadow a pushed version is this machine's, so this
+/// machine's trust journal is the one that answers.
 ///
 /// No presentation file: its reader is the front end, on the host.
 fn serveRunExtension(agent: *Agent, req: protocol.Request, arguments: []const u8) !void {
@@ -514,26 +502,22 @@ fn serveRunExtension(agent: *Agent, req: protocol.Request, arguments: []const u8
     } });
 }
 
-/// The workspace-store trust gate (DESIGN §9), asked HERE, before this machine
-/// resolves anything through its own roots.
+/// The workspace-store trust gate, asked HERE, before this machine resolves
+/// anything through its own roots.
 ///
 /// `.nulya/extensions` is checkout content AND the first store root over here
-/// exactly as it is on the host, so without this a store that arrived with a
-/// clone ON THIS MACHINE would shadow the very version the host delivered by
-/// `nulya ext push` into this machine's user store — and nobody would ever have
-/// looked at it. The judgement is made on this side, against this machine's trust
-/// journal, for the same reason the entry variant and the seal are: the machine
-/// holding the bytes is the only one that can answer for them.
+/// exactly as on the host, so without this a store that arrived with a clone ON
+/// THIS MACHINE would shadow the very version `nulya ext push` delivered into
+/// this machine's user store. The machine holding the bytes is the only one
+/// that can answer for them.
 ///
-/// The answer is a refusal of ONE CALL, never the end of the channel: the host
-/// turns it into an ordinary failed extension call (`environment/remote/mod.zig`),
-/// the model reads the sentence, the session goes on, and one `nulya ext trust`
-/// over here fixes it — the shape "this machine does not hold that version"
-/// already has.
+/// The answer refuses ONE CALL, never the channel: the host turns it into an
+/// ordinary failed extension call, the model reads the sentence, and one
+/// `nulya ext trust` over here fixes it.
 ///
 /// Only the workspace root is gated, exactly as on the host: the user store and
-/// `extensions.paths` are out of a checkout's reach (DESIGN §7.2/§9.5), which is
-/// also why `ext push` lands in the user store.
+/// `extensions.paths` are out of a checkout's reach, which is also why
+/// `ext push` lands in the user store.
 fn workspaceStoreRefusal(agent: *Agent, cwd: []const u8) !?[]const u8 {
     if (agent.gate) |g| {
         if (std.mem.eql(u8, g.cwd, cwd)) return g.refusal;
@@ -645,14 +629,12 @@ fn replyRun(agent: *Agent, task: *RunTask) !void {
 /// Write one file into this session's workspace on THIS machine.
 ///
 /// The bytes go through `agent.lenv`'s `putWorkspaceFile` — the same function a
-/// local session's spill goes through, not a copy of it. That is the point of
-/// the far side being nulya itself: "spill on the far machine" is not a second
-/// implementation of "spill here", it is the same one, reached over a channel.
+/// local session's spill goes through, not a copy of it.
 ///
-/// `path` is workspace-relative and `/`-spelled (it is the string the model will
-/// read in the footer); `cwd` is where that workspace is here. They are joined
-/// exactly once, and only in this direction — the host never learns a path on
-/// this machine (goals/remote-env.md §3.3).
+/// `path` is workspace-relative and `/`-spelled (it is the string the model
+/// will read in the footer); `cwd` is where that workspace is here. They are
+/// joined exactly once, and only in this direction — the host never learns a
+/// path on this machine.
 fn servePutFile(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
     if (req.path.len == 0) {
         try agent.refuse("put-file needs a path");
@@ -673,7 +655,7 @@ fn servePutFile(agent: *Agent, req: protocol.Request, payload: []const u8) !void
     try agent.reply(.{ .ok = true }, "", "");
 }
 
-// ── background tasks on this machine (goals/remote-env.md §4 Phase 4) ───────
+// ── background tasks on this machine ────────────────────────────────────────
 //
 // A remote session's background task is supervised HERE, by the same
 // `nulya task supervise` a local one is, with the log, the status and the lease
@@ -708,7 +690,7 @@ fn serveStartTask(agent: *Agent, req: protocol.Request, command: []const u8) !vo
     defer agent.alloc.free(paths.dir);
 
     // The one thing this machine has to know about itself to start one: which
-    // binary it is (DESIGN §7.6).
+    // binary it is.
     const exe = agent.lenv.env.get("NULYA_EXE") orelse {
         try agent.refuse("the nulya here does not know its own path, so it cannot start a supervisor");
         return;
@@ -775,10 +757,9 @@ fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
         return;
     };
     // The report is already valid UTF-8 when a supervisor writes it
-    // (`emit.utf8Lossy` runs over the log tail there), and this is what makes
-    // that a checked fact rather than an assumption: a JSON string cannot carry
-    // invalid bytes, and `std.json` writing them as an array of numbers is how a
-    // session file once stopped being a session file (BUGS #22).
+    // (`emit.utf8Lossy` runs over the log tail there); this makes that a
+    // checked fact rather than an assumption, since `std.json` writes invalid
+    // bytes as an array of numbers instead of a string.
     const cleaned = try emit.utf8Lossy(a, raw_report);
     const report = if (cleaned) |c| c.text else raw_report;
 
@@ -790,18 +771,11 @@ fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
     // The probe takes the lease itself, non-blocking, for the instant it is
     // open; a supervisor whose own acquire lands in that instant is told
     // "another supervisor already owns this" and EXITS, so the task silently
-    // never runs. Locally that window cannot be reached because `projectState`
-    // asks the same question in the same order — no status, no probe — and a
-    // supervisor writes its first status only after it holds the lease. Probing
-    // unconditionally here would have removed that protection on this side
-    // alone. Null is the honest answer meanwhile: `readRow` reads a statusless
-    // task as `starting` and never looks at this column.
-    // A real fault reading `.lock` (permission denied, the lease being a
-    // directory, anything this machine's disk had to say) is refused rather
-    // than swallowed into "not held": `readRow` turns a refusal into
-    // `unreachable`, not `lost` — the same distinction `readTaskFile` above
-    // already draws for `status.json` and `report.txt`, and the reason
-    // `leaseHeldIn` propagates that fault instead of answering it here.
+    // never runs. A supervisor writes its first status only after it holds the
+    // lease, so requiring one closes that window. Null is honest meanwhile:
+    // `readRow` reads a statusless task as `starting`.
+    // A real fault reading `.lock` is refused rather than swallowed into "not
+    // held": `readRow` turns a refusal into `unreachable`, not `lost`.
     const lease_held: ?bool = if (status.len == 0)
         null
     else
@@ -816,12 +790,9 @@ fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
 
 /// Read one task file here, `arena`-owned. `error.FileNotFound` answers empty —
 /// the same "nothing written yet" a directory with no status reports locally —
-/// but every other failure (permission denied, a read past `cap`, anything this
-/// machine's disk had to say) propagates: those are not "not written yet", they
-/// are this machine unable to answer, and folding them into the same empty
-/// string is exactly the shape this repo has fixed before (`Repo.unknown`,
-/// `Answer` as a union) — an I/O fault must not read as a confident "starting".
-/// The caller decides what to say about it, because it knows which file this was.
+/// but every other failure (permission denied, a read past `cap`) propagates:
+/// those are this machine unable to answer, and an I/O fault must not read as a
+/// confident "starting". The caller decides what to say about it.
 fn readTaskFile(
     agent: *Agent,
     ws: std.Io.Dir,
@@ -869,20 +840,17 @@ fn serveTaskKill(agent: *Agent, req: protocol.Request) !void {
 
 // ── receiving an extension version (`nulya ext push`) ───────────────────────
 //
-// The far side of a push is deliberately thin: it opens a staging directory,
-// takes bytes, and then asks `integrity.validateVersionDir` — the same function
-// activation, `ext run` and a donor copy ask — whether what arrived is that
-// version. There is no second definition of "a valid version" over here,
-// because over here is nulya too.
+// The far side of a push is thin: open a staging directory, take bytes, then
+// ask `integrity.validateVersionDir` — the same function activation, `ext run`
+// and a donor copy ask — whether what arrived is that version.
 
 /// Where a pushed version lands: this machine's USER store.
 ///
 /// Not the workspace store, and not a choice the host gets to make. The user
-/// store is the one root that is by definition this machine's own (DESIGN §9:
-/// the trust gate exists for the workspace root, which arrives with a
-/// checkout), and the host resolving a path over here would be the host
-/// modelling another machine's file system — the thing goals/remote-env.md §3.3
-/// exists to prevent.
+/// store is the one root that is by definition this machine's own — the trust
+/// gate exists for the workspace root, which arrives with a checkout — and the
+/// host resolving a path over here would be the host modelling another
+/// machine's file system.
 fn openUserStore(agent: *Agent) !?std.Io.Dir {
     const spec = (try common.writeRootSpec(agent.alloc, true)) orelse return null;
     defer agent.alloc.free(spec);
@@ -893,10 +861,9 @@ fn openUserStore(agent: *Agent) !?std.Io.Dir {
 
 /// A version-relative path this agent is willing to write, or null.
 ///
-/// The host is nulya's own `ext push`, so this is not a defence against a peer
-/// — it is the ordinary rule that a directory being filled from a stream may
-/// only grow inwards. A `..` or an absolute path would put bytes outside the
-/// staging tree, where nothing would ever validate them.
+/// The ordinary rule that a directory being filled from a stream may only grow
+/// inwards: a `..` or an absolute path would put bytes outside the staging
+/// tree, where nothing would ever validate them.
 fn safeVersionRel(path: []const u8) ?[]const u8 {
     if (path.len == 0) return null;
     if (std.fs.path.isAbsolute(path)) return null;
@@ -995,11 +962,9 @@ fn serveStoreCommit(agent: *Agent) !void {
     };
     defer closePush(agent);
 
-    // The whole point of the verb. These bytes arrived over a channel, so this
-    // is a WRITE of bytes from somewhere else — `adoptVersionDir`'s moment, and
-    // the same level: re-digest the package, prove it reproduces this very
-    // version id, prove the binary is the sealed one. Anything less and "the
-    // remote validates what it was sent" would be a claim rather than a check.
+    // These bytes arrived over a channel, so this is `adoptVersionDir`'s
+    // moment at the same level: re-digest the package, prove it reproduces this
+    // very version id, prove the binary is the sealed one.
     integrity.validateVersionDir(agent.alloc, agent.io, p.root, p.staging_rel, p.version, p.id, .sealed) catch |err| {
         try agent.refuseFmt("what arrived is not {s}@{s} ({s}); nothing was installed", .{ p.id, p.version, @errorName(err) });
         return;
@@ -1036,9 +1001,8 @@ fn serveListDir(agent: *Agent, req: protocol.Request) !void {
     var it = dir.iterate();
     while (it.next(agent.io) catch null) |e| {
         // A name that is not valid UTF-8 cannot be encoded as JSON at all
-        // (`std.json` would write it as an array of numbers and the host's
-        // parse would then declare the channel dead). Skipping it and SAYING SO
-        // keeps one odd file from taking the whole listing down.
+        // (`std.json` writes it as an array of numbers, and the host's parse
+        // then declares the channel dead). Skipped, and SAID.
         if (!std.unicode.utf8ValidateSlice(e.name)) {
             skipped += 1;
             continue;
@@ -1058,17 +1022,16 @@ fn serveListDir(agent: *Agent, req: protocol.Request) !void {
         note = try std.fmt.allocPrint(a, "{d} entries were left out: their names are not valid UTF-8", .{skipped});
     }
     // The listing is the payload: it grows with what this machine holds, and a
-    // header may not (protocol rule 6). The note stays in the header — it is one
-    // sentence this build wrote, not something the directory decides the size of.
+    // header may not (protocol rule 6). The note stays in the header — one
+    // sentence this build wrote, not something the directory sizes.
     const body = try protocol.encodeEntries(a, entries.items);
     try agent.reply(.{ .ok = true, .bytes = body.len, .message = note }, body, "");
 }
 
 /// Why a run did not happen, in that machine's own words. An extension gets the
-/// sentence that names the missing version and the command that delivers it:
-/// "this machine does not have it" is the ONE failure a push fixes, and the model
-/// is the one who has to be told (the host turns this into an ordinary failed
-/// call).
+/// sentence that names the missing version and the command that delivers it —
+/// the one failure a push fixes. The host turns this into an ordinary failed
+/// call, so the model reads it.
 fn runFailure(agent: *Agent, request: @FieldType(RunTask, "req"), err: anyerror) ![]const u8 {
     switch (request) {
         .shell => return std.fmt.allocPrint(agent.arena.allocator(), "could not run the command: {s}", .{@errorName(err)}),

@@ -1,40 +1,32 @@
-//! Durable, append-only journal of the extension store roots this machine's user
-//! has trusted (DESIGN §9).
+//! Durable, append-only journal of the extension store roots this machine's
+//! user has trusted.
 //!
-//! It exists for exactly one gap: the workspace store `.nulya/extensions` is
-//! CHECKOUT CONTENT and the first store root (DESIGN §7.2), so cloning a repo
-//! used to be enough to put its active versions into a session's composition —
-//! system prompts into the system blocks, tools one CLI call away — with nothing
-//! in between. The record below is what "a person looked at this store once" is
-//! written down as.
+//! It exists for one gap: the workspace store `.nulya/extensions` is CHECKOUT
+//! CONTENT and the first store root searched, so cloning a repo would put its
+//! active versions straight into a session's composition — system prompts
+//! into system blocks, tools one CLI call away — with nothing in between. A
+//! line here is what "a person looked at this store once" is written down as.
 //!
-//! **What is trusted is the STORE, not its contents.** Not a hash of the
-//! versions it holds: an agent that builds and activates its own capability
-//! changes that hash on every loop, and a gate that re-asks each time would
-//! break self-evolution — which is the point of the whole harness, not an
-//! edge case. The judgement being recorded is about ORIGIN: was this store born
-//! on this machine, or did it arrive with a checkout? `nulya ext build` answers
-//! the first case by itself (it records trust the first time it fills an empty
-//! workspace store, DESIGN §9), and `nulya ext trust` is how a person answers
-//! the second.
+//! **What is trusted is the STORE, not its contents**: not a hash of the
+//! versions it holds, since an agent that builds and activates its own
+//! capability changes that hash every loop and a re-check would break
+//! self-evolution. The judgement is about ORIGIN — born on this machine, or
+//! arrived with a checkout? `nulya ext build` answers the first case itself
+//! (recording trust the first time it fills an empty workspace store);
+//! `nulya ext trust` answers the second.
 //!
-//! Format: one JSON object per line in `<NULYA_HOME | ~/.nulya>/trusted-stores.jsonl`:
-//!
+//! One JSON object per line in `<NULYA_HOME | ~/.nulya>/trusted-stores.jsonl`:
 //!   {"v":1,"store":"/home/me/work/repo/.nulya/extensions","at":"2026-08-17T09:31:07Z"}
 //!
-//! `store` is the store directory's absolute REAL path (symlinks resolved), which
-//! is why every writer resolves it from an open handle rather than joining
-//! strings. Duplicate lines are harmless: the question a reader asks is "does
-//! this path appear at all", so recording trust twice is idempotent, and a
-//! withdrawal is deleting lines by hand — there is no revoke verb until someone
-//! needs one.
+//! `store` is the absolute REAL path (symlinks resolved), so every writer
+//! resolves it from an open handle rather than joining strings. Duplicate
+//! lines are harmless (the query is "does this path appear at all"); there is
+//! no revoke verb — a withdrawal is deleting lines by hand.
 //!
-//! **The user layer is the whole point.** A project-layer record would let a
-//! checkout sign for itself, the same reason `extensions.paths` is trusted-layers
-//! only (DESIGN §9.5). The file discipline (one complete line under the
-//! journal's writer lease, torn tails repaired on write and skipped on read) is
-//! shared with the two workspace journals through `journal.zig`; the schema here
-//! is this module's alone.
+//! **The user layer is the whole point**: a project-layer record would let a
+//! checkout sign for itself. File discipline (writer lease, torn-tail repair
+//! on write, skip on read) is shared with the two workspace journals through
+//! `journal.zig`; the schema above is this module's alone.
 
 const std = @import("std");
 const journal = @import("journal.zig");

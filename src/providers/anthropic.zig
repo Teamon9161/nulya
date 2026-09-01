@@ -1,11 +1,10 @@
-//! Anthropic Messages API provider (DESIGN §13, PLAN §3.9).
+//! Anthropic Messages API provider.
 //!
 //! Unlike Chat Completions, this API caches only where it is told to. The
-//! PromptIR turn prefix (DESIGN §1) is what makes that safe here: the prefix
-//! only ever grows, so two `cache_control` breakpoints — one after the frozen
-//! system blocks, one on the last content block of the last message — cover the
-//! whole prefix, and the tail breakpoint moves forward on its own as the ledger
-//! is appended to.
+//! projected turn prefix only ever grows, never gets rewritten, so two
+//! `cache_control` breakpoints — one after the frozen system blocks, one on
+//! the last content block of the last message — cover the whole prefix, and
+//! the tail breakpoint moves forward on its own as the ledger is appended to.
 //!
 //! Also speaks Anthropic-compatible backends (DeepSeek's `/anthropic` endpoint).
 //! The only place the two differ is the reasoning dial: first-party models take
@@ -321,9 +320,9 @@ fn writeMessage(jw: *std.json.Stringify, alloc: std.mem.Allocator, role: Role, r
         .user_text => |u| {
             // Text first, then the images inlined with it. An image-only turn
             // writes NO text block: this API rejects an empty one, and
-            // `session append --image` with nothing said is a legal turn
-            // (DESIGN §14). `cacheableBlocks` counts by the same rule — the two
-            // must agree or the moving breakpoint lands on the wrong block.
+            // `session append --image` with nothing said is a legal turn.
+            // `cacheableBlocks` counts by the same rule — the two must agree
+            // or the moving breakpoint lands on the wrong block.
             if (u.text.len != 0 or u.images.len == 0) try writeTextBlock(jw, u.text, takes(breakpoint, &seen));
             for (u.images) |img| try writeImageBlock(jw, img, takes(breakpoint, &seen));
         },
@@ -437,9 +436,8 @@ fn writeTools(jw: *std.json.Stringify, tools: []const tool.ToolDefinition) !void
 
 /// Usage arrives in two events: `message_start` carries the input and cache
 /// counters, `message_delta` the output count (and, on newer API versions, a
-/// partial repeat of the rest). The collector keeps the last `usage` event it
-/// sees, so this merges instead of replacing — otherwise the cache-read counter,
-/// the one number DESIGN §1 is measured by, would be zeroed by the final event.
+/// partial repeat of the rest). This merges instead of replacing — otherwise
+/// the cache-read counter would be zeroed by the final event.
 pub const StreamState = struct {
     alloc: std.mem.Allocator,
     sink: provider.EventSink,

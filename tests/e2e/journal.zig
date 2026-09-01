@@ -1,4 +1,4 @@
-//! `nulya journal append|read` end to end (DESIGN §14): the CLI exposure of the
+//! `nulya journal append|read` end to end: the CLI exposure of the
 //! append-only JSONL discipline `journals/journal.zig` already implements for
 //! the three kernel journals — a real process appends, a real process reads,
 //! and two real processes racing the same file never tear a line.

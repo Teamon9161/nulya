@@ -1,4 +1,4 @@
-//! Layered Nulya configuration (DESIGN §9.5).
+//! Layered Nulya configuration.
 //!
 //! The loader resolves `default -> system -> user -> project`, with the project
 //! layer passed through the "can tighten, cannot loosen" trust boundary. Disk
@@ -23,12 +23,8 @@ pub const ProviderKind = enum {
     codex,
 };
 
-/// `remote` was retired 2026-08-30 (goals/remote-env.md §7.1): it named a
-/// third confinement level that was never implemented, and it read as though
-/// it were the same axis as `--env remote:…` (DESIGN §8.2) when it is not —
-/// this enum is the SANDBOX axis (how confined a command is), `--env` is which
-/// MACHINE runs it. Keeping a word here that nothing built and that collided
-/// in name with an unrelated, shipped feature was worse than deleting it.
+/// The SANDBOX axis — how confined a command is. Distinct from `--env`, which
+/// is a separate axis choosing which MACHINE runs it.
 pub const EnvironmentBackend = enum {
     local,
     sandbox,
@@ -94,17 +90,17 @@ pub const ModelParams = struct {
     /// Whether this model accepts images in a user turn. Explicit opt-in: an id
     /// with no catalog entry, or an entry that does not say so, does not accept
     /// them — `session append --image` refuses rather than guessing and letting
-    /// the provider 400 mid-run (DESIGN §3.1, §14). Descriptive like every other
-    /// field here; the kernel never reads it, the shell does.
+    /// the provider 400 mid-run. Descriptive like every other field here; the
+    /// kernel never reads it, the shell does.
     vision: bool = false,
 };
 
 pub const Provider = struct {
     active_profile: []const u8 = "",
     profiles: []ProviderProfile = &.{},
-    /// How a transient model-request failure is retried (`provider.RetryPolicy`,
-    /// DESIGN §13). One policy for every profile: it describes the wire, not a
-    /// model. Trusted layers only.
+    /// How a transient model-request failure is retried (`provider.RetryPolicy`).
+    /// One policy for every profile: it describes the wire, not a model.
+    /// Trusted layers only.
     retry: provider.RetryPolicy = .{},
 
     pub fn activeProfile(self: Provider) ?ProviderProfile {
@@ -124,7 +120,7 @@ pub const Provider = struct {
 
 /// The model-facing tool face: how many tools a session may expose at all, and
 /// which extension tools take one of those slots. Both are decisions, never
-/// derived — nothing in the kernel reads usage to fill a slot (DESIGN §5.1).
+/// derived — nothing in the kernel reads usage to fill a slot.
 pub const Registry = struct {
     max_tools: u32 = 20,
     pinned_native_tools: []const []const u8 = &.{},
@@ -138,8 +134,8 @@ pub const Environment = struct {
 pub const Extensions = struct {
     paths: []const []const u8 = &.{},
     /// Extension ids that are a MEMBER of every session opened in this
-    /// workspace (DESIGN §5.1) — skills into the catalog, system prompts into
-    /// the system blocks, tools reachable through the CLI. The standing half of
+    /// workspace — skills into the catalog, system prompts into the system
+    /// blocks, tools reachable through the CLI. The standing half of
     /// the membership axis, exactly as `registry.pinned_native_tools` is the
     /// standing half of the tool-face axis; `session new --with` is the
     /// per-session half of this one, and the shell joins the two before the
@@ -194,7 +190,7 @@ pub const Config = struct {
             // same ids with a different dial and its own per-model default —
             // which the backend applies when nothing is sent. Sending the
             // catalog's default instead would silently overrule it; "auto" here
-            // has to mean the subscription's auto (DESIGN §9.5).
+            // has to mean the subscription's auto.
             if (p.kind == .codex) return null;
         }
         if (self.findModel(model_id)) |m| return m.default_effort;
@@ -386,8 +382,7 @@ fn mergeProject(cfg: *Config, raw: RawConfig) !void {
     // difference. A store root decides which DIRECTORIES on this machine get to
     // supply `current` versions — i.e. which code a session may run — so a
     // checkout adding one would widen authority, the exact thing the project
-    // layer may never do (DESIGN §9.5). Trusted layers (system / user) still
-    // set it.
+    // layer may never do. Trusted layers (system / user) still set it.
 }
 
 fn upsertProfile(cfg: *Config, raw: RawProviderProfile) !void {
@@ -704,17 +699,15 @@ test "project layer may tighten but not loosen trusted authority" {
     defer cfg.deinit();
 
     // A checkout may narrow what runs (fewer tools) but never widen it back to a
-    // looser execution backend than a trusted layer chose (DESIGN §9.5).
+    // looser execution backend than a trusted layer chose.
     try std.testing.expectEqual(EnvironmentBackend.sandbox, cfg.environment.backend);
     try std.testing.expectEqual(@as(u32, 4), cfg.registry.max_tools);
 }
 
 test "a config file naming the retired 'remote' backend fails to load, rather than reading as local" {
-    // `remote` was deleted from `EnvironmentBackend` (goals/remote-env.md §7.1)
-    // rather than kept as a synonym for `local` or `sandbox` — an old file with
-    // `backend = "remote"` must say so loudly (the enum-decode error every
-    // other unrecognized TOML value already gets), not silently downgrade to a
-    // laxer backend than whoever wrote that file asked for.
+    // An old file with `backend = "remote"` must say so loudly (the
+    // enum-decode error every other unrecognized TOML value already gets),
+    // not silently downgrade to a laxer backend than whoever wrote it asked for.
     try std.testing.expectError(error.InvalidValueType, loadFromLayers(std.testing.allocator, &.{
         .{ .source = default_toml },
         .{ .source =

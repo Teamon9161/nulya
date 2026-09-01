@@ -18,25 +18,21 @@ const tool = @import("tool.zig");
 const tool_stats = @import("journals/tool_stats.zig");
 const store = @import("extension/store.zig");
 
-/// The most kernel steps one `run` may take, whatever the caller asks for
-/// (DESIGN §4, §14). A driver can lower the budget per call, never raise it.
+/// The most kernel steps one `run` may take, whatever the caller asks for. A
+/// driver can lower the budget per call, never raise it.
 ///
-/// A RUNAWAY GUARD, NOT A BUDGET. It exists so a loop that has stopped making
-/// progress cannot bill without end, and it is set high enough that honest work
-/// never reaches it — because a ceiling the model can feel is a ceiling that
-/// distorts the work. At 50 it was felt: a single ordinary editing pass spends
-/// one step per tool batch, and a session that made fifty of them had to be
-/// resumed by hand twice in the middle, which teaches the model nothing except
-/// that it is running out of room.
+/// A RUNAWAY GUARD, NOT A BUDGET: it stops a loop that has stopped making
+/// progress from billing without end, and is set high enough that honest work
+/// never reaches it. A ceiling the model can feel is a ceiling that distorts the
+/// work.
 pub const max_steps_ceiling: usize = 500;
 
-/// Consecutive RETRIABLE `max_tokens` steps before `run` stops on its own. Only a
-/// truncation that carried tool calls is retriable: it ends in a marker batch, so
-/// stepping again shows the model what happened and one retry usually fits. A
-/// text-only truncation is not retried at all — see `run` — so this bound is never
-/// reached through those. Two retries in a row mean the cap is genuinely too small
-/// for what is being asked, which no retry fixes and every retry bills a full
-/// prefix for; the driver (and the person) has to hear about it.
+/// Consecutive RETRIABLE `max_tokens` steps before `run` stops on its own. Only
+/// a truncation that CARRIED TOOL CALLS is retriable: it ends in a marker batch,
+/// so stepping again shows the model what happened. A text-only truncation is
+/// never retried (see `run`), so this bound is unreachable through those. Two in
+/// a row mean the cap is too small for what is being asked, which no retry
+/// fixes.
 pub const max_truncated_streak: usize = 2;
 
 /// Where a durable session's file and its cross-process siblings (`<id>.inbox/`,
@@ -49,9 +45,9 @@ pub const DurableRef = struct {
 };
 
 /// Ask a durable session to stop at its next step boundary, from any process:
-/// drops the `<stem>.cancel` marker next to the session file. The owning
-/// session consumes it in `prepareStep` and reports that step as `.canceled`
-/// without calling the model (DESIGN §4). Requesting twice is one request.
+/// drops the `<stem>.cancel` marker next to the session file. The owning session
+/// consumes it in `prepareStep` and reports that step as `.canceled` without
+/// calling the model. Requesting twice is one request.
 pub fn requestCancel(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir, session_path: []const u8) !void {
     const marker = try ledger.siblingPath(alloc, session_path, ".cancel");
     defer alloc.free(marker);
@@ -78,7 +74,7 @@ pub const AgentSession = struct {
     model_options: provider.Options,
     extension_roots: []const []const u8,
     /// Set for durable sessions: the session file's location, used to drain the
-    /// cross-process capability-note inbox each step (DESIGN §3, §5.3).
+    /// cross-process inbox each step.
     durable: ?DurableRef = null,
     total_usage: provider.Usage = .{},
     /// How to build a handle for an identity the ledger names, and which
@@ -87,23 +83,20 @@ pub const AgentSession = struct {
     rebind: ?ModelResolver = null,
     built: ledger.Identity = .{ .profile = "", .identity = .{} },
 
-    /// How to build a running model handle for an identity the ledger names
-    /// (goals/model-rebind.md §5).
+    /// How to build a running model handle for an identity the ledger names.
     ///
-    /// The kernel decides WHEN a session is running on the wrong model — that is
-    /// a fact it reads off the ledger — and knows nothing about how to construct
-    /// one, which needs config, credentials and a provider table that live in
-    /// the shell. So the shell hands in a callback, exactly as it hands in
-    /// `composition.ExecTargetProbe`: the kernel calls it at the two moments the
-    /// answer can change (opening a session whose ledger already rebound, and
-    /// draining a rebind at a step boundary) and never at any other.
+    /// The kernel decides WHEN a session is running on the wrong model — a fact
+    /// it reads off the ledger — and knows nothing about constructing one, which
+    /// needs config, credentials and a provider table from the shell. So the
+    /// shell hands in a callback, called at exactly the two moments the answer
+    /// can change: opening a session whose ledger already rebound, and draining
+    /// a rebind at a step boundary.
     ///
     /// The returned handle has to outlive the session; the shell owns it.
     pub const ModelResolver = struct {
         ptr: *anyopaque,
         /// The whole `(profile, identity)` the ledger recorded: the descriptor
-        /// says what to run and the profile name is what a credential in config
-        /// is filed under, exactly as at session creation.
+        /// says what to run, the profile name says which credential reaches it.
         build: *const fn (ptr: *anyopaque, wanted: ledger.Identity) anyerror!provider.Model,
     };
 
@@ -112,44 +105,40 @@ pub const AgentSession = struct {
         step_ctx: loop.StepContext,
         model_options: provider.Options = .{},
         /// Set by a shell that supports `session rebind`. Without it a rebind
-        /// event still projects (the reasoning behind it stops being replayed —
-        /// that is the kernel's own rule) but the handle stays as built, so a
-        /// caller that cannot swap models is never handed one it did not make.
+        /// event still applies to the PROJECTION (reasoning behind it stops
+        /// being replayed) but the handle stays as built.
         rebind: ?ModelResolver = null,
-        /// Store roots to search, in order (DESIGN §7.2). The default is the
-        /// workspace root alone; a CLI adds the user root and any trusted
-        /// `extensions.paths` at the session-setup boundary.
+        /// Store roots to search, in order. The default is the workspace root
+        /// alone; a CLI adds the user root and any trusted `extensions.paths`.
         extension_roots: []const []const u8 = &.{store.workspace_root_rel},
         /// Native tool selection and budget, resolved from config at the
         /// session-setup boundary so this module stays config-agnostic.
         registry: composition.Options = .{},
     };
 
-    /// Create a new durable session (DESIGN §3): resolve the composition fresh
-    /// from `opts.registry`, freeze it into the header, and open the session file
-    /// for appends. Fails if the file already exists.
+    /// Create a new durable session: resolve the composition fresh from
+    /// `opts.registry`, freeze it into the header, and open the session file for
+    /// appends. Fails if the file already exists.
     pub const CreateDurableOptions = struct {
         workspace: std.Io.Dir,
         session_path: []const u8,
         session_id: []const u8,
         /// The provider profile NAME (display / effort lookup).
         model_profile: []const u8 = "",
-        /// The RESOLVED model identity to freeze into the header (DESIGN §3). The
-        /// caller resolves this from config at the creation boundary; the kernel
-        /// only stores it. Empty provider = a scripted/legacy session.
+        /// The RESOLVED model identity to freeze into the header. The caller
+        /// resolves it from config at the creation boundary; the kernel only
+        /// stores it. Empty provider = a scripted/legacy session.
         model_identity: ledger.ModelDescriptor = .{},
-        /// The exec target's spec, frozen into the header (DESIGN §8). The
-        /// kernel only stores it: which machine a shell command runs on is a
-        /// creation-boundary decision, exactly like the model identity.
+        /// The exec target's spec, frozen into the header. Which machine a
+        /// shell command runs on is a creation-boundary decision, exactly like
+        /// the model identity; the kernel only stores it.
         environment: []const u8 = "",
         /// For a remote environment, the absolute workspace on that machine —
-        /// the other half of "where does this session run" (DESIGN §8.1). Empty
-        /// otherwise; the kernel only stores it.
+        /// the other half of "where does this session run". Empty otherwise.
         remote_workspace: []const u8 = "",
         created: []const u8 = "",
-        /// The creating binary's version string (`launch.version`). The other
-        /// half of the header's provenance stamp — the kernel hash — comes from
-        /// the kernel itself, so a caller can only get it right (DESIGN §3.4).
+        /// The creating binary's version string. The other half of the header's
+        /// provenance stamp — the kernel hash — the kernel computes itself.
         nulya_version: []const u8 = "",
         parent: ?ledger.ParentRef = null,
     };
@@ -183,18 +172,16 @@ pub const AgentSession = struct {
         var comp = try composition.SessionComposition.init(alloc, io, tool_ctx.cwd, opts.extension_roots, opts.registry);
         errdefer comp.deinit(alloc);
 
-        // Freeze the resolved composition into the header: the member extensions
-        // at their frozen versions and which of their tools are native this
-        // session. Any process reopening the file rebuilds the identical
-        // composition.
+        // Freeze the resolved composition into the header, so any process
+        // reopening the file rebuilds the identical one.
         const active = try alloc.alloc(ledger.ExtensionRef, comp.extensions.len);
         defer alloc.free(active);
         for (comp.extensions, 0..) |e, i| active[i] = .{
             .id = e.id,
             .version = e.version,
-            // Which build serves a call is decided once, here, and never
-            // re-derived: a resume that asked the far machine again could get a
-            // different answer than the session was composed with.
+            // Decided once, here, and never re-derived: a resume that asked the
+            // far machine again could get a different answer than the session
+            // was composed with.
             .exec_version = e.exec_version orelse "",
         };
         const native = try alloc.alloc([]const u8, comp.extension_tool_bindings.len);
@@ -202,8 +189,8 @@ pub const AgentSession = struct {
         for (comp.extension_tool_bindings, 0..) |b, i| native[i] = b.definition.id;
 
         // Provenance: which binary froze the model-visible state this header
-        // describes. The kernel prompt and the builtin definitions are the part
-        // of that state the header could not otherwise name (DESIGN §3.4).
+        // describes. The kernel prompt and builtin definitions are the part of
+        // that state the header could not otherwise name.
         const kernel_hash = try composition.kernelHash(alloc);
         defer alloc.free(kernel_hash);
 
@@ -216,9 +203,9 @@ pub const AgentSession = struct {
             .remote_workspace = d.remote_workspace,
             .created = d.created,
             .nulya = .{ .version = d.nulya_version, .kernel_hash = kernel_hash },
-            // The inline prompts go in by VALUE — they have no store entry to
-            // point at, and freezing the bytes is what lets a resume rebuild
-            // the identical system blocks from this file alone (DESIGN §3).
+            // Inline prompts go in by VALUE: they have no store entry to point
+            // at, and freezing the bytes is what lets a resume rebuild identical
+            // system blocks from this file alone.
             .composition = .{ .active = active, .native_tools = native, .prompts = comp.prompts },
         });
         errdefer l.deinit();
@@ -283,44 +270,39 @@ pub const AgentSession = struct {
         try self.l.append(.{ .user_text = .{ .text = text } });
     }
 
-    /// Run one step. Cancellation is reported as `StepOutcome.status == .canceled`
-    /// (never an error), whether it came from the host canceling the running
+    /// Run one step. Cancellation is reported as `StepOutcome.status ==
+    /// .canceled`, NEVER an error, whether it came from the host canceling the
     /// step's `Future` or from a `requestCancel` marker consumed at this step's
-    /// boundary; the host decides what to do next. Usage is accumulated for
-    /// canceled and completed steps alike, since the ledger is left in a legal
-    /// state either way. A canceled step does not poison the session — the next
-    /// `step()` runs normally.
+    /// boundary. Usage accumulates for canceled and completed steps alike, since
+    /// the ledger is left legal either way, and a canceled step does not poison
+    /// the session.
     ///
     /// Fails with `error.TruncatedTurnNeedsInput` when the ledger ends on a reply
-    /// the provider cut off (`lastAssistantTruncated`): stepping it would ask the
-    /// provider to continue its own message as a prefill. Nothing is appended, so
-    /// the session is fine — it wants a message, not a retry.
+    /// the provider cut off: stepping it would ask the provider to continue its
+    /// own message as a prefill. Nothing is appended — it wants a message, not a
+    /// retry.
     pub fn step(self: *AgentSession) !loop.StepOutcome {
         const outcome = try self.stepInner();
-        // The step boundary is the one place where the ledger is guaranteed
-        // legal (tui.md §2.2), so it is where an observer gets a read-only look
-        // at the events this step produced. Pure observation: it cannot change
-        // the outcome, and a step without an observer runs identically.
+        // The step boundary is the one place the ledger is guaranteed legal, so
+        // it is where an observer gets its read-only look at this step's events.
         if (self.step_ctx.observer) |obs| obs.stepEnd(self.l.view(), outcome);
         return outcome;
     }
 
     fn stepInner(self: *AgentSession) !loop.StepOutcome {
-        // Preparation runs cancellable filesystem I/O (inbox, extension
-        // integrity, manifest reads) and consumes any cancel marker. A cancel
-        // there is host execution control, not a fault: no provider/tool
-        // execution for this step has started, usage is 0, and cancellation adds
-        // no partial model turn. (prepareStep may still have appended a repair
-        // batch or a drained event first — that is legal history, not a partial
-        // turn.) Report it as a canceled outcome, honoring step()'s contract that
-        // cancellation is never an error.
+        // Preparation runs cancellable filesystem I/O and consumes any cancel
+        // marker. A cancel there is host execution control: nothing of this step
+        // has run, usage is 0, and no partial model turn was added. (A repair
+        // batch or drained event prepareStep already appended is legal history,
+        // not a partial turn.) Reported as a canceled outcome, per step()'s
+        // contract that cancellation is never an error.
         self.prepareStep() catch |err| switch (err) {
             error.Canceled => return .{ .status = .canceled },
             else => return err,
         };
         // Checked AFTER prepareStep: a drained inbox event is exactly the new
-        // input that makes the ledger steppable again, so a `session append` racing
-        // with this step must be seen first.
+        // input that makes the ledger steppable again, so a `session append`
+        // racing with this step must be seen first.
         if (self.lastAssistantTruncated()) return error.TruncatedTurnNeedsInput;
         const prompt_ir = try prompt.projectWithSystem(self.alloc, self.composition.system_prompts.blocks, self.l.view());
         defer prompt_ir.deinit(self.alloc);
@@ -328,28 +310,22 @@ pub const AgentSession = struct {
         // here on is this step's assistant turn plus, when it carried tool
         // calls, the single batched tool_results turn.
         const before = self.l.len();
-        // How long each call took, for the usage journal below. A step-local
-        // buffer, so a duration cannot outlive the step that measured it: it is
-        // journal evidence, and neither the ledger nor `StepOutcome` — which
-        // every caller of `step()` receives — has any business carrying it.
+        // How long each call took, for the usage journal below. Step-local, so
+        // a duration cannot outlive the step that measured it.
         var durations_ms: std.ArrayList(?u64) = .empty;
         defer durations_ms.deinit(self.alloc);
         const outcome = try loop.runStepWithPrompt(self.alloc, &self.l, self.model, &prompt_ir, self.composition.tools, self.step_ctx, self.model_options, &durations_ms);
         self.total_usage.add(outcome.usage);
-        // Stats are an observation AFTER execution (`tool_stats.zig`), so they are
-        // recorded only for a step whose tools actually ran. A reply cut by
-        // `max_tokens` closes its batch with marker results the loop wrote without
-        // calling any executor: recording those `ok=false` markers would bill the
-        // tools for the model's output cap and skew the very success rates
-        // evolution reads (DESIGN §4).
+        // Stats are an observation AFTER execution, recorded only for a step
+        // whose tools actually ran. A reply cut by `max_tokens` closes its batch
+        // with marker results no executor produced: recording those `ok=false`
+        // markers would bill the tools for the model's output cap.
         const tools_executed = outcome.status == .completed and outcome.stop_reason != .max_tokens;
         if (tools_executed) {
-            // Tool usage stats are auxiliary durable metadata, not conversation
-            // truth: a recording failure never rewinds the ledger or turns a
-            // completed invocation into a failure. Host faults (OOM, real I/O
-            // errors) propagate; a cancel landing after the step's real work
-            // already finished is host execution control, so the completed
-            // outcome is reported as-is and this step's events go unrecorded.
+            // Auxiliary durable metadata, not conversation truth: a recording
+            // failure never rewinds the ledger. Host faults (OOM, real I/O)
+            // propagate; a cancel landing after the step's real work finished
+            // reports the completed outcome and leaves this step unrecorded.
             self.recordCompletedToolStats(before, durations_ms.items) catch |err| switch (err) {
                 error.Canceled => {},
                 else => return err,
@@ -358,14 +334,12 @@ pub const AgentSession = struct {
         return outcome;
     }
 
-    /// Run steps until the assistant ends its turn or the budget is reached —
-    /// whichever comes first. The budget is `min(max_steps, max_steps_ceiling)`
-    /// and is enforced here in the kernel, not by a caller's loop, so a driver
-    /// that wants "just keep going" still cannot run a session past it (DESIGN
-    /// §4, PLAN §3.6). A canceled step (host cancel or a consumed cancel marker)
-    /// stops the run, and so do `max_truncated_streak` truncated replies in a
-    /// row. Returns the number of steps taken; `lastStopReason` says how the
-    /// final step's reply ended.
+    /// Run steps until the assistant ends its turn or the budget is reached. The
+    /// budget is `min(max_steps, max_steps_ceiling)` and is enforced HERE, not by
+    /// a caller's loop, so a driver that wants "just keep going" still cannot run
+    /// a session past it. A canceled step stops the run, and so do
+    /// `max_truncated_streak` truncated replies in a row. Returns the number of
+    /// steps taken; `lastStopReason` says how the final reply ended.
     pub fn run(self: *AgentSession, max_steps: usize) !usize {
         const budget = @min(max_steps, max_steps_ceiling);
         var taken: usize = 0;
@@ -376,16 +350,13 @@ pub const AgentSession = struct {
             if (outcome.status == .canceled) break;
             truncated = if (outcome.stop_reason == .max_tokens) truncated + 1 else 0;
             if (truncated >= max_truncated_streak) break;
-            // The streak above is reachable only through truncations that carried
-            // tool calls, and that asymmetry is deliberate (DESIGN §4). A truncated
-            // reply WITH calls ends in a marker batch, so stepping again shows the
-            // model what happened and asks it to retry. A truncated reply with NO
-            // calls leaves the ledger ending on an assistant turn — stepping again
-            // would send that back as a prefill for the model to continue, which
-            // providers reject outright when thinking is on. So it stops here,
-            // looking "done" by shape, and `lastStopReason` tells the driver the
-            // turn was cut: continuing is the person's move (a new message), not
-            // the kernel's.
+            // The streak above is reachable only through truncations that
+            // carried tool calls. Those end in a marker batch, so stepping again
+            // shows the model what happened. A truncated reply with NO calls
+            // leaves the ledger ending on an assistant turn, and stepping again
+            // would send it back as a prefill — which providers reject outright
+            // when thinking is on. So the run stops here, looking "done" by
+            // shape, and `lastStopReason` tells the driver the turn was cut.
             if (self.lastAssistantDone()) break;
         }
         return taken;
@@ -396,11 +367,9 @@ pub const AgentSession = struct {
     }
 
     /// Why the model stopped in the most recent turn on record — the ledger's
-    /// LAST assistant event, or `end_turn` when there is none yet. Read from the
-    /// durable fact rather than remembered in memory, so a process that only
-    /// resumed the session answers exactly like the process that ran the step
-    /// (DESIGN §3.1). `max_tokens` means that reply was cut off — the driver's
-    /// cue that "the assistant is done" is not what happened.
+    /// LAST assistant event, or `end_turn` when there is none. Read from the
+    /// DURABLE fact rather than remembered in memory, so a process that only
+    /// resumed the session answers exactly like the one that ran the step.
     pub fn lastStopReason(self: *const AgentSession) provider.StopReason {
         const events = self.l.view();
         var i = events.len;
@@ -414,14 +383,13 @@ pub const AgentSession = struct {
         return .end_turn;
     }
 
-    /// Whether the ledger ends on a reply the provider cut at its output cap. That
-    /// tail is not steppable: projected as-is it becomes a trailing assistant
-    /// message, which the provider reads as a prefill to continue and rejects
-    /// outright when thinking is on (DESIGN §4). In-process, `run` never reaches
-    /// that state — it stops on the truncated step. Across processes the ledger is
-    /// all there is, which is exactly why the stop reason is a durable fact on the
-    /// assistant event and not a field that dies with the process. Appending
-    /// anything (a user message, a drained inbox event) clears it.
+    /// Whether the ledger ends on a reply the provider cut at its output cap.
+    /// That tail is NOT steppable: projected as-is it becomes a trailing
+    /// assistant message, which the provider reads as a prefill to continue and
+    /// rejects outright when thinking is on. In-process `run` never reaches the
+    /// state (it stops on the truncated step); across processes the ledger is all
+    /// there is, which is why the stop reason is durable. Appending anything (a
+    /// user message, a drained inbox event) clears it.
     pub fn lastAssistantTruncated(self: *const AgentSession) bool {
         if (self.l.len() == 0) return false;
         return switch (self.l.view()[self.l.len() - 1]) {
@@ -442,11 +410,10 @@ pub const AgentSession = struct {
         };
     }
 
-    /// The step boundary (DESIGN §4): repair an interrupted tail, honor a
-    /// pending cancel request, drain the cross-process inbox. Repair comes
-    /// first so a drained event can never land between an
-    /// assistant-with-tool-calls and its matching tool_results batch (the batch
-    /// invariant). A pure in-memory session has no siblings to consult.
+    /// The step boundary: repair an interrupted tail, honor a pending cancel
+    /// request, drain the cross-process inbox. REPAIR COMES FIRST, so a drained
+    /// event can never land between an assistant-with-tool-calls and its matching
+    /// tool_results batch. A pure in-memory session has no siblings to consult.
     fn prepareStep(self: *AgentSession) !void {
         try loop.completeInterruptedToolBatch(self.alloc, &self.l);
         if (self.durable) |d| {
@@ -456,9 +423,8 @@ pub const AgentSession = struct {
             // consumed here, at the boundary, and this step reports `.canceled`.
             if (try consumeCancel(self.alloc, io, d.workspace, d.session_path)) return error.Canceled;
             try ledger.drainInbox(self.alloc, io, &self.l, d.workspace, d.session_path);
-            // A drained rebind takes effect for THIS step: the boundary is where
-            // the identity may change, and the model has not been asked anything
-            // yet (goals/model-rebind.md §5).
+            // A drained rebind takes effect for THIS step: the boundary is
+            // where the identity may change, and nothing has been asked yet.
             try self.applyRebind();
         }
     }
@@ -466,18 +432,16 @@ pub const AgentSession = struct {
     /// Run on the model the ledger names, not the one the shell happened to
     /// build. Called at the two moments the answer can change — reopening a
     /// session whose ledger already rebound, and draining one at a step boundary
-    /// — so both paths are the same rule rather than two.
+    /// — so both paths are one rule.
     ///
-    /// Without a resolver the handle stays as built. That is deliberate: the
-    /// projection's half (reasoning from before the rebind is no longer
-    /// replayed) is the kernel's own and always applies, while swapping a
-    /// running handle is only possible for a caller that made one.
+    /// Without a resolver the handle stays as built: the projection's half
+    /// (reasoning from before the rebind is no longer replayed) always applies,
+    /// while swapping a running handle needs a caller that can make one.
     fn applyRebind(self: *AgentSession) !void {
         const wanted = ledger.lastRebind(self.l.view()) orelse return;
         // The whole identity, profile included: a rebind that only moves to
-        // another profile reaches the same model through a different
-        // credential, and skipping the rebuild would keep answering it with
-        // the old one (`ledger.identityEqual`).
+        // another profile reaches the same model through a different credential,
+        // and skipping the rebuild would keep using the old one.
         if (ledger.identityEqual(wanted, self.built)) return;
         const resolver = self.rebind orelse return;
         self.model = try resolver.build(resolver.ptr, wanted);
@@ -485,26 +449,22 @@ pub const AgentSession = struct {
     }
 
     /// Append one usage event per completed tool call in this step's ledger
-    /// suffix `[before..]`. Stats are an observation after execution, so the
-    /// loop stays generic and no executor knows the journal exists. A completed
-    /// step's suffix has a fixed shape the loop guarantees — no calls: exactly
-    /// `[assistant]`; with calls: exactly `[assistant, tool_results]` with one
-    /// result per call — so this reads the shape directly instead of searching
-    /// for possibly-present events, and asserts instead of tolerating a broken
-    /// invariant. A call is recorded only when its model-facing name resolves
-    /// to a real exposed `ToolDefinition.id`: a hallucinated name has no
-    /// durable identity, so it is skipped rather than saved under a fake id.
+    /// suffix `[before..]`. Stats are an observation after execution, so no
+    /// executor knows the journal exists.
     ///
-    /// Each line also carries WHICH SESSION the call served, so the slow loop
-    /// can join it against `session-outcomes.jsonl` instead of seeing an
-    /// undifferentiated pile of calls. An in-memory session has no durable id
-    /// and simply omits it.
+    /// A completed step's suffix has a shape the loop GUARANTEES — no calls:
+    /// exactly `[assistant]`; with calls: exactly `[assistant, tool_results]`
+    /// with one result per call — so this reads the shape directly and asserts
+    /// rather than tolerating a broken invariant. A call is recorded only when
+    /// its model-facing name resolves to a real exposed `ToolDefinition.id`: a
+    /// hallucinated name has no durable identity.
     ///
-    /// …and WHICH FROZEN IMPLEMENTATION served it, looked up in this session's
-    /// frozen member list — the one truth about member versions, held right
-    /// here in `self.composition`. The stable id stays version-free (a tool's
-    /// history is one history); the version sits beside it so the same history
-    /// can also be read per implementation. The builtin has none.
+    /// Each line also carries WHICH SESSION the call served, so the slow loop can
+    /// join it against `session-outcomes.jsonl`; an in-memory session has no
+    /// durable id and omits it. And WHICH FROZEN IMPLEMENTATION served it, from
+    /// this session's frozen member list. The stable id stays version-free (a
+    /// tool's history is one history); the version sits beside it so the same
+    /// history can also be read per implementation. The builtin has none.
     fn recordCompletedToolStats(self: *AgentSession, before: usize, durations_ms: []const ?u64) !void {
         const suffix = self.l.view()[before..];
         if (suffix.len == 1) return; // the model addressed the user; nothing to record
@@ -517,10 +477,8 @@ pub const AgentSession = struct {
             .tool_results => |r| r,
             else => unreachable, // a completed step with calls always appends its batch
         };
-        // One tool_results entry per assistant call, and one measurement slot per
-        // call: a completed step reached every one of them, and the loop filled
-        // all three in call order. The multi-prong for below panics if the
-        // lengths ever disagree.
+        // One tool_results entry and one measurement slot per assistant call,
+        // all in call order. The multi-prong for below panics if they disagree.
         std.debug.assert(assistant.calls.len == results.len);
         std.debug.assert(assistant.calls.len == durations_ms.len);
 
@@ -530,9 +488,8 @@ pub const AgentSession = struct {
         else
             null;
         for (assistant.calls, results, durations_ms) |call, result, measured| {
-            // No measurement means no executor ran: a gate denied the call
-            // (DESIGN §4). Journalling it would bill the tool for somebody's
-            // refusal, the same skew a `max_tokens` marker batch would cause.
+            // No measurement means no executor ran (a gate denied the call).
+            // Journalling it would bill the tool for somebody's refusal.
             const duration_ms = measured orelse continue;
             const t = self.composition.tools.lookup(call.tool) orelse continue;
             try tool_stats.append(self.alloc, ctx.environment.io, ctx.cwd, .{
@@ -546,15 +503,12 @@ pub const AgentSession = struct {
     }
 
     /// The frozen version of the member extension that owns `tool_id`, or null
-    /// when no member does: the builtin (`builtin.shell` names no extension)
-    /// and — in theory unreachable, since every binding came from a member — a
-    /// stable id whose extension is not in the frozen list. A null there is
-    /// "not recorded", the same honest gap an old journal line carries; it is
-    /// never an error, because a missing evidence column must not be able to
-    /// fail a step. The id shape is `ext:<extension-id>/<tool-name>` and ids
-    /// never contain `/`, so reading the id segment needs no validation here:
-    /// it arrives from a frozen `ToolDefinition`, not from a user. The returned
-    /// slice is borrowed from the composition, which outlives the append.
+    /// when no member does: the builtin, or a stable id whose extension is not in
+    /// the frozen list. A null is "not recorded", never an error — a missing
+    /// evidence column must not be able to fail a step. The id shape is
+    /// `ext:<extension-id>/<tool-name>` and ids never contain `/`; it arrives
+    /// from a frozen `ToolDefinition`, not from a user. The returned slice is
+    /// borrowed from the composition, which outlives the append.
     fn frozenVersionOf(self: *const AgentSession, tool_id: []const u8) ?[]const u8 {
         const prefix = "ext:";
         if (!std.mem.startsWith(u8, tool_id, prefix)) return null;
@@ -562,10 +516,9 @@ pub const AgentSession = struct {
         const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
         const ext_id = rest[0..slash];
         for (self.composition.extensions) |e| {
-            // The implementation that SERVED this call, which in a session whose
-            // tools run elsewhere is the build for that machine — the version
-            // column answers "which implementation is this evidence about"
-            // (DESIGN §5.5), and the one that ran is the only honest answer.
+            // The implementation that SERVED the call — in a session whose tools
+            // run elsewhere, the build for that machine. The column answers
+            // "which implementation is this evidence about".
             if (std.mem.eql(u8, e.id, ext_id)) return e.exec_version orelse e.version;
         }
         return null;
@@ -727,9 +680,9 @@ test "a canceled step accumulates its usage and the session runs the next step" 
 
     var model_impl = StepModel{};
 
-    // Built by hand with a static composition so the blocking tool is in scope;
-    // its slices are static, so only the ledger needs freeing (never `sess.deinit`,
-    // which would try to free the static composition).
+    // Built by hand with a static composition so the blocking tool is in scope.
+    // Its slices are static, so only the ledger needs freeing — never
+    // `sess.deinit`, which would try to free the static composition.
     var sess: AgentSession = .{
         .alloc = alloc,
         .l = ledger.Ledger.init(alloc),
@@ -778,8 +731,8 @@ test "a canceled step accumulates its usage and the session runs the next step" 
 /// Test-only coordination: consume the first cancelation at a deterministic gate
 /// (`release.wait`), re-arm it via `io.recancel()`, then run a real step so the
 /// pending cancelation lands inside `prepareStep`'s first filesystem syscall.
-/// `recancel` exists for exactly this kind of test choreography — production
-/// control flow consumes or propagates `error.Canceled` at each boundary instead.
+/// `recancel` is for this kind of test choreography only — production control
+/// flow consumes or propagates `error.Canceled` at each boundary instead.
 fn stepAfterRecancel(
     sess: *AgentSession,
     io: std.Io,
@@ -838,8 +791,8 @@ test "a cancel during prepareStep reconciliation reports canceled with zero usag
     defer tmp.cleanup();
     const cwd = try sessionTmpCwd(alloc, io, tmp);
     defer alloc.free(cwd);
-    // A durable session whose inbox directory exists: prepareStep drains the
-    // inbox each step, and that `openDir` is a real filesystem cancelation point.
+    // The inbox directory exists, so prepareStep's `openDir` is a real
+    // filesystem cancelation point.
     try tmp.dir.createDirPath(io, ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "s.inbox");
 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
@@ -865,14 +818,13 @@ test "a cancel during prepareStep reconciliation reports canceled with zero usag
     var ready: std.Io.Event = .unset;
     var release: std.Io.Event = .unset;
     var fut = io.async(stepAfterRecancel, .{ &sess, io, &ready, &release });
-    // Determinism contract: cancel only after the worker is known to sit at the
-    // gate. A timeout here means the worker never arrived — fail, don't proceed.
+    // Cancel only after the worker is known to sit at the gate; a timeout means
+    // it never arrived, so fail rather than proceed.
     try ready.waitTimeout(io, .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5000) }) });
     const first = try fut.cancel(io);
 
-    // The cancel was consumed at the gate, re-armed, and re-signaled by
-    // prepareStep's first filesystem op — reported as a canceled outcome,
-    // never as an error.
+    // Consumed at the gate, re-armed, re-signaled by prepareStep's first
+    // filesystem op — reported as a canceled outcome, never an error.
     try std.testing.expectEqual(loop.StepStatus.canceled, first.status);
     try std.testing.expectEqual(@as(u64, 0), first.usage.input_tokens);
     try std.testing.expectEqual(@as(u64, 0), sess.usage().input_tokens);
@@ -1042,8 +994,8 @@ test "a cancel marker is consumed at the step boundary: no model call, then the 
     defer sess.deinit();
     try sess.appendUser("go");
 
-    // Another process asks for a cancel; `run` would take up to 5 steps but
-    // stops at the very first boundary without calling the model.
+    // Another process asks for a cancel: `run` would take up to 5 steps but
+    // stops at the first boundary without calling the model.
     try requestCancel(alloc, io, tmp.dir, session_path);
     const taken = try sess.run(5);
     try std.testing.expectEqual(@as(usize, 1), taken);
@@ -1165,9 +1117,8 @@ test "completed step records stable ids and the frozen version behind each, neve
         },
     };
 
-    // One real extension call (web_search), one builtin (shell) and one name
-    // the model invented (ghost): the real calls resolve to their stable ids,
-    // the hallucinated one is skipped.
+    // One real extension call, one builtin, and one name the model invented: the
+    // real ones resolve to stable ids, the hallucinated one is skipped.
     const MixedModel = struct {
         fn name(ptr: *anyopaque) []const u8 {
             _ = ptr;
@@ -1210,7 +1161,7 @@ test "completed step records stable ids and the frozen version behind each, neve
         .l = ledger.Ledger.init(alloc),
         .composition = .{
             // The one truth about member versions: the stats write point reads
-            // the version out of here, not out of a copy in the binding.
+            // it from here, not from a copy in the binding.
             .extensions = &.{.{ .id = "web.search", .version = "v-frozen" }},
             .extension_tool_bindings = &.{},
             .tools = .{ .tools = &tools_arr },
@@ -1237,18 +1188,16 @@ test "completed step records stable ids and the frozen version behind each, neve
     try std.testing.expectEqualStrings("ext:web.search/web_search", events[0].tool_id);
     try std.testing.expect(events[0].ok);
     // The stable id says WHICH tool; the version beside it says which frozen
-    // implementation answered this call — looked up in the frozen member list.
+    // implementation answered.
     try std.testing.expectEqualStrings("v-frozen", events[0].version.?);
     // Every recorded call carries a stamp and a measurement…
     try std.testing.expect(events[0].at != null);
     try std.testing.expect(events[0].duration_ms != null);
     // …and no session, because this one is pure memory: there is no id to join
-    // an outcome to, and inventing one would be a lie.
+    // an outcome to.
     try std.testing.expect(events[0].session == null);
 
-    // The builtin is the kernel: it has no implementation version to record,
-    // which is a different fact from an unrecorded one only in that no honest
-    // writer could ever fill it in.
+    // The builtin is the kernel: there is no implementation version to record.
     try std.testing.expectEqualStrings("builtin.shell", events[1].tool_id);
     try std.testing.expect(events[1].version == null);
 }
@@ -1267,8 +1216,7 @@ test "a durable session's usage rows name the session, so outcomes can be joined
     const SlowTool = struct {
         fn call(ptr: ?*anyopaque, a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
             _ = ptr;
-            // A real wait, so the measurement is of something rather than of
-            // nothing: the clock is monotonic, so this cannot come back as 0.
+            // A real wait, so the monotonic clock cannot report 0.
             try std.Io.sleep(req.ctx.environment.io, .fromMilliseconds(12), .awake);
             return .{ .ok = true, .output = try a.dupe(u8, "searched") };
         }
@@ -1330,8 +1278,8 @@ test "a durable session's usage rows name the session, so outcomes can be joined
         },
         .model_options = .{},
         .extension_roots = &.{"nulya-absent-extensions-root"},
-        // What makes this session identifiable: the id the journal records is
-        // the session FILE's stem, exactly as `session outcome <id>` spells it.
+        // The id the journal records is the session FILE's stem, exactly as
+        // `session outcome <id>` spells it.
         .durable = .{ .workspace = tmp.dir, .session_path = session_path },
     };
     defer sess.l.deinit();
@@ -1343,8 +1291,7 @@ test "a durable session's usage rows name the session, so outcomes can be joined
     defer tool_stats.freeEvents(alloc, events);
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqualStrings("ext:web.search/web_search", events[0].tool_id);
-    // The session id is the file's stem — the same id `session outcome` writes,
-    // which is the whole point of recording it.
+    // The session id is the file's stem — the same id `session outcome` writes.
     try std.testing.expectEqualStrings("s-42", events[0].session.?);
     // A call that really waited is measured as having taken time.
     try std.testing.expect(events[0].duration_ms.? >= 10);
@@ -1440,8 +1387,7 @@ test "a canceled step records no tool usage stats" {
     const outcome = try fut.cancel(io);
     try std.testing.expectEqual(loop.StepStatus.canceled, outcome.status);
 
-    // A canceled batch is not recorded as a failure (or anything): the journal
-    // stays absent.
+    // A canceled batch is not recorded at all: the journal stays absent.
     const events = try tool_stats.readAll(alloc, io, cwd);
     defer tool_stats.freeEvents(alloc, events);
     try std.testing.expectEqual(@as(usize, 0), events.len);
@@ -1457,9 +1403,9 @@ test "a reply cut by max_tokens before it wrote any call stops the run, unlike o
     const cwd = try sessionTmpCwd(alloc, io, tmp);
     defer alloc.free(cwd);
 
-    // Writes long prose and runs out of cap with no tool call. A second step would
-    // resend that assistant turn as a prefill, so the run must not take one — the
-    // model is asked to fail the test if it is called twice.
+    // Writes long prose and runs out of cap with no tool call. A second step
+    // would resend that assistant turn as a prefill, so the model fails the test
+    // if it is called twice.
     const TruncatedProseModel = struct {
         turns: usize = 0,
 
@@ -1517,10 +1463,9 @@ test "a reply cut by max_tokens before it wrote any call stops the run, unlike o
     defer sess.l.deinit();
 
     try sess.appendUser("go");
-    // One step, well under the budget: `lastAssistantDone` is true by shape, and
-    // the run stops there rather than retrying the way a truncation with calls is
-    // retried (DESIGN §4). What the reply lost is not lost silently — the driver
-    // reads it off `lastStopReason` and asks the person for a new message.
+    // One step, well under the budget: `lastAssistantDone` is true by shape and
+    // the run stops rather than retrying the way a truncation WITH calls is
+    // retried. The driver reads what happened off `lastStopReason`.
     try std.testing.expectEqual(@as(usize, 1), try sess.run(5));
     try std.testing.expectEqual(@as(usize, 1), model_impl.turns);
     try std.testing.expectEqual(provider.StopReason.max_tokens, sess.lastStopReason());
@@ -1544,8 +1489,8 @@ test "a truncated tail refuses to step in the next process until a message arriv
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
-    // Process 1: one step, cut at the output cap before it wrote any call. `run`
-    // stops there, and the fact goes to disk with the turn.
+    // Process 1: one step, cut at the output cap before it wrote any call. The
+    // fact goes to disk with the turn.
     {
         const TruncatingModel = struct {
             fn name(ptr: *anyopaque) []const u8 {
@@ -1602,8 +1547,8 @@ test "a truncated tail refuses to step in the next process until a message arriv
             _ = a;
             const self: *usize = @ptrCast(@alignCast(ptr));
             self.* += 1;
-            // The tail this step was handed must never end on the assistant: that
-            // is the prefill the provider rejects with thinking on.
+            // The tail this step was handed must never end on the assistant:
+            // that is the prefill the provider rejects with thinking on.
             const turns = request.prompt_ir.turns;
             if (turns.len != 0 and turns[turns.len - 1] == .assistant) return error.TestUnexpectedResult;
             try sink.emit(.started);
@@ -1624,14 +1569,13 @@ test "a truncated tail refuses to step in the next process until a message arriv
     defer sess.deinit();
 
     try std.testing.expect(sess.lastAssistantTruncated());
-    // The refusal is the whole point: without it this step sends the truncated
-    // assistant turn back as a prefill for the model to continue.
+    // Without the refusal this step sends the truncated assistant turn back as a
+    // prefill for the model to continue.
     try std.testing.expectError(error.TruncatedTurnNeedsInput, sess.step());
     try std.testing.expectEqual(@as(usize, 0), calls); // provider never called
     try std.testing.expectEqual(@as(usize, 2), sess.l.len()); // and nothing appended
 
-    // A message is what the session wants, not a retry: it clears the tail and
-    // the session steps normally again.
+    // A message clears the tail and the session steps normally again.
     try sess.appendUser("continue please");
     const outcome = try sess.step();
     try std.testing.expectEqual(loop.StepStatus.completed, outcome.status);
@@ -1719,15 +1663,14 @@ test "a truncated turn's unexecuted calls are not recorded as tool usage" {
 
     try sess.appendUser("go");
     const outcome = try sess.step();
-    // The step completed as far as the host is concerned — the ledger has its
-    // assistant turn and a matching marker batch...
+    // The step completed as far as the host is concerned: assistant turn plus a
+    // matching marker batch…
     try std.testing.expectEqual(loop.StepStatus.completed, outcome.status);
     try std.testing.expectEqual(provider.StopReason.max_tokens, outcome.stop_reason);
     try std.testing.expectEqual(@as(usize, 3), sess.l.len());
     try std.testing.expect(!sess.l.view()[2].tool_results[0].ok);
 
-    // ...but no executor ran, so the journal has nothing to observe. Recording the
-    // marker would charge web_search a failure it never earned.
+    // …but no executor ran, so the journal has nothing to observe.
     const events = try tool_stats.readAll(alloc, io, cwd);
     defer tool_stats.freeEvents(alloc, events);
     try std.testing.expectEqual(@as(usize, 0), events.len);

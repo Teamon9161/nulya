@@ -1,78 +1,49 @@
-//! An external runner: a delegation held by a harness some OTHER extension
-//! knows how to talk to (`runner: ext:<id>`).
+//! An external runner: a delegation held by a harness some OTHER extension knows
+//! how to talk to (`runner: ext:<id>`).
 //!
-//! **What this is for.** The four arms beside it (`nulya`, `codex`, `claude`,
-//! `pi`) are in this package because they were the first four; nothing about
-//! them is privileged. A fifth harness — one this repository has never heard of,
-//! one somebody wrote this morning, one that needs a runtime nobody wants
-//! compiled in here (D12) — reaches the same delegation world view by shipping
-//! an ordinary extension with one tool in it. Everything the model sees is
-//! unchanged: the same `agent{name|session, task}`, the same `d-…`, the same
-//! report arriving through the parent's inbox.
-//!
-//! **What stays here and what goes out there.** The invariants are this
-//! package's, always: the runner lease and its release-and-recheck (D4), the
-//! record and the exchange count (D2), the per-delegation inbox and the order
-//! messages come out of it (D5), the interrupt marker being written after the
-//! message it belongs to (D6), the report framing, the read-only refusal. What
-//! goes out is only ever "how do I say this to that harness".
+//! Everything above the wire stays in this package — the lease and its
+//! release-and-recheck, the record and the exchange count, the inbox and its
+//! order, the interrupt marker, the report framing, the read-only refusal. What
+//! goes out is only "how do I say this to that harness".
 //!
 //! ── the `agent_runner` contract ─────────────────────────────────────────────
 //!
 //! A runner extension declares ONE tool, named exactly `agent_runner`, with
-//! `"surface": "internal"` (it is a driver's tool, never a model's). It is
-//! called through `nulya ext run <id>@<version> agent_runner --arg k=v …`, so
-//! its arguments arrive the way every other extension's do (DESIGN §7.3): as one
-//! JSON object on stdin, and as `NULYA_ARG_<key>` in the environment.
+//! `"surface": "internal"`. It is called through `nulya ext run <id>@<version>
+//! agent_runner --arg k=v …`, so its arguments arrive as one JSON object on
+//! stdin and as `NULYA_ARG_<key>` in the environment. Two operations, told apart
+//! by `op`:
 //!
-//! It answers two operations, told apart by `op`:
+//!   `op=open`   Open a conversation. Arguments: `delegation` (the `d-…`),
+//!               `persona` (PATH of the frozen system prompt), `permissions`
+//!               (`readonly` / `default` / `unsafe`), `model` (opaque, omitted
+//!               when the definition named none). On success print
+//!               `{"remote":"<handle>"}` — any string a later round can find the
+//!               conversation by — and exit 0. Exit non-zero to REFUSE the whole
+//!               delegation: stderr is the reason and nothing is recorded.
 //!
-//!   `op=open`   Open a conversation. Arguments: `delegation` (the `d-…` this is
-//!               for), `persona` (PATH of the frozen system prompt),
-//!               `permissions` (`readonly` / `default` / `unsafe`), `model`
-//!               (opaque, omitted when the definition named none). On success
-//!               print `{"remote":"<handle>"}` — any
-//!               string that lets a later round find the conversation again —
-//!               and exit 0. Exit non-zero to REFUSE the whole delegation:
-//!               stderr is the reason and reaches the model, and nothing is
-//!               recorded.
-//!
-//!   `op=round`  Answer exactly one message. Arguments: `delegation`, `persona`,
-//!               `permissions`, `model` as above, plus `remote` (what `open` gave
-//!               back), `message_file` (PATH of the one message to answer) and
-//!               `interrupt` (PATH of a marker file). On success print
-//!               `{"text":"<the harness's final answer for this round>"}` and
-//!               exit 0. Exit non-zero when the round could not be run: stderr
-//!               is the reason, and the message goes back into the delegation's
-//!               inbox for the next round rather than being lost.
+//!   `op=round`  Answer exactly one message. Arguments: those above plus `remote`
+//!               (what `open` gave back), `message_file` (PATH of the message)
+//!               and `interrupt` (PATH of a marker file). On success print
+//!               `{"text":"<final answer for this round>"}` and exit 0. Exit
+//!               non-zero when the round could not run: stderr is the reason, and
+//!               the message STAYS in the inbox for the next round.
 //!
 //!               While the turn is in flight, watch `interrupt`. If that file
-//!               appears, delete it, stop the turn in whatever way the harness
-//!               offers, and answer `{"text":"","interrupted":true}` — the
-//!               message behind the interrupt is already queued, and the next
-//!               round takes it (D6).
+//!               appears, delete it, stop the turn however the harness allows,
+//!               and answer `{"text":"","interrupted":true}` — the message behind
+//!               the interrupt is already queued for the next round.
 //!
-//! Two texts arrive as PATHS rather than values, and deliberately: a persona and
-//! a task are as long as they need to be, and a command line is not a place to
-//! put either (Windows caps the whole of one at 32 KiB). Everything else is a
-//! short scalar.
+//! Two texts arrive as PATHS rather than values: Windows caps a whole command
+//! line at 32 KiB.
 //!
-//! **`permissions` is three words, and the narrow one is a ceiling (D10,
-//! contract ar-h).** `readonly` means the harness must be held to reading: a
-//! runner that cannot do that must refuse at `op=open`, because silently
-//! running wider than the definition asked for is the one outcome this whole
-//! field exists to prevent. `default` is ordinary work in this checkout;
-//! `unsafe` is everything the harness can do, and it only ever arrives because
-//! somebody wrote the word. **A word this runner does not recognise is refused
-//! too** — the vocabulary may grow, and a runner that read a future level as
-//! its own default would be widening a ceiling it never understood.
+//! `permissions` is three words and `readonly` is a CEILING: a runner that
+//! cannot hold its harness to reading must refuse at `op=open`. A word it does
+//! not recognise is refused too — reading a future level as its own default
+//! would widen a ceiling it never understood.
 //!
-//! **The version is frozen when the delegation opens (D7).** `current` is
-//! resolved once, at `open`, and every later round of that delegation calls that
-//! exact version — the same discipline a session freezes its composition with
-//! (physics #2). Activating a new version of a runner changes what the NEXT
-//! delegation runs on, never what a conversation already under way is answered
-//! by.
+//! The VERSION is frozen when the delegation opens: `current` is resolved once,
+//! at `open`, and every later round calls that exact version.
 
 const std = @import("std");
 const proc = @import("proc.zig");
@@ -85,7 +56,7 @@ const mailbox = @import("mailbox.zig");
 pub const tool_name = "agent_runner";
 
 /// How much of a round's answer is read back. The report the parent finally sees
-/// is bounded again by the task supervisor's own head/tail budget (DESIGN §6.1).
+/// is bounded again by the task supervisor's own head/tail budget.
 const max_round_bytes: usize = 1 << 20;
 
 /// A persona longer than this is refused rather than truncated. Generous — it is
@@ -97,11 +68,9 @@ const max_persona_bytes: usize = 1 << 20;
 /// Which version of `<id>` a delegation opened now would be nailed to.
 ///
 /// Asked of the kernel rather than worked out from the store: root order,
-/// shadowing and what `current` means are the kernel's answers (DESIGN §5.1,
-/// §7.2), and a second implementation here would be a second answer. The two
-/// ways it can fail are the two the kernel itself distinguishes for `--with` —
-/// nothing built under that name, or nothing activated — because the fix is
-/// different.
+/// shadowing and what `current` means are the kernel's answers, and a second
+/// implementation here would be a second answer. The two ways it can fail are
+/// kept apart because the fix is different.
 pub fn resolveCurrent(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -134,9 +103,7 @@ pub fn resolveCurrent(
 pub const Listed = union(enum) { version: []const u8, no_current, absent };
 
 /// Which version `nulya ext list` says is in effect for `id`. A tab-separated
-/// projection (`<id>\t<version>\t<root>…`), read for its first two columns only:
-/// the rest of the line is what a package contributes and where it came from,
-/// and this asks one question.
+/// projection (`<id>\t<version>\t<root>…`), read for its first two columns only.
 pub fn versionIn(listing: []const u8, id: []const u8) Listed {
     var lines = std.mem.splitScalar(u8, listing, '\n');
     while (lines.next()) |raw| {
@@ -193,8 +160,8 @@ pub const OpenOptions = struct {
     model: []const u8,
 };
 
-/// `op=open`. Its stdout is the handle this delegation is answered through;
-/// a non-zero exit refuses the delegation outright (D10 included).
+/// `op=open`. Its stdout is the handle this delegation is answered through; a
+/// non-zero exit refuses the delegation outright, the read-only refusal included.
 pub fn open(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -296,10 +263,10 @@ pub const RoundResult = struct {
 /// Answer the next message waiting for this delegation.
 ///
 /// The message is read from the inbox HERE rather than out there: the wake
-/// invariant (D4) is this package's to keep, and a runner on the far side of a
-/// contract cannot be trusted with it. It is copied to a file the runner reads,
-/// and acked only once the round answers — so a runner that crashes, or a
-/// harness that is not installed, costs a retry rather than a message.
+/// invariant is this package's to keep, and a runner on the far side of a
+/// contract cannot be trusted with it. It is copied to a file the runner reads
+/// and acked only once the round answers, so a runner that crashes costs a retry
+/// rather than a message.
 pub fn driveRound(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -316,7 +283,7 @@ pub fn driveRound(
     };
     const message = entry.msg;
     // Left in the inbox until the round settles, and dropped only then — every
-    // early return goes through here having acked nothing (`mailbox.peekAfter`).
+    // early return goes through here having acked nothing.
     var answered = false;
     defer if (answered) mailbox.ack(alloc, io, base, delegation, entry.name);
 
@@ -358,7 +325,7 @@ pub fn driveRound(
     // produced is this round's answer. An interrupted round is answered too —
     // the run it cut short consumed this message and its half-answer is thrown
     // away on purpose, because the interrupt IS the new direction and the
-    // message behind it is already waiting (D6).
+    // message behind it is already waiting.
     answered = true;
     out.interrupted = boolOf(obj, "interrupted");
     if (!out.interrupted) {

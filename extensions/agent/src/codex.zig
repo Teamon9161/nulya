@@ -1,53 +1,33 @@
 //! The Codex runner: a delegation held by a Codex thread.
 //!
-//! **The protocol, as this machine reports it** (`codex app-server`, verified
-//! against `codex app-server generate-json-schema` and a live handshake —
-//! contract §6). Newline-delimited JSON-RPC over the child's stdio; the server
-//! omits the `jsonrpc` member on its replies, so a reader must key on the
-//! members that are there rather than on the version tag:
-//!
-//!   `{"id":N,"method":…,"params":…}`  a request (either direction)
-//!   `{"id":N,"result":…}` / `{"error":…,"id":N}`   the reply to one
-//!   `{"method":…,"params":…}`         a notification (no reply)
-//!
-//! The five verbs a runner needs are all there:
+//! Newline-delimited JSON-RPC over `codex app-server`'s stdio, verified against
+//! `generate-json-schema` and a live handshake. The server OMITS the `jsonrpc`
+//! member on its replies, so a reader must key on the members that ARE there:
+//! `{"id":N,"method":…,"params":…}` is a request either direction,
+//! `{"id":N,"result":…}` / `{"error":…,"id":N}` its reply, `{"method":…,
+//! "params":…}` a notification. The verbs:
 //!
 //!   `initialize {clientInfo}`   once per connection, then the `initialized`
 //!                               notification. Nothing else is answered before.
 //!   `thread/start {…}`          opens a conversation → `result.thread.id`.
-//!   `thread/resume {threadId}`  picks that conversation back up in a later
-//!                               process — which is what makes a delegation
-//!                               survive between rounds without a daemon.
+//!   `thread/resume {threadId}`  picks it up in a later process, which is what
+//!                               lets a delegation survive between rounds.
 //!   `turn/start {threadId, input:[{type:"text",text}]}` → `result.turn.id`,
-//!                               then a stream of notifications ending in
-//!                               `turn/completed`.
-//!   `turn/steer {threadId, expectedTurnId, input}`      another message INTO
-//!                               the turn already running (D3's send, at this
-//!                               harness's own granularity).
-//!   `turn/interrupt {threadId, turnId}`                 D6's stop.
+//!                               then notifications ending in `turn/completed`.
+//!   `turn/steer {threadId, expectedTurnId, input}`   another message INTO the
+//!                               turn already running.
+//!   `turn/interrupt {threadId, turnId}`              the stop.
 //!
-//! **Why a process per round rather than a daemon.** A delegation's rounds are
-//! separate background tasks (`runner.zig`), so nothing survives between them
-//! anyway; `thread/resume` is the harness's own answer to that, and a resident
-//! app-server would be a second lifetime to manage on top of the lease that
-//! already decides who is driving. One connection is opened when a round starts
-//! and closed when it ends.
-//!
-//! **readonly is fail-closed (D10).** `thread/start` and `thread/resume` both
-//! take `sandbox` and both ECHO the policy they actually applied. A read-only
-//! delegation asks for `read-only` and then CHECKS the answer: anything else and
-//! the delegation is refused rather than run wider than it said. A claim a
-//! harness did not confirm is worth nothing, and the whole point of the flag is
-//! that the sub-agent cannot exceed it.
+//! One connection per round. `readonly` is FAIL-CLOSED: both `thread/start` and
+//! `thread/resume` echo the sandbox policy they actually applied, so a read-only
+//! delegation asks for `read-only` and then CHECKS the answer.
 
 const std = @import("std");
 const record = @import("record.zig");
 const mailbox = @import("mailbox.zig");
 
-/// Which binary to talk to. `codex` on PATH is the answer on a real machine;
-/// the variable exists so a test can point at one that answers the protocol
-/// without a network (the same shape as `NULYA_EXE` — a harness names the exact
-/// executable rather than trusting a search path).
+/// Which binary to talk to. `codex` on PATH is the answer on a real machine; the
+/// variable lets a test point at one that answers the protocol without a network.
 pub const exe_var = "NULYA_CODEX_EXE";
 
 pub fn executable(env: *const std.process.Environ.Map) []const u8 {
@@ -62,27 +42,23 @@ const max_line_bytes: usize = 8 << 20;
 
 /// What `thread/start` is asked for, and what a `turn/start` is given.
 pub const OpenOptions = struct {
-    /// The persona, verbatim. It rides as `developerInstructions` rather than
+    /// The persona, verbatim. It rides as `developerInstructions`, never
     /// `baseInstructions`: the latter REPLACES Codex's own operating prompt —
     /// the part that tells it how its tools work — so a persona sent that way
-    /// would silently cost the agent its harness. `developerInstructions` is the
-    /// client's own instruction channel, which is exactly what a persona is.
+    /// would silently cost the agent its harness.
     persona: []const u8,
     /// Whatever the definition or the call said to run on, in Codex's own
-    /// vocabulary (D9). Empty leaves Codex's configured default alone. Opaque
-    /// here on purpose: a model id is a fact about that harness, and a parser
-    /// on this side could only ever be a second, staler copy of its catalogue.
+    /// vocabulary. Empty leaves Codex's configured default alone. Opaque here: a
+    /// parser on this side could only be a staler copy of its catalogue.
     model: []const u8 = "",
-    /// How much this delegation may do, in the one vocabulary every arm reads
-    /// (`record.Permissions`). Codex has a word for each of the three, which is
-    /// why the sandbox below is a straight translation rather than a choice.
+    /// How much this delegation may do (`record.Permissions`). Codex has a word
+    /// for each of the three, so the sandbox below is a straight translation.
     permissions: record.Permissions = record.default_permissions,
 };
 
-/// A connection with a thread on the other end of it. There is no `permissions`
-/// here: the ceiling was settled by the exchange that opened this (`attach`
-/// refuses rather than returns when the sandbox comes back wider), so carrying
-/// the word on would be a second copy of an answer already given.
+/// A connection with a thread on the other end of it. No `permissions` here: the
+/// ceiling was settled by the exchange that opened this — `attach` refuses
+/// rather than returns when the sandbox comes back wider.
 pub const Session = struct {
     client: Client,
     thread_id: []const u8,
@@ -93,17 +69,15 @@ pub const Session = struct {
 };
 
 /// What a connection attempt came back with. A failure is a SENTENCE, not an
-/// error code: it ends up in a refusal the model reads, or in the report of a
-/// round that could not run.
+/// error code: it ends up in a refusal the model reads.
 pub const Attempt = union(enum) { ok: Session, failed: []const u8 };
 
 // ── opening and resuming ────────────────────────────────────────────────────
 
 /// Open a new Codex thread for a delegation. On success the thread id is the
-/// delegation's `remote` — the handle every later round resumes from.
-///
-/// The connection is closed before this returns: the thread lives on disk in
-/// Codex's own session store, and the round that drives it will resume it.
+/// delegation's `remote` — the handle every later round resumes from. The
+/// connection is closed before this returns: the thread lives in Codex's own
+/// session store, and the round that drives it resumes it.
 pub fn open(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -125,8 +99,7 @@ pub fn open(
     var jw: std.json.Stringify = .{ .writer = &params.writer };
     try jw.beginObject();
     // No `cwd`: the app-server inherits this process's working directory, which
-    // is the workspace (DESIGN §7.6). Naming it here would be a second answer
-    // to a question the spawn already answered.
+    // is the workspace.
     try writeSandbox(&jw, opts.permissions);
     if (opts.persona.len != 0) {
         try jw.objectField("developerInstructions");
@@ -170,10 +143,9 @@ pub fn attach(
             .{ executable(env), @errorName(err) },
         ) };
     };
-    // Every way out of here but the last one leaves no session behind, and a
-    // refusal below is an ordinary return rather than an error — so this is a
-    // `defer` with a flag rather than an `errdefer`, or a delegation refused for
-    // its sandbox would leave the app-server it refused still running.
+    // A refusal below is an ordinary return rather than an error, so this is a
+    // `defer` with a flag rather than an `errdefer`: otherwise a delegation
+    // refused for its sandbox would leave the app-server still running.
     var handed_over = false;
     defer if (!handed_over) client.close(io);
 
@@ -201,13 +173,9 @@ pub fn attach(
     return .{ .ok = .{ .client = client, .thread_id = thread_id } };
 }
 
-/// Codex's own word for each of the three (contract ar-h). A straight
-/// translation, and the reason this arm needs no judgement of its own: the
-/// harness already draws the line in the same three places.
-///
-/// `workspace-write` is Codex's posture for a non-interactive run and the
-/// honest reading of "an agent working in this checkout"; `danger-full-access`
-/// is what a definition asks for by writing `unsafe` and never by omission.
+/// Codex's own word for each of the three: a straight translation, because the
+/// harness already draws the line in the same three places. `danger-full-access`
+/// is reached by writing `unsafe`, never by omission.
 fn sandboxWord(permissions: record.Permissions) []const u8 {
     return switch (permissions) {
         .readonly => "read-only",
@@ -220,20 +188,15 @@ fn writeSandbox(jw: *std.json.Stringify, permissions: record.Permissions) !void 
     try jw.objectField("sandbox");
     try jw.write(sandboxWord(permissions));
     // Nobody is at the keyboard: a background task cannot answer an approval
-    // request, and a turn that blocks on one would hang until the task is
-    // killed. Refusing is the answer a person would not be there to give.
+    // request, and a turn that blocks on one hangs until the task is killed.
     try jw.objectField("approvalPolicy");
     try jw.write("never");
 }
 
-/// The fail-closed half of D10: `thread/start` and `thread/resume` both report
-/// the policy they applied, so a read-only delegation can be CONFIRMED rather
-/// than hoped for.
-///
-/// Only `readonly` is checked. The other two are not ceilings — a Codex that
-/// applied something NARROWER than asked has made the delegation less capable,
-/// which is a disappointment and not a breach, and refusing it would turn a
-/// harness's own caution into a failure.
+/// The fail-closed half: `thread/start` and `thread/resume` both report the
+/// policy they applied, so a read-only delegation is CONFIRMED rather than hoped
+/// for. Only `readonly` is checked — the other two are not ceilings, and a
+/// narrower sandbox than asked is a disappointment, not a breach.
 fn sandboxRefusal(alloc: std.mem.Allocator, result: std.json.ObjectMap, permissions: record.Permissions) !?[]const u8 {
     if (!permissions.isReadonly()) return null;
     const applied: ?[]const u8 = switch (result.get("sandbox") orelse std.json.Value{ .null = {} }) {
@@ -256,38 +219,30 @@ fn sandboxRefusal(alloc: std.mem.Allocator, result: std.json.ObjectMap, permissi
 
 // ── driving one round ───────────────────────────────────────────────────────
 
-/// One turn, read to the end (or cut short by an interrupt). The same five facts
-/// `runner.zig` collects from a nulya round, in this harness's words.
+/// One turn, read to the end (or cut short by an interrupt).
 pub const RoundResult = struct {
     /// The last thing the agent said this round — the report.
     text: []const u8 = "",
     /// The turn's own word for how it ended (`completed` / `interrupted` /
-    /// `failed`), for a report that has nothing else to say.
+    /// `failed`), for a report with nothing else to say.
     stopped: []const u8 = "",
     /// Why the round could not run at all. Non-empty means "stop looping".
     failure: []const u8 = "",
     interrupted: bool = false,
 };
 
-/// Take everything waiting for this delegation and answer it.
+/// Take everything waiting for this delegation and answer it. Codex has no inbox
+/// of its own, so `<d>/inbox/` is drained here, between notification lines.
 ///
-/// The message channel is `<d>/inbox/` (D5): Codex has no inbox of its own, so
-/// the drain happens here, at the granularity this protocol gives — between
-/// notification lines, which a turn produces constantly.
+/// AN INTERRUPT IS NEVER STEERED, whichever way it is noticed — steering a
+/// message and then cutting the turn down delivers it into an answer about to be
+/// thrown away, so it must stay where it is until a round that will answer it.
 ///
-/// **An interrupt is never steered, whichever way it is noticed.** Steering with
-/// a message and then cutting the turn down delivers it into an answer that is
-/// about to be thrown away, so the message must stay where it is until a round
-/// that will actually answer it.
-///
-/// This is checked TWICE because the fact arrives by two routes. The marker is
-/// checked before the drain (①), and the message itself says how it was sent
-/// (②) — and the second one is not belt and braces, it is the load-bearing one
-/// on this arm. The marker is a separate file written just after the message, so
-/// a drain landing in that gap sees a message that looks ordinary; only the
-/// envelope is atomic with the text (`mailbox.Message`). Every other arm takes
-/// its one message at the start of a round and never drains a running turn, so
-/// the marker alone is enough there.
+/// Checked TWICE, because the fact arrives by two routes: the marker before the
+/// drain (①), and the message's own envelope (②). ② is the load-bearing one here
+/// — the marker is a separate file written just after the message, so a drain
+/// landing in that gap sees a message that looks ordinary, and only the envelope
+/// is atomic with the text.
 pub fn driveRound(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -299,34 +254,29 @@ pub fn driveRound(
     var out: RoundResult = .{};
 
     // How far into the inbox this round has already offered. Peeking does not
-    // consume (`mailbox.peekAfter`) and this arm peeks again on every pass of
-    // the read loop, so without a cursor the same message would be steered into
-    // the same turn over and over — and every pass would re-read and re-parse
-    // every file still waiting, once per streamed notification.
+    // consume and this arm peeks on every pass of the read loop, so without a
+    // cursor the same message would be steered into the same turn over and over.
     //
-    // A number rather than a set of names, and that is what rule 1 of the
-    // mailbox buys: senders publish under a lock, so a message that arrives
-    // during this round has a number past everything already seen.
+    // A number rather than a set of names, which is what the mailbox's publish
+    // order buys: a message arriving during this round has a number past
+    // everything already seen.
     var cursor: usize = 0;
     // The ones the harness confirmed, dropped when the round is over and NOT
-    // before. Two reasons, and the second one is not optional:
+    // before:
     //
     //   * an ack is a delivery receipt, and a round that ends badly should not
     //     have been handing them out as it went;
-    //   * a name that is freed mid-round can be HANDED OUT AGAIN. `scanForPut`
-    //     takes one past the highest number present, so acking the message that
-    //     started the turn empties the directory and the next message sent lands
-    //     on that same number — behind the cursor, and therefore never offered
-    //     at all. That is a message silently held back until the next round, and
-    //     it is exactly what it looked like: a mid-turn message arriving as a
-    //     fresh `turn/start` instead of a `turn/steer`.
+    //   * a name freed mid-round can be HANDED OUT AGAIN — `scanForPut` takes one
+    //     past the highest present, so acking the message that started the turn
+    //     empties the directory and the next message lands on that same number,
+    //     behind the cursor and therefore never offered at all.
     var confirmed: std.ArrayList([]const u8) = .empty;
     defer for (confirmed.items) |name| mailbox.ack(alloc, io, base, delegation, name);
 
     const first = try mailbox.peekAfter(alloc, io, base, delegation, cursor);
     if (first.len == 0) {
-        // Nothing to answer. Not a failure and not a report: the caller's
-        // pending check decides whether to go round again.
+        // Not a failure and not a report: the caller's pending check decides
+        // whether to go round again.
         out.stopped = "idle";
         return out;
     }
@@ -339,8 +289,7 @@ pub fn driveRound(
     try jw.objectField("input");
     try jw.beginArray();
     // The envelope says nothing here: a message that asked to interrupt has
-    // nothing to interrupt when it is the one STARTING the turn. (`driveOnce`
-    // clears a stale marker before each round for the same reason.)
+    // nothing to interrupt when it is the one STARTING the turn.
     for (first) |entry| {
         try writeTextInput(&jw, entry.msg.text);
         cursor = entry.seq;
@@ -351,9 +300,8 @@ pub fn driveRound(
     const reply = try request(alloc, io, &sess.client, "turn/start", params.writer.buffered());
     const result = switch (reply) {
         .failed => |f| {
-            // Nothing acked: a turn that never started did not take them, and
-            // they wait for the next round rather than disappearing with this
-            // one.
+            // Nothing acked: a turn that never started did not take them, so
+            // they wait for the next round.
             out.failure = try std.fmt.allocPrint(alloc, "codex refused the turn: {s}", .{f});
             return out;
         },
@@ -374,44 +322,33 @@ pub fn driveRound(
     }
     const turn = try alloc.dupe(u8, turn_id);
 
-    // Steers whose reply has not come back yet. A steered message is still in
-    // the inbox — nothing is taken there (`mailbox.peekAfter`) — so what the
-    // reply decides is whether it is ever ACKED: confirmed, and it goes on the
-    // list above; refused, because the turn ended under it, and it is simply
-    // left untouched for the next round to offer again (the wake invariant, D4,
-    // held on this side too). Each is tracked until its reply lands because
-    // that is the only thing that tells the two apart.
+    // Steers whose reply has not come back yet. A steered message is still in the
+    // inbox — nothing is taken there — so the reply only decides whether it is
+    // ever ACKED: confirmed goes on the list above, refused (the turn ended under
+    // it) is left untouched for the next round. Each is tracked until its reply
+    // lands, because that reply is the only thing that tells the two apart.
     var steered: std.ArrayList(Steered) = .empty;
 
     while (true) {
-        // ① The interrupt marker, before anything else this round could do with
-        // a message. See the note on this function.
+        // ① The interrupt marker, before anything else could do with a message.
         if (mailbox.takeInterruptAt(io, base, interrupt_path)) {
             try interrupt(alloc, io, &sess.client, sess.thread_id, turn);
             out.interrupted = true;
-            // Read on until the turn actually ends, so the connection is closed
-            // with nothing half-said on it — and so that any steer still in
-            // flight is settled rather than abandoned.
+            // Read on until the turn actually ends, so the connection closes with
+            // nothing half-said on it and any steer in flight is settled.
             try drainToEnd(alloc, io, &sess.client, &steered, &confirmed);
             return out;
         }
-        // ② Anything that arrived while this turn has been running goes INTO
-        // it. That is what `turn/steer` is for, and it is the same act as
-        // typing while the main conversation is answering (D3).
-        //
-        // Unless it was sent AS an interrupt. This is the same decision as ①
-        // and it is here as well because the two facts arrive by two routes:
-        // the marker is a separate file written just after the message, so this
-        // arm — the only one that drains a running turn — can reach the message
-        // first and steer it into a turn that is about to be cut down. Whoever
-        // gets here first, the answer is the same: put it back untouched and
-        // stop the turn (`mailbox.Message`).
+        // ② Anything that arrived while this turn has been running goes INTO it —
+        // that is what `turn/steer` is for. Unless it was sent AS an interrupt:
+        // the same decision as ①, here as well because the two facts arrive by
+        // two routes. Whichever gets here first, leave it untouched and stop.
         const batch = try mailbox.peekAfter(alloc, io, base, delegation, cursor);
         for (batch) |entry| {
             if (entry.msg.interrupt) {
                 // It and everything queued behind it stay exactly where they
-                // are — nothing was taken, so there is nothing to give back, and
-                // the next round finds them in the order they were sent (D4).
+                // are — nothing was taken, so the next round finds them in the
+                // order they were sent.
                 try interrupt(alloc, io, &sess.client, sess.thread_id, turn);
                 out.interrupted = true;
                 try drainToEnd(alloc, io, &sess.client, &steered, &confirmed);
@@ -427,9 +364,9 @@ pub fn driveRound(
             return out;
         };
         switch (msg) {
-            // A reply to `turn/steer`. Confirmed means the message may be
-            // acked when the round ends; refused means the turn ended under it,
-            // so it is left in the inbox for the next round to answer.
+            // A reply to `turn/steer`. Confirmed means the message may be acked
+            // when the round ends; refused means the turn ended under it, so it
+            // is left in the inbox for the next round.
             .response => |r| {
                 try settleSteer(alloc, &steered, &confirmed, r);
                 continue;
@@ -438,8 +375,7 @@ pub fn driveRound(
                 // Codex is asking US something — an approval, an elicitation.
                 // With `approvalPolicy: "never"` this should not happen, but an
                 // unanswered request stalls the turn for ever, so every one gets
-                // an answer, and the answer is no. A background task has nobody
-                // to ask.
+                // an answer and the answer is no.
                 try declineRequest(alloc, io, &sess.client, req.id);
                 continue;
             },
@@ -452,14 +388,13 @@ pub fn driveRound(
                 if (std.mem.eql(u8, note.method, "turn/completed")) {
                     out.stopped = try alloc.dupe(u8, turnStatus(note_params));
                     // Steers still unanswered are messages in limbo: returning
-                    // now would let a refusal after this line lose the message
-                    // unheard.
+                    // now would let a refusal after this line lose one unheard.
                     try settleOutstanding(alloc, io, &sess.client, &steered, &confirmed);
                     return out;
                 }
                 if (std.mem.eql(u8, note.method, "error")) {
-                    // A turn-level error that Codex will not retry ends the
-                    // round; one it will retry is just noise on the way.
+                    // A turn-level error Codex will not retry ends the round; one
+                    // it will retry is noise on the way.
                     if (willRetry(note_params)) continue;
                     out.failure = try std.fmt.allocPrint(alloc, "codex reported an error: {s}", .{errorMessage(note_params)});
                     return out;
@@ -492,10 +427,9 @@ fn steer(
     try jw.beginObject();
     try jw.objectField("threadId");
     try jw.write(thread_id);
-    // The precondition Codex requires: a steer is for THIS turn, and one aimed
-    // at a turn that has already ended is refused rather than silently becoming
-    // a new one. The reply is not waited for here — the read loop settles it
-    // (`settleSteer`), and a refusal re-queues the message for the next round.
+    // The precondition Codex requires: a steer is for THIS turn, and one aimed at
+    // a turn that has already ended is refused rather than silently becoming a
+    // new one. The reply is not waited for here — the read loop settles it.
     try jw.objectField("expectedTurnId");
     try jw.write(turn_id);
     try jw.objectField("input");
@@ -509,9 +443,9 @@ fn steer(
 /// A steer whose reply has not come back yet, and the inbox name it is for.
 const Steered = struct { id: i64, name: []const u8 };
 
-/// Match a reply to an outstanding steer. Confirmed means the turn took it, so
-/// it is acked; a refusal — the turn ended under it — leaves it in `<d>/inbox/`,
-/// where the pending check and the next round find it, in its original place.
+/// Match a reply to an outstanding steer. Confirmed means the turn took it, so it
+/// is acked; a refusal — the turn ended under it — leaves it in `<d>/inbox/` in
+/// its original place, where the next round finds it.
 fn settleSteer(
     alloc: std.mem.Allocator,
     steered: *std.ArrayList(Steered),
@@ -540,14 +474,11 @@ fn interrupt(alloc: std.mem.Allocator, io: std.Io, client: *Client, thread_id: [
 
 /// Read until the turn ends, answering anything that would otherwise stall it.
 /// Called after an interrupt: the round's answer is already decided, and this
-/// only makes sure the connection is left in a state nobody is waiting on.
+/// only leaves the connection in a state nobody is waiting on.
 ///
-/// **And that every steer is settled.** This used to discard replies (`.response
-/// => {}`), which quietly lost a message: back when a steered message had been
-/// TAKEN from the inbox, a refusal was the only thing that put it back. Peeking
-/// makes that failure impossible rather than handled — an unsettled steer now
-/// costs a message being delivered twice, never a message gone. Reading the
-/// replies is still what tells the two apart, so it stays.
+/// Steer replies are settled here rather than discarded: an unsettled steer costs
+/// a message delivered twice, and the reply is what tells "confirmed" from
+/// "refused".
 fn drainToEnd(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -567,10 +498,9 @@ fn drainToEnd(
     try settleOutstanding(alloc, io, client, steered, confirmed);
 }
 
-/// Read on until no steer is still waiting for its reply. A message in limbo is
-/// a message that is neither in the inbox nor certainly delivered, and every
-/// JSON-RPC request gets exactly one reply — so the only way to know which it
-/// was is to wait for it.
+/// Read on until no steer is still waiting for its reply. Every JSON-RPC request
+/// gets exactly one reply, so waiting for it is the only way to know whether the
+/// message was taken.
 fn settleOutstanding(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -589,9 +519,9 @@ fn settleOutstanding(
 }
 
 fn declineRequest(alloc: std.mem.Allocator, io: std.Io, client: *Client, id: i64) !void {
-    // A JSON-RPC error is the one reply that is valid for every request there
-    // is: this client answers no question Codex could ask, and saying so is
-    // better than guessing at a result shape per method.
+    // A JSON-RPC error is the one reply valid for every request there is: this
+    // client answers no question Codex could ask, and saying so beats guessing at
+    // a result shape per method.
     var line: std.Io.Writer.Allocating = .init(alloc);
     var jw: std.json.Stringify = .{ .writer = &line.writer };
     try jw.beginObject();
@@ -657,8 +587,7 @@ pub const Client = struct {
 
     pub fn close(self: *Client, io: std.Io) void {
         // Closing stdin is how a well-behaved app-server is told to stop; the
-        // kill is what makes sure a round does not leave a process behind when
-        // it does not.
+        // kill makes sure a round leaves no process behind when it is not.
         if (self.child.stdin) |stdin| {
             var f = stdin;
             f.close(io);
@@ -673,8 +602,8 @@ fn spawn(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.M
         .argv = &.{ executable(env), "app-server" },
         .stdin = .pipe,
         .stdout = .pipe,
-        // Dropped rather than captured: Codex's diagnostics are its own, and a
-        // pipe nobody drains is a process that blocks once it fills.
+        // Dropped rather than captured: a pipe nobody drains is a process that
+        // blocks once it fills.
         .stderr = .ignore,
     });
     errdefer child.kill(io);
@@ -713,9 +642,8 @@ fn handshake(alloc: std.mem.Allocator, io: std.Io, client: *Client) !?[]const u8
 pub const Reply = union(enum) { ok: std.json.ObjectMap, failed: []const u8 };
 
 /// Send a request and read until its reply, answering anything that would stall
-/// the connection on the way. Notifications passed on the way are dropped: the
-/// three calls that use this (`initialize`, `thread/start`, `thread/resume`)
-/// happen before any turn, so nothing interesting can arrive during them.
+/// the connection. Notifications are dropped: the three callers all happen
+/// before any turn.
 fn request(alloc: std.mem.Allocator, io: std.Io, client: *Client, method: []const u8, params: []const u8) !Reply {
     const id = try send(alloc, io, client, method, params);
     while (try next(alloc, client)) |msg| {
@@ -737,8 +665,7 @@ fn request(alloc: std.mem.Allocator, io: std.Io, client: *Client, method: []cons
 }
 
 /// Every method name here is a literal from this file, and every `params` was
-/// built by `std.json.Stringify` — so the line is assembled directly rather than
-/// re-encoded.
+/// built by `std.json.Stringify`, so the line is assembled rather than encoded.
 fn send(alloc: std.mem.Allocator, io: std.Io, client: *Client, method: []const u8, params: []const u8) !i64 {
     const id = client.next_id;
     client.next_id += 1;
@@ -760,8 +687,7 @@ fn writeLine(io: std.Io, client: *Client, line: []const u8) !void {
 
 pub const Message = union(enum) {
     /// `result` is null for a reply that carried an error, and for one whose
-    /// result was not an object — nothing here reads a scalar result, and
-    /// "there was no object" is the honest way to say so.
+    /// result was not an object — nothing here reads a scalar result.
     response: struct { id: i64, result: ?std.json.ObjectMap, failure: ?[]const u8 },
     notification: struct { method: []const u8, params: ?std.json.ObjectMap },
     server_request: struct { id: i64, method: []const u8 },
@@ -776,9 +702,9 @@ fn next(alloc: std.mem.Allocator, client: *Client) !?Message {
     while (true) {
         const line = client.reader.interface.takeDelimiter('\n') catch |err| switch (err) {
             // Longer than we will hold: step over it rather than stop reading.
-            // Giving up here would stop draining a pipe Codex is still writing
-            // into, and then it blocks on stdout while we wait for a turn that
-            // has already ended.
+            // Giving up would stop draining a pipe Codex is still writing into,
+            // and then it blocks on stdout while we wait for a turn that has
+            // already ended.
             error.StreamTooLong => {
                 _ = client.reader.interface.discardDelimiterInclusive('\n') catch return null;
                 continue;

@@ -1,6 +1,5 @@
-//! CLI surface (DESIGN §14). None of these are model-facing tools: the model
-//! reaches them through `shell`, keeping its tool face tiny. `nulya ext api`
-//! prints THIS binary's real protocol so the model never guesses a signature.
+//! CLI surface. None of these are model-facing tools: the model reaches them
+//! through `shell`, keeping its tool face tiny.
 //!
 //! This file is the dispatcher and nothing else: one file per verb family under
 //! `cli/`, plus `cli/common.zig` for the plumbing two or more of them share.
@@ -18,7 +17,7 @@ const cli_src = @import("cli/src.zig");
 const cli_config = @import("cli/config.zig");
 
 /// `nulya demo` composes a session through the same code path `session new`
-/// does, so the two cannot drift (DESIGN §14).
+/// does, so the two cannot drift.
 pub const createSession = cli_session.createSession;
 
 const demo_prompt = "What system am I on?";
@@ -31,9 +30,6 @@ pub const usage = common.usage;
 /// code. Errors are printed and turned into a non-zero code by `main`.
 pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len == 0) return usage(io);
-    // `help` is a verb like any other so that a model which reached this binary
-    // through `shell` can ask it what it can do without guessing a flag; the two
-    // flag spellings are here because everything else on a terminal accepts them.
     if (std.mem.eql(u8, args[0], "help") or std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h")) return usage(io);
     if (std.mem.eql(u8, args[0], "ext")) return ext.dispatchExt(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "skill")) return skill.dispatchSkill(alloc, io, args[1..]);
@@ -49,15 +45,10 @@ pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     return 1;
 }
 
-/// `nulya demo` runs a fixed-prompt session over the same durable path a driver
-/// uses (DESIGN §3.4, §14). It is a CLIENT of the verbs beside it — `session
-/// new`, then `session append`, then `session step` — rather than a second
-/// assembly of config, environment and session creation, so it can never drift
-/// from what `nulya session *` actually does. The offline scripted provider
+/// `nulya demo` runs a fixed-prompt session over the durable path: a CLIENT of
+/// `session new` -> `session append` -> `session step`, never a second assembly
+/// of config, environment and session creation. The offline scripted provider
 /// stands in when no credential is set (`session new` says so on stderr).
-///
-/// A verb rather than what a bare `nulya` does: running the binary with no
-/// arguments should say what it can do, not start writing session files.
 fn runDemo(alloc: std.mem.Allocator, io: std.Io) !u8 {
     const id = (try cli_session.createSession(alloc, io, &.{}, .stand_in)) orelse return 1;
     defer alloc.free(id);

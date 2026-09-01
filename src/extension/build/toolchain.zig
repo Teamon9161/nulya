@@ -1,28 +1,23 @@
-//! Managed Zig toolchain (DESIGN §10).
+//! Managed Zig toolchain.
 //!
 //! The host-platform Zig release archive is `@embedFile`'d into the nulya
-//! binary and extracted on first use. Nulya is already platform-specific, so a
-//! single embedded host archive suffices — and one host Zig cross-compiles to
-//! every target, so this also buys cross-platform extension builds for free.
-//!
-//! The AI never calls `zig build` directly: it calls `nulya ext build`, and
-//! nulya alone fixes zig version / optimize / target / cache, so builds are
-//! reproducible (DESIGN §10, §14).
+//! binary and extracted on first use — one host Zig cross-compiles to every
+//! target, so a single embedded host archive buys cross-platform extension
+//! builds for free. The AI never calls `zig build` directly: it calls `nulya
+//! ext build`, and nulya alone fixes zig version / optimize / target / cache.
 //!
 //! Embedding is gated behind the `-Dembed-toolchain` build option so day-to-day
 //! `zig build test` stays light. When the option is off, `@embedFile` resolves
 //! to an empty stub and there is nothing to extract — but the directory the
 //! extraction would land in is still the pinned compiler's home, so a build
-//! without the archive USES what is already there: a release build extracted
-//! it earlier, or somebody unpacked (or junctioned) a 0.16.0 install into it.
-//! Only when the archive is absent AND the directory is empty does
-//! `ensureExtracted` return `error.ToolchainNotEmbedded`; the shipped binary and
-//! the e2e build set the option on.
+//! without the archive uses what is already there. Only when the archive is
+//! absent AND the directory is empty does `ensureExtracted` return
+//! `error.ToolchainNotEmbedded`.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// The single Zig version nulya builds every extension with (DESIGN §10).
+/// The single Zig version nulya builds every extension with.
 pub const pinned_version = "0.16.0";
 
 pub const exe_name = if (builtin.os.tag == .windows) "zig.exe" else "zig";
@@ -48,18 +43,14 @@ pub fn isEmbedded() bool {
     return embedded_archive.len != 0;
 }
 
-/// The pinned Zig under `data_dir/managed_rel`, as an ABSOLUTE path to its
+/// The pinned Zig under `data_dir/managed_rel`, as an absolute path to its
 /// `zig` executable (usable as `argv[0]` regardless of the child's cwd) —
 /// extracted from the embedded archive when this binary carries one and the
 /// directory does not hold it yet. Idempotent: a completed extraction is marked
 /// with a `.ok` file and skipped on subsequent calls.
 ///
-/// A binary WITHOUT the archive still answers from that directory when a whole
-/// toolchain is already in it (either layout `zigExeAbsPath` accepts). The
-/// directory is nulya's own and the version is pinned, so who put the bytes
-/// there — an earlier release build, or a person following the "needs zig"
-/// sentence — does not change what they are; refusing them would send a dev
-/// build to an unpinned PATH zig while the pinned one sits right there.
+/// A binary without the archive still answers from that directory when a whole
+/// toolchain is already in it (either layout `zigExeAbsPath` accepts).
 ///
 /// NOTE: the extraction path is validated only via the manual embedded build
 /// (`-Dembed-toolchain`), since unit tests run with embedding off.

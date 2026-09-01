@@ -1,47 +1,33 @@
-//! Turning `(id, version)` into something to spawn — ON THE MACHINE THAT HOLDS
-//! THE BYTES (DESIGN §7.3, §7.5, goals/remote-env.md §3.1).
+//! Turning `(id, version)` into something to spawn, on the machine that holds
+//! the bytes.
 //!
-//! An `ExtensionRequest` names a frozen version and a tool, never a path. Which
-//! file to run is an answer only the executing machine can give, for three
-//! reasons that are all the same reason:
+//! An `ExtensionRequest` names a frozen version and a tool, never a path.
+//! Which file to run is an answer only the executing machine can give: the
+//! entry variant is picked per OS, integrity has to be checked where the
+//! bytes are (or a host would verify its own copy and run someone else's),
+//! and a store root is a directory on that machine. So both execution sides
+//! share this one resolver: the local backend and the remote agent.
 //!
-//!   - the entry variant is picked per OS (`runtime.entry` may be an object,
-//!     DESIGN §7.1) and the OS that matters is the one about to spawn it;
-//!   - integrity has to be checked where the bytes are, or a host would be
-//!     verifying its own copy and running someone else's;
-//!   - a store root is a directory on that machine, and the host has no business
-//!     modelling another machine's file system.
-//!
-//! So both execution sides share this one resolver: the local backend
-//! (`environment.LocalEnvironment`) and the remote agent (`cli/remote.zig`,
-//! which IS a nulya running a local backend of its own).
-//!
-//! **`.sealed` is paid once per (id, version) per resolver, not per call.** A
-//! full re-digest of a package is the price of "these are still the bytes that
-//! were sealed", and it is the right price to pay before running them — but
-//! paying it on every `read` in a session would be absurd. A resolver lives as
-//! long as the process that owns it (one `session step`, one served channel), so
-//! the guarantee is "this process verified this version before it ran it", which
-//! is exactly what the invariant asks for. On the host that means one extra
-//! digest beside the one session composition already does at freeze time, and
-//! only for packages a step actually calls.
+//! `.sealed` is paid once per (id, version) per resolver, not per call: a
+//! resolver lives as long as the process that owns it (one `session step`,
+//! one served channel), so "this process verified this version before it
+//! ran it" is exactly the guarantee needed.
 
 const std = @import("std");
 const manifest = @import("manifest.zig");
 const roots_mod = @import("roots.zig");
 const store = @import("store.zig");
 
-/// Is this a failure to RESOLVE the version ON THIS MACHINE, rather than a fault
-/// of the host trying to run it?
+/// Is this a failure to resolve the version on this machine, rather than a
+/// fault of the host trying to run it?
 ///
-/// The two need different answers, and the difference is not "local versus
-/// remote": a package this machine does not hold, holds broken, or declares no
-/// entry variant for, is the CALLER's business — something to be told about and
-/// possibly fixed (`nulya ext build`, `nulya ext push`) — while an out-of-memory
-/// or a cancellation is the step's. So the first kind becomes an ordinary failed
-/// call and the second propagates, on both sides of the seam: the remote agent
-/// answers such a version with a refusal that the host turns into exactly the
-/// same failed call (`environment/remote/mod.zig`).
+/// A package this machine does not hold, holds broken, or declares no entry
+/// variant for, is the caller's business — something to be told about and
+/// possibly fixed (`nulya ext build`, `nulya ext push`) — while an
+/// out-of-memory or a cancellation is the step's. So the first kind becomes
+/// an ordinary failed call and the second propagates, on both sides of the
+/// seam: the remote agent answers such a version with a refusal that the
+/// host turns into exactly the same failed call.
 pub fn isUnrunnableHere(err: anyerror) bool {
     return store.isExtensionFault(err) or
         err == error.EntryUnsupportedOnHost or
@@ -115,8 +101,8 @@ pub const Resolver = struct {
     /// against its own seal at least once in this process.
     ///
     /// `workspace` is the directory relative root specs resolve against — the
-    /// same directory the call itself runs in, so each side reads "the workspace
-    /// store" as its own (goals/remote-env.md §3.3).
+    /// same directory the call itself runs in, so each side reads "the
+    /// workspace store" as its own.
     pub fn resolve(self: *Resolver, workspace: []const u8, id: []const u8, version: []const u8) !Entry {
         for (self.memo.items) |m| {
             if (std.mem.eql(u8, m.id, id) and std.mem.eql(u8, m.version, version)) {

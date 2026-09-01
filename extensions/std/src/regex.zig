@@ -1,31 +1,19 @@
-//! The regex `grep` searches with: the vendored mvzr behind a wrapper that adds
-//! the two things mvzr lacks and a search tool needs — a bigger program budget
-//! and case handling.
+//! The regex `grep` searches with: the vendored mvzr (byte-level backtracking,
+//! no lookaround/backreferences/Unicode classes/case-insensitive flag) behind
+//! a wrapper that adds a bigger program budget (`SizedRegex(256, 32)` — the
+//! default 64 ops/8 sets is too small for a model's `foo|bar|baz|...`) and
+//! case handling.
 //!
-//! mvzr (`vendor/mvzr.zig`, unmodified) is a byte-level backtracking engine:
-//! classes, alternation, groups, greedy / lazy / possessive / bounded
-//! quantifiers, anchors, `\b`. No lookaround, no backreferences, no Unicode
-//! classes, and no case-insensitive flag. The default `mvzr.Regex` is sized for
-//! 64 ops / 8 character sets, which a model's `foo|bar|baz|...` alternation
-//! outgrows quickly, so this compiles into `SizedRegex(256, 32)`.
+//! The `(?…` family must be handled BEFORE mvzr sees it: mvzr misparses it
+//! into a pattern that compiles and silently matches the wrong text (`(?i)AAA`
+//! matched the literal `iAAA`). Non-capturing `(?:` is rewritten to a plain
+//! `(`; every other `(?…` is refused up front with a message naming the way out.
 //!
-//! The whole `(?…` family needs handling BEFORE mvzr sees it: mvzr does not
-//! know the syntax, and worse than rejecting it, it misparses it into a
-//! pattern that compiles and silently matches the wrong text (`(?i)AAA`
-//! matched the literal `iAAA`). So a non-capturing `(?:` — the one member a
-//! match-only wrapper can honor, since it never asks which group captured
-//! what — is rewritten to a plain `(`, and every other `(?…` (inline flags,
-//! lookaround) is refused up front with a message that names the way out.
-//!
-//! Case handling is tcode's smart case (tcode search.rs: `case_smart(true)` +
-//! `case_insensitive(...)`): a pattern with no uppercase LITERAL letter searches
-//! case-insensitively, any uppercase literal makes it exact, and
-//! `case_insensitive=true` forces insensitivity outright. With no engine flag to
-//! set, insensitivity is done by lowering both sides: the caller lowercases each
-//! haystack line, and `compile` lowercases the pattern's literal letters —
-//! only those. `\d \D \w \W \s \S \b \B` and every other backslash escape stay
-//! exactly as written (lowering `\D` would silently turn "not a digit" into
-//! "a digit"); letters inside `[...]` are literals and are lowered too.
+//! Smart case: no uppercase literal in the pattern searches case-insensitively,
+//! any uppercase literal makes it exact, `case_insensitive=true` forces it.
+//! With no engine flag for this, insensitivity is done by lowering both sides;
+//! backslash escapes (`\d \D \w \W \s \S \b \B`) stay untouched — lowering
+//! `\D` would turn "not a digit" into "a digit".
 
 const std = @import("std");
 const mvzr = @import("vendor/mvzr.zig");

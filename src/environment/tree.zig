@@ -2,10 +2,9 @@
 //! terminated, and wait for it under a wall-clock budget.
 //!
 //! `environment.zig` owns the seams (what a shell / extension run IS, which
-//! dialect, which env survives); this file owns the platform mechanics those
-//! seams need and nothing else — job objects on Windows, process groups on
-//! POSIX, and the bounded wait that turns a timeout into an actual kill rather
-//! than only a label.
+//! dialect, which env survives); this file owns the platform mechanics — job
+//! objects on Windows, process groups on POSIX, and the bounded wait that turns
+//! a timeout into an actual kill rather than only a label.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -14,13 +13,10 @@ const windows = std.os.windows;
 
 /// The kernel32 job-object calls `std.os.windows` does not declare (0.16 ships
 /// only `CreateProcessW` there). A job object is the only reliable way to
-/// terminate a process TREE on Windows, so the three calls plus `ResumeThread`
-/// are declared locally. Analyzed lazily — nothing here is referenced off
-/// Windows, so the externs never reach a POSIX link.
+/// terminate a process TREE on Windows. Analyzed lazily — nothing here is
+/// referenced off Windows, so the externs never reach a POSIX link.
 ///
-/// The job carries NO limits: it is a handle on the tree for `TerminateJobObject`
-/// and nothing else. In particular not `KILL_ON_JOB_CLOSE`, which would make a
-/// NORMAL return kill the tree (see `Tree`), so `SetInformationJobObject` is not
+/// The job carries NO limits (see `Tree`), so `SetInformationJobObject` is not
 /// needed and is not declared.
 const win32 = struct {
     extern "kernel32" fn CreateJobObjectW(lpJobAttributes: ?*anyopaque, lpName: ?[*:0]const u16) callconv(.winapi) ?windows.HANDLE;
@@ -46,24 +42,19 @@ const win32 = struct {
 ///            then resumed — so it cannot fork anything outside the job.
 ///            `killAll` terminates the job.
 ///
-/// The rule is the same on both, and it is deliberately narrow: **terminating is
-/// what kills the tree; returning normally does not.** The job is created with NO
-/// limits — notably not `KILL_ON_JOB_CLOSE`, which would kill everything the
-/// command started the moment `deinit` closed the handle. That would both diverge
-/// from POSIX (which only ever signals on timeout / cancel) and destroy a
-/// legitimate pattern: `some-server >/dev/null 2>&1 &` in one shell call, used by
-/// the next. Nothing is lost by dropping it — the error paths are already covered
-/// by the callers' `killAll` (`defer if (!child_reaped)` / `errdefer`).
+/// Terminating is what kills the tree; returning normally does not. The job is
+/// created with NO limits — notably not `KILL_ON_JOB_CLOSE`, which would kill
+/// everything the command started the moment `deinit` closed the handle. That
+/// would diverge from POSIX (which only signals on timeout / cancel) and destroy
+/// `some-server >/dev/null 2>&1 &` in one shell call, used by the next.
 ///
 /// A detached background process must still redirect its stdio, or the call
 /// blocks until it exits: it inherits the pipe write-ends, and the drain reads
-/// both pipes to EOF. That is pre-existing drain behavior, not something the tree
-/// introduced.
+/// both pipes to EOF.
 ///
 /// If the OS refuses a job object (an older Windows' nested-job restriction, or
 /// nulya itself running inside a restrictive job), this degrades to the plain
-/// single-process kill and says so once: a shell that runs is worth more than a
-/// guarantee about its grandchildren.
+/// single-process kill and says so once.
 pub const Tree = struct {
     child: std.process.Child,
     /// POSIX: the direct child's pid — which is also the group id — kept here
@@ -172,21 +163,16 @@ pub const Waited = union(enum) {
     timed_out,
 };
 
-/// Runs `child.wait` under a wall-clock budget. `null` waits forever (the
-/// pre-timeout behavior, still used by tests).
+/// Runs `child.wait` under a wall-clock budget. `null` waits forever.
 ///
 /// The wait runs as its own task and reports through `Waiter` rather than
-/// through the `Select` union, because the two answers are not symmetric: on
-/// a timeout the loser must be asked whether it nevertheless reaped the
-/// child. It usually did not — the child is still running, which is the whole
-/// point — but if the process exited in the same instant the budget expired,
-/// `outcome` holds its `Term` and this reports a normal exit instead of a
-/// timeout. Cancellation is unchanged: `await` returns `error.Canceled`, the
-/// tasks are joined, and the caller kills + drains exactly as before.
+/// through the `Select` union, because the two answers are not symmetric: on a
+/// timeout the loser must still be asked whether it nevertheless reaped the
+/// child. If the process exited in the same instant the budget expired,
+/// `outcome` holds its `Term` and this reports a normal exit, not a timeout.
 ///
 /// What the caller does with a timeout is `Tree.killAll` — the command's whole
-/// process tree, not just the direct child (see `Tree`), which is what makes
-/// the budget actually end the step rather than only label it.
+/// process tree, not just the direct child.
 pub fn waitBounded(io: std.Io, child: *std.process.Child, timeout_ms: ?u32) !Waited {
     const ms = timeout_ms orelse return .{ .term = try child.wait(io) };
 

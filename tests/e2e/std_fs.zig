@@ -1,5 +1,5 @@
 //! The bundled `std` extension's file tools — `read` / `write` / `append` /
-//! `edit` and the on-disk freshness they share (docs/goals/std.md §1.2).
+//! `edit` and the on-disk freshness they share.
 //! Fixtures come from `std.zig`.
 //!
 //! Everything here goes through the real binary: `ext run std@<v> <tool> '<json>'`
@@ -140,9 +140,8 @@ test "bundled std read: verbatim without gutter; unchanged stub in a session and
     }
 
     // A directory and a binary file are refused, each naming what is wrong. A
-    // missing file is not a refusal: it answers with its parent's contents
-    // (or that the parent is missing too), so a wrong path costs no failed
-    // call (docs/goals/std.md "existence answers").
+    // missing file is not a refusal: it answers with its parent's contents (or
+    // that the parent is missing too), so a wrong path costs no failed call.
     try tmp.dir.createDirPath(io, "d");
     try tmp.dir.writeFile(io, .{ .sub_path = "d/inner.txt", .data = "" });
     try tmp.dir.writeFile(io, .{ .sub_path = "bin.dat", .data = "abc\x00def" });

@@ -1,15 +1,13 @@
 //! Capability notes: announcing a newly active extension version to a running
-//! conversation (DESIGN §5.3, §3.4).
+//! conversation.
 //!
 //! When the agent builds and activates an extension mid-conversation (via
 //! `shell` -> `nulya ext …`), the CLI runs in a subprocess and cannot touch the
 //! session's ledger — the session file has one writer. So the CLI, when
-//! `NULYA_SESSION` names the session file, DEPOSITS a `capability_note` into the
+//! `NULYA_SESSION` names the session file, deposits a `capability_note` into the
 //! session's inbox (`ledger.depositEvent`); the session drains it at its next
-//! step boundary as a plain append. The prompt prefix stays stable, the batch
-//! invariant is never split, and the model can invoke new tools through `shell`
-//! or load skills through `nulya skill load` on its next step. Promotion into
-//! `tools[]` waits for the next session (DESIGN §5.1).
+//! step boundary as a plain append. Promotion into `tools[]` still waits for
+//! the next session.
 //!
 //! This module owns only what a note SAYS. The inbox mechanics live in
 //! `ledger.zig`; the drain is `AgentSession.prepareStep`.

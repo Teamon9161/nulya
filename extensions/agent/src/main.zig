@@ -1,70 +1,24 @@
-//! `agent` — delegation, outside the kernel.
+//! `agent` — delegation, outside the kernel. Four tools in one binary,
+//! dispatched on `NULYA_TOOL`:
 //!
-//! **What it is.** Four tools in one binary, dispatched on `NULYA_TOOL`:
+//!   `agent {name, task}`    a new delegation: render the persona, open a
+//!                           conversation wearing it, start a BACKGROUND TASK
+//!                           driving it. Returns a receipt naming the DELEGATION.
+//!   `agent {session, task}` another turn into one already going, including
+//!                           while it works (`interrupt: true` = take it NOW).
+//!   `render {name}`         a definition file → the prompt file and the whole
+//!                           set of `session new` arguments it asks for. The
+//!                           single WRITER of that rendering.
+//!   `run {delegation, …}`   the background command itself (`runner.zig`).
 //!
-//!   `agent {name, task}`   the model asking for one piece of work to be
-//!                          delegated. Renders the persona, opens a
-//!                          conversation wearing it, and starts a BACKGROUND
-//!                          TASK that drives it. Returns a receipt naming the
-//!                          DELEGATION (`d-…`, `record.zig`).
-//!   `agent {session, task}` another turn into one that is already going —
-//!                          including while it is working (`interrupt: true`
-//!                          says take it NOW rather than at its next natural
-//!                          boundary).
-//!   `render {name}`        a definition file → the prompt file and the whole
-//!                          set of `session new` arguments it asks for. The
-//!                          single writer of that rendering; the front end calls
-//!                          it too rather than keeping a second copy.
-//!   `run {delegation, …}`  the background command itself (`runner.zig`).
+//! The model names a DELEGATION, never the session behind it; which harness holds
+//! it is the definition's `runner:`, frozen into the record when it opens.
 //!
-//! **One world view, many runners.** The model names a DELEGATION, never the
-//! session that happens to be behind it: `d-…` is the conversation, and which
-//! harness holds it — this nulya today — is the definition's `runner:`, frozen
-//! into the delegation's record when it opens (`runners.zig`, contract D1/D7).
-//! The record is readable and the report still points at the remote transcript:
-//! the abstraction gives the facts one name, it does not hide them (D2).
-//!
-//! **Why the persona is not an extension.** It used to be: every delegation
-//! froze the body into an `agent-<name>` data extension and composed it in with
-//! `--with`. That made a piece of per-session text into an installed artifact —
-//! it showed up in `ext list`, and `ext prune` could break the resume of a
-//! session frozen on an older version of it. `session new --prompt <file>`
-//! freezes the BYTES into the session header instead (DESIGN §3, §5), which is
-//! where text with one session's lifetime belongs.
-//!
-//! **Why the report comes back through a background task.** A delegation is a
-//! mechanism that owes an answer later, and the kernel already has exactly one
-//! of those: a background task's `task_finished` event, deposited into the
-//! parent's inbox and drained at its next step boundary (DESIGN §6.1 / §3.1).
-//! Using it means every driver already knows how to collect the answer —
-//! `drivers/goal.*` needed no change, the TUI needed no new watcher, and the
-//! next driver will need nothing either. The alternative considered first was a
-//! request file for drivers to poll (`extensions/handoff`'s shape); that is a
-//! second protocol every driver would have to learn, in two implementations on
-//! two platforms, for a loop the kernel already runs.
-//!
-//! **A definition is the WHOLE composition.** Every child session is created
-//! `--bare` (DESIGN §14): the workspace's standing `[extensions] with` and
-//! `registry.pinned_native_tools` are read as empty for it. Those two lists are
-//! how a PERSON says "every session I open here carries this"; a session opened
-//! by the model to do one piece of work is not one of those, and inheriting
-//! them would give a sub-agent capabilities its author never wrote down — and
-//! would make the same definition behave differently in two workspaces. So a
-//! definition with no `pins` gets `shell` and nothing else, which is a real
-//! answer (`explore` deliberately narrows itself that way) rather than an
-//! oversight to be topped up from config.
-//!
-//! **Leaf by default.** A delegated session carries this package only when its
-//! own definition names somebody to pass work to (`agents:` non-empty), so a
-//! sub-agent that was not given that field cannot delegate again — the tool is
-//! simply not there. One field, read in one place, and no refusal to write.
-//!
-//! **Why compiled Zig.** `run` reads the `session step` JSONL protocol line by
-//! line and answers a gate on a pipe while it does, and the other three parse
-//! markdown front matter and validate it. `sh` has no JSON reader, Windows has
-//! neither `jq` nor a guaranteed python, and one manifest carries one
-//! `interpreter` — a script version would be a `.sh` and a `.ps1` that could
-//! never share a version id.
+//! The persona reaches a session as `session new --prompt <file>` — bytes frozen
+//! into the header, nothing installed. Every child session is `--bare`, so a
+//! definition's `pins` are its whole tool face and it behaves the same in every
+//! workspace. A delegated session carries this package only when its definition
+//! names somebody to pass work to (`agents:` non-empty).
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
@@ -88,15 +42,14 @@ const Ctx = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
     env: *const std.process.Environ.Map,
-    /// Absolute path of the nulya that spawned this process (DESIGN §7.6): the
-    /// binary every child call must use, rather than whichever copy is on PATH.
+    /// Absolute path of the nulya that spawned this process: the binary every
+    /// child call must use, rather than whichever copy is on PATH.
     exe: []const u8,
 };
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    // One arena for the whole call: this process makes a handful of child calls
-    // and prints one response, so individual frees would be noise.
+    // One arena for the whole call: a handful of child calls and one response.
     const alloc = init.arena.allocator();
 
     const name = init.environ_map.get("NULYA_TOOL") orelse "";
@@ -108,8 +61,7 @@ pub fn main(init: std.process.Init) !void {
     const exe = init.environ_map.get("NULYA_EXE") orelse "";
     const ctx: Ctx = .{ .alloc = alloc, .io = io, .env = init.environ_map, .exe = exe };
 
-    // Host faults surface as Zig errors and are folded into a refusal here, so
-    // every path still ends in exactly one answer.
+    // Host faults are folded into a refusal, so every path ends in one answer.
     const outcome = dispatch(&ctx, name, arguments) catch |err| rpc.Outcome{
         .failed = try std.fmt.allocPrint(alloc, "{s} could not run: {s}", .{ name, @errorName(err) }),
     };
@@ -144,9 +96,8 @@ const Rendered = struct {
     warnings: []const []const u8,
 };
 
-/// Read a definition and write its body where `session new --prompt` can read
-/// it. The one implementation of that rendering (see `defs.zig`), so the front
-/// end and the model's own `agent` tool cannot disagree about what a persona is.
+/// Read a definition and write its body where `session new --prompt` can read it.
+/// The one implementation of that rendering.
 fn render(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Rendered, failed: []const u8 } {
     const alloc = ctx.alloc;
     if (!defs.isPlainName(name)) {
@@ -166,10 +117,8 @@ fn render(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Rendered, failed
 
     const def = entry.def;
 
-    // Written every time, and that is cheap and deliberate: the contents are
-    // decided by the definition, so an unedited one rewrites the same bytes and
-    // an edit is picked up without anybody running a command. Two delegations
-    // racing here write the same file.
+    // Content-determined, so two delegations racing here write the same bytes
+    // and an edit is picked up without anybody running a command.
     const label = try defs.promptLabel(alloc, def.name);
     const path = try defs.promptPath(alloc, label);
     defs.writePrompt(alloc, ctx.io, def, path) catch |err| {
@@ -217,39 +166,28 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             try jw.beginObject();
             try jw.objectField("name");
             try jw.write(m.def.name);
-            // `session new --prompt <this>`: the whole of how a persona reaches
-            // a session now. Nothing is installed, so there is no version and no
-            // id to name.
+            // The whole of how a persona reaches a session. Nothing is
+            // installed, so there is no version and no id to name.
             try jw.objectField("prompt");
             try jw.write(m.path);
-            // Always true, and named rather than assumed, because a driver that
-            // opened this session WITHOUT it would compose something else
-            // entirely (`session new --bare`, DESIGN §14). A definition's
-            // `pins` are its whole tool face; a workspace's standing
-            // `[extensions] with` / `pinned_native_tools` are what a PERSON
-            // asked every session of theirs to carry, and a delegated session
-            // is not one of those. Inheriting them would hand a sub-agent
-            // capabilities its author never wrote down.
+            // Always true, and named rather than assumed: without `--bare` the
+            // session inherits the workspace's standing membership and pins,
+            // which its author never wrote down.
             try jw.objectField("bare");
             try jw.write(true);
             try jw.objectField("label");
             try jw.write(m.label);
             try jw.objectField("description");
             try jw.write(m.def.description);
-            // Two columns, one answer. `permissions` is the field a definition
-            // writes and the record freezes; `readonly` is that same answer as
-            // the one bit every existing reader asks for, kept so a driver that
-            // only ever wanted "may this touch anything" is not made to learn
-            // three words to ask one question.
+            // Two columns, one answer: `permissions` is the word a definition
+            // writes and the record freezes, `readonly` the single bit most
+            // readers ask for.
             try jw.objectField("permissions");
             try jw.write(m.def.permissions.label());
             try jw.objectField("readonly");
             try jw.write(m.def.permissions.isReadonly());
-            // Which harness will hold the conversation (D1). A driver rendering
-            // a persona to open a session itself only ever sees `nulya`; the
-            // column is here because "what runs this" is part of what a
-            // definition asks for, and the answer must not be inferred from the
-            // absence of the field.
+            // Which harness holds the conversation, named so it is never
+            // inferred from the absence of the field.
             try jw.objectField("runner");
             try jw.write(m.def.runner.label());
             try jw.objectField("layer");
@@ -258,9 +196,8 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             try jw.write(m.def.profile);
             try jw.objectField("model");
             try jw.write(m.def.model);
-            // An external runner's opaque model string (D9). Beside the other
-            // two rather than folded into them: a driver reading this must not
-            // have to guess which vocabulary the value is in.
+            // An external runner's opaque model string. Its own column so a
+            // reader never has to guess which vocabulary the value is in.
             try jw.objectField("runner_model");
             try jw.write(m.def.runner_model);
             try jw.objectField("max_steps");
@@ -268,17 +205,13 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             try jw.objectField("max_exchanges");
             try jw.write(m.def.max_exchanges);
             // The names it may pass work to. Non-empty is what makes a delegated
-            // session carry this package at all (`newDelegation`), so a driver
-            // composing one needs the same answer.
+            // session carry this package at all (`newDelegation`).
             try jw.objectField("agents");
             try jw.beginArray();
             for (m.def.agents) |one| try jw.write(one);
             try jw.endArray();
-            // Pins only. The `--with` a pin implies is the KERNEL's implication
-            // now (DESIGN §5.1): `session new --pin ext:<id>/<tool>` brings the
-            // package in at `current` by itself, so a driver that derived the
-            // membership list here was saying the same thing a second time — and
-            // three drivers said it three slightly different ways.
+            // Pins only: `--pin ext:<id>/<tool>` brings its package in at
+            // `current` by itself, so a derived membership list would repeat it.
             try jw.objectField("pins");
             try jw.beginArray();
             for (m.def.pins) |pin| try jw.write(pin);
@@ -297,12 +230,9 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
 
 /// `list` — every definition all three layers hold, in search order.
 ///
-/// Driver-facing, and never pinned: the model does not need a catalogue (an
-/// unknown name already comes back with the names that exist), while a driver
-/// needs one to draw a picker and to decide what a checkout brought with it.
-/// This is the ONE reader of the definition format, the way `render` is the
-/// one writer of the rendering — the front end used to parse front matter as
-/// well, and two parsers of one file is two answers to "is this agent read-only".
+/// The ONE reader of the definition format, as `render` is the one writer of the
+/// rendering: two parsers of one file would be two answers to "is this agent
+/// read-only".
 fn list(ctx: *const Ctx) !rpc.Outcome {
     const alloc = ctx.alloc;
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -324,8 +254,7 @@ fn list(ctx: *const Ctx) !rpc.Outcome {
         try jw.objectField("layer");
         try jw.write(@tagName(entry.def.layer));
         // Listed, not dropped: a definition that never runs because an earlier
-        // layer has the name is exactly the thing somebody needs to be told
-        // about (DESIGN §7.2's rule for store roots, for its reason).
+        // layer holds the name is exactly the thing somebody needs told.
         try jw.objectField("shadowed");
         try jw.write(entry.shadowed);
         try jw.objectField("source");
@@ -364,26 +293,19 @@ fn list(ctx: *const Ctx) !rpc.Outcome {
 ///
 /// A backstop against an INDIRECT cycle (`a` may delegate to `b`, `b` to `a`),
 /// which no whitelist catches — not a security boundary: `NULYA_AGENT_DEPTH` is
-/// an ordinary variable, it is absent when a person drives a delegated session
-/// from a front end, and the whitelist above it is a policy in exactly the way
-/// the approval tables are (DESIGN §9).
+/// an ordinary variable and is absent when a person drives a delegated session
+/// from a front end.
 const max_depth: u32 = 3;
 
 /// `agent{name, task}` — a new delegation — or `agent{session, task}` — another
 /// turn in one that is already going.
 ///
-/// The two are one tool because they are one act with one answer: the caller
-/// wants work done by somebody else and gets a report back. The second form is
-/// the cheaper one and the model should reach for it — another turn lands in a
-/// conversation that still holds everything it learned (append-only, so it hits
-/// its OWN prefix cache, DESIGN §1), where a fresh delegation pays for the
-/// reconnaissance again.
+/// The follow-up form is the cheaper one: another turn lands in a conversation
+/// that still holds everything it learned and hits its OWN prefix cache, where a
+/// fresh delegation pays for the reconnaissance again.
 ///
-/// The `session` argument names a DELEGATION (`d-…`), not the session that
-/// happens to be behind it. A delegation is the conversation; which harness
-/// holds it — this nulya, another one later — is the runner's business, and a
-/// model that had to name a session id could only ever address the one runner
-/// that has such things (D1/D11).
+/// The `session` argument names a DELEGATION (`d-…`), not the session behind it:
+/// a model naming a session id could only address a runner that has such things.
 fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     const alloc = ctx.alloc;
     const name = rpc.trimmedField(args, "name");
@@ -409,10 +331,8 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
         );
     }
 
-    // Which session is this? `session step` puts the live session's file path in
-    // the environment of everything it runs (DESIGN §5.3). Without it there is
-    // nobody to report BACK to: the background task's `task_finished` is
-    // deposited into a session's inbox, and there would be no session.
+    // Which session is this? Without it there is nobody to report BACK to —
+    // `task_finished` is deposited into a session's inbox.
     const session_path = ctx.env.get("NULYA_SESSION") orelse
         return rpc.refuse(alloc, "agent must be called from inside a session (NULYA_SESSION is not set)", .{});
     const parent = std.fs.path.stem(session_path);
@@ -427,11 +347,8 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
         );
     }
 
-    // A model reference is a choice made when a session is CREATED and frozen
-    // there (physics #2, DESIGN §3.4). A follow-up creates nothing — it appends
-    // a turn to a session whose identity was frozen rounds ago — so a `model`
-    // on that form cannot be honoured, and quietly ignoring it would be the
-    // worst of the three answers.
+    // A model reference is chosen when a session is CREATED and frozen there, so
+    // a follow-up cannot honour one; ignoring it quietly would be worse.
     if (target.len != 0 and asked_model.len != 0) {
         return rpc.refuse(
             alloc,
@@ -439,11 +356,9 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             .{target},
         );
     }
-    // The ceiling is frozen into the delegation's record when it opens, for the
-    // same reason a model is frozen into a session header: everything about
-    // what a conversation may do was settled before it said its first word, and
-    // a follow-up that could widen it would make the ceiling a suggestion. So
-    // this argument only means anything on the form that CREATES something.
+    // The ceiling is frozen into the record when the delegation opens: a
+    // follow-up that could widen it would make the ceiling a suggestion. So this
+    // argument only means anything on the form that CREATES something.
     if (target.len != 0 and asked_permissions.len != 0) {
         return rpc.refuse(
             alloc,
@@ -451,8 +366,8 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             .{target},
         );
     }
-    // `interrupt` is how a message is delivered, not a kind of message (D3), so
-    // it only means anything where there is something in flight to interrupt.
+    // `interrupt` is how a message is delivered, not a kind of message, so it
+    // only means anything where there is something in flight to interrupt.
     if (name.len != 0 and interrupt) {
         return rpc.refuse(
             alloc,
@@ -461,16 +376,13 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
         );
     }
     if (target.len != 0) return sendTurn(ctx, parent, target, task, interrupt, depth);
-    // `model` is NOT parsed here: what grammar it is written in depends on the
+    // `model` is NOT parsed here: which vocabulary it is in depends on the
     // runner the definition names, and the definition is not read until
-    // `newDelegation` renders it (D9). One string, two vocabularies, and the
-    // one place that knows which is the one that has the definition in hand.
-    // Nearest first, and only two answers: what THIS call asked for, then what
-    // the definition says. Nothing is inherited — not from the parent session,
-    // not from a front end's mode, not from the environment. `unsafe` is only
-    // ever reached because somebody wrote the word in one of those two places,
-    // and this call is itself a tool call the parent's own gate rules on, so a
-    // person watching an `ask`-mode conversation sees it before it runs.
+    // `newDelegation` renders it.
+    //
+    // Permissions: the call, then the definition, and nothing else — never the
+    // parent session, a front end's mode, or the environment. This call is itself
+    // gated by the parent, so `unsafe` is visible before it runs.
     const permissions: ?record.Permissions = if (asked_permissions.len == 0) null else record.Permissions.parse(asked_permissions) orelse {
         return rpc.refuse(
             alloc,
@@ -514,21 +426,14 @@ fn newDelegation(
         .ok => |ok| ok,
     };
 
-    // Three answers to "what runs this", nearest first: what THIS call asked
-    // for, then what the definition says, then what the parent is running on. A
-    // persona that does not care which model runs it should not silently move
-    // the work onto whatever the config's default happens to be — and the caller
-    // knows something neither of the other two do, which is what this piece of
-    // work is worth.
+    // What runs this, nearest first: the call, the definition, then the parent.
     //
-    // A pair, never a mix: `--model` is an id WITHIN a profile (DESIGN §9.5), so
-    // taking the profile from one source and the id from another would name a
-    // model that profile does not serve.
-    // An EXTERNAL runner has its own catalogue, so the same argument means a
-    // different thing (D9): an opaque string, in that harness's vocabulary,
-    // passed through untouched and with its errors coming back untouched.
-    // Nothing is inherited from the parent either — this nulya's profile is not
-    // a name Codex has ever heard.
+    // A PAIR, NEVER A MIX: `--model` is an id WITHIN a profile, so taking the
+    // profile from one source and the id from another names a model that profile
+    // does not serve.
+    //
+    // An EXTERNAL runner has its own catalogue, so the same argument is an
+    // opaque string passed through untouched and never inherited from the parent.
     var profile: []const u8 = "";
     var model: []const u8 = "";
     var runner_model: []const u8 = "";
@@ -556,31 +461,22 @@ fn newDelegation(
         runner_model = if (asked_model.len != 0) asked_model else m.def.runner_model;
     }
 
-    // The ceiling, nearest answer first and nothing behind the two: the call, or
-    // the definition. There is no third source on purpose (contract ar-h) — an
-    // escalation that could be inherited from the parent, the front end's mode
-    // or the environment would be an escalation nobody wrote down.
+    // The ceiling: the call, or the definition, and nothing behind those two —
+    // an inheritable escalation would be one nobody wrote down.
     const permissions = asked_permissions orelse m.def.permissions;
 
     const self_ref = try proc.selfRef(alloc, ctx.io);
 
-    // The delegation's own identity, minted BEFORE the conversation is opened:
-    // a runner may need somewhere of its own to put what it freezes (the claude
-    // arm copies the persona into `<d>/`), and nothing about the id depends on
-    // what the runner answers. Nothing is written yet — the record's opening row
-    // is below, once there is a remote conversation for it to name.
+    // Minted BEFORE the conversation is opened: a runner may need somewhere of
+    // its own to put what it freezes. Nothing is written yet — the record's
+    // opening row is below, once there is a remote conversation to name.
     const d = try record.mint(alloc, ctx.io);
 
     // …and this package itself, but ONLY for a persona that names somebody to
-    // pass work to. That one field is what makes a session a leaf or not, and it
-    // is read in one place: a delegated session that cannot delegate simply does
-    // not carry the tool, so there is nothing to refuse later.
-    //
-    // Membership is the whole of it: the `agent` tool is `surface: "auto"`, so
-    // naming the package IS putting it on that session's tool face (DESIGN
-    // §5.1) — and a pin at it would now be refused outright
-    // (`PinToolNotPinnable`). The other three tools are `internal`; they stay
-    // where they are, reached through `ext run`.
+    // pass work to: a session that cannot delegate does not carry the tool, so
+    // there is nothing to refuse later. Membership is the whole of it — the
+    // `agent` tool is `surface: "auto"`, so naming the package puts it on that
+    // session's tool face. The other three are `internal`.
     const created = try runners.start(m.def.runner, alloc, ctx.io, .{
         .exe = ctx.exe,
         .prompt = m.path,
@@ -590,21 +486,17 @@ fn newDelegation(
         .runner_model = runner_model,
         // The ceiling reaches the runner HERE, not only when a round is driven:
         // a runner that cannot enforce the read-only one refuses the whole
-        // delegation rather than opening one that would run wider than it said
-        // (D10). For the nulya arm the gate does it at every call; for Codex the
-        // sandbox is asked for and its answer checked.
+        // delegation rather than opening one that would run wider than it said.
         .permissions = permissions,
         .pins = m.def.pins,
         .with_self = if (m.def.agents.len != 0) self_ref else "",
         .delegation = d,
     });
     if (created.run.code != 0) {
-        // Straight through, including the credential refusal (DESIGN §9.5): the
-        // kernel already says the whole way out, and a second sentence composed
-        // here would be a second place that has an opinion about credentials.
-        // The one thing added is where the model reference came from, and only
-        // when it came from the CALL — the caller can retry without it, which is
-        // not obvious from a message about a profile it did not know it named.
+        // Straight through, including the credential refusal: the kernel already
+        // says the whole way out. The one thing added is where the model
+        // reference came from, and only when it came from the CALL, so the caller
+        // knows it can retry without it.
         if (chosen) {
             return rpc.refuse(
                 alloc,
@@ -617,10 +509,9 @@ fn newDelegation(
     const remote = std.mem.trim(u8, created.run.stdout, " \t\r\n");
     if (remote.len == 0) return rpc.refuse(alloc, "the {s} runner opened no conversation for '{s}'", .{ m.def.runner.label(), m.def.name });
 
-    // The journal that holds everything decided once about this delegation —
-    // which runner, at what version, over which remote conversation (D2/D7).
-    // Written BEFORE the first message, so a runner started by that message
-    // always finds a record describing what it drives.
+    // Everything decided once about this delegation. Written BEFORE the first
+    // message, so a runner started by that message always finds a record
+    // describing what it drives.
     try record.appendCreated(alloc, ctx.io, std.Io.Dir.cwd(), d, .{
         .agent = m.def.name,
         .runner = m.def.runner.label(),
@@ -631,9 +522,8 @@ fn newDelegation(
         .profile = profile,
         .model = model,
         .runner_model = runner_model,
-        // The policy this delegation lives under for the rest of its life. Read
-        // from the definition HERE and never again: this is the moment the
-        // definition has a say, and everything after it reads the record.
+        // Read from the definition HERE and never again — everything after this
+        // reads the record.
         .max_exchanges = m.def.max_exchanges,
         .max_steps = m.def.max_steps,
         .agents = m.def.agents,
@@ -651,9 +541,8 @@ fn newDelegation(
     }
     const started = switch (try wake(ctx, parent, spec, depth)) {
         .failed => |f| return rpc.refuse(alloc, "'{s}' has delegation {s} but its run could not be started: {s}", .{ m.def.name, d, f }),
-        // Nobody can hold the lease of a delegation that did not exist a moment
-        // ago, so this is unreachable in practice; saying the honest thing
-        // rather than asserting keeps one shape for both callers.
+        // Unreachable in practice, but saying so rather than asserting keeps one
+        // shape for both callers.
         .busy => "(already running)",
         .task => |t| t,
     };
@@ -679,16 +568,11 @@ fn newDelegation(
     ) };
 }
 
-/// Everything about a delegation the sending and waking paths need. Read from
-/// the RECORD for a delegation that already exists, and from the definition for
-/// one being opened — the two are the same facts, so they are one struct.
+/// Everything the sending and waking paths need — from the RECORD for a
+/// delegation that exists, from the definition for one being opened.
 ///
-/// It is this short because the background command is: what a round is driven
-/// WITH is read from the record by the process that drives it
-/// (`proc.startDelegationTask`), so nothing here has to be carried there — and
-/// what is left is exactly what DELIVERING a message needs. The ceiling and the
-/// persona name used to be here too; both were read from the record by then and
-/// nothing on this side looked at the copies.
+/// Short because what a round is driven WITH is read from the record by the
+/// process that drives it, so what is left is what DELIVERING a message needs.
 const Spec = struct {
     delegation: []const u8,
     remote: []const u8,
@@ -697,21 +581,14 @@ const Spec = struct {
 
 /// Another turn into a delegation that is already going.
 ///
-/// Append-only, so the sub-agent resumes with everything it learned still in
-/// front of it and hits its OWN prefix cache (DESIGN §1) — a correction costs
-/// one turn where a fresh delegation would pay for the reconnaissance again.
-/// Nothing new is created: same conversation, same frozen composition, same
-/// read-only ceiling (the runner recomputes it from that session's own header,
-/// so it cannot drift).
+/// Append-only, so the sub-agent resumes with everything it learned in front of
+/// it and hits its OWN prefix cache. Nothing new is created: same conversation,
+/// same frozen composition, same ceiling.
 ///
-/// **It is never refused for being busy.** It used to be: a turn appended while
-/// the sub-agent was working would be drained mid-run by the very step producing
-/// the report, and that was called a race. It is not one — it is exactly what
-/// the main conversation does when a person types while the model is answering
-/// (D3), and the kernel drains a session's inbox at every step boundary whether
-/// or not anybody is watching. What was missing was not a refusal but a
-/// guarantee that somebody eventually drives what was accepted, and that is the
-/// wake invariant below.
+/// NEVER REFUSED FOR BEING BUSY: a turn arriving mid-run is what the main
+/// conversation does when a person types while the model is answering, and the
+/// kernel drains a session's inbox at every step boundary. What that needs is not
+/// a refusal but the wake invariant below.
 fn sendTurn(
     ctx: *const Ctx,
     parent: []const u8,
@@ -722,9 +599,8 @@ fn sendTurn(
 ) !rpc.Outcome {
     const alloc = ctx.alloc;
 
-    // ① The shape. A session id here is the OLD vocabulary, and a delegation
-    // opened under it has no record, so there is nothing to resume — say which
-    // word replaced it rather than reporting a missing directory (D11).
+    // ① The shape. A session id here is the OLD vocabulary and has no record, so
+    // name the word that replaced it rather than report a missing directory.
     if (!record.isPlainId(target)) {
         if (defs.isPlainSessionId(target)) {
             return rpc.refuse(
@@ -736,16 +612,13 @@ fn sendTurn(
         return rpc.refuse(alloc, "'{s}' is not a delegation id (they look like d-…)", .{target});
     }
 
-    // ② Is it one of ours? The record is this package's own truth about the
-    // delegation — it says which persona is wearing it, which runner drives it
-    // and what that runner opened — where the session header could only ever
-    // answer for a nulya session.
+    // ② Is it one of ours? The record says which persona wears it, which runner
+    // drives it and what that runner opened; a session header could only answer
+    // for a nulya session.
     const state = (record.read(alloc, ctx.io, std.Io.Dir.cwd(), target) catch |err| switch (err) {
-        // A record that is there but cannot be believed is not a delegation to
-        // send another turn into: what it may do and how much of it is left are
-        // both in that file (`record.read`). Named rather than folded into "no
-        // delegation" — the two have different repairs, and only one of them is
-        // "start a fresh one".
+        // A record that is there but cannot be believed is not one to send into:
+        // what it may do and how much is left are both in that file. Named
+        // rather than folded into "no delegation" — different repairs.
         record.Corrupt.CorruptDelegationRecord => return rpc.refuse(
             alloc,
             "delegation {s} has a damaged record ({s}/{s}/{s}), so what it was allowed to do can no longer be read. Nothing was sent. Start a fresh delegation for this work.",
@@ -769,18 +642,12 @@ fn sendTurn(
     };
 
     // ③ Is it OURS? A delegation belongs to the conversation that opened it, and
-    // that is what the frozen `parent` says. It used to be provenance only: the
-    // check was missing and `wake` starts the background task under whichever
-    // session is calling, so a second session that learned the id could take a
-    // delegation over and have its next report land somewhere else. Then
-    // "a sub-agent reports back to its parent" would mean "to whoever spoke to
-    // it last", and the record's own column would be describing something that
-    // was no longer true.
+    // the frozen `parent` says which. Without this, `wake` would start the task
+    // under whichever session is calling, so a second session that learned the id
+    // could take the delegation over and have its next report land elsewhere.
     //
-    // A fork is a different conversation by this rule, and that is consistent
-    // rather than incidental: `session new --parent` inherits no composition, no
-    // prompts and no images either (DESIGN §11) — everything in this system
-    // treats a fork as a boundary, and a delegation is not the one exception.
+    // A fork is a different conversation by this rule, as it is everywhere:
+    // `session new --parent` inherits no composition, prompts or images either.
     if (!std.mem.eql(u8, parent, state.created.parent)) {
         return rpc.refuse(
             alloc,
@@ -789,19 +656,15 @@ fn sendTurn(
         );
     }
 
-    // ④ How many turns has it had, and how many was it opened with? Both come
-    // from the record. The count, because it is the only one an external runner
-    // can answer too — counting a child session's user turns is a fact about
-    // nulya sessions and nothing else. The budget, because the definition is
-    // consulted when a delegation is CREATED and never again: one edited since
-    // must not change what a conversation already under way is allowed, and one
-    // DELETED since must not strand a conversation whose persona, remote and
-    // ceiling are all still right here.
+    // ④ How many turns has it had, and how many was it opened with? Both from
+    // the record: the count because it is the only one an external runner can
+    // answer too, the budget because an edit must not change what a conversation
+    // already under way is allowed and a deletion must not strand one.
     const allowed_exchanges = state.created.max_exchanges;
-    // `>` rather than `>= allowed + 1`, which is the same thing without an
-    // addition that overflows on a definition asking for the largest budget
-    // there is: `turns` counts the opening task too, so "has had them all" is
-    // exactly "more turns than follow-ups allowed".
+    // `>` rather than `>= allowed + 1`: same thing without an addition that
+    // overflows on the largest budget there is. `turns` counts the opening task
+    // too, so "has had them all" is exactly "more turns than follow-ups
+    // allowed".
     if (allowed_exchanges != 0 and state.turns > allowed_exchanges) {
         return rpc.refuse(
             alloc,
@@ -840,25 +703,18 @@ fn sendTurn(
     ) };
 }
 
-/// Record one message, then deliver it.
+/// Record one message, THEN deliver it. That order is the fail-closed one: the
+/// two writes cannot be made atomic, and recording first can only spend an
+/// exchange on a message that did not go — which the caller is told. Sending
+/// first would leave a message the sub-agent answers, uncounted, with the caller
+/// told it failed, quietly widening `max_exchanges` by one.
 ///
-/// **The turn is written down FIRST, and that order is the fail-closed one.**
-/// The two writes can only be made atomic by a transaction neither of them is
-/// worth, so one of them can land alone, and the question is which way that
-/// leans. Sending first leaned the wrong way: a delivered message whose row
-/// failed to append is one the sub-agent will actually answer, uncounted, with
-/// the caller told it failed — three things wrong at once, and `max_exchanges`
-/// quietly widened by one, which is the number this row exists to enforce.
-/// Recording first can only ever spend an exchange on a message that did not
-/// go, and the caller is told exactly that.
-///
-/// An interrupt is the same message, sent saying so (D6). On the arms with an
-/// inbox that word travels IN the message, atomically, because two writes is a
-/// race in either order (`mailbox.Message`); the `<d>/interrupt` marker is
-/// written as well, and is what stops a turn on the nulya arm — which has no
-/// inbox of its own — and on the arms that do not drain mid-turn. Both orders
-/// are correct now, so the marker goes after the message, where a runner that
-/// sees it always finds something behind it.
+/// An interrupt is the same message, sent saying so. On the arms with an inbox
+/// that word travels IN the message, atomically, because two writes is a race in
+/// either order (`mailbox.Message`); the `<d>/interrupt` marker is written as
+/// well and is what stops a turn on the nulya arm — which has no inbox — and on
+/// the arms that do not drain mid-turn. The marker goes AFTER the message, so a
+/// runner that sees it always finds something behind it.
 fn deliver(
     ctx: *const Ctx,
     spec: Spec,
@@ -884,15 +740,13 @@ fn deliver(
     return .ok;
 }
 
-/// The sender's half of the wake invariant (D4): after delivering, probe the
-/// runner's lease and start one only when nobody holds it.
+/// The sender's half of the wake invariant: after DELIVERING, probe the runner's
+/// lease and start one only when nobody holds it.
 ///
-/// Probing rather than "was a task running a moment ago" is the whole point.
-/// The runner's half is the mirror of this — it re-checks for messages AFTER
-/// letting the lease go — and between the two, a message delivered in any
-/// window is seen by somebody: either the holder finds it before it lets go, or
-/// it lets go and finds it, or it has already let go and this probe starts a
-/// fresh runner.
+/// The runner's half mirrors this — it re-checks for messages AFTER letting the
+/// lease go — and between the two, a message delivered in any window is seen by
+/// somebody: either the holder finds it before letting go, or it lets go and
+/// finds it, or it has already let go and this probe starts a fresh runner.
 fn wake(
     ctx: *const Ctx,
     parent: []const u8,
@@ -916,40 +770,24 @@ fn wake(
 /// The names this session may delegate to, or null when it is not a delegation
 /// and nothing is restricted.
 ///
-/// Two questions, and the frozen answer to each. IS this a delegation: the
-/// persona in the session's own header says so, and a header cannot have changed
-/// since. WHICH names: the delegation's record, frozen when it opened — not the
+/// The DELEGATION is asked FIRST and the header not at all on that path: a
+/// delegated session's authority is its record, frozen when it opened — not the
 /// definition as it reads today, which would let an edit widen (or empty) the
-/// whitelist of a conversation already under way.
+/// whitelist of a conversation already under way. Asking the header first would
+/// let an unreadable one answer "nothing is restricted" for a session that
+/// plainly IS a delegation.
 ///
-/// The runner tells the step it drives which delegation it is
-/// (`record.delegation_var`), for the same reason it tells it the depth: it is a
-/// fact about this chain, it is not secret-shaped, and it survives the
-/// environment sanitising every child gets (DESIGN §7.6).
-///
-/// Without it, the definition answers — and that is not the leak this function
-/// was changed to close. A session wearing a persona with no delegation behind
-/// it is a person driving one by hand from a front end (`/agent` opens exactly
-/// that): nothing was ever frozen for it, so there is no frozen answer to
-/// contradict, and holding it to `leaf` would take a coordinator's whole reason
-/// for existing away from the one caller who can watch what it does.
-///
-/// **The delegation is asked FIRST, and the header is not asked at all on that
-/// path.** A delegated session's authority is its record; the header could only
-/// ever corroborate it. Asking the header first meant an unreadable one answered
-/// `null` — "not a delegation, nothing is restricted" — for a session that
-/// plainly IS one, which is the widest possible answer taken from the least
-/// authoritative source.
+/// With no delegation named (`record.delegation_var`), the definition answers:
+/// that is a person driving a persona by hand from a front end, where nothing was
+/// ever frozen.
 fn allowedHere(ctx: *const Ctx, parent: []const u8) !?[]const []const u8 {
     const d = std.mem.trim(u8, ctx.env.get(record.delegation_var) orelse "", " \t\r\n");
     if (record.isPlainId(d)) {
         const found = record.read(ctx.alloc, ctx.io, std.Io.Dir.cwd(), d) catch null;
         if (found) |state| return state.created.agents;
-        // A delegation was named and its record is missing or damaged: that is
-        // not a hand-driven session, it is a delegated one whose frozen answer
-        // cannot be read, and `leaf` is the only honest answer. No refusal is
-        // needed here because this IS the refusal — the caller turns an empty
-        // list into "this agent cannot delegate".
+        // A delegation was named and its record is missing or damaged: a
+        // delegated session whose frozen answer cannot be read, so `leaf`. The
+        // caller turns an empty list into "this agent cannot delegate".
         return &.{};
     }
     // No delegation, so this is a person driving a persona by hand — or an
@@ -962,12 +800,10 @@ fn allowedHere(ctx: *const Ctx, parent: []const u8) !?[]const []const u8 {
 /// The delegation depth this session is running at (`NULYA_AGENT_DEPTH`, set by
 /// the runner for the step it drives).
 ///
-/// Two absences, two answers, as everywhere else here. ABSENT is zero: a
-/// top-level conversation, or a person driving a delegated session from a front
-/// end, and neither of those is deep in anything. Present and UNREADABLE is the
-/// ceiling: somebody set it, this build cannot tell what to, and the one thing
-/// the variable exists to stop is a chain that does not know how long it is.
-/// Reading it as zero says "top level" about a session that certainly is not.
+/// ABSENT is zero: a top-level conversation, or a person driving a delegated
+/// session from a front end. Present and UNREADABLE is the ceiling: somebody set
+/// it, this build cannot tell to what, and reading that as zero would say "top
+/// level" about a session that certainly is not.
 fn currentDepth(env: *const std.process.Environ.Map) u32 {
     const raw = env.get("NULYA_AGENT_DEPTH") orelse return 0;
     return std.fmt.parseInt(u32, std.mem.trim(u8, raw, " \t\r\n"), 10) catch max_depth;
@@ -975,9 +811,9 @@ fn currentDepth(env: *const std.process.Environ.Map) u32 {
 
 const Identity = struct { profile: []const u8 = "", model: []const u8 = "" };
 
-/// What the parent session runs on, from its frozen header (DESIGN §3.4). Best
-/// effort: an unreadable header simply means "no inheritance", and then the
-/// kernel's own default decides — which is what would have happened anyway.
+/// What the parent session runs on, from its frozen header. Best effort: an
+/// unreadable header means "no inheritance", and the kernel's own default
+/// decides.
 fn parentIdentity(alloc: std.mem.Allocator, io: std.Io, parent: []const u8) Identity {
     const obj = header_mod.object(alloc, io, parent) orelse return .{};
     var out: Identity = .{};

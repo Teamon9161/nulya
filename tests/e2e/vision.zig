@@ -1,4 +1,4 @@
-//! Images in a user turn, end to end (docs/goals/vision.md, DESIGN §3.1 / §14):
+//! Images in a user turn, end to end:
 //! `session append --image` behind the shell's two gates — can this session's
 //! FROZEN model see an image at all (`[[models]] vision = true`), and is this
 //! file a png/jpeg small enough to send — then the base64 riding the ledger
@@ -19,7 +19,7 @@ const runCliEnv = support.runCliEnv;
 const runCliStderr = support.runCliStderr;
 
 /// A user layer that says the scripted profile's model id can be shown images.
-/// `[[models]]` is trusted-layers only (DESIGN §9.5), so this is where a claim
+/// `[[models]]` is trusted-layers only, so this is where a claim
 /// like that has to live — a checkout cannot make one.
 const vision_config =
     \\[[models]]
@@ -194,7 +194,7 @@ test "session append --image: a claimed model takes the image onto the ledger li
     try std.testing.expect(std.mem.indexOf(u8, bytes, png_b64) != null);
 
     // Resume projects the same turn, image included: a second process reading
-    // the file alone sees exactly what the first one sent (DESIGN §3.4).
+    // the file alone sees exactly what the first one sent.
     {
         const rel = try sessionRel(alloc, id);
         defer alloc.free(rel);
@@ -211,7 +211,7 @@ test "session append --image: a claimed model takes the image onto the ledger li
     }
 
     // …but `session events` prints the turn without the payload: same seq, same
-    // text, a placeholder where the base64 was (DESIGN §14).
+    // text, a placeholder where the base64 was.
     const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", id });
     defer alloc.free(events.stdout);
     try std.testing.expectEqual(@as(u8, 0), events.code);

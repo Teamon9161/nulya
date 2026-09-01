@@ -215,14 +215,14 @@ fn writeMessages(alloc: std.mem.Allocator, jw: *std.json.Stringify, ir: *const p
             try jw.write(result.output);
             try jw.endObject();
         },
-        // A capability announcement (DESIGN §5.3): an out-of-band system
-        // message the model reads to learn it can now shell out to a new
-        // extension. Appended, so it never disturbs the cached prefix.
+        // A capability announcement: an out-of-band system message the model
+        // reads to learn it can now shell out to a new extension. Appended, so
+        // it never disturbs the cached prefix.
         .capability_note => |text| try writeRoleContentMessage(jw, "system", text),
-        // A finished background task (DESIGN §3.1) does NOT follow it into the
-        // system role: this text carries the output of an arbitrary process, and
-        // the system role is the one place the model is entitled to read as the
-        // harness speaking. `user` is what the other two wires already give it.
+        // A finished background task does NOT follow it into the system role:
+        // this text carries the output of an arbitrary process, and the system
+        // role is the one place the model is entitled to read as the harness
+        // speaking. `user` is what the other two wires already give it.
         .task_finished => |text| try writeRoleContentMessage(jw, "user", text),
     };
     try jw.endArray();
@@ -575,7 +575,7 @@ test "SSE parser extracts streamed text tool calls usage and done" {
     try std.testing.expectEqualStrings("call_1", turn.calls[0].id);
     try std.testing.expectEqualStrings("shell", turn.calls[0].tool);
     try std.testing.expectEqualStrings("{\"command\":\"echo hi\"}", turn.calls[0].args_json);
-    // Usage now survives the collector into the ModelTurn (DESIGN §1 measurability).
+    // Usage survives the collector into the ModelTurn.
     try std.testing.expectEqual(@as(u64, 20), turn.usage.input_tokens);
     try std.testing.expectEqual(@as(u64, 80), turn.usage.cache_read_tokens);
     try std.testing.expectEqual(@as(u64, 5), turn.usage.output_tokens);

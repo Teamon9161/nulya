@@ -34,10 +34,10 @@ const max_output: usize = 4 << 20;
 /// this is already pathological.
 const deadline_ms: u32 = 4000;
 
-/// One `git <args…>` in this process's working directory — the workspace, which
-/// is where the host spawns an extension (DESIGN §7.6). Trimmed, since every
-/// caller outside this file wants one value; `locate` needs the raw bytes and
-/// goes through `whether` for them.
+/// One `git <args…>` in this process's working directory — the workspace,
+/// which is where the host spawns an extension. Trimmed, since every caller
+/// outside this file wants one value; `locate` needs the raw bytes and goes
+/// through `whether` for them.
 pub fn ask(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) ?[]const u8 {
     const raw = switch (whether(alloc, io, args)) {
         .ok => |text| text,

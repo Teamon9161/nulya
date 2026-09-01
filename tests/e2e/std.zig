@@ -1,4 +1,4 @@
-//! The bundled `std` extension (docs/goals/std.md): shared fixtures and the
+//! The bundled `std` extension: shared fixtures and the
 //! smoke test. The per-tool proofs live beside it — `std_fs.zig` (read / write /
 //! append + freshness) and `std_search.zig` (grep / glob) — so the two halves
 //! can be written in parallel without touching one file.
@@ -95,9 +95,9 @@ test "bundled std: ext build compiles one binary with five tools; ext run reache
     // missing required argument), which on this wire is the message on
     // stderr and a non-zero exit, and which the CLI reports as `exit 1` plus
     // that message — not "unknown tool", not a crash. What refusals SAY, and
-    // which of a tool's negative answers are refusals at all versus plain
-    // text (e.g. `read` of a path that does not exist — docs/goals/std.md
-    // "existence answers"), is std_fs.zig's / std_search.zig's business.
+    // which of a tool's negative answers are refusals at all versus plain text
+    // (e.g. `read` of a path that does not exist, which answers rather than
+    // fails), is std_fs.zig's / std_search.zig's business.
     {
         const run = try runStd(alloc, io, ws, exe_abs, ref, "read", "{}", null);
         defer alloc.free(run.stdout);

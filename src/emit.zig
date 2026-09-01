@@ -1,4 +1,4 @@
-//! The single output-discipline primitive (base-tools.md §2).
+//! The single output-discipline primitive.
 //!
 //! Every tool's output — shell, edit echo, and any future native tool — passes
 //! through `emit`. There is exactly ONE truncation/spill code path in the whole
@@ -26,11 +26,11 @@
 const std = @import("std");
 
 /// Where a spill's bytes go. `emit` writes no files itself: it hands the
-/// workspace-relative path and the bytes to the session's environment, which is
-/// the thing that knows which machine the workspace is on
-/// (`Environment.putWorkspaceFile`, DESIGN §8). The interface lives here rather
-/// than in `environment.zig` because `emit` must stay importable by everything
-/// and know nothing about processes — and there is no adapter between the two:
+/// workspace-relative path and the bytes to the session's environment
+/// (`Environment.putWorkspaceFile`), which is the thing that knows which
+/// machine the workspace is on. The interface lives here rather than in
+/// `environment.zig` because `emit` must stay importable by everything and
+/// know nothing about processes — and there is no adapter between the two:
 /// this IS the shape of a vtable entry, so `Environment.fileSink()` just hands
 /// over the pointer and that function.
 pub const FileSink = struct {
@@ -148,8 +148,7 @@ pub const Lossy = struct {
 ///
 /// Why it has to happen: `std.json.Stringify` writes a `[]const u8` that is not
 /// valid UTF-8 as an ARRAY OF NUMBERS, so one stray byte from a subprocess
-/// changes the shape of the session file and of every request built from it
-/// (BUGS.md #22).
+/// changes the shape of the session file and of every request built from it.
 pub fn utf8Lossy(alloc: std.mem.Allocator, raw: []const u8) !?Lossy {
     if (std.unicode.utf8ValidateSlice(raw)) return null;
 
@@ -185,8 +184,8 @@ pub fn utf8Lossy(alloc: std.mem.Allocator, raw: []const u8) !?Lossy {
 ///
 /// The second consumer of that discipline (`emit` is the first): a background
 /// task's report quotes the tail of a log that is ALREADY the complete bytes on
-/// disk (DESIGN §6.1), so it needs the trimming and must not spill a second
-/// copy. Everything the two share stays in one implementation here.
+/// disk, so it needs the trimming and must not spill a second copy. Everything
+/// the two share stays in one implementation here.
 pub fn headTail(alloc: std.mem.Allocator, body: []const u8, budget: OutputBudget) ![]u8 {
     if (body.len <= budget.max_bytes) return alloc.dupe(u8, body);
     var out: std.ArrayList(u8) = .empty;
@@ -254,8 +253,8 @@ fn spillName(alloc: std.mem.Allocator, tool: []const u8, event_seq: u64, call_in
 
 /// Join the parts of a workspace-relative path the MODEL will read — a spill
 /// footer, a background task's log — with `/` on every OS, never the native
-/// separator (base-tools.md §2.4). Two reasons, both about the reader rather
-/// than the file system (which accepts `/` on Windows just the same): a
+/// separator. Two reasons, both about the reader rather than the file system
+/// (which accepts `/` on Windows just the same): a
 /// backslash path pasted into a bash command is mangled the moment it is read
 /// (`\t` is a tab), and every other relative path the harness shows is already
 /// spelled with `/` (`.nulya/sessions/…`, `.nulya/handoffs/…`) — one spelling,
@@ -491,7 +490,7 @@ test "utf8Lossy leaves valid input alone and repairs the rest byte for byte" {
     const alloc = std.testing.allocator;
     try std.testing.expect(try utf8Lossy(alloc, "plain ascii and 你好") == null);
 
-    // The shape that started BUGS.md #22: a CP936 console banner.
+    // The shape that motivated this: a CP936 console banner.
     const gbk = "Microsoft Windows [\xb0\xe6\xb1\xbe 10.0.26200]\n";
     const fixed = (try utf8Lossy(alloc, gbk)).?;
     defer alloc.free(fixed.text);

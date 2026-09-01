@@ -1,80 +1,39 @@
 //! The Claude runner: a delegation held by a Claude Code session.
 //!
-//! **The protocol, as this machine reports it** (`claude --help` on Claude Code
-//! 2.1.246, plus the option and message schemas the shipped binary carries —
-//! contract §6). `claude -p --input-format stream-json --output-format
-//! stream-json --verbose` is a bidirectional, newline-delimited JSON stream over
-//! the child's stdio: the CLI protocol the Agent SDK itself drives (D12 — the
-//! SDK is not used, because it would nail a TypeScript runtime into a compiled
-//! Zig package).
+//! `claude -p --input-format stream-json --output-format stream-json --verbose`
+//! is a bidirectional, newline-delimited JSON stream over the child's stdio,
+//! verified against Claude Code 2.1.246. The Agent SDK drives the same protocol
+//! and is not used: it would nail a TypeScript runtime into a compiled Zig
+//! package. IN, one object per line:
+//! `{"type":"user","message":{"role":"user","content":…},"parent_tool_use_id":
+//! null}` is a turn (stdin stays open, so a session takes as many as it is
+//! given); `{"type":"control_request","request_id":…,"request":{"subtype":
+//! "interrupt"}}` is the stop. OUT, the members this reads:
 //!
-//! What goes IN, one object per line:
+//!   `system/init`  session metadata opening every turn: `session_id`, `model`,
+//!                  `tools[]`, `mcp_servers[]`, `permissionMode`. THE ECHO the
+//!                  read-only ceiling is checked against.
+//!   `assistant`    one per content block; non-null `parent_tool_use_id` is a
+//!                  subagent's own message, not this conversation's answer.
+//!   `result`       end of a turn: `subtype`, `is_error`, `result` (final text).
 //!
-//!   `{"type":"user","message":{"role":"user","content":"…"},
-//!     "parent_tool_use_id":null}`     a turn. stdin stays open, so a session
-//!                                     takes as many of these as it is given.
-//!   `{"type":"control_request","request_id":"…",
-//!     "request":{"subtype":"interrupt"}}`   D6's stop.
+//! The session id is minted HERE — `--session-id <uuid>` opens, `--resume
+//! <uuid>` picks up in a later process — and which a round uses is decided by
+//! `<d>/claude.started`, so an attempt that died before opening anything retries
+//! as a creation. ONE TURN PER ROUND: no mid-turn steer, because Claude's own
+//! queue dies with the process where our inbox does not.
 //!
-//! What comes OUT (the members this reads; the rest is passed over):
-//!
-//!   `system/init`     session metadata at the start of every turn: `session_id`,
-//!                     `model`, `tools[]`, `mcp_servers[]`, `permissionMode`.
-//!                     **This is the echo** the read-only ceiling is checked
-//!                     against — see below.
-//!   `assistant`       one per completed content block. `parent_tool_use_id` is
-//!                     non-null for a subagent's own messages, which are not this
-//!                     conversation's answer.
-//!   `result`          the end of a turn: `subtype` ("success" / "error"),
-//!                     `is_error`, and `result` — the final response text.
-//!   `control_response`  the reply to a control request.
-//!
-//! **A session id is minted here, not by the harness.** `--session-id <uuid>`
-//! opens a conversation under a name we chose, and `--resume <uuid>` picks it up
-//! in a later process — which is what lets a delegation survive between rounds
-//! with no daemon. Which of the two a round uses is decided by a fact on disk
-//! (`<d>/claude.started`, written the first time a session actually reported
-//! itself), so a first attempt that died before opening anything is retried as a
-//! creation rather than as a resume of nothing.
-//!
-//! **One process per task, one turn per round.** The process spans every round
-//! of one background task (stdin stays open); a round writes exactly ONE message
-//! and reads to that turn's `result`. Taking one at a time is what makes the wake
-//! invariant (D4) trivial here: a message is removed from `<d>/inbox/` only to be
-//! written immediately, and if anything goes wrong before its turn ends it goes
-//! straight back. Nothing is ever held in a queue we cannot see.
-//!
-//! **Why there is no mid-turn steer.** Claude queues a message that arrives while
-//! a turn is running and delivers it AFTER that turn — which is exactly what
-//! waiting in `<d>/inbox/` does, except our inbox survives the process dying and
-//! its queue does not. So a message sent to a busy delegation waits here and is
-//! written the moment the turn ends, one round later. That is D3's send read
-//! literally (wait for a natural boundary), and the way to cut the boundary short
-//! is the interrupt, which is implemented.
-//!
-//! **readonly is fail-closed (D10), and confirmed rather than assumed.** Claude's
-//! permission flags are enforced by Claude, and unlike Codex's sandbox nothing
-//! comes back saying "this is what I applied" — except `system/init`, which lists
-//! the tools that are actually in play and the permission mode in force. So a
-//! read-only delegation asks for the narrow shape (`--tools` naming only the
-//! tools that read, `--permission-mode dontAsk`, `--strict-mcp-config` so no
-//! configured MCP server adds anything) and then CHECKS that echo: a tool outside
-//! the read-only set, a wider permission mode, or any MCP server at all and the
-//! round is refused before a single tool has run. `system/init` arrives ahead of
-//! the model's first word, so the refusal costs nothing but the process.
-//!
-//! Availability (`--tools`) rather than approval (`--permission-mode plan`, or an
-//! allow-list) is deliberate: a tool that is not in the session cannot be reached
-//! by any path, and it is the one of the two that the echo can report.
+//! `readonly` is FAIL-CLOSED: ask for the narrow shape, then CHECK the
+//! `system/init` echo — a tool outside the read-only set, a wider permission
+//! mode, or any MCP server refuses the round before a single tool has run.
 
 const std = @import("std");
 const proc = @import("proc.zig");
 const record = @import("record.zig");
 const mailbox = @import("mailbox.zig");
 
-/// Which binary to talk to. `claude` on PATH is the answer on a real machine;
-/// the variable exists so a test can point at one that answers the protocol
-/// without a network (`codex.exe_var`'s shape, for its reason).
+/// Which binary to talk to. `claude` on PATH is the answer on a real machine; the
+/// variable lets a test point at one that answers the protocol without a network.
 pub const exe_var = "NULYA_CLAUDE_EXE";
 
 pub fn executable(env: *const std.process.Environ.Map) []const u8 {
@@ -96,34 +55,26 @@ const started_name = "claude.started";
 /// command-line argument (`--append-system-prompt`), and Windows caps a command
 /// line at 32767 bytes: a persona that silently lost its second half would be a
 /// sub-agent quietly running as somebody else. `--append-system-prompt-file`
-/// exists and takes a path, but it is hidden from `--help`; the visible flag with
-/// a stated bound is the one worth depending on.
+/// exists and takes a path, but it is hidden from `--help`.
 const max_persona_bytes: usize = 16 << 10;
 
 /// What a read-only delegation may have in its session. Named tools rather than
-/// "not the writing ones": a tool this list has never heard of might do anything,
-/// and the whole point of the ceiling is that the sub-agent cannot exceed it.
-///
-/// It is the same answer `extensions/std` gives in its manifest — read, search,
-/// list — because it is the same question.
+/// "not the writing ones": a tool this list has never heard of might do anything.
 const readonly_tools = [_][]const u8{ "Read", "Glob", "Grep", "NotebookRead", "TodoWrite" };
 
 /// The permission mode a read-only delegation asks for, and the only one its echo
 /// may come back with. `dontAsk` denies anything outside the allow rules and the
-/// read-only command set, and — with nobody at the keyboard — a decision that
-/// would have been a question is terminal, so a turn never stalls on a prompt.
+/// read-only command set, so with nobody at the keyboard a turn never stalls on
+/// a prompt.
 const readonly_mode = "dontAsk";
 
-/// …and what an ordinary one runs as. `acceptEdits` is Claude's own posture for
-/// an agent working in a checkout: it writes files without asking, and anything
-/// beyond the read-only command set still needs a rule, so a background task
-/// cannot reach for something nobody granted.
+/// …and what an ordinary one runs as. `acceptEdits` writes files without asking;
+/// anything beyond the read-only command set still needs a rule.
 const default_mode = "acceptEdits";
 
-/// …and what `permissions: unsafe` asks for (contract ar-h). This is the Codex
-/// arm's `danger-full-access`: everything the harness can do, guard rails off.
-/// It is reached only by a definition or an `agent` call that says the word —
-/// never by omission, never inherited from anything about the parent.
+/// …and what `permissions: unsafe` asks for: everything the harness can do, guard
+/// rails off. Reached only by a definition or an `agent` call that says the word
+/// — never by omission, never inherited from anything about the parent.
 const unsafe_mode = "bypassPermissions";
 
 /// Claude's own word for each of the three. Only `readonly` also narrows the
@@ -143,14 +94,9 @@ fn modeWord(permissions: record.Permissions) []const u8 {
 /// definition naming a harness this machine does not have is refused THEN —
 /// before a record exists and before a receipt says work is under way.
 ///
-/// It is also where `runner_version` comes from — and on this arm that column
-/// is OBSERVED PROVENANCE, not a pin (D7). What is recorded is what `--version`
-/// said on this machine at this moment; later rounds run whatever `claude`
-/// resolves to on PATH then. There is nothing to pin: an upgrade replaces the
-/// binary, so the recorded version is usually gone, and refusing a resume over
-/// a mismatch would kill a conversation that would have continued fine without
-/// restoring any reproducibility. Only `runner: ext:<id>` can pin, because only
-/// there does the old implementation still exist (`record.Created`).
+/// Also where `runner_version` comes from, and on this arm that column is
+/// OBSERVED PROVENANCE rather than a pin: later rounds run whatever `claude`
+/// resolves to on PATH then (`record.Created`).
 pub fn probe(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -174,9 +120,8 @@ pub fn probe(
     return .{ .ok = proc.firstLine(said.stdout) };
 }
 
-/// Copy the rendered persona into the delegation, once, when it opens. The
-/// layout is the record's (`record.freezePersona`); the sentence about the limit
-/// is this runner's, because the limit is this runner's.
+/// Copy the rendered persona into the delegation, once, when it opens. The layout
+/// is the record's; the sentence about the limit is this runner's.
 pub fn freezePersona(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -203,17 +148,16 @@ pub const Session = struct {
     write_buf: [4096]u8 = undefined,
     next_control: u32 = 1,
     /// Is there a ceiling to hold this process to — re-checked against the echo
-    /// of every session start (see `checkInit`)? A bool rather than the three
-    /// words on purpose: `readonly` is the only one of them that is checked,
-    /// and the other two have nothing left to say once the flags are written.
+    /// of every session start (`checkInit`)? A bool rather than the three words:
+    /// `readonly` is the only one that is checked.
     readonly: bool = false,
     /// Has an `init` for this process been seen and accepted yet?
     confirmed: bool = false,
 
     pub fn close(self: *Session, io: std.Io) void {
         // Closing stdin is how a `-p` session in streaming input mode is told
-        // there is nothing more coming; the kill is what makes sure a round does
-        // not leave a process behind when it does not take the hint.
+        // there is nothing more coming; the kill makes sure a round leaves no
+        // process behind when it does not take the hint.
         if (self.child.stdin) |stdin| {
             var f = stdin;
             f.close(io);
@@ -225,8 +169,8 @@ pub const Session = struct {
 
 pub const Attempt = union(enum) { ok: Session, failed: []const u8 };
 
-/// Start the process that will hold this delegation's conversation for the whole
-/// of one background task.
+/// Start the process that holds this delegation's conversation for one whole
+/// background task.
 ///
 /// Nothing is read here: `system/init` — the echo the read-only check reads —
 /// arrives at the start of the first TURN, so the confirmation lives in
@@ -267,8 +211,8 @@ pub fn attach(
         "stream-json",
         "--verbose",
     });
-    // Opened by name the first time, resumed by name after that. The fact that
-    // decides which is on disk, so a round after a crash that opened nothing
+    // Opened by name the first time, resumed by name after that. The fact
+    // deciding which is on disk, so a round after a crash that opened nothing
     // still creates rather than resuming a session that is not there.
     const opened = blk: {
         base.access(io, try record.pathIn(alloc, delegation, started_name), .{}) catch break :blk false;
@@ -280,8 +224,8 @@ pub fn attach(
     if (model.len != 0) try argv.appendSlice(alloc, &.{ "--model", model });
     try argv.appendSlice(alloc, &.{ "--permission-mode", modeWord(permissions) });
     if (permissions.isReadonly()) {
-        // Availability, not approval: a tool that is not in the session cannot
-        // be reached, and it is the half `system/init` reports back.
+        // Availability, not approval: a tool that is not in the session cannot be
+        // reached, and it is the half `system/init` reports back.
         try argv.appendSlice(alloc, &.{ "--tools", try std.mem.join(alloc, ",", &readonly_tools) });
         // No `--mcp-config`, so this leaves the session with no MCP servers at
         // all — a configured one could otherwise contribute a tool nobody here
@@ -293,8 +237,8 @@ pub fn attach(
         .argv = argv.items,
         .stdin = .pipe,
         .stdout = .pipe,
-        // Dropped rather than captured: Claude's diagnostics are its own, and a
-        // pipe nobody drains is a process that blocks once it fills.
+        // Dropped rather than captured: a pipe nobody drains is a process that
+        // blocks once it fills.
         .stderr = .ignore,
     }) catch |err| {
         return .{ .failed = try std.fmt.allocPrint(
@@ -315,8 +259,7 @@ pub fn attach(
 
 // ── driving one round ───────────────────────────────────────────────────────
 
-/// One turn, read to its end (or cut short by an interrupt). The same facts
-/// `runner.zig` collects from a nulya round, in this harness's words.
+/// One turn, read to its end (or cut short by an interrupt).
 pub const RoundResult = struct {
     /// The last thing the agent said this round — the report.
     text: []const u8 = "",
@@ -329,17 +272,16 @@ pub const RoundResult = struct {
 
 /// Answer the next message waiting for this delegation.
 ///
-/// **One message, read and answered before it is dropped.** It is READ from
-/// `<d>/inbox/` and stays there; only "the turn ended" acks it (D4). So every
-/// other way out of here — an error, an interrupt, a killed process — leaves it
-/// exactly where it was, never inside a queue that died with a process. The
-/// cost is at-least-once: an ack that does not land means the next round hands
-/// the same message over again (`mailbox.zig`).
+/// ONE MESSAGE, READ AND ANSWERED BEFORE IT IS DROPPED. It is read from
+/// `<d>/inbox/` and stays there; only "the turn ended" acks it. So every other
+/// way out of here — an error, an interrupt, a killed process — leaves it exactly
+/// where it was. The cost is at-least-once: an ack that does not land means the
+/// next round hands the same message over again.
 ///
-/// **Marker before message, always.** An interrupt delivers its message and THEN
-/// writes the marker (D6), so both are on disk at once. Checking the marker first
-/// is what keeps the message where it is, rather than feeding it to a turn that
-/// is about to be thrown away.
+/// MARKER CHECKED BEFORE MESSAGE, always. An interrupt delivers its message and
+/// THEN writes the marker, so both are on disk at once; checking the marker first
+/// keeps the message where it is rather than feeding it to a turn about to be
+/// thrown away.
 pub fn driveRound(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -351,16 +293,16 @@ pub fn driveRound(
     var out: RoundResult = .{};
 
     const entry = (try mailbox.peekOne(alloc, io, base, delegation)) orelse {
-        // Nothing to answer. Not a failure and not a report: the caller's pending
-        // check decides whether to come round again.
+        // Not a failure and not a report: the caller's pending check decides
+        // whether to come round again.
         out.stopped = "idle";
         return out;
     };
     const message = entry.msg;
     // Left in the inbox until the turn ends, and dropped only then. Every early
-    // return goes through here having acked nothing, so a round that could not
-    // use the message leaves it where the next round finds it — in its place, in
-    // order, and still there if this process is killed (`mailbox.peekAfter`).
+    // return goes through here having acked nothing, so a round that could not use
+    // the message leaves it in its place, in order, and still there if this
+    // process is killed.
     var answered = false;
     defer if (answered) mailbox.ack(alloc, io, base, delegation, entry.name);
 
@@ -374,14 +316,13 @@ pub fn driveRound(
     };
 
     while (true) {
-        // ① The interrupt marker, at the granularity the stream gives for free:
-        // a model answering produces lines constantly.
+        // ① The interrupt marker, at the granularity the stream gives for free.
         if (mailbox.takeInterruptAt(io, base, interrupt_path)) {
             interrupt(alloc, io, sess) catch {};
             out.interrupted = true;
             // The turn this cut short consumed the message, and its answer is
-            // being thrown away on purpose — the interrupt IS the new direction,
-            // and the message behind it is still in the inbox.
+            // thrown away on purpose — the interrupt IS the new direction, and
+            // the message behind it is still in the inbox.
             answered = true;
             drainToEnd(alloc, sess);
             return out;
@@ -406,8 +347,8 @@ pub fn driveRound(
             if (try checkInit(alloc, sess, msg)) |refusal| {
                 out.failure = refusal;
                 // Refused, not deferred: driving it again would refuse again, and
-                // a message that comes back for ever is worse than one whose
-                // answer is "this delegation cannot run here".
+                // a message that comes back for ever is worse than one answered
+                // with "this delegation cannot run here".
                 answered = true;
                 return out;
             }
@@ -417,11 +358,10 @@ pub fn driveRound(
             continue;
         }
 
-        // The echo comes FIRST or the ceiling is not a ceiling. `system/init` is
-        // documented to open every turn ahead of everything else, so anything
-        // that means the model has begun working, seen before it, is a session
-        // whose shape was never confirmed — and this refuses rather than reads on
-        // and checks afterwards, which would be checking after the fact.
+        // The echo comes FIRST or the ceiling is not a ceiling. `system/init`
+        // opens every turn ahead of everything else, so anything meaning the
+        // model has begun working, seen before it, is a session whose shape was
+        // never confirmed. Refuse rather than check after the fact.
         if (sess.readonly and !sess.confirmed and workBegun(kind)) {
             out.failure = try std.fmt.allocPrint(
                 alloc,
@@ -442,9 +382,9 @@ pub fn driveRound(
         if (std.mem.eql(u8, kind, "result")) {
             answered = true;
             out.stopped = try alloc.dupe(u8, stringOf(msg, "subtype") orelse "");
-            // The final response text, which is what `result` carries and what
-            // the sub-agent was told its report would be. The last assistant
-            // block is the fallback for a turn that ended without one.
+            // The final response text, which the sub-agent was told its report
+            // would be. The last assistant block is the fallback for a turn that
+            // ended without one.
             if (stringOf(msg, "result")) |final| {
                 const trimmed = std.mem.trim(u8, final, " \t\r\n");
                 if (trimmed.len != 0) out.text = try alloc.dupe(u8, trimmed);
@@ -484,7 +424,7 @@ fn writeUserMessage(alloc: std.mem.Allocator, io: std.Io, sess: *Session, text: 
     try writeLine(io, sess, line.writer.buffered());
 }
 
-/// D6's stop, in this harness's dialect: the control channel the SDK's own
+/// The stop, in this harness's dialect: the control channel the SDK's own
 /// `interrupt()` uses. Fire and forget — the round's answer is already decided,
 /// and what matters is that the turn stops, not that we hear it did.
 fn interrupt(alloc: std.mem.Allocator, io: std.Io, sess: *Session) !void {
@@ -507,9 +447,9 @@ fn drainToEnd(alloc: std.mem.Allocator, sess: *Session) void {
     }
 }
 
-/// The fail-closed half of D10 (see the note at the top of this file): the echo
-/// `system/init` carries is the only thing Claude says back about what it applied,
-/// so it is what the ceiling is checked against. Null means "narrow enough".
+/// The fail-closed half: the `system/init` echo is the only thing Claude says
+/// back about what it applied, so it is what the ceiling is checked against. Null
+/// means "narrow enough".
 fn checkInit(alloc: std.mem.Allocator, sess: *Session, msg: std.json.ObjectMap) !?[]const u8 {
     if (!sess.readonly) return null;
 
@@ -551,8 +491,8 @@ fn checkInit(alloc: std.mem.Allocator, sess: *Session, msg: std.json.ObjectMap) 
     }
 
     // An MCP server is a tool face this side has never seen a name from. Asked
-    // for with `--strict-mcp-config` and checked here for the same reason as the
-    // rest: the flag is a request, the echo is the answer.
+    // for with `--strict-mcp-config` and checked here: the flag is a request, the
+    // echo is the answer.
     switch (msg.get("mcp_servers") orelse std.json.Value{ .null = {} }) {
         .array => |a| if (a.items.len != 0) return try std.fmt.allocPrint(
             alloc,
@@ -571,8 +511,7 @@ fn markStarted(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, delegatio
     });
 }
 
-/// The text blocks of one assistant message, joined. Null when it carried none —
-/// a turn is several of these, and only the ones with words are the answer.
+/// The text blocks of one assistant message, joined. Null when it carried none.
 fn assistantText(alloc: std.mem.Allocator, msg: std.json.ObjectMap) ?[]const u8 {
     const body = switch (msg.get("message") orelse std.json.Value{ .null = {} }) {
         .object => |o| o,
@@ -598,10 +537,9 @@ fn assistantText(alloc: std.mem.Allocator, msg: std.json.ObjectMap) ?[]const u8 
     return if (whole.len == 0) null else whole;
 }
 
-/// Does this line mean the model has started working? The set is deliberately
-/// the conversation's own message kinds: startup noise (hook events, plugin
-/// installs, informational notices) may legitimately precede `system/init`, and
-/// none of it can run a tool.
+/// Does this line mean the model has started working? Only the conversation's own
+/// message kinds: startup noise (hook events, plugin installs, notices) may
+/// legitimately precede `system/init`, and none of it can run a tool.
 fn workBegun(kind: []const u8) bool {
     inline for (.{ "assistant", "user", "stream_event", "tool_progress", "result" }) |working| {
         if (std.mem.eql(u8, kind, working)) return true;
@@ -638,9 +576,9 @@ fn next(alloc: std.mem.Allocator, sess: *Session) !?std.json.ObjectMap {
     while (true) {
         const line = sess.reader.interface.takeDelimiter('\n') catch |err| switch (err) {
             // Longer than we will hold: step over it rather than stop reading.
-            // Giving up here would stop draining a pipe Claude is still writing
-            // into, and then it blocks on stdout while we wait for a turn that
-            // has already ended.
+            // Giving up would stop draining a pipe Claude is still writing into,
+            // and then it blocks on stdout while we wait for a turn that has
+            // already ended.
             error.StreamTooLong => {
                 _ = sess.reader.interface.discardDelimiterInclusive('\n') catch return null;
                 continue;

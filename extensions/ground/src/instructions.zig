@@ -1,15 +1,10 @@
 //! The project's own instruction files, layered from the repository root down
 //! to this directory.
 //!
-//! Ported from tcode's `memory.rs` (`instruction_sources` + `append_sources`),
-//! minus the auto-memory half, which is a separate feature and not this one.
-//!
-//! **Only root → cwd, and that is the whole design.** The layers below this
-//! directory cannot be chosen here — which of them matter depends on which
-//! files the work turns out to touch — and nothing delivers them mechanically:
-//! the agent reads a deeper `AGENTS.md` itself when work first enters that
-//! area, prompted by `extensions/coding`. `docs/goals/ground.md` §4 records why
-//! the mechanical version was written and then withdrawn.
+//! Only root → cwd: layers below this directory are not delivered here — which
+//! of them matter depends on which files the work turns out to touch — the
+//! agent reads a deeper `AGENTS.md` itself when work enters that area,
+//! prompted by `extensions/coding`.
 
 const std = @import("std");
 const git = @import("git.zig");
@@ -76,40 +71,32 @@ pub fn render(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, repo: git
 /// caller stops there rather than opening a near-empty section for whatever
 /// comes next.
 fn one(w: *std.Io.Writer, source: Source, remaining: usize) !usize {
-    // The bytes are chosen BEFORE anything is measured against them, and that
-    // order is the whole of this function's correctness. The fence has to be
-    // longer than the longest backtick run in what is quoted, and what is
-    // quoted is the clipped body, never the file: `max_file_bytes` allows a
-    // megabyte, so measuring the file let a megabyte of backticks past the cut
-    // wrap 16 KB of text in two megabyte-long fences. The document then ran
-    // past `prompt.max_system_prompt_bytes` and `session new --prompt` refused
-    // a session that `render` had just reported as fine — a failure landing on
-    // somebody who could not see where it came from.
+    // The bytes must be clipped BEFORE the fence length is measured against
+    // them: the fence quotes the clipped body, never the whole file. Measuring
+    // the unclipped file (up to `max_file_bytes`, a megabyte) against a run of
+    // backticks past the cut would wrap 16 KB of text in a megabyte-long
+    // fence, pushing the document past `prompt.max_system_prompt_bytes` and
+    // making `session new --prompt` refuse a session `render` just reported
+    // as fine.
     const clipped = source.text.len > remaining;
     const end = if (clipped) boundaryAtOrBefore(source.text, remaining) else source.text.len;
     const body = source.text[0..end];
 
-    // Fencing is about document structure, not defence. These files carry their
-    // own `#` headings — this repository's CLAUDE.md opens with one — and
-    // unfenced they land at the same level as this document's own sections, so
-    // `# Nulya …` ends up sitting between `# Project instructions` and
-    // `# Environment` as though it were one of them. That is confusing to any
-    // reader before it is useful to an adversarial one.
-    //
-    // It is NOT a security boundary and must not be read as one: a file saying
-    // "ignore your instructions" says it just as loudly inside a fence, and it
-    // could say it in ordinary prose anyway. What answers that is the framing
-    // paragraph above, plus `extensions/coding`.
+    // Fencing is about document structure, not defence: these files carry
+    // their own `#` headings, and unfenced they would land at the same level
+    // as this document's own sections. It is NOT a security boundary — a file
+    // saying "ignore your instructions" says it just as loudly inside a fence
+    // — what answers that is the framing paragraph above, plus
+    // `extensions/coding`.
     const fence_len = fenceFor(body);
     try w.print("## {s}\n\n", .{source.display});
     try openFence(w, fence_len);
     try w.writeAll(body);
 
     // The marker goes OUTSIDE the fence: it is this harness speaking about the
-    // file, not a line the project wrote. And a silently halved instruction
-    // file is worse than none — the model follows what it read and never learns
-    // the rest exists — so it says what is missing, the same self-describing
-    // rule `read`/`grep` follow for clipped output.
+    // file, not a line the project wrote. A silently halved instruction file
+    // is worse than none — the model follows what it read and never learns
+    // the rest exists.
     try w.writeByte('\n');
     try w.splatByteAll('`', fence_len);
     try w.writeByte('\n');
@@ -159,19 +146,13 @@ fn consider(
     for (candidates) |candidate| {
         const path = try std.fmt.allocPrint(alloc, "{s}{s}", .{ read_at, candidate });
         const raw = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(max_file_bytes)) catch continue;
-        // Trimmed to decide whether the file says anything; quoted from the
-        // END only. Trailing whitespace before a closing fence is not content,
-        // and dropping it is what lets exactly one newline be written there.
-        // Leading whitespace is a different matter — indentation on the first
-        // line can be markdown structure — so what the project wrote at the
-        // front is what gets quoted.
+        // Trimmed only to decide whether the file says anything, and only at
+        // the end when quoting: trailing whitespace before a closing fence is
+        // not content, but leading whitespace can be markdown structure.
         if (std.mem.trim(u8, raw, " \t\r\n").len == 0) continue;
-        // Passed over rather than refused, and that is the difference between
-        // the two checks: `session new --prompt` rejects a file that is not
-        // text because nothing downstream can carry it, while here a project
-        // whose `AGENTS.md` is somehow binary should still get a session — one
-        // unusable instruction file costs a section, not a session. It is also
-        // what `read_to_string` gives tcode for free.
+        // Passed over, not refused: a project whose `AGENTS.md` is somehow
+        // binary should still get a session — one unusable instruction file
+        // costs a section, not a session.
         if (!std.unicode.utf8ValidateSlice(raw)) continue;
         try out.append(alloc, .{
             .display = try std.fmt.allocPrint(alloc, "{s}{s}", .{ show_at, candidate }),
@@ -183,12 +164,8 @@ fn consider(
 
 /// How many backticks the fence needs: one more than the longest run in the
 /// text, so nothing the file contains — including its own fenced code blocks —
-/// can close it early.
-///
-/// A LENGTH rather than a slice of some fixed literal. The first version
-/// returned `("`" ** 32)[0..n]`, which silently stopped being longer than the
-/// content at 32 backticks — a cap that made the property it existed for
-/// untrue in exactly the case somebody would construct on purpose.
+/// can close it early. Computed as a length rather than sliced from a
+/// fixed-size literal, so there is no run length at which this stops holding.
 fn fenceFor(text: []const u8) usize {
     var longest: usize = 0;
     var run: usize = 0;
@@ -224,9 +201,7 @@ test "a file cannot close the fence it is quoted in, at any length" {
     // be trusted to survive it.
     try std.testing.expectEqual(@as(usize, 6), fenceFor("see ````` here"));
 
-    // Past any fixed-literal cap. The point is that there is no length at which
-    // this quietly stops holding — which is exactly what the first version, a
-    // slice of a 32-backtick literal, did.
+    // Past any fixed-literal cap — there is no length at which this stops holding.
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const long = try arena.allocator().alloc(u8, 400);

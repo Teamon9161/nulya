@@ -1,35 +1,21 @@
 //! `std` — the file and search tools a coding session reaches for first, as one
 //! extension outside the kernel.
 //!
-//! **What it is.** Six tools in one binary — `read`, `write`, `append`, `edit`,
-//! `grep`, `glob` — dispatched here on `NULYA_TOOL`. Their
-//! behaviour is ported from tcode's tool crate, error text and numbers
-//! included: an error is written FOR the model (what went wrong, how to succeed
-//! next call), a small read is widened, a big one paginates itself, `write`
-//! will not clobber a file the model has not seen, `edit` replaces an exact
-//! unique string and teaches when it cannot, `grep` is smart-case with a
-//! per-file cap, `glob` sorts by mtime. See docs/goals/std.md for the contract.
+//! Six tools in one binary — `read`, `write`, `append`, `edit`, `grep`,
+//! `glob` — dispatched here on `NULYA_TOOL`, ported from tcode's tool crate.
+//! Compiled Zig rather than a script: a regex engine, a gitignore-aware
+//! walker and the whitespace-normalising fallbacks `edit` needs are not
+//! something a shell script carries, and a manifest holds one `interpreter`,
+//! so a script version would need a `.sh` and a `.ps1` of the same six tools
+//! that could never share a content-addressed version. DEFAULT-OFF: this
+//! ships with the repo but a user who wants it must build, activate, and pin
+//! the tools they want.
 //!
-//! **Why an extension and not builtins.** nulya has no "std tool" layer: a tool
-//! that is always in front of every model costs a `max_tools` slot and prefix
-//! tokens in every session, whether or not it is used. This ships with the repo,
-//! DEFAULT-OFF; a user who wants it builds it (`nulya ext build extensions/std
-//! --user`), activates it, and pins the tools they want in `[registry]
-//! pinned_native_tools` (`ext:std/read`, …). The id `std` is a name, not a rank.
-//!
-//! **Why compiled Zig.** A regex engine, a gitignore-aware walker and the
-//! whitespace-normalising fallbacks `edit` needs — none of which a shell script
-//! carries. And one version id across both shell dialects: a manifest holds one
-//! `interpreter`, so a script version would be a `.sh` and a `.ps1` of the same
-//! six tools that could never share a content-addressed version.
-//!
-//! **State.** A tool sees only its arguments, a sanitized environment and the
-//! working directory. The one thing these tools remember between calls — what
-//! the model has already read, so `read` can say "unchanged" and `write` can
+//! A tool sees only its arguments, a sanitized environment and the working
+//! directory. The one thing these tools remember between calls — what the
+//! model has already read, so `read` can say "unchanged" and `write` can
 //! refuse to overwrite the unseen — lives on disk in this session's scratch
-//! directory (`.nulya/scratch/<session>/std-freshness.jsonl`, `freshness.zig`),
-//! keyed by `NULYA_SESSION_ID`. Outside a session there is no such file and no
-//! gate.
+//! directory (`freshness.zig`), keyed by `NULYA_SESSION_ID`.
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
@@ -41,8 +27,8 @@ const edit = @import("edit.zig");
 const grep = @import("grep.zig");
 const glob = @import("glob.zig");
 
-/// On the `plain` wire stderr IS the failure message the model reads (DESIGN
-/// §7.3), so nothing may write there but `rpc.answer`. The vendored regex engine
+/// On the `plain` wire stderr IS the failure message the model reads, so
+/// nothing may write there but `rpc.answer`. The vendored regex engine
 /// logs its parse diagnostic through `std.log`, which would otherwise arrive
 /// above the teaching text — a library's debug line, in the sentence a model is
 /// meant to act on. Discarded rather than routed somewhere: this binary has no
@@ -111,7 +97,7 @@ fn dispatch(ctx: *const rpc.Ctx, name: []const u8, arguments: std.json.ObjectMap
 }
 
 /// The session this call runs in, from the id `session step` publishes to
-/// everything it runs (DESIGN §5.3); null outside a session.
+/// everything it runs; null outside a session.
 ///
 /// The ID, not the stem of `NULYA_SESSION`: what the freshness journal needs is
 /// an identity to key itself by, and a session whose workspace lives on another

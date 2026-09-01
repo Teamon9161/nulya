@@ -1,4 +1,4 @@
-//! The durable session end to end (DESIGN §3, §11, §14): a ledger that survives
+//! The durable session end to end: a ledger that survives
 //! the process that wrote it, the `nulya session *` driver surface, forks and
 //! their inherited identity, the `--stream` line protocol, per-step usage, and
 //! the outcome journal.
@@ -32,7 +32,7 @@ const runCliStdin = support.runCliStdin;
 const scaffoldAndBuild = support.scaffoldAndBuild;
 const shellCallArgs = support.shellCallArgs;
 
-// ── M1: durable ledger (DESIGN §3) ──────────────────────────────────────────
+// ── M1: durable ledger ──────────────────────────────────────────
 
 const sessions_dir_rel = ".nulya" ++ std.fs.path.sep_str ++ "sessions";
 const session_file_rel = sessions_dir_rel ++ std.fs.path.sep_str ++ "s.jsonl";
@@ -199,7 +199,7 @@ test "durable ledger: a tool result carrying non-utf-8 bytes is still a JSON str
     defer alloc.free(file);
 
     // Without the repair `std.json.Stringify` would have written the output as
-    // an array of numbers, which is not the shape DESIGN §3 describes.
+    // an array of numbers instead of a UTF-8 string.
     try std.testing.expect(std.unicode.utf8ValidateSlice(file));
 
     var lines = std.mem.splitScalar(u8, file, '\n');
@@ -458,7 +458,7 @@ test "durable ledger: a capability_note appended by a separate CLI process is re
     try std.testing.expect(reopened.l.containsNote("demo", version));
 }
 
-// ── M2a: `nulya session *` CLI (PLAN §3.2) ──────────────────────────────────
+// ── M2a: `nulya session *` CLI ──────────────────────────────────
 
 test "session cli: --max-steps is enforced by the kernel even when the driver asks for more" {
     const alloc = std.testing.allocator;
@@ -649,8 +649,8 @@ test "session cli: a shell-script driver runs a goal loop to completion" {
     const ws = tmp.dir;
 
     // A real driver script: create a session, then loop step/append until the
-    // model ends its turn (an assistant with an empty calls array). This is the
-    // /goal pattern from PLAN §3.2, expressed as ~10 lines of shell.
+    // model ends its turn (an assistant with an empty calls array), in ~10 lines
+    // of shell.
     const ps1_driver =
         \\$ErrorActionPreference = 'Stop'
         \\$n = $args[0]
@@ -753,7 +753,7 @@ test "session cli: drivers/goal runs the bundled driver — the model hands off,
     // its own `ext build` for both bundled extensions, but the compiles are shared
     // with the rest of the suite, so those builds answer "already built". Staging
     // them fills the workspace store, which is exactly the case `ext build` does
-    // NOT auto-trust — so `stageBundled` records the trust itself (DESIGN §9).
+    // NOT auto-trust — so `stageBundled` records the trust itself.
     alloc.free(try support.stageBundled(alloc, io, ws, "handoff"));
     alloc.free(try support.stageBundled(alloc, io, ws, "compact"));
 
@@ -855,7 +855,7 @@ test "session cli: drivers/goal runs the bundled driver — the model hands off,
     // The proposal itself is the CALL, and it is where the kernel put it: in the
     // parent's ledger. Nothing was written beside it — the directory this used to
     // need does not exist, which is what makes the same signal readable by a
-    // driver whose workspace is on another machine (goals/remote-env.md §3.2).
+    // driver whose workspace is on another machine.
     try std.testing.expect(std.mem.indexOf(u8, events.stdout, "\"tool\":\"handoff\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, events.stdout, support.launch.ScriptedProvider.handoff_sentinel) != null);
     try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/handoffs", .{}));
@@ -1032,7 +1032,7 @@ test "session cli: --stream emits the transient line protocol and leaves the led
     try std.testing.expectEqual(@as(u8, 0), step.code);
 
     // Every stdout line is one JSON object — a driver can parse the stream
-    // without ever meeting a bare diagnostic line (tui.md §2.2).
+    // without ever meeting a bare diagnostic line.
     var lines = std.mem.tokenizeAny(u8, step.stdout, "\r\n");
     var first: ?[]const u8 = null;
     var last: []const u8 = "";
@@ -1114,7 +1114,7 @@ test "session cli: --stream emits the transient line protocol and leaves the led
     try std.testing.expect(std.mem.indexOf(u8, plain.stdout, "\"stream\":") == null);
 }
 
-// ── M5c: multiple extension store roots (DESIGN §7.2) ───────────────────────
+// ── M5c: multiple extension store roots ───────────────────────
 
 test "session cli: list --json reports parent, event count, summed usage and the latest outcome" {
     const alloc = std.testing.allocator;
@@ -1375,8 +1375,8 @@ test "session cli: --with pins a built-but-not-activated version into one sessio
         defer alloc.free(activated.stdout);
         try std.testing.expectEqual(@as(u8, 0), activated.code);
 
-        // Now that it is active it enters EVERY future session's system blocks
-        // (DESIGN §7.5), and the listing says so out loud.
+        // Now that it is active it enters EVERY future session's system blocks,
+        // and the listing says so out loud.
         const list = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "list" });
         defer alloc.free(list.stdout);
         try std.testing.expect(std.mem.indexOf(u8, list.stdout, "[skills prompt]") != null);
@@ -1600,11 +1600,10 @@ test "session cli: --prompt freezes a file's bytes into the header, blocks land 
 test "session cli: --prompt refuses a file whose name is not valid UTF-8, before a session exists (goals/review-fork-remote.md §2)" {
     // The `.source` label is `std.fs.path.stem(path)`, computed from the argv
     // path string itself and written into the same header JSON the prompt's
-    // text is — so it needs the same guarantee, for the same reason (BUGS #22:
-    // `std.json.Stringify` writes a non-UTF-8 `[]const u8` as an array of
-    // numbers, not a string). Constructing the case needs a real filesystem
-    // entry whose name is invalid UTF-8, which POSIX permits and Windows's
-    // UTF-16-backed paths cannot represent.
+    // text is — so it needs the same guarantee: `std.json.Stringify` writes a
+    // non-UTF-8 `[]const u8` as an array of numbers, not a string. Constructing
+    // the case needs a real filesystem entry whose name is invalid UTF-8, which
+    // POSIX permits and Windows's UTF-16-backed paths cannot represent.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
@@ -1742,7 +1741,7 @@ test "durable ledger: assistant events carry per-step usage, legacy lines read a
     try std.testing.expect(plain.view()[1].assistant.usage == null);
 }
 
-// ── M5a: the session-outcome journal (DESIGN §3.3) ──────────────────────────
+// ── M5a: the session-outcome journal ──────────────────────────
 
 test "session cli: outcome appends a verdict to the outcomes journal, rejects a bad verdict and an unknown session, and works while another process holds the session lock" {
     const alloc = std.testing.allocator;
@@ -1873,9 +1872,9 @@ test "session cli: outcome appends a verdict to the outcomes journal, rejects a 
     try std.testing.expect(std.mem.indexOf(u8, bytes, "partial") == null);
 }
 
-// ── M2b: script extensions (DESIGN §7.1) ────────────────────────────────────
+// ── M2b: script extensions ────────────────────────────────────
 
-// ── §9.5: credentials — the file, and the refusal ───────────────────────────
+// ── credentials — the file, and the refusal ─────────────────────────────────
 
 test "session new: a profile whose credential resolves nowhere refuses instead of freezing scripted, and the user credential file answers api_key_env by name" {
     const alloc = std.testing.allocator;
@@ -1913,7 +1912,7 @@ test "session new: a profile whose credential resolves nowhere refuses instead o
     }
 
     // ② The same profile, the same config, one new file: the key by the very
-    // name `api_key_env` already declares (DESIGN §9.5). No profile edit, and no
+    // name `api_key_env` already declares. No profile edit, and no
     // second naming scheme.
     const home = try support.testHome(alloc, io, ws);
     defer alloc.free(home);
@@ -1938,8 +1937,8 @@ test "session new: a profile whose credential resolves nowhere refuses instead o
     defer alloc.free(header);
     try std.testing.expect(std.mem.indexOf(u8, header, "\"provider\":\"openai\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "\"api_key_env\":\"OPENAI_API_KEY\"") != null);
-    // The header holds the NAME and never the value (§3.4) — the file changed
-    // where a key can be found, not what a session records.
+    // The header holds the NAME and never the value — the file changed where a
+    // key can be found, not what a session records.
     try std.testing.expect(std.mem.indexOf(u8, header, "sk-e2e-from-file") == null);
 
     // …and `config show` reports the new source without ever printing the value.
@@ -1987,10 +1986,10 @@ const rebind_config =
 ;
 
 test "session cli: rebind moves the rest of a session onto another model, and refuses what it cannot honour" {
-    // goals/model-rebind.md: the header still freezes one identity and is never
-    // rewritten — the change is an appended event, deposited like a user turn
-    // and drained at the next step boundary, so the transcript continues in the
-    // same file on a different model.
+    // The header still freezes one identity and is never rewritten — the change
+    // is an appended event, deposited like a user turn and drained at the next
+    // step boundary, so the transcript continues in the same file on a different
+    // model.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 

@@ -28,10 +28,10 @@ pub fn renderEnvironment(
     if (try osRelease(alloc, io)) |name| try w.print(" ({s})", .{name});
     try w.writeAll("\n");
 
-    // Not "which shells exist" but which command line the `shell` tool actually
-    // runs (DESIGN §8). The parent Environment resolves this once and passes the
-    // result through the sanitized child environment; do not duplicate that
-    // decision here. The fallback keeps standalone ground binaries useful.
+    // Not "which shells exist" but which command line the `shell` tool
+    // actually runs: the parent Environment resolves this once and passes
+    // the result through `NULYA_SHELL_DIALECT` in the sanitized child
+    // environment; the fallback below keeps standalone ground binaries useful.
     const shell = if (env.get("NULYA_SHELL_DIALECT")) |dialect|
         if (std.mem.eql(u8, dialect, "bash"))
             "bash -lc"
@@ -78,19 +78,14 @@ pub fn renderGit(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, repo: 
     }
     // `%<(240,trunc)` is a courtesy, not a bound: it cuts at 240 DISPLAY
     // COLUMNS, not 240 bytes, and a column is not a fixed number of bytes in
-    // UTF-8. It was once assumed to bound the subject to ~960 bytes worst
-    // case (4 bytes/column) — that is wrong, measured against real git
-    // (2.50.1): a subject built from zero-width combining marks (which occupy
-    // a column each without widening it — U+0301 repeated) printed 2.2 MB
-    // through this exact format string, not 960 bytes. Nothing here failed as
-    // a result only because `main.zig`'s `clipToBudget` is a second,
-    // byte-counted backstop over the WHOLE assembled document — that is where
-    // the actual guarantee against a document past
-    // `prompt.max_system_prompt_bytes` lives now. This format string still
-    // earns its place for the ordinary case: it keeps short subjects
-    // unpadded (`ask` trims what padding it does add) and long-but-honest
-    // ones from dominating the section, it is just not what makes the size
-    // invariant hold.
+    // UTF-8. Measured against real git (2.50.1), a subject built from
+    // zero-width combining marks (each occupies a column without widening
+    // it — U+0301 repeated) printed 2.2 MB through this exact format string,
+    // not the ~960 bytes a 4-bytes/column estimate predicts. The actual
+    // ceiling on the whole document is `main.zig`'s `clipToBudget`, a
+    // byte-counted backstop; this format string only keeps the ordinary case
+    // tidy (short subjects unpadded, long-but-honest ones from dominating the
+    // section).
     if (git.ask(alloc, io, &.{ "log", "-1", "--format=%h %<(240,trunc)%s" })) |head| {
         if (head.len != 0) try w.print("last commit: {s}\n", .{head});
     }

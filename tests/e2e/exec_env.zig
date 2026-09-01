@@ -1,5 +1,4 @@
-//! `session new --env <spec>`: WHERE a session's `shell` commands run
-//! (DESIGN §8).
+//! `session new --env <spec>`: WHERE a session's `shell` commands run.
 //!
 //! Three things are pinned here, and only these three, because they are the
 //! ones a mistake would make invisible:
@@ -13,9 +12,9 @@
 //!      on this host. That is the whole safety property of the feature.
 //!
 //! `wsl` is the only non-local exec target left (`ssh:<destination>` was
-//! retired 2026-08-30, goals/remote-env.md §7.1 — `--env remote:ssh:<dest>`
-//! moves the whole workspace instead, and is exercised in `remote.zig`), and
-//! `execTargetSupportedOnHost` accepts any `wsl:<distro>` spelling on Windows
+//! retired — `--env remote:ssh:<dest>` moves the whole workspace instead, and
+//! is exercised in `remote.zig`), and `execTargetSupportedOnHost` accepts any
+//! `wsl:<distro>` spelling on Windows
 //! whether or not that distro actually exists — so property 3 is pinned with a
 //! distro name that does not, WITHOUT needing an actual reachable distribution:
 //! `wsl.exe` itself reports the failure, and that is not this host running the
@@ -37,9 +36,8 @@ const readSessionFile = support.readSessionFile;
 test "session new --parent inherits environment and remote_workspace from the frozen header, and --env local forks back to nothing" {
     // `remote:exec:` needs only a non-empty argv word to PARSE — it is never
     // actually spawned here, because `--bare` composes no compiled extension
-    // member, and `composition.ExecTargetProbe` only connects when a compiled
-    // member is in play (DESIGN §8.2, the doc comment on `RemoteTargetProbe`
-    // above). So this pins the header-inheritance property without a real peer.
+    // member, and `ExecTargetProbe` only connects when a compiled member is in
+    // play. So this pins the header-inheritance property without a real peer.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -120,7 +118,7 @@ fn countSessions(io: std.Io, ws: std.Io.Dir) !usize {
 test "session new --parent: an inherited legacy ssh: environment is refused with a pointer at remote:ssh:, and names the parent" {
     // Today's `session new --env ssh:…` is refused outright, so the only way
     // this spelling reaches `--parent` inheritance is a header already on disk
-    // from before the retirement (goals/remote-env.md §7.1) — built here
+    // from before the retirement — built here
     // directly rather than through the CLI, which is exactly the case.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -201,7 +199,7 @@ test "session new --env: a bad spec creates nothing, a good one is frozen, and t
     }
 
     // ①b The retired `ssh:<destination>` exec-target spelling is refused with a
-    // SPECIFIC pointer at its replacement (goals/remote-env.md §7.1) — not just
+    // SPECIFIC pointer at its replacement — not just
     // folded into the generic "unrecognized" message above.
     {
         const err = try runCliStderr(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", "ssh:nobody@e2e.invalid" }, &.{});

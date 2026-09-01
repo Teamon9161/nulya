@@ -1,4 +1,4 @@
-//! The shared file layer under Nulya's durable JSONL journals (DESIGN §3.3).
+//! The shared file layer under Nulya's durable JSONL journals.
 //!
 //! Two journals live in the workspace's `.nulya/`: tool usage (`tool_stats.zig`)
 //! and session outcomes (`outcome.zig`); a third, trusted stores (`trust.zig`),

@@ -2,15 +2,11 @@
 //! machine.
 //!
 //! **Why this exists.** The Claude runner (`extensions/agent/src/claude.zig`) is
-//! a conversation with another harness over its stdio. Everything worth pinning
-//! down about it — that a delegation opens a session under a name we minted and
-//! resumes it by that name, that a message waits in `<d>/inbox/` until the runner
-//! writes it into stdin, that the interrupt marker becomes a `control_request`,
-//! that a read-only agent is refused when the echo comes back wider — is about
-//! THIS SIDE of that conversation. None of it needs a model, and a test that
-//! needed one would be a test nobody runs. It is also the only way to test this
-//! here at all: `claude` is the harness this repository is developed in, and an
-//! e2e that spawned a real one would be spending somebody's tokens on a fixture.
+//! a conversation with another harness over its stdio, and everything worth
+//! pinning down about it — session naming and resume, messages queued in
+//! `<d>/inbox/` until written to stdin, the interrupt marker becoming a
+//! `control_request`, a read-only agent refused when the echo comes back wider
+//! — is about THIS SIDE of that conversation, needing no real model.
 //!
 //! **What it answers.** `--version` prints one line and exits. Otherwise it reads
 //! stdin as newline-delimited JSON and, for each `{"type":"user"}`, emits one
@@ -18,14 +14,13 @@
 //! given (so a test can tell which message produced which report), and `result`.
 //!
 //! **It never reads while a turn is running, and that is deliberate** — the same
-//! choice `tests/fake_codex.zig` made and for the same reason: watching stdin
-//! mid-turn needs a thread or a non-blocking read to avoid deadlocking against a
-//! client that is itself blocked reading. What a test needs instead is EVIDENCE
-//! that the runner sent the right thing at the right moment, and that is what the
-//! log is: the whole command line at launch, and one line per message stdin
-//! carried — the ones sent mid-turn as soon as the turn is over. A turn's length
-//! is set from outside (`FAKE_CLAUDE_HOLD`), so a test decides when it ends
-//! rather than racing it.
+//! choice `tests/fake_codex.zig` made: watching stdin mid-turn needs a thread or
+//! a non-blocking read to avoid deadlocking against a client itself blocked
+//! reading. What a test needs instead is EVIDENCE that the runner sent the right
+//! thing at the right moment, and that is what the log is: the whole command
+//! line at launch, and one line per message stdin carried — mid-turn ones as
+//! soon as the turn is over. A turn's length is set from outside
+//! (`FAKE_CLAUDE_HOLD`), so a test decides when it ends rather than racing it.
 //!
 //! **How a test bends it**, through the environment, because that is what reaches
 //! a process spawned three levels down:

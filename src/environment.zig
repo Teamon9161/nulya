@@ -1,16 +1,15 @@
-//! Execution Environment boundary (DESIGN §8, §9).
+//! Execution Environment boundary.
 //!
 //! shell/extension execution goes through an `Environment`, never a raw process
 //! spawn. This is the single seam that:
-//!   1. picks the shell dialect (bash | powershell) — DESIGN §6.1;
+//!   1. picks the shell dialect (bash | powershell);
 //!   2. sanitizes the child environment so host secrets (API keys, SSH agent,
-//!      cloud creds) never reach an AI-authored subprocess — DESIGN §9;
-//!   3. later swaps `local` execution for sandbox/remote without touching a
-//!      single line of tool code — DESIGN §8.
+//!      cloud creds) never reach an AI-authored subprocess;
+//!   3. swaps `local` execution for sandbox/remote without touching a single
+//!      line of tool code.
 //!
-//! v0.1 ships only the `local` backend. The interface is in place so new
-//! backends are drop-in; `authority` stays coupled to the environment (shell and
-//! extension share one `session_authority` in v0.1, DESIGN §9).
+//! Authority stays coupled to the environment: shell and extension share one
+//! `session_authority`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -20,16 +19,13 @@ const ext_exec = @import("extension/exec.zig");
 const protocol = @import("extension/protocol.zig");
 const process_tree = @import("environment/tree.zig");
 const testkit = @import("extension/testkit.zig");
-// Aliased so the two run paths keep naming the primitives they use, not the
-// module they now live in.
 const Tree = process_tree.Tree;
 const waitBounded = process_tree.waitBounded;
 
 /// The host process environment. std 0.16 removed the ambient global environ
 /// (`.{ .block = .global }`): the OS block is handed to `main` via
 /// `std.process.Init` and to the test runner via `std.testing.environ`, and
-/// nowhere else. `main` registers its copy here once at startup; this module is
-/// the keeper because sanitizing that environment is already its job (§9).
+/// nowhere else. `main` registers its copy here once at startup.
 var host_environ: std.process.Environ = .empty;
 var host_environ_registered = false;
 
@@ -38,11 +34,9 @@ pub fn registerHostEnviron(env: std.process.Environ) void {
     host_environ_registered = true;
 }
 
-/// The host environment as a fresh `Map` (caller deinits) — what
-/// `createMap(.{ .block = .global })` returned before the global was removed.
-/// Test builds fall back to the test runner's environ, so in-process tests see
-/// the real environment exactly as they used to; a production process whose
-/// main never registered gets the empty environment, never a hidden global.
+/// The host environment as a fresh `Map` (caller deinits). Test builds fall back
+/// to the test runner's environ; a production process whose main never
+/// registered gets the EMPTY environment, never a hidden global.
 pub fn hostEnvironMap(alloc: std.mem.Allocator) !std.process.Environ.Map {
     if (host_environ_registered) return host_environ.createMap(alloc);
     if (builtin.is_test) return std.testing.environ.createMap(alloc);
@@ -61,29 +55,19 @@ pub const Dialect = enum {
     }
 };
 
-/// WHERE a `shell` command runs (DESIGN §8).
+/// WHERE a `shell` command runs.
 ///
-/// A third axis, orthogonal to the two that were already here. `Dialect` says
-/// which language the command is written in; `config.EnvironmentBackend` says
-/// how confined it is (still `local` only — that is the sandbox axis, PLAN
-/// §3.8). This one says which machine's shell reads it. A WSL distribution is
-/// neither narrower nor wider than the host: it is ELSEWHERE, which is why it
-/// is not a fourth `EnvironmentBackend` word.
-///
-/// The `ssh:<destination>` spelling this union used to carry was retired
-/// 2026-08-30 (goals/remote-env.md §7.1): it wrapped one command while the
-/// workspace, extensions and every spill file stayed on the host, which was
-/// dishonest the moment anything beyond `shell` mattered — the same
-/// machine-splitting `runExtension` exists to end (§8.2). `remote:ssh:<dest>`
-/// (`environment/remote/mod.zig`) is the replacement when the WHOLE workspace
-/// should move; a session that only ever wants `shell` on another Windows
-/// machine's WSL keeps that word here.
+/// A third axis: `Dialect` says which language the command is written in,
+/// `config.EnvironmentBackend` says how confined it is, this says which
+/// machine's shell reads it. A WSL distribution is neither narrower nor wider
+/// than the host — it is ELSEWHERE, not a fourth `EnvironmentBackend` word.
 ///
 /// **Only the `shell` builtin's commands move.** Extension processes, the task
 /// supervisor, the extension store, the journals and every spill file stay on
-/// the host: those are this harness's own machinery, they are built for this
-/// host, and a `remote` shell does not make the harness remote. The consequences
-/// are honest rather than hidden — see `shellArgv` and DESIGN §8.
+/// the host — a `remote` shell does not make the harness remote. The
+/// consequences are spelled out at `shellArgv`. Moving the WHOLE workspace
+/// (including over ssh, `remote:ssh:<dest>`) is `--env remote:…`, a second
+/// `Environment` implementation in `environment/remote/mod.zig`.
 pub const ExecTarget = union(enum) {
     local,
     /// `wsl.exe [-d <distro>] -e bash -lc …`; an empty payload means WSL's
@@ -121,22 +105,19 @@ pub fn execTargetSupportedOnHost(target: ExecTarget) bool {
 }
 
 /// The spelling a session freezes: `local` and the empty string are the same
-/// answer, and the header records the absence rather than the word (so a
-/// session that never asked for a target reads back exactly as every session
-/// written before this existed did). Everything else is stored verbatim — the
-/// kernel does not rewrite what the operator typed.
+/// answer, and the header records the ABSENCE rather than the word, so a header
+/// written before this column existed reads back identically. Everything else is
+/// stored verbatim — the kernel does not rewrite what the operator typed.
 pub fn normalizeExecSpec(spec: []const u8) []const u8 {
     return if (std.mem.eql(u8, spec, "local")) "" else spec;
 }
 
 /// A Windows path as a WSL distribution sees it: `C:\code\x` → `/mnt/c/code/x`.
 ///
-/// Null when the path is not drive-lettered — a UNC share has no `/mnt/` name,
-/// and inventing one would be a guess. The caller then passes the path through
-/// UNTRANSLATED on purpose: `cd 'C:\…'` fails inside the distro with the
-/// distro's own message, which is a truthful error the model can read, whereas
-/// silently dropping the `cd` would run the command in some other directory and
-/// call it a success.
+/// Null when the path is not drive-lettered — a UNC share has no `/mnt/` name.
+/// The caller then passes the path through UNTRANSLATED: `cd 'C:\…'` fails
+/// inside the distro with the distro's own message, whereas dropping the `cd`
+/// would run the command in some other directory and call it a success.
 pub fn wslPath(alloc: std.mem.Allocator, path: []const u8) !?[]u8 {
     if (path.len < 2 or path[1] != ':' or !std.ascii.isAlphabetic(path[0])) return null;
     if (path.len > 2 and path[2] != '\\' and path[2] != '/') return null;
@@ -183,8 +164,8 @@ pub const ShellOutcome = struct {
     stderr: []u8,
     exit_code: u8,
     /// The wall-clock budget ran out and the child was killed. `stdout`/`stderr`
-    /// are then whatever had been captured before the kill (base-tools.md §3:
-    /// a timeout still returns the output it already has).
+    /// are then whatever had been captured before the kill: a timeout still
+    /// returns the output it already has.
     timed_out: bool = false,
 
     pub fn deinit(self: ShellOutcome, alloc: std.mem.Allocator) void {
@@ -198,29 +179,25 @@ pub const ShellRequest = struct {
     cwd: []const u8,
     /// Runner-level capture cap; the `emit` budget does the model-facing trim.
     max_output_bytes: usize,
-    /// Wall-clock cap for the command (`tool.Timeouts`, base-tools.md §3). The
-    /// `shell` tool always sets one; `null` runs unguarded and is for tests that
-    /// are about something else.
+    /// Wall-clock cap for the command (`tool.Timeouts`). The `shell` tool always
+    /// sets one; `null` runs unguarded and is for tests about something else.
     timeout_ms: ?u32 = null,
 };
 
-/// One oneshot extension invocation (DESIGN §7.3). `request_json` is this
-/// call's arguments object, written to the child's stdin; `stdout` on return is
-/// exactly what the child printed before exiting, which IS the tool's result —
-/// this seam never interprets it.
+/// One oneshot extension invocation. `request_json` is this call's arguments
+/// object, written to the child's stdin; `stdout` on return is exactly what the
+/// child printed before exiting, which IS the tool's result — this seam never
+/// interprets it.
 ///
 /// It names an IDENTITY, not a path. Which file to spawn, which entry variant
 /// this OS uses, which interpreter, and whether the version still matches its
-/// seal are all answers only the machine holding the bytes can give — so they
-/// are given there, by `extension/exec.zig`, on both sides of the seam
-/// (goals/remote-env.md §3.1). A host that resolved a path here would be
-/// modelling another machine's file system, and would verify its own copy while
-/// a different one ran.
+/// seal are all answers only the machine holding the bytes can give, so they are
+/// given there, by `extension/exec.zig`, on both sides of the seam. A host that
+/// resolved a path here would verify its own copy while a different one ran.
 pub const ExtensionRequest = struct {
     /// The extension, and the FROZEN VERSION that serves this call — for a
-    /// session whose tools run elsewhere that is the header's `exec_version`
-    /// (DESIGN §3.4), which is why the choice is made once at freeze time and
-    /// merely carried here.
+    /// session whose tools run elsewhere that is the header's `exec_version`.
+    /// Chosen once at session freeze time and merely carried here.
     id: []const u8,
     version: []const u8,
     /// The tool name the frozen manifest declared; it reaches the child as
@@ -232,17 +209,16 @@ pub const ExtensionRequest = struct {
     /// `NULYA_ARG_<k>` variables the executing side derives (`protocol.callEnv`).
     request_json: []const u8,
     max_output_bytes: usize,
-    /// Wall-clock cap for the oneshot call (`tool.Timeouts`, base-tools.md §3).
-    /// `null` disables the guard; callers should only do that in controlled tests.
+    /// Wall-clock cap for the oneshot call (`tool.Timeouts`). `null` disables the
+    /// guard; callers should only do that in controlled tests.
     timeout_ms: ?u32 = tool.Timeouts.extension_ms,
     /// Workspace-relative file the child may write UI-only presentation JSON
     /// into. It is not stdout and never reaches the model.
     ///
     /// A remote environment deliberately does NOT forward it: who READS a file
-    /// decides which machine it lives on (goals/remote-env.md §3.2), and this
-    /// one's reader is the front end, on the host. A package asked to render
-    /// over there simply sees no presentation file and renders nothing, which is
-    /// the same thing it does when the driver offers none.
+    /// decides which machine it lives on, and this one's reader is the front end,
+    /// on the host. A package asked to render over there sees no presentation
+    /// file and renders nothing, exactly as when the driver offers none.
     presentation_file: ?[]const u8 = null,
 };
 
@@ -259,11 +235,10 @@ pub const ExtensionOutcome = struct {
     }
 };
 
-/// A command to run DETACHED, outliving the step process that asked for it
-/// (DESIGN §6.1). Deliberately unlike `ShellRequest`: there is no capture cap
-/// (the whole of the output goes to the task's log file), and `timeout_ms` has
-/// no default and no ceiling — a task that outlives its step is the point, and
-/// what ends one is `nulya task kill`.
+/// A command to run DETACHED, outliving the step process that asked for it.
+/// Deliberately unlike `ShellRequest`: there is no capture cap (the whole output
+/// goes to the task's log file), and `timeout_ms` has no default and no ceiling
+/// — what ends such a task is `nulya task kill`.
 pub const TaskRequest = struct {
     command: []const u8,
     cwd: []const u8,
@@ -273,8 +248,8 @@ pub const TaskRequest = struct {
 /// What starting a task tells the caller, immediately: which task this is and
 /// where to watch it. Both strings are caller-owned.
 pub const TaskStart = struct {
-    /// The task's FULL name, `<session-id>/t<N>` (DESIGN §6.1). Full so that a
-    /// task whose report was retargeted to another session still names itself
+    /// The task's FULL name, `<session-id>/t<N>`. Full so that a task whose
+    /// report was retargeted to another session still names itself
     /// unambiguously, and so no workspace-wide counter is needed.
     task_id: []u8,
     /// The log accumulating this task's stdout+stderr, relative to the workspace.
@@ -286,14 +261,12 @@ pub const TaskStart = struct {
     }
 };
 
-/// The durable session an environment's background tasks belong to (DESIGN §8),
-/// when it has one. Both halves are decided by the SHELL layer and handed down —
-/// the same division of labour as `StepContext.scratch_dir`, which the kernel
-/// only writes into: `session_path` is the file the supervisor deposits its
-/// `task_finished` into (and whose stem names the task), `tasks_dir` is where
-/// this workspace keeps that session's tasks (`launch.sessionTasksDir`). Absent
-/// means `startShellTask` has nowhere to report to, and says so instead of
-/// guessing a session.
+/// The durable session an environment's background tasks belong to, when it has
+/// one. Both halves are decided by the shell layer and handed down:
+/// `session_path` is the file the supervisor deposits its `task_finished` into
+/// (and whose stem names the task), `tasks_dir` is where this workspace keeps
+/// that session's tasks (`launch.sessionTasksDir`). Absent means `startShellTask`
+/// has nowhere to report to, and says so instead of guessing a session.
 pub const SessionRef = struct {
     session_path: []const u8,
     tasks_dir: []const u8,
@@ -301,7 +274,7 @@ pub const SessionRef = struct {
 
 /// The environment handle carried in every tool's `ToolContext`. The vtable
 /// covers process execution and dialect. Fixed-shape — nothing grows with the
-/// conversation, so it is safe in `ToolContext` (DESIGN §7.6).
+/// conversation, so it is safe in `ToolContext`.
 pub const Environment = struct {
     io: std.Io,
     ptr: *anyopaque,
@@ -329,37 +302,29 @@ pub const Environment = struct {
 
     /// Start `req` detached and return at once. The ONE entry point for a
     /// background task: `shell {background:true}` and `nulya task run` both
-    /// arrive here, so allocating the slot and launching the supervisor exist
-    /// in exactly one place. `error.NoDurableSession` when this environment
-    /// belongs to no session — there would be nowhere to report the result.
+    /// arrive here. `error.NoDurableSession` when this environment belongs to no
+    /// session — there would be nowhere to report the result.
     pub fn startShellTask(self: Environment, alloc: std.mem.Allocator, req: TaskRequest) !TaskStart {
         return self.vtable.startShellTask(self.ptr, alloc, req);
     }
 
     /// Write `bytes` into this session's workspace at `rel_path`, creating the
-    /// parent directories. The fourth verb, and the one `emit` spills through
-    /// (DESIGN §8, goals/remote-env.md §3.2).
+    /// parent directories. The fourth verb, and the one `emit` spills through.
     ///
     /// `rel_path` is workspace-relative and spelled with `/` — it is the SAME
-    /// string the model reads in the footer that points at the file, which is
-    /// the whole invariant this verb buys: where the bytes land and where the
-    /// reader is sent are one string, on whichever machine the workspace is.
-    /// A footer pointing at the harness's disk in a session whose commands run
-    /// elsewhere is a sentence the model cannot act on, and `emit`'s third
-    /// guarantee ("the full output is always on disk and the text points at it")
-    /// would be false with it.
+    /// string the model reads in the footer that points at the file. Where the
+    /// bytes land and where the reader is sent are one string, on whichever
+    /// machine the workspace is.
     ///
-    /// No allocator: an implementation that needs one has its own (the channel
-    /// has), and every caller here is handing over bytes it already owns.
+    /// No allocator: an implementation that needs one has its own, and every
+    /// caller here is handing over bytes it already owns.
     pub fn putWorkspaceFile(self: Environment, rel_path: []const u8, bytes: []const u8) !void {
         return self.vtable.putWorkspaceFile(self.ptr, rel_path, bytes);
     }
 
-    /// This environment as the sink `emit` spills through. No adapter struct
-    /// anywhere: `emit.FileSink` is exactly "a pointer and that one function",
-    /// which is what a vtable entry already is, so the two are the same value
-    /// twice. If either signature moves the other has to, and the compiler says
-    /// so at this line.
+    /// This environment as the sink `emit` spills through. `emit.FileSink` is
+    /// the same shape as the vtable entry, so there is no adapter: if either
+    /// signature moves, the compiler says so at this line.
     pub fn fileSink(self: Environment) emit.FileSink {
         return .{ .ptr = self.ptr, .writeFn = self.vtable.putWorkspaceFile };
     }
@@ -412,16 +377,15 @@ fn isWindowsBashLauncherDir(path: []const u8) bool {
 }
 
 /// The host environment as a child of this process may see it: every
-/// secret-shaped variable stripped (`isSecretKey`, physics #6), plus the one
-/// thing children are ADDED (`NULYA_EXE`). Caller deinits.
+/// secret-shaped variable stripped (`isSecretKey`), plus the one thing children
+/// are ADDED (`NULYA_EXE`). Caller deinits.
 ///
-/// One implementation, two callers, and that is the point: the local backend
-/// builds its children's environment from this, and so does the remote
-/// backend's transport — so a `wsl.exe` / `ssh` / `docker` process this harness
-/// starts can never be handed a key, whatever `WSLENV` or `SendEnv` is set to.
-/// The remote AGENT runs this same function on its own machine for its own
-/// children, which is why the denylist holds on both ends without a second
-/// implementation of it (goals/remote-env.md §3.5).
+/// One implementation, two callers: the local backend builds its children's
+/// environment from this, and so does the remote backend's transport — so a
+/// `wsl.exe` / `ssh` / `docker` process this harness starts can never be handed
+/// a key, whatever `WSLENV` or `SendEnv` is set to. The remote agent runs this
+/// same function on its own machine for its own children, so the denylist holds
+/// on both ends without a second implementation.
 pub fn sanitizedChildEnv(alloc: std.mem.Allocator, io: std.Io) !std.process.Environ.Map {
     var host = try hostEnvironMap(alloc);
     defer host.deinit();
@@ -434,15 +398,12 @@ pub fn sanitizedChildEnv(alloc: std.mem.Allocator, io: std.Io) !std.process.Envi
         try sanitized.put(entry.key_ptr.*, entry.value_ptr.*);
     }
 
-    // Children get to find the harness that spawned them. A driver written as
-    // an extension (`extensions/compact`, PLAN §3.6) has to run `nulya session
-    // append|step|new`, and it cannot assume a `nulya` on PATH — the one that
-    // matters is THIS binary, not whichever copy an installer left behind. Not
-    // a secret and not model-visible state: an absolute path to the running
-    // executable, next to `NULYA_SESSION` (which `session step` puts here to
-    // name the live session file). Unknowable path (a deleted binary, an exotic
-    // OS) leaves it unset: building an environment must never fail over
-    // provenance.
+    // Children get to find the harness that spawned them: a driver written as
+    // an extension has to run `nulya session append|step|new`, and it cannot
+    // assume a `nulya` on PATH — the one that matters is THIS binary, not
+    // whichever copy an installer left behind. An unknowable path (a deleted
+    // binary, an exotic OS) leaves it unset: building an environment must never
+    // fail over provenance.
     if (std.process.executablePathAlloc(io, alloc)) |exe_path| {
         defer alloc.free(exe_path);
         try sanitized.put("NULYA_EXE", exe_path);
@@ -461,14 +422,13 @@ pub const LocalOptions = struct {
     /// they do can start a task.
     session: ?SessionRef = null,
     /// Where `shell` commands run (`ExecTarget`), as its spec string — `""` is
-    /// local. A string rather than the parsed union so this struct owns nothing
-    /// and the environment can keep the ONE copy that both the parsed payload
-    /// and a supervisor's `--env` argument borrow from.
+    /// local. A string rather than the parsed union so this struct owns nothing;
+    /// the environment keeps the ONE copy both the parsed payload and a
+    /// supervisor's `--env` argument borrow from.
     exec: []const u8 = "",
-    /// Where THIS machine keeps extension versions, in search order (DESIGN
-    /// §7.2). Supplied by the shell layer for the same reason `session` is:
-    /// which directories may supply code is a configuration decision, and the
-    /// kernel does not read config.
+    /// Where THIS machine keeps extension versions, in search order. Supplied by
+    /// the shell layer: which directories may supply code is a configuration
+    /// decision, and the kernel does not read config.
     ///
     /// Copied, and opened only when an extension is actually run — relative
     /// specs resolve against the workspace the CALL names, which is the far
@@ -494,10 +454,9 @@ pub const ShellCommandLine = struct {
 };
 
 /// The `local` backend: runs in the host process with a sanitized child
-/// environment. v0.1 honest version (DESIGN §9): shell authority == session
-/// authority, so the *only* enforced boundary is that host secrets are stripped
-/// before they can reach a subprocess. OS-level confinement arrives with the
-/// `sandbox` backend.
+/// environment. Shell authority == session authority, so the *only* enforced
+/// boundary is that host secrets are stripped before they can reach a
+/// subprocess. OS-level confinement arrives with the `sandbox` backend.
 pub const LocalEnvironment = struct {
     io: std.Io,
     alloc: std.mem.Allocator,
@@ -548,9 +507,8 @@ pub const LocalEnvironment = struct {
         // runs, so the dialect is decided by the target and the host's answer
         // (config or detection) does not apply.
         const dialect_val = if (target == .local) opts.dialect orelse defaultDialect(io, &host) else .bash;
-        // Grounding is an extension, but its environment section must describe
-        // the shell this handle will actually spawn. Passing the resolved value
-        // avoids making that package duplicate the host/config detection logic.
+        // Published so a package describing this session's environment does not
+        // have to duplicate the host/config detection logic.
         try sanitized.put("NULYA_SHELL_DIALECT", dialect_val.label());
 
         var session_path: ?[]u8 = null;
@@ -588,12 +546,11 @@ pub const LocalEnvironment = struct {
         self.* = undefined;
     }
 
-    /// Publish the live session to everything this environment spawns (DESIGN
-    /// §5.3): `NULYA_SESSION` is the session FILE's path — a fact about this
-    /// machine — and `NULYA_SESSION_ID` is the session's IDENTITY, which is true
-    /// on any machine. They were one variable until a workspace could live
-    /// elsewhere; splitting them is what lets a package that only ever wanted
-    /// the id (a scratch key, a journal column) work over there too.
+    /// Publish the live session to everything this environment spawns.
+    /// `NULYA_SESSION` is the session FILE's path — a fact about this machine —
+    /// and `NULYA_SESSION_ID` is the session's IDENTITY, true on any machine.
+    /// They are two variables so a package that only wants the id (a scratch
+    /// key, a journal column) works when the workspace lives elsewhere.
     pub fn publishSession(self: *LocalEnvironment, session_path: []const u8, session_id: []const u8) !void {
         if (session_path.len != 0) try self.env.put("NULYA_SESSION", session_path);
         if (session_id.len != 0) try self.env.put("NULYA_SESSION_ID", session_id);
@@ -612,20 +569,18 @@ pub const LocalEnvironment = struct {
     /// exec target — the ONE place both decisions are made. Two consumers: an
     /// in-process `shell` call below, and `nulya task supervise`, which runs a
     /// BACKGROUND command and must reach the same interpreter, with the same
-    /// flags, on the same machine (DESIGN §6.1, §8).
+    /// flags, on the same machine.
     ///
     /// `buf` backs the argv and must outlive the returned value; every form but
     /// plain bash additionally owns one heap string, released by `deinit`.
     ///
-    /// What the WSL target does NOT change, stated where the wrapping is
-    /// written so nobody has to infer it:
+    /// What the WSL target does NOT change:
     ///
     ///   - **Killing reaches the local client, not always the far side.** The
-    ///     `Tree` around `wsl.exe` is terminated exactly as before, so a
-    ///     timeout or a cancel always ends this step. Whether the process on
-    ///     the other end dies with it is the far side's business: killing the
-    ///     WSL relay usually takes its Linux process down, but a command that
-    ///     detached itself can survive it. Nulya does not claim otherwise.
+    ///     `Tree` around `wsl.exe` is terminated, so a timeout or a cancel
+    ///     always ends this step. Whether the process on the other end dies
+    ///     with it is the far side's business: killing the WSL relay usually
+    ///     takes its Linux process down, but a detached command can survive it.
     ///   - **The child environment is the target's, not the sanitized map.**
     ///     WSL forwards only what `WSLENV` names, so `NULYA_EXE` /
     ///     `NULYA_SESSION` do not arrive on the far side. The secret denylist
@@ -633,12 +588,6 @@ pub const LocalEnvironment = struct {
     ///     there is nothing secret left to forward.
     ///   - **`cwd` is translated.** The workspace is the same directory seen
     ///     through `/mnt/<drive>`, so the command is run from there.
-    ///
-    /// Moving the whole workspace onto another machine (rather than wrapping
-    /// one command) is `--env remote:…`, a second `Environment` implementation
-    /// in `environment/remote/mod.zig` — including over ssh
-    /// (`remote:ssh:<dest>`), which is why the `ssh:<dest>` spelling this
-    /// switch used to branch on is gone (goals/remote-env.md §7.1).
     pub fn shellArgv(
         self: *const LocalEnvironment,
         alloc: std.mem.Allocator,
@@ -719,7 +668,7 @@ pub const LocalEnvironment = struct {
         // nor the kill ever closes a pipe the drain task is mid-read on
         // (`child.wait` reaps only the process handle). That removes every race
         // between draining and process cleanup; this code owns the read-ends and
-        // closes them once the drain has finished (DESIGN §8/§9).
+        // closes them once the drain has finished.
         //
         // `Tree` rather than a bare spawn: a shell forks, and killing only the
         // direct child would leave a grandchild holding these very write-ends, so
@@ -760,12 +709,10 @@ pub const LocalEnvironment = struct {
         // `child`, so it cannot race process cleanup.
         var drain = self.io.async(drainShellOutput, .{ &multi_reader, req.max_output_bytes });
 
-        // The wall-clock budget races the child's own exit (base-tools.md §3).
-        // `child.wait` stays the cancelation point either way — `waitBounded`
-        // just runs it as one of two tasks, exactly the `Select` shape the stall
-        // watchdog uses (`providers/wire.zig` `Watched`). If the io cannot give
-        // the pair their own units of concurrency, the wait runs unguarded: no
-        // false timeout, just no guard.
+        // The wall-clock budget races the child's own exit. `child.wait` stays
+        // the cancelation point either way — `waitBounded` just runs it as one
+        // of two tasks. If the io cannot give the pair their own units of
+        // concurrency, the wait runs unguarded: no false timeout, just no guard.
         const waited = waitBounded(self.io, child, req.timeout_ms) catch |err| {
             // Cancellation (or a wait failure): the tree is still alive. Terminate
             // ALL of it so every write-end closes, which lets the blocked drain
@@ -782,7 +729,7 @@ pub const LocalEnvironment = struct {
             // Same unwind as the cancel path, and for the same reason: kill the
             // whole tree first so the pipes reach EOF, then join the drain, then
             // take what it got. A timeout returns the output captured before the
-            // kill rather than an empty result (base-tools.md §3).
+            // kill rather than an empty result.
             tree.killAll(self.io);
             child_reaped = true;
             drain.await(self.io) catch {};
@@ -844,9 +791,9 @@ pub const LocalEnvironment = struct {
         // The caller only ever named `(id, version, tool)`.
         const entry = try self.resolver.resolve(req.cwd, req.id, req.version);
 
-        // Oneshot (DESIGN §7.3): spawn, feed one request, read one response, exit.
-        // Capture stderr too: when an AI-authored extension crashes before it can
-        // write a protocol error on stdout, stderr is the only repair signal.
+        // Oneshot: spawn, feed one request, read one response, exit. Capture
+        // stderr too: when an AI-authored extension crashes before it can write
+        // a protocol error on stdout, stderr is the only repair signal.
         // A script extension runs through its interpreter (argv = [interpreter,
         // entry]); a compiled one runs directly (argv = [entry]).
         var argv_buf: [2][]const u8 = undefined;
@@ -947,24 +894,23 @@ pub const LocalEnvironment = struct {
         return .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, duration) };
     }
 
-    /// Start a detached background command and return the moment it is launched
-    /// (DESIGN §6.1). What is started is NOT the command itself but
-    /// `nulya task supervise` — the same binary, in its supervisor role: it
-    /// holds the task's lease, runs the real command under a `Tree` so
-    /// `nulya task kill` ends the whole subtree, and deposits the
-    /// `task_finished` event when it is over. Nothing is waited on here.
+    /// Start a detached background command and return the moment it is launched.
+    /// What is started is NOT the command itself but `nulya task supervise` —
+    /// the same binary, in its supervisor role: it holds the task's lease, runs
+    /// the real command under a `Tree` so `nulya task kill` ends the whole
+    /// subtree, and deposits the `task_finished` event when it is over. Nothing
+    /// is waited on here.
     ///
-    /// The slot is allocated with an exclusive `mkdir` (the handoff file's
-    /// discipline, one directory up): the first free `t<N>` wins, so two callers
-    /// racing cannot be handed the same name, and the name is monotonic within a
-    /// session.
+    /// The slot is allocated with an exclusive `mkdir`: the first free `t<N>`
+    /// wins, so two callers racing cannot be handed the same name, and the name
+    /// is monotonic within a session.
     fn startShellTaskImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: TaskRequest) anyerror!TaskStart {
         const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
         const session_path = self.session_path orelse return error.NoDurableSession;
         const tasks_dir = self.tasks_dir orelse return error.NoDurableSession;
         // The supervisor IS this binary. `NULYA_EXE` is where every child of a
-        // nulya process learns which one that is (DESIGN §7.6); without it there
-        // is no honest way to start one.
+        // nulya process learns which one that is; without it there is no honest
+        // way to start one.
         const exe = self.env.get("NULYA_EXE") orelse return error.HarnessPathUnknown;
 
         const session_id = std.fs.path.stem(std.fs.path.basename(session_path));
@@ -981,7 +927,7 @@ pub const LocalEnvironment = struct {
             // The supervisor is a HOST process either way (it holds the lease,
             // drains the log, deposits the event); what it is told here is where
             // the COMMAND it watches runs, so a background command lands on the
-            // same machine as the foreground ones of the same session (§8).
+            // same machine as the foreground ones of the same session.
             .exec_spec = self.exec_spec,
             .timeout_ms = req.timeout_ms,
             .command = req.command,
@@ -991,11 +937,9 @@ pub const LocalEnvironment = struct {
     }
 
     /// The ONE place in this repository where a workspace file is written from
-    /// bytes. A remote session does not get a second copy of this code: its
-    /// environment forwards the bytes over the channel and the `nulya remote
-    /// serve` on the other side calls exactly this function (`cli/remote.zig`),
-    /// which is what makes "spill on the far machine" the same behaviour as
-    /// "spill here" rather than a re-implementation of it.
+    /// bytes. A remote session does not get a second copy: its environment
+    /// forwards the bytes over the channel and `nulya remote serve` on the other
+    /// side calls exactly this function (`cli/remote.zig`).
     fn putWorkspaceFileImpl(ptr: *anyopaque, rel_path: []const u8, bytes: []const u8) anyerror!void {
         const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
         const cwd = std.Io.Dir.cwd();
@@ -1022,9 +966,8 @@ pub const LocalEnvironment = struct {
 pub const task_log_name = "output.log";
 
 /// One claimed `t<N>`: the directory, the full name, and the log the receipt
-/// points at. All three are workspace-relative and `/`-spelled, which is what
-/// makes the same three strings true on whichever machine that workspace lives
-/// on (DESIGN §8.2).
+/// points at. All three are workspace-relative and `/`-spelled, so the same
+/// three strings are true on whichever machine that workspace lives on.
 pub const TaskSlot = struct {
     dir_rel: []u8,
     task_id: []u8,
@@ -1045,9 +988,8 @@ pub const TaskSlot = struct {
 };
 
 /// Claim the next free `t<N>` for `session_id` under `tasks_dir`, by exclusive
-/// `mkdir` (the handoff file's discipline, one directory up): the first free
-/// name wins, so two callers racing cannot be handed the same one, and names are
-/// monotonic within a session.
+/// `mkdir`: the first free name wins, so two callers racing cannot be handed the
+/// same one, and names are monotonic within a session.
 ///
 /// The claim always happens HERE, on the host, whichever machine the command
 /// will run on: the name is what the ledger, the receipt and every `task` verb
@@ -1096,7 +1038,7 @@ pub const SupervisorSpawn = struct {
     /// `session_path` means "deposit it into that session file's inbox" (the
     /// session is on this machine), `task_name` means "you are `<sid>/t<N>` and
     /// there is no session file here — leave the report beside your log, for the
-    /// host to collect" (DESIGN §8.2).
+    /// host to collect".
     session_path: ?[]const u8 = null,
     task_name: ?[]const u8 = null,
     /// Where the watched COMMAND runs.
@@ -1113,16 +1055,15 @@ pub const SupervisorSpawn = struct {
     spawn_cwd: ?[]const u8 = null,
 };
 
-/// Start a supervisor and return the moment it is launched (DESIGN §6.1, §8.2).
+/// Start a supervisor and return the moment it is launched.
 ///
 /// A PLAIN spawn, not a `Tree`: this call returns normally and kills nothing,
 /// and the supervisor must survive both this process and the terminal it was
 /// started from — hence its own process group on POSIX and no console on
 /// Windows. Its stdio is null because it inherits this process's pipes
 /// otherwise, and the caller's drain would then wait for a process designed to
-/// outlive it (see `Tree`'s note on detaching). On the far side that caller is
-/// the channel itself, so the same care keeps a background task from holding
-/// the host's reader open.
+/// outlive it. On the far side that caller is the channel itself, so the same
+/// care keeps a background task from holding the host's reader open.
 pub fn spawnSupervisor(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1183,8 +1124,8 @@ const win32 = struct {
 /// driver running `session step`, a test running the CLI), those pipe write ends
 /// are exactly such handles: a supervisor that inherited a duplicate would hold
 /// them open for the task's whole life, and the caller's drain would not reach
-/// EOF until the background command finished. That is precisely the wait
-/// detaching exists to avoid — the task would be background in name only.
+/// EOF until the background command finished — the task would be background in
+/// name only.
 ///
 /// So the inherit flag is cleared on stdin/stdout/stderr across the spawn and
 /// restored right after. POSIX needs nothing: std opens its own descriptors
@@ -1220,12 +1161,12 @@ const DetachedStdio = struct {
     }
 };
 
-/// Host secret-shaped environment variables should not reach an AI-authored
-/// subprocess (DESIGN §9). Matched case-insensitively as a substring so
-/// provider keys, cloud creds, and SSH agents are all covered without
-/// maintaining an exhaustive allowlist. Non-secret vars (PATH, HOME, …) pass
-/// through so commands keep working — the v0.1 boundary is "no obvious secret
-/// env leakage", not full non-inheritance or filesystem confinement.
+/// Host secret-shaped environment variables must not reach an AI-authored
+/// subprocess. Matched case-insensitively as a substring so provider keys, cloud
+/// creds, and SSH agents are all covered without maintaining an exhaustive
+/// allowlist. Non-secret vars (PATH, HOME, …) pass through so commands keep
+/// working — the boundary is "no obvious secret env leakage", not full
+/// non-inheritance or filesystem confinement.
 pub fn isSecretKey(key: []const u8) bool {
     const needles = [_][]const u8{
         "SECRET",     "TOKEN",         "PASSWORD",   "PASSWD",
@@ -1300,9 +1241,9 @@ test "exec target specs parse into the two targets, and nothing else does" {
 
     // A prefix with nothing after it names no distro: refused, not read as
     // "the default one" — the colon says something was meant to follow.
-    // `ssh:<dest>` is refused too, unconditionally: the exec-target spelling
-    // was retired (goals/remote-env.md §7.1) in favor of `remote:ssh:<dest>`,
-    // which moves the whole workspace rather than wrapping one command.
+    // `ssh:<dest>` is refused unconditionally: moving work to another machine
+    // is `remote:ssh:<dest>`, which moves the whole workspace rather than
+    // wrapping one command.
     for ([_][]const u8{ "wsl:", "ssh:", "ssh:me@build-box", "ssh", "docker:x", "WSL", " wsl" }) |bad| {
         try std.testing.expectError(error.InvalidExecTarget, parseExecTarget(bad));
     }
@@ -1528,7 +1469,7 @@ test "a named version is resolved and spawned here, and both its streams are cap
         .version = version,
         .tool = "t",
         // Also where the relative store root is resolved from: each side reads
-        // "the workspace store" as its own (goals/remote-env.md §3.3).
+        // "the workspace store" as its own.
         .cwd = root_path,
         .request_json = "{}",
         .max_output_bytes = 1024,
