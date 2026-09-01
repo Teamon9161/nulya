@@ -101,6 +101,8 @@ export interface DriverOptions {
   effort?: () => string | undefined
   /** Extra child environment (tests set NULYA_SCRIPTED_MODE here). */
   env?: Record<string, string>
+  /** Test seam for fencing the otherwise real append process at scheduler boundaries. */
+  append?: typeof sessionAppend
   /** A fresh copy of the transient SSH password for each spawned step. */
   sshPassword?: (session: string) => Uint8Array | undefined
   /**
@@ -215,9 +217,16 @@ export function createDriver(
   // Enter presses can never acquire timestamped inbox names in reverse order.
   let appendTail: Promise<void> = Promise.resolve()
   function appendInOrder(text: string, images: readonly ImageInput[]): Promise<void> {
-    const next = appendTail.then(() => sessionAppend(ws, id, text, images))
+    const next = appendTail.then(() => (options.append ?? sessionAppend)(ws, id, text, images))
     appendTail = next.catch(() => {})
     return next
+  }
+  async function drainAppends(): Promise<void> {
+    for (;;) {
+      const tail = appendTail
+      await tail
+      if (appendTail === tail) return
+    }
   }
   function idleOnce(): Promise<void> {
     if (!driving) return Promise.resolve()
@@ -341,11 +350,11 @@ export function createDriver(
     // Mid-run appends are not interruptions: the kernel drains the inbox at
     // its next step boundary (DESIGN §3.4), so the turn joins the run itself.
     if (running) return
-    // Calls made back-to-back have all joined `appendTail` before this first
-    // append can resume. Let that already-queued batch land before opening the
-    // step, otherwise process scheduling decides whether two quick sends become
-    // one opening user turn (Linux often hid this race; Windows exposed it).
-    await appendTail
+    // Drain to a stable tail, not merely the tail visible after this append:
+    // another send may join while we await a queued append. The final identity
+    // check and drive()'s synchronous `stepping` transition are one JS turn, so
+    // every send admitted during `sending` lands in this opening user turn.
+    await drainAppends()
     await drive()
   }
 

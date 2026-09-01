@@ -11,7 +11,7 @@ import { createAttachment } from "../src/state/attach.ts"
 import { createDriver, stepExitError } from "../src/state/driver.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { midTaskOf, mid_task_note, mid_task_open } from "../src/midtask.ts"
-import { sessionEvents, sessionNew } from "../src/nulya/cli.ts"
+import { sessionAppend, sessionEvents, sessionNew } from "../src/nulya/cli.ts"
 import { scripted_env, scripted_loop_env, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
 let ws: TempWorkspace
@@ -50,6 +50,45 @@ test("two sends in quick succession start ONE step and both turns land", async (
     expect(userEvents.map((event) => event.text)).toEqual(["first\n\nsecond"])
   } finally {
     attach.dispose()
+  }
+}, 120_000)
+
+test("a send joining while the opening tail is draining stays in that opening turn", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  let signalBStarted!: () => void
+  let releaseB!: () => void
+  const bStarted = new Promise<void>((resolve) => { signalBStarted = resolve })
+  const bBarrier = new Promise<void>((resolve) => { releaseB = resolve })
+  const driver = createDriver(ws, id, state, {
+    env: scripted_env,
+    append: async (workspace, session, text, images) => {
+      if (text === "B") {
+        signalBStarted()
+        await bBarrier
+      }
+      await sessionAppend(workspace, session, text, images)
+    },
+  })
+  try {
+    const a = driver.send("A")
+    const b = driver.send("B")
+    // A has completed its append and is waiting on B. Add C only now: an
+    // ordinary synchronous A/B/C send cannot pin this scheduler window.
+    await bStarted
+    await Promise.resolve()
+    const c = driver.send("C")
+    releaseB()
+
+    await Promise.all([a, b, c])
+    await until(() => driver.status() === "idle", 60_000)
+
+    const events = await sessionEvents(ws, id)
+    const userEvents = events.filter((event) => event.kind === "user_text") as Array<{ kind: "user_text"; text: string }>
+    expect(userEvents.map((event) => event.text)).toEqual(["A\n\nB\n\nC"])
+  } finally {
+    releaseB()
+    driver.dispose()
   }
 }, 120_000)
 
