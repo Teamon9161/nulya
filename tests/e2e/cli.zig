@@ -87,8 +87,11 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // different provider is paid for in a cold cache; `session discard`, +1 — a
     // new verb, and the only one in the whole surface that REMOVES something,
     // which is not a thing to leave undiscoverable; its refusals cost nothing
-    // because the command says them itself when it refuses).
-    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 65);
+    // because the command says them itself when it refuses; that verb becoming
+    // `session prune --force`, +1 — the default and what the flag adds are two
+    // different amounts of deletion, and a reader who guesses wrong loses a
+    // conversation).
+    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 66);
 
     // The two flag spellings a terminal user reaches for reach the same text.
     for ([_][]const u8{ "--help", "-h" }) |flag| {

@@ -260,6 +260,15 @@ Store and scope:
 - Only `step` writes the session file. `append`, `cancel` and `rebind` deposit
   into sibling files that the next step boundary drains, so all three work on a
   session another process is currently running.
+- `nulya session prune <id> [--force]` is the only verb that REMOVES a session.
+  Without the flag it takes only one that recorded nothing and holds nothing —
+  a `session new` nobody ever spoke into. `--force` takes its events and any
+  queued turns as well, and says how many it took. Neither form removes one that
+  is being stepped, that something is depositing into, or that still has a
+  running background task (it names the task; `nulya task kill <task>` first).
+  What goes with it: the session file, its siblings, and `.nulya/scratch/<id>/`.
+  What stays: the journal rows (a verdict is evidence about something that
+  happened), and any session forked from it with `--parent`.
 - `nulya session rebind <id> [--profile P] [--model ID]` runs the REST of a
   session on a different model. The header still freezes one identity and is
   still never rewritten — the change is an appended event, and the identity in

@@ -24,7 +24,7 @@ import { reportFailure } from "./driver.ts"
 import { createTaskWatch, type TaskWatch } from "./tasks.ts"
 import { sessionPins, type ModelPick } from "./tui_state.ts"
 import { readActiveContributions, readHeader, type Contributions } from "../nulya/files.ts"
-import { sessionDiscard, sessionEvents, sessionNew } from "../nulya/cli.ts"
+import { sessionEvents, sessionNew, sessionPrune } from "../nulya/cli.ts"
 import { withOptions, type WithRef } from "../with.ts"
 import { sameWorkspace } from "../workspaces.ts"
 import { createPaneStore, main_surface, type PaneStore } from "./panes.ts"
@@ -145,7 +145,7 @@ export interface SessionTab extends TabCommon {
   /**
    * This process ran `session new` for it. Only such a session is un-created
    * again when it closes without ever having recorded anything
-   * (`cli.sessionDiscard`); one opened by id, or somebody else's, is
+   * (`cli.sessionPrune`); one opened by id, or somebody else's, is
    * never touched.
    */
   created: boolean
@@ -452,9 +452,9 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
     tab.attach.dispose()
     tab.tasks.dispose()
     // The tab's OWN workspace: the session file is in that directory and
-    // nowhere else, so a discard aimed at the process's launch directory would
+    // nowhere else, so a prune aimed at the process's launch directory would
     // either miss or, worse, name somebody else's file.
-    if (tab.created) sessionDiscard(tab.ws, tab.id)
+    if (tab.created) sessionPrune(tab.ws, tab.id)
   }
 
   setTabs([

@@ -1159,13 +1159,16 @@ test "background task: a result that landed before the fork follows the conversa
     try std.testing.expect(std.mem.indexOf(u8, child_file, "Background tasks still running") == null);
 }
 
-test "background task: a report for a session that was discarded is refused, not left in an inbox" {
-    // The window the inbox's deposit lease exists to close, driven for real. A
-    // supervisor is a depositor like any other: `session discard` takes that
-    // lease and the writer lease before it removes anything, and every deposit
-    // re-checks the session under the same lease — so a report for a session
-    // that is gone is refused rather than left as a durable fact in an inbox
-    // nobody will ever drain.
+test "background task: prune refuses a session whose task is still running, and takes it once the task is gone" {
+    // Removing a session removes its scratch tree, which is where its tasks'
+    // directories, logs and leases live — so a running task is a reason to
+    // refuse that no flag lifts. `--force` is about what this session HOLDS, not
+    // about pulling the ground out from under a supervisor still writing.
+    //
+    // (The other half of that story — a report arriving for a session that is
+    // already gone is refused rather than left in an inbox nobody will drain —
+    // is the deposit lease's, and is asserted where the lease lives, in
+    // `ledger.zig`.)
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     const exe = (try nulyaExe(alloc)) orelse return error.SkipZigTest;
@@ -1181,7 +1184,7 @@ test "background task: a report for a session that was discarded is refused, not
     const d = try dialect(alloc, io);
     const hold = "hold-t1";
     try takeHold(io, ws, hold);
-    const lingering = try holdCommand(alloc, d, hold, "ORPHANED");
+    const lingering = try holdCommand(alloc, d, hold, "LINGERING");
     defer alloc.free(lingering);
     {
         const started = try runCli(alloc, io, ws, &.{ exe, "task", "run", "--session", id, "--", lingering });
@@ -1190,18 +1193,29 @@ test "background task: a report for a session that was discarded is refused, not
     }
     try std.testing.expect(try waitUntilRunning(alloc, io, ws, exe, id));
 
-    // Nothing recorded, nothing queued: a running task is not a reason to keep
-    // a session that holds no history, so this succeeds.
+    const task_name = try std.fmt.allocPrint(alloc, "{s}/t1", .{id});
+    defer alloc.free(task_name);
+    const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+    defer alloc.free(spath);
+
+    // Refused with or without the flag, and it names the task to kill.
+    for ([_][]const []const u8{
+        &.{ exe, "session", "prune", id },
+        &.{ exe, "session", "prune", id, "--force" },
+    }) |argv| {
+        const refused = try runCliStderr(alloc, io, ws, argv, &.{});
+        defer alloc.free(refused);
+        try std.testing.expect(std.mem.indexOf(u8, refused, task_name) != null);
+        try ws.access(io, spath, .{});
+    }
+
     {
-        const gone = try runCli(alloc, io, ws, &.{ exe, "session", "discard", id });
-        defer alloc.free(gone.stdout);
-        try std.testing.expectEqual(@as(u8, 0), gone.code);
+        const killed = try runCli(alloc, io, ws, &.{ exe, "task", "kill", task_name });
+        defer alloc.free(killed.stdout);
+        try std.testing.expectEqual(@as(u8, 0), killed.code);
     }
     try releaseHold(io, ws, hold);
 
-    // Waited out on the supervisor's own record — the `task` verbs read the
-    // owner session's header to learn which machine it runs on, and that header
-    // is what was just removed.
     var done = false;
     var tries: usize = 0;
     while (tries < wait_tries) : (tries += 1) {
@@ -1218,9 +1232,22 @@ test "background task: a report for a session that was discarded is refused, not
     }
     try std.testing.expect(done);
 
-    try std.testing.expect((try inboxDeposit(alloc, io, ws, id, id, "t1")) == null);
-    // And it stayed discarded: a late deposit does not resurrect a session.
-    const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
-    defer alloc.free(spath);
+    // The finished task left its report in the inbox (deposit before done), and
+    // an undrained deposit is exactly what the default answer protects — so the
+    // session goes only when the caller says so.
+    {
+        const refused = try runCli(alloc, io, ws, &.{ exe, "session", "prune", id });
+        defer alloc.free(refused.stdout);
+        try std.testing.expect(refused.code != 0);
+        try ws.access(io, spath, .{});
+    }
+    {
+        const gone = try runCli(alloc, io, ws, &.{ exe, "session", "prune", id, "--force" });
+        defer alloc.free(gone.stdout);
+        try std.testing.expectEqual(@as(u8, 0), gone.code);
+    }
     try std.testing.expectError(error.FileNotFound, ws.access(io, spath, .{}));
+    const scratch = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}", .{id});
+    defer alloc.free(scratch);
+    try std.testing.expectError(error.FileNotFound, ws.access(io, scratch, .{}));
 }

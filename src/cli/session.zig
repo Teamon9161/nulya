@@ -103,10 +103,10 @@ pub fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []con
     if (std.mem.eql(u8, sub, "events")) return sessionEvents(alloc, io, rest);
     if (std.mem.eql(u8, sub, "cancel")) return sessionCancel(alloc, io, rest);
     if (std.mem.eql(u8, sub, "rebind")) return sessionRebind(alloc, io, rest);
-    if (std.mem.eql(u8, sub, "discard")) return sessionDiscard(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "prune")) return sessionPrune(alloc, io, rest);
     if (std.mem.eql(u8, sub, "outcome")) return sessionOutcome(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return session_list.sessionList(alloc, io, sliceHasFlag(rest, "--json"));
-    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|rebind|discard|outcome|list\n");
+    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|rebind|prune|outcome|list\n");
     return 1;
 }
 
@@ -906,7 +906,7 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     // deposits, and so does the OTHER half of that same rule in
     // `session rebind`; the delivery id is minted from what is already waiting,
     // so two appends racing would otherwise be able to take the same queue
-    // position; and `session discard` may not take the session away between the
+    // position; and `session prune` may not take the session away between the
     // check below and the deposit.
     var lease = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
         try printErr(io, "session append failed: cannot open this session's inbox\n");
@@ -914,7 +914,7 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     };
     defer lease.close(io);
     // Under the lease, because waiting for it is a moment in which the session
-    // can have been discarded.
+    // can have been pruned.
     if (!sessionExists(io, spath)) {
         try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
         return 1;
@@ -966,120 +966,139 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     return 0;
 }
 
-/// `nulya session discard <id>` — un-create a session that never recorded
-/// anything.
+/// `nulya session prune <id> [--force]` — remove a session and everything that
+/// is only about it.
 ///
-/// The only command that REMOVES a session, and it can only ever remove one
+/// The one verb that REMOVES a session. Without `--force` it removes only one
 /// that holds nothing: a header and no events is not a ledger, it is a name
-/// (physics #1 is about history, and there is none here). What makes these:
-/// `session new` runs before the first message, so a compaction whose driver
-/// never came back, or a front end that opened a session and was closed, leaves
-/// a file nobody will ever add to.
+/// (physics #1 is about history, and there is none here) — a compaction whose
+/// driver never came back, a front end that opened a session and was closed.
+/// That case is what a front end calls on its own, so it stays the default.
+/// With `--force` a session that DOES hold history goes too: real cleanup is
+/// something people have to be able to do, and the judgment "this one is not
+/// worth keeping" is the caller's, which is why this verb takes one id and
+/// never a pattern (physics #8).
 ///
-/// It exists because deciding this from OUTSIDE is not something a reader can
-/// do. The two facts that say "leave it alone" are both LOCKS — a step writing
-/// it, a deposit in flight — and a lock can only be answered by taking it, not
-/// by looking at it. A front end that probes instead (is there a lock file? can
-/// I read byte 0 of it?) is guessing, and its guess is wrong exactly when it
-/// matters: while another process sits between its check and its deposit. Here
-/// the checks and the removal happen under both leases, so "nothing holds this"
-/// is true for as long as it takes to act on it — and the lease it takes is the
-/// INBOX's, held by every depositor there is (`ledger.acquireDepositLease`),
-/// not an agreement between two commands: a supervisor delivering a task report
-/// and an activation depositing a capability note are as much a reason to leave
-/// a session alone as a queued turn is.
+/// What `--force` does not lift is the part that is not a judgment at all: a
+/// step writing this session, a deposit in flight, a background task of this
+/// session still running. The first two are LOCKS, and a lock can only be
+/// answered by taking it, not by looking at it — a front end that probes
+/// instead (is there a lock file? can I read byte 0 of it?) is guessing, and its
+/// guess is wrong exactly when it matters: while another process sits between
+/// its check and its deposit. `ledger.pruneSession` holds both leases across
+/// every check and the removal, so "nothing holds this" is true for as long as
+/// it takes to act on it.
 ///
 /// Exit 0 means one thing only: it is gone because this command removed it.
-/// Every refusal — no such session, a step running, a queued turn, a deposit in
-/// flight, any event at all — is exit 1 with the reason, so a caller can treat
-/// the code as the answer.
-fn sessionDiscard(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len != 1) {
-        try printErr(io, "usage: nulya session discard <id>\n");
-        return 1;
+/// Every refusal is exit 1 with the reason, so a caller can treat the code as
+/// the answer.
+fn sessionPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    const force = sliceHasFlag(args, "--force");
+    var id: ?[]const u8 = null;
+    for (args) |a| {
+        if (std.mem.startsWith(u8, a, "--")) {
+            if (std.mem.eql(u8, a, "--force")) continue;
+            try printErr(io, "usage: nulya session prune <id> [--force]\n");
+            return 1;
+        }
+        if (id != null) {
+            try printErr(io, "usage: nulya session prune <id> [--force]\n");
+            return 1;
+        }
+        id = a;
     }
-    const id = args[0];
-    if (!launch.isValidSessionId(id)) {
+    const session_id = id orelse {
+        try printErr(io, "usage: nulya session prune <id> [--force]\n");
+        return 1;
+    };
+    if (!launch.isValidSessionId(session_id)) {
         try printErr(io, "invalid session id\n");
         return 1;
     }
-    const spath = try launch.sessionPath(alloc, id);
+    const spath = try launch.sessionPath(alloc, session_id);
     defer alloc.free(spath);
-    if (!sessionExists(io, spath)) {
-        try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
+
+    // Tasks are the shell's knowledge, not the ledger's, so this question is
+    // asked here — and BEFORE the leases, since answering it means reading (and
+    // for a remote session, asking another machine about) every task directory,
+    // which is not something to do while holding a session's writer lease.
+    //
+    // That leaves a check-then-act window, and it is an acceptable one: a task
+    // can only appear for this session through a `step` or a `task run` naming
+    // it, and the first is refused by the writer lease below while the second is
+    // a deliberate act on a session somebody is deleting.
+    if (try task_cli.liveTaskFor(alloc, io, session_id)) |live| {
+        defer alloc.free(live);
+        try printErrFmt(
+            alloc,
+            io,
+            "session prune refused: background task {s} is still running; `nulya task kill {s}` first\n",
+            .{ live, live },
+        );
         return 1;
     }
 
-    // Both leases, in the order that cannot deadlock: nothing in the system
-    // takes the writer lease and then a deposit lease (`step` never deposits),
-    // so this is the only place the two are held at once.
-    var deposits = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .fail_fast) catch |err| switch (err) {
-        error.WouldBlock => {
-            try printErrFmt(alloc, io, "session discard refused: something is depositing into '{s}' right now\n", .{id});
+    const report = ledger.pruneSession(alloc, io, std.Io.Dir.cwd(), spath, .{ .force = force }) catch |err| switch (err) {
+        error.NoSuchSession => {
+            try printErrFmt(alloc, io, "no such session '{s}'\n", .{session_id});
             return 1;
         },
-        else => {
-            try printErrFmt(alloc, io, "session discard failed: cannot open the inbox of '{s}'\n", .{id});
-            return 1;
-        },
-    };
-    var deposits_open = true;
-    defer if (deposits_open) deposits.close(io);
-
-    var writer = ledger.acquireWriterLease(alloc, io, std.Io.Dir.cwd(), spath) catch |err| switch (err) {
         error.SessionBusy => {
-            try printErrFmt(alloc, io, "session discard refused: a step is running '{s}'\n", .{id});
+            try printErrFmt(alloc, io, "session prune refused: a step is running '{s}'\n", .{session_id});
+            return 1;
+        },
+        error.DepositInFlight => {
+            try printErrFmt(alloc, io, "session prune refused: something is depositing into '{s}' right now\n", .{session_id});
+            return 1;
+        },
+        error.HasEvents => {
+            try printErrFmt(
+                alloc,
+                io,
+                "session prune refused: '{s}' has recorded events; `nulya session prune {s} --force` removes it and them\n",
+                .{ session_id, session_id },
+            );
+            return 1;
+        },
+        error.HoldsDeposits => {
+            try printErrFmt(
+                alloc,
+                io,
+                "session prune refused: a turn is queued for '{s}' and no step has drained it; `nulya session prune {s} --force` removes it too\n",
+                .{ session_id, session_id },
+            );
             return 1;
         },
         else => return err,
     };
-    var writer_open = true;
-    defer if (writer_open) writer.close(io);
 
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, spath, alloc, .unlimited) catch {
-        try printErrFmt(alloc, io, "session discard failed: cannot read '{s}'\n", .{id});
-        return 1;
+    // The scratch tree is the shell's to place (`launch.sessionScratchDir`) and
+    // so the shell's to remove, and it goes only after the session itself did:
+    // spills, task directories and per-session extension state are about a
+    // session that no longer exists. Safe to take whole, because a task still
+    // writing under it was refused above.
+    const scratch = try launch.sessionScratchDir(alloc, session_id);
+    defer alloc.free(scratch);
+    // Said rather than swallowed, and not an exit code: the session IS gone, so
+    // the answer stays 0 — but files left behind (a log some other process still
+    // has open) are the caller's to know about, not to discover later.
+    std.Io.Dir.cwd().deleteTree(io, scratch) catch |err| {
+        try printErrFmt(alloc, io, "note: could not remove {s}: {s}\n", .{ scratch, @errorName(err) });
     };
-    defer alloc.free(bytes);
-    var lines = ledger.completeLines(bytes);
-    var complete: usize = 0;
-    while (lines.next()) |_| complete += 1;
-    if (complete > 1) {
-        try printErrFmt(alloc, io, "session discard refused: '{s}' has recorded events\n", .{id});
-        return 1;
-    }
-    if (try ledger.inboxHoldsDeposit(alloc, io, std.Io.Dir.cwd(), spath)) {
-        try printErrFmt(alloc, io, "session discard refused: a turn is queued for '{s}' and no step has drained it\n", .{id});
-        return 1;
-    }
 
-    // The session file first: its absence is what every other process reads as
-    // "gone" (both depositors re-check it under the lease this still holds).
-    // Then each lease is closed before its own file is removed — Windows will
-    // not unlink a file that is open, and here the opener is us.
-    try std.Io.Dir.cwd().deleteFile(io, spath);
-    try deleteIfPresent(io, try ledger.siblingPath(alloc, spath, ".cancel"), alloc);
-    writer.close(io);
-    writer_open = false;
-    try deleteIfPresent(io, try ledger.siblingPath(alloc, spath, ".lock"), alloc);
-    deposits.close(io);
-    deposits_open = false;
-    try deleteIfPresent(io, try ledger.depositLockPath(alloc, spath), alloc);
-    const inbox = try ledger.inboxPath(alloc, spath);
-    defer alloc.free(inbox);
-    // Whatever is left in there arrived after the checks above, and belongs to
-    // nobody now; the directory goes only if it is empty.
-    std.Io.Dir.cwd().deleteDir(io, inbox) catch {};
-    try printOut(alloc, io, "discarded {s}\n", .{id});
+    try printOut(alloc, io, "pruned {s}\n", .{session_id});
+    if (force and (report.events != 0 or report.deposits != 0)) {
+        // What it cost, once, in the caller's own terms. The journals are not in
+        // that list on purpose: an outcome or usage row is evidence about
+        // something that happened, and it stays (§3.3).
+        try printErrFmt(
+            alloc,
+            io,
+            "removed {d} recorded events, {d} queued deposits; journal rows stay\n",
+            .{ report.events, report.deposits },
+        );
+    }
     return 0;
-}
-
-fn deleteIfPresent(io: std.Io, path: []u8, alloc: std.mem.Allocator) !void {
-    defer alloc.free(path);
-    std.Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
 }
 
 /// The largest image one turn may carry, raw bytes before base64 (the tightest
@@ -1770,7 +1789,7 @@ fn sessionRebind(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     };
     defer lease.close(io);
     // Under the lease: waiting for it is a moment in which the session can have
-    // been discarded out from under this command.
+    // been pruned out from under this command.
     if (!sessionExists(io, spath)) {
         try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
         return 1;

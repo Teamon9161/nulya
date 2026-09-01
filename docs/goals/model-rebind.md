@@ -203,7 +203,22 @@ descriptor 说的是「哪个模型、走哪条 wire」，profile 说的是「�
    对排干过的名字靠的是随机尾巴。要数学意义上的唯一得引入 durable sequence，
    而「活得过排干的状态」正是这里刻意没有的东西（同 §9.2 的理由）。
 
-## 11. 不做的
+## 11. 后来：`discard` 变成 `prune`（2026-09-01）
+
+§9.3 收进 CLI 的那个动词，同日被推广成 **`nulya session prune <id> [--force]`**，
+`discard` 这个名字不再存在（pre-release，不留别名）。缺省档逐字就是 discard
+（什么都没记下、什么都没排队的那种，前端自动调的仍是它），`--force` 连**有历史**的
+一起删——真正的清理是人做得到的事，而「哪一场不值得留」是判断，所以这个动词
+只收一个 id、永远不收 pattern（physics #8）。
+
+对这份文档记的那条并发规则没有任何改动，只是换了个位置：编排（两把租约的顺序、
+锁下的两次确认、哪些文件构成一场 session）整个沉进 **`ledger.pruneSession`**，
+CLI 只剩 id 校验、后台任务那道 policy、scratch 清理与把 typed error 翻成人话。
+`--force` 掀得动的只有「这一场握着什么」（`HasEvents` / `HoldsDeposits`）；
+掀不动的是「谁正握着它」——`SessionBusy`、`DepositInFlight`，以及这一场还活着的
+后台任务（它的目录就在将被删掉的 scratch 树里）。两条 journal 的行照旧不动。
+
+## 12. 不做的
 
 - 不做兼容性白名单（§2）；
 - 不做「回头路保留 reasoning」的特例（§3）；

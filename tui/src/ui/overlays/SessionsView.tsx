@@ -118,7 +118,7 @@ export const double_click_ms = 350
  *
  * There is a third kind, and it is not a conversation of either sort: a session
  * whose ledger has NO events. A header exists and nothing was ever said into
- * it — a process that was killed before `sessionDiscard` could take its
+ * it — a process that was killed before `sessionPrune` could take its
  * empty session back. Opening one shows an empty screen, and since T22 a new
  * message freezes a new session anyway, so nothing is lost by leaving it out.
  * It is counted rather than silently dropped (a list quietly shorter than the

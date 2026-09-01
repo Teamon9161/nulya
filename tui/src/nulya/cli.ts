@@ -1096,8 +1096,12 @@ export async function sessionCancel(ws: Workspace, id: string): Promise<void> {
 }
 
 /**
- * `nulya session discard <id>` — un-create a session that never recorded
+ * `nulya session prune <id>` — remove a session that never recorded
  * anything. Returns whether it was removed.
+ *
+ * Never `--force`: this is the automatic call on a tab that closes, so it may
+ * only ever take away a session that holds nothing. Removing one WITH history
+ * is a person's decision, and it is made by typing the command.
  *
  * Synchronous, and a subprocess rather than a few `unlinkSync` calls, because
  * the question "may this be removed?" cannot be answered from out here. Two of
@@ -1112,9 +1116,9 @@ export async function sessionCancel(ws: Workspace, id: string): Promise<void> {
  * somebody else's, is never a candidate — another front end sitting on its own
  * fresh session looks exactly like this from the outside.
  */
-export function sessionDiscard(ws: Workspace, id: string): boolean {
+export function sessionPrune(ws: Workspace, id: string): boolean {
   const result = Bun.spawnSync({
-    cmd: [ws.bin, "session", "discard", id],
+    cmd: [ws.bin, "session", "prune", id],
     cwd: ws.dir,
     env: process.env,
     stdout: "pipe",

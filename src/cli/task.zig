@@ -931,7 +931,7 @@ fn depositName(alloc: std.mem.Allocator, session_id: []const u8, slot: []const u
 ///
 /// The other way a `task_finished` reaches an inbox, so it obeys the same rule
 /// as a deposit: the destination's lease is held across "does that session still
-/// exist" and the rename, which is what keeps `session discard` from removing
+/// exist" and the rename, which is what keeps `session prune` from removing
 /// one in between (`ledger.acquireDepositLease`). A destination that is gone is
 /// `error.NoSuchSession` and the file stays where it is — nothing is left behind
 /// for a reader that will never exist.
@@ -1218,7 +1218,41 @@ pub fn sweepRemoteReports(
     var far: Far = .init(alloc, io);
     defer far.deinit();
     far.lend(session_id, ch) catch return;
-    _ = collectRows(arena, io, &far, session_id) catch return;
+    _ = collectRows(arena, io, &far, .{ .reports_into = session_id }) catch return;
+}
+
+/// The scope a reading verb means by `--session <id>`, or none at all.
+fn scopeOf(only: ?[]const u8) Scope {
+    return if (only) |id| .{ .reports_into = id } else .all;
+}
+
+/// The first task still alive that `session prune` would take the ground out
+/// from under, or null when there is none — its full name, for a refusal that
+/// can name what to kill.
+///
+/// Asks the same projection the `task` verbs answer with (`collectRows` /
+/// `readRow`), because "is this task running?" has one answer and reading
+/// `status.json` a second time here would be a second one. The scope is
+/// `touches`, not the narrower one `task list --session` uses: a task this
+/// session started and retargeted elsewhere still writes into a directory under
+/// this session's scratch tree, which is exactly what prune is about to remove.
+/// `done` and `lost` rows do not block — nothing is writing there any more, and
+/// their directories go with the tree.
+pub fn liveTaskFor(alloc: std.mem.Allocator, io: std.Io, session_id: []const u8) !?[]u8 {
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var far: Far = .init(alloc, io);
+    defer far.deinit();
+
+    const rows = try collectRows(arena, io, &far, .{ .touches = session_id });
+    for (rows) |row| {
+        // `unreachable` counts as alive: that machine did not answer, and not
+        // knowing is not grounds to delete what a supervisor may still be using.
+        if (isLive(row.state) or row.state == .@"unreachable") return try alloc.dupe(u8, row.full);
+    }
+    return null;
 }
 
 // ── `nulya task run`: the CLI twin of `shell {background:true}` ─────────────
@@ -1423,10 +1457,26 @@ fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef) !?Row {
     };
 }
 
-/// Every task directory under `.nulya/scratch/*/tasks/`, or just one session's
-/// when `only` names it — plus, in that case, the tasks OTHER sessions retargeted
-/// here, which is the whole point of `notify` being readable from outside.
-fn collectRows(arena: std.mem.Allocator, io: std.Io, far: *Far, only: ?[]const u8) ![]Row {
+/// Which of a session's tasks a reader is asking about.
+const Scope = union(enum) {
+    /// Every task in this workspace.
+    all,
+    /// The ones whose result arrives in this session: its own, unless it handed
+    /// them to somebody else, plus the ones another session retargeted here.
+    /// What `task list --session` shows, because that is what a reader watching
+    /// a session wants to know.
+    reports_into: []const u8,
+    /// Every task this session still TOUCHES: the ones above, plus the ones it
+    /// owns on disk after handing the report elsewhere. `session prune` asks
+    /// this one, because it is about to delete the directory those supervisors
+    /// are writing into, whoever ends up reading their result.
+    touches: []const u8,
+};
+
+/// Every task directory under `.nulya/scratch/*/tasks/`, narrowed by `scope` —
+/// which for one session includes the tasks OTHER sessions retargeted here,
+/// the whole point of `notify` being readable from outside.
+fn collectRows(arena: std.mem.Allocator, io: std.Io, far: *Far, scope: Scope) ![]Row {
     var rows: std.ArrayList(Row) = .empty;
     const cwd = std.Io.Dir.cwd();
 
@@ -1455,12 +1505,20 @@ fn collectRows(arena: std.mem.Allocator, io: std.Io, far: *Far, only: ?[]const u
             const dir = try emit.joinRel(arena, &.{ tasks_dir, slot_entry.name });
             const notify = try readNotify(arena, io, dir);
 
-            if (only) |want| {
-                const mine = std.mem.eql(u8, session_id, want);
-                const sent_here = if (notify) |n| std.mem.eql(u8, n, want) else false;
-                // A task this session started but handed to someone else is no
-                // longer this session's to watch.
-                if (!sent_here and (!mine or notify != null)) continue;
+            switch (scope) {
+                .all => {},
+                .reports_into => |want| {
+                    const mine = std.mem.eql(u8, session_id, want);
+                    const sent_here = if (notify) |n| std.mem.eql(u8, n, want) else false;
+                    // A task this session started but handed to someone else is
+                    // no longer this session's to watch.
+                    if (!sent_here and (!mine or notify != null)) continue;
+                },
+                .touches => |want| {
+                    const mine = std.mem.eql(u8, session_id, want);
+                    const sent_here = if (notify) |n| std.mem.eql(u8, n, want) else false;
+                    if (!mine and !sent_here) continue;
+                },
             }
 
             const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ session_id, slot_entry.name });
@@ -1493,7 +1551,7 @@ fn taskList(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     var far: Far = .init(alloc, io);
     defer far.deinit();
 
-    const rows = try collectRows(arena, io, &far, only);
+    const rows = try collectRows(arena, io, &far, scopeOf(only));
     const running_only = sliceHasFlag(args, "--running");
     const as_json = sliceHasFlag(args, "--json");
 
@@ -1772,7 +1830,7 @@ fn taskWait(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         const arena = arena_state.allocator();
 
         if (any) {
-            const rows = try collectRows(arena, io, &far, scope);
+            const rows = try collectRows(arena, io, &far, scopeOf(scope));
             var waitable: usize = 0;
             for (rows) |row| {
                 // A finished task counts only while its result is still

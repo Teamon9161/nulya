@@ -5,7 +5,7 @@
  * exactly one writer and it is `session step`.
  *
  * Un-creating a session this process made and never used used to be the one
- * exception, and it is now `sessionDiscard` in `cli.ts`: the two facts that
+ * exception, and it is now `sessionPrune` in `cli.ts`: the two facts that
  * forbid it are locks, and a lock can only be answered by taking it.
  */
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs"
@@ -527,7 +527,7 @@ function probeByteRangeRead(path: string): LeaseState {
  * POSIX: look the lock file up in `/proc/locks` by device and inode. Any lock
  * on that inode counts as held — the kernel only ever takes `flock`, but if a
  * future std switched lock flavors, "held" is the direction that keeps a live
- * session's file safe from `sessionDiscard`.
+ * session's file safe from `sessionPrune`.
  */
 function probeProcLocks(path: string): LeaseState {
   let dev: bigint

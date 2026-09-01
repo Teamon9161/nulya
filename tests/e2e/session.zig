@@ -221,7 +221,7 @@ test "durable ledger: a tool result carrying non-utf-8 bytes is still a JSON str
     try std.testing.expect(checked);
 }
 
-test "session cli: discard removes a session that holds nothing, and refuses one that holds anything" {
+test "session cli: prune removes a session that holds nothing, and refuses one that holds anything" {
     // The one command that removes a session, and the reason it is a command at
     // all: two of the facts that forbid it are locks, and a lock is answered by
     // taking it. Exit 0 means it is gone because this removed it — nothing else.
@@ -243,7 +243,7 @@ test "session cli: discard removes a session that holds nothing, and refuses one
     const spath = try std.fmt.allocPrint(alloc, "{s}{c}{s}.jsonl", .{ sessions_dir_rel, std.fs.path.sep, empty });
     defer alloc.free(spath);
 
-    const gone = try runCli(alloc, io, ws, &.{ exe_abs, "session", "discard", empty });
+    const gone = try runCli(alloc, io, ws, &.{ exe_abs, "session", "prune", empty });
     defer alloc.free(gone.stdout);
     try std.testing.expectEqual(@as(u8, 0), gone.code);
     try std.testing.expectError(error.FileNotFound, ws.access(io, spath, .{}));
@@ -254,7 +254,7 @@ test "session cli: discard removes a session that holds nothing, and refuses one
         try std.testing.expectError(error.FileNotFound, ws.access(io, sibling, .{}));
     }
     // Twice is a refusal, not a success: there is nothing left to remove.
-    const again = try runCli(alloc, io, ws, &.{ exe_abs, "session", "discard", empty });
+    const again = try runCli(alloc, io, ws, &.{ exe_abs, "session", "prune", empty });
     defer alloc.free(again.stdout);
     try std.testing.expect(again.code != 0);
 
@@ -267,12 +267,74 @@ test "session cli: discard removes a session that holds nothing, and refuses one
     defer alloc.free(appended.stdout);
     try std.testing.expectEqual(@as(u8, 0), appended.code);
 
-    const refused = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "discard", queued }, &.{});
+    const refused = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "prune", queued }, &.{});
     defer alloc.free(refused);
     try std.testing.expect(std.mem.indexOf(u8, refused, "queued") != null);
     const kept = try std.fmt.allocPrint(alloc, "{s}{c}{s}.jsonl", .{ sessions_dir_rel, std.fs.path.sep, queued });
     defer alloc.free(kept);
     try ws.access(io, kept, .{});
+}
+
+test "session cli: prune --force removes a session that recorded events, and its scratch tree with it" {
+    // The other half of one verb: the default answer about history is no, and
+    // `--force` is the caller saying it meant this one. What goes is the session
+    // and everything that is only about it — including the scratch tree, which
+    // is where its spills and its finished tasks live.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const id = std.mem.trim(u8, new.stdout, " \r\n");
+    {
+        const appended = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", id, "something worth recording" });
+        defer alloc.free(appended.stdout);
+        try std.testing.expectEqual(@as(u8, 0), appended.code);
+    }
+    {
+        const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", id }, "NULYA_SCRIPTED_MODE", "finish");
+        defer alloc.free(step.stdout);
+        try std.testing.expectEqual(@as(u8, 0), step.code);
+    }
+
+    const scratch = try std.fmt.allocPrint(alloc, ".nulya{c}scratch{c}{s}", .{ std.fs.path.sep, std.fs.path.sep, id });
+    defer alloc.free(scratch);
+    try ws.createDirPath(io, scratch);
+    const spill = try std.fmt.allocPrint(alloc, "{s}{c}spill-1.txt", .{ scratch, std.fs.path.sep });
+    defer alloc.free(spill);
+    try ws.writeFile(io, .{ .sub_path = spill, .data = "what a tool said, in full" });
+
+    const spath = try std.fmt.allocPrint(alloc, "{s}{c}{s}.jsonl", .{ sessions_dir_rel, std.fs.path.sep, id });
+    defer alloc.free(spath);
+
+    // Recorded history still refuses by default, and refusing changes nothing.
+    {
+        const refused = try runCli(alloc, io, ws, &.{ exe_abs, "session", "prune", id });
+        defer alloc.free(refused.stdout);
+        try std.testing.expect(refused.code != 0);
+        try ws.access(io, spath, .{});
+        try ws.access(io, spill, .{});
+    }
+
+    const forced = try runCli(alloc, io, ws, &.{ exe_abs, "session", "prune", id, "--force" });
+    defer alloc.free(forced.stdout);
+    try std.testing.expectEqual(@as(u8, 0), forced.code);
+    try std.testing.expectError(error.FileNotFound, ws.access(io, spath, .{}));
+    try std.testing.expectError(error.FileNotFound, ws.access(io, scratch, .{}));
+
+    // And the projection that reads `.nulya/sessions/` agrees it is gone.
+    const listed = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list" });
+    defer alloc.free(listed.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, id) == null);
 }
 
 test "session cli: append refuses a message that is not valid UTF-8 and records nothing" {
