@@ -1,23 +1,14 @@
 /**
- * The `.nulya/` directory layout (DESIGN §3.4 / §5.5 / §7.2), read-only —
- * with one exception at the bottom of this file: un-creating a session this
- * process made and never used (`discardIfUntouched`).
+ * The `.nulya/` directory layout (DESIGN §3.4 / §5.5 / §7.2), READ-ONLY. The
+ * TUI never writes into `.nulya/` except through the CLI (`session append`
+ * stages its text in `.nulya/scratch/`, see `cli.ts`) — the session file has
+ * exactly one writer and it is `session step`.
  *
- * Otherwise the TUI never writes into `.nulya/` except through the CLI
- * (`session append` stages its text in `.nulya/scratch/`, see `cli.ts`) — the
- * session file has exactly one writer and it is `session step`.
+ * Un-creating a session this process made and never used used to be the one
+ * exception, and it is now `sessionDiscard` in `cli.ts`: the two facts that
+ * forbid it are locks, and a lock can only be answered by taking it.
  */
-import {
-  closeSync,
-  existsSync,
-  openSync,
-  readFileSync,
-  readSync,
-  readdirSync,
-  rmdirSync,
-  statSync,
-  unlinkSync,
-} from "node:fs"
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 import { parseHeaderLine, type SessionHeader } from "./ledger.ts"
 import { extList } from "./cli.ts"
@@ -536,7 +527,7 @@ function probeByteRangeRead(path: string): LeaseState {
  * POSIX: look the lock file up in `/proc/locks` by device and inode. Any lock
  * on that inode counts as held — the kernel only ever takes `flock`, but if a
  * future std switched lock flavors, "held" is the direction that keeps a live
- * session's file safe from `discardIfUntouched`.
+ * session's file safe from `sessionDiscard`.
  */
 function probeProcLocks(path: string): LeaseState {
   let dev: bigint
@@ -625,83 +616,6 @@ export async function readTaskLog(ws: Workspace, path: string, bytes = task_log_
     // Not written yet, or removed under us: an empty log reads the same way.
     return ""
   }
-}
-
-// --- un-creating an unused session ------------------------------------------
-
-/**
- * Remove a session that has recorded nothing, if — and only if — nothing about
- * it says somebody still means to use it.
- *
- * The common way to get one of these is gone since T22: a TUI tab starts as a
- * draft and runs `session new` at the first message, so looking and leaving
- * creates nothing at all. What is left are the paths that DO create a session
- * before anything is recorded — a compaction whose driver never returned, a
- * `--session` this process made — and for those the file is a header and no
- * events: not a ledger, just a name. Removing it is not rewriting history —
- * there is none — but it IS the one write into `.nulya/sessions/` this program
- * makes, so the guards are strict and every one is a "no":
- *
- *   - any event line: it is a ledger now (physics #1) and stays, empty of
- *     meaning or not;
- *   - a non-empty inbox: somebody appended and no step drained it yet — a
- *     turn the user typed is in there, and the next open would drain it;
- *   - the writer lease held: a step is running this very moment;
- *   - the lease probe answering `unknown` (a POSIX without `/proc/locks`): the
- *     lock file only exists once something opened the session for writing, so
- *     when the probe cannot see who, the honest action is to leave it.
- *
- * Callers only ever pass ids THIS process created (`session new` from the
- * TUI); a session opened with `--session`, or somebody else's, is never a
- * candidate — another TUI sitting idle on its own fresh session looks exactly
- * like this from the outside, and deleting it under them would break their
- * next `append`. Returns whether the session was removed.
- */
-export function discardIfUntouched(ws: Workspace, id: string): boolean {
-  const path = sessionPath(ws, id)
-  if (!existsSync(path)) return false
-  if (probeWriterLease(ws, id) !== "free") return false
-  const lock = lockPath(ws, id)
-  let text: string
-  try {
-    text = readFileSync(path, "utf8")
-  } catch {
-    return false
-  }
-  // The header is the first line; anything after it is an event.
-  const lines = text.split("\n").filter((line) => line.trim().length > 0)
-  if (lines.length > 1) return false
-  const inbox = siblingPath(ws, id, ".inbox")
-  if (existsSync(inbox)) {
-    try {
-      // Deposits only, the same `.json` the kernel drains: the directory also
-      // holds the lock the shell's gates serialize on (DESIGN §3.4), and a lock
-      // nobody is holding says nothing about whether anyone means to use this.
-      if (readdirSync(inbox).some((name) => name.endsWith(".json"))) return false
-    } catch {
-      return false
-    }
-  }
-  try {
-    unlinkSync(path)
-  } catch {
-    // Somebody opened it between the checks and now (a Windows sharing
-    // violation, say): it is in use after all, and the checks above hold.
-    return false
-  }
-  for (const sibling of [lock, siblingPath(ws, id, ".cancel")]) {
-    try {
-      if (existsSync(sibling)) unlinkSync(sibling)
-    } catch {
-      // A stray marker next to no session is harmless.
-    }
-  }
-  try {
-    if (existsSync(inbox)) rmdirSync(inbox)
-  } catch {
-    // Non-empty after all, or held open; leaving an empty directory is fine.
-  }
-  return true
 }
 
 // --- the extension store ----------------------------------------------------

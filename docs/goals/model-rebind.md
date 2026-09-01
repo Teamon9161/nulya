@@ -137,7 +137,43 @@ descriptor 说的是「哪个模型、走哪条 wire」，profile 说的是「�
    顺序如实写成「只有时钟那么好，且没有东西依赖它」；
    断言 `first < second` 的那条测试随之删掉——它钉的是时钟粒度，不是机制。
 
-## 9. 不做的
+## 9. 第二轮 review 的三条（2026-09-01）
+
+上一轮的修法本身被查出两个洞，外加一条一直都在的：
+
+1. **`scanSession` 的 inbox-first 只修好了一半。** 「inbox 一条 rebind 都没有才采信 committed 的」
+   这条规则在**两条 pending** 时会翻车：inbox 那一趟是一个文件一个文件读的，
+   并发的 drain 可以在两次读之间把更晚的 R2 commit 掉并删除，
+   于是扫描手里攥着 R1、更晚的 R2 哪儿都没看见，而 ledger 又被整个闭嘴 → 答 B，真相是 C。
+   **裁决靠投递 id 本身**：ledger 里若把这条 pending 记成了 `origin`，
+   说明 drain 已经走过，ledger 最后那条才是更新的真相。
+   于是规则从「有 pending 就闭嘴」收成「**pending 且它还没被 committed** 才赢」——
+   顺带把「崩在 append 与 delete 之间的残余文件」也白拿地答对了。
+   （不采用「ledger → inbox → ledger suffix」：那条路对称地会错——
+   inbox 看到 C 还等着、而 suffix 只读到刚被 commit 的更旧的 B，就会答 B。）
+
+2. **删掉假的 ordering contract，不等于代码不再依赖 ordering。** 上一轮把注释改诚实了，
+   但 `drainInbox` 仍按文件名排序、rebind 仍是最后一条赢、消息仍按这个次序合成一个 turn——
+   两条**顺序执行**的 `session rebind`（都拿了 deposit lease，人的意图明明白白是 B then C）
+   在时钟回拨或同刻时可以被应用成 C then B。所以选了「**名字就是队列位置**」这一侧：
+   `freshDeliveryName` 铸名时读一眼 inbox、跨过同前缀的最新戳。
+   作用域正好是顺序有含义的那个集合（同时在等的那些）；已 committed 的不需要，
+   因为「等着的排在后面」是另一条独立成立的规则。
+   不把顺序另开一条通道的理由：那要第二份 durable 状态，
+   而一个每次排干就清空的目录上的计数器会重用编号——重用的名字正是静默的「同一件事再说一遍」。
+
+3. **`discardIfUntouched` 与正在进行的投递赛跑。** 前端在 `.nulya/sessions/` 里 unlink，
+   判据靠**探测**锁（有没有 lock 文件、读不读得到第 0 字节）——而两条禁止删除的事实都是锁，
+   **锁只能靠拿来回答，不能靠看**：探测恰好在最要紧的那一刻猜错，
+   即另一个进程正卡在它自己的 check 与 deposit 之间（text-only 的 `append` 更是连锁都不拿）。
+   结果是 session 文件没了、inbox 里躺着一条 rebind、而那条命令报了成功。
+   修法是把这个动作收进 CLI：**`nulya session discard <id>`**（§14），
+   全程持写者租约与 deposit lease（后者 non-blocking——「有人正在投递」是答案不是队列），
+   exit 0 只有一个含义。相应地 `session append` **一律**拿 deposit lease，
+   两条投递命令都在拿到锁之后再确认一次 session 文件还在。
+   前端那一大坨跨平台的「我猜现在能不能删」随之删除。
+
+## 10. 不做的
 
 - 不做兼容性白名单（§2）；
 - 不做「回头路保留 reasoning」的特例（§3）；

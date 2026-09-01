@@ -657,7 +657,11 @@ const Durable = struct {
 /// second writer fails fast with `error.SessionBusy` instead of racing. The
 /// returned handle must stay open for the writer's lifetime; closing it releases
 /// the lease. Caller frees nothing else.
-fn acquireWriterLease(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !std.Io.File {
+///
+/// Public because one caller is not a writer at all: `session discard` has to
+/// know that nobody is writing, and that is a question only taking the lease can
+/// answer — probing a lock races with whoever is about to take it.
+pub fn acquireWriterLease(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !std.Io.File {
     const lock_path = try siblingPath(alloc, path, ".lock");
     defer alloc.free(lock_path);
     return dir.createFile(io, lock_path, .{ .truncate = false, .read = true, .lock = .exclusive, .lock_nonblocking = true }) catch |err| switch (err) {
@@ -1124,33 +1128,102 @@ pub fn depositEvent(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, sess
 /// text plus several images, each up to 5 MiB raw and ~4/3 that as base64.
 pub const max_inbox_event_bytes: usize = 32 << 20;
 
-/// A delivery id for one more fact: DISTINCT on every call — that is the whole
-/// contract, because the name is the exactly-once key.
+/// A delivery id for one more fact. Two properties, both load-bearing:
 ///
-/// It is also, in practice, ordered: `drainInbox` applies files in filename
-/// order, and within one prefix the fixed-width nanosecond stamp sorts by the
-/// moment of deposit. "In practice" is the honest word — a clock can repeat a
-/// value or step backwards, and the random tail that keeps names distinct then
-/// decides. Nothing depends on it: which of two rebinds raced to be last has no
-/// right answer, and merged user turns only need to read in a sensible order.
-/// ACROSS prefixes the sort is by prefix, so a `msg-` always drains before a
-/// `rebind-` deposited earlier — also harmless, since a rebind is not a turn
-/// and the identity it names takes effect for the whole step either way.
+/// **Distinct on every call**, because the name IS the exactly-once key — so
+/// choosing it is choosing between "the same fact again" and "another fact": a
+/// capability note names itself `note-<id>-<version>` so a redeposit collapses
+/// into the one event, while a user turn and a rebind are new facts every time
+/// and must never collapse. Getting that wrong is silent: the second deposit is
+/// deleted at the next drain and never reaches the ledger.
 ///
-/// The name IS the exactly-once key, so choosing it is choosing between "the
-/// same fact again" and "another fact": a capability note names itself
-/// `note-<id>-<version>` so a redeposit collapses into the one event, while a
-/// user turn and a rebind are new facts every time and must never collapse.
-/// One implementation, because getting this wrong is silent — the second
-/// deposit is deleted at the next drain and never reaches the ledger.
-pub fn freshDeliveryName(alloc: std.mem.Allocator, io: std.Io, prefix: []const u8) ![]u8 {
+/// **Sorting after every name still waiting in this inbox under the same
+/// prefix**, because `drainInbox` applies files in filename order — the name is
+/// not only an identity, it is the queue position. That set is exactly the one
+/// whose order carries meaning: two queued messages merge into one turn in this
+/// order, and of two waiting rebinds the last one is what the session ends on.
+/// A wall clock alone does not give it (it can repeat a value or step
+/// backwards, and then the random tail decides), so the mint reads the inbox
+/// and steps past the newest stamp it finds there. Already-committed events
+/// need no such care: anything still waiting is applied after all of them, and
+/// both `drainInbox` and `scanSession` are built on that.
+///
+/// Not defended: two mints racing each other (their order is not anybody's
+/// intent — and the two commands where it WOULD be, `append --image` and
+/// `rebind`, serialize on the inbox's deposit lease anyway), and order ACROSS
+/// prefixes, which is the prefix's order rather than time's. The latter is
+/// cosmetic — a rebind is not a turn at all, and a note or a finished task
+/// landing on the other side of a message only moves two turns past each other.
+///
+/// Why not carry ordering somewhere else and leave this a pure id: a second
+/// channel means a second piece of durable state, and a counter over a
+/// directory that empties on every drain reuses numbers — which is precisely
+/// how a reused name silently becomes "the same fact again" (the agent
+/// package's mailbox learned this one the hard way).
+pub fn freshDeliveryName(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    session_path: []const u8,
+    prefix: []const u8,
+) ![]u8 {
+    const now = std.Io.Timestamp.now(io, .real).toNanoseconds();
+    var stamp: u64 = if (now < 0) 0 else @intCast(@min(now, max_stamp));
+    if (try latestWaitingStamp(alloc, io, base, session_path, prefix)) |seen| {
+        // `+ 1` is enough to sort after it: the stamp is a fixed-width field, so
+        // the comparison never reaches the random tail.
+        if (seen >= stamp and seen < max_stamp) stamp = seen + 1;
+    }
     var nonce: [4]u8 = undefined;
     io.random(&nonce);
-    return std.fmt.allocPrint(alloc, "{s}-{d}-{x}", .{
+    return std.fmt.allocPrint(alloc, "{s}-{d:0>19}-{x}", .{
         prefix,
-        std.Io.Timestamp.now(io, .real).toNanoseconds(),
+        stamp,
         std.mem.readInt(u32, &nonce, .little),
     });
+}
+
+/// The widest stamp the name's fixed-width field can hold. Nanoseconds reach it
+/// in the year 2286; a name beyond it could only be planted by hand, and all it
+/// costs is the ordering step above (the id is still distinct).
+const max_stamp: u64 = 9_999_999_999_999_999_999;
+
+/// The newest stamp among the names this prefix already has waiting, or null
+/// when the inbox holds none (or does not exist). A name this cannot read a
+/// stamp out of is skipped: it is either a foreign name or one from a shape
+/// this function did not write, and neither is something to order against.
+fn latestWaitingStamp(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    session_path: []const u8,
+    prefix: []const u8,
+) !?u64 {
+    const inbox = try inboxPath(alloc, session_path);
+    defer alloc.free(inbox);
+    var dir = base.openDir(io, inbox, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer dir.close(io);
+    var newest: ?u64 = null;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+        const stamp = stampOf(entry.name, prefix) orelse continue;
+        if (newest == null or stamp > newest.?) newest = stamp;
+    }
+    return newest;
+}
+
+/// `<prefix>-<stamp>-<nonce>.json` → `stamp`.
+fn stampOf(name: []const u8, prefix: []const u8) ?u64 {
+    if (!std.mem.startsWith(u8, name, prefix)) return null;
+    const rest = name[prefix.len..];
+    if (rest.len == 0 or rest[0] != '-') return null;
+    const digits_and_more = rest[1..];
+    const end = std.mem.indexOfScalar(u8, digits_and_more, '-') orelse return null;
+    return std.fmt.parseInt(u64, digits_and_more[0..end], 10) catch null;
 }
 
 /// Drain every deposited `.json` in filename order. Consecutive user messages
@@ -1261,20 +1334,25 @@ fn flushInboxUsers(
 /// It does not open the ledger: `openDurable` takes the writer lease, and each
 /// of those readers must work while a step is running (`session append` and
 /// `session rebind` both deposit for exactly that reason, DESIGN §3.4). So it
-/// reads bytes, honours the same crash-tail rule replay does, and mirrors
-/// `drainInbox`'s filename order so "last one wins" means the same thing here
-/// as it will there. Being concurrent with the writer is what decides the order
-/// of its two passes — see `scanSession`.
+/// reads bytes and honours the same crash-tail rule replay does. Being
+/// concurrent with the writer is what shapes the rest — see `scanSession`.
 pub const SessionScan = struct {
     arena: std.heap.ArenaAllocator,
     /// The last rebind this session has been told about, committed or pending;
-    /// null when it still runs on what its header froze.
+    /// null when it still runs on what its header froze. Decided at the end of
+    /// `scanSession` from the two below.
     rebound: ?Identity = null,
     /// Whether any user turn, committed or pending, carries an image.
     has_images: bool = false,
-    /// How many rebinds this scan has taken, so the second pass can tell whether
-    /// the first already holds the answer (`scanSession`).
-    rebinds_seen: usize = 0,
+
+    /// The last rebind still waiting in the inbox, in the order the drain will
+    /// apply them, and whether the ledger turned out to have applied it already.
+    /// Only the LAST one is kept: the drain works in filename order, so a later
+    /// name being committed implies every earlier one is too.
+    pending: ?struct { name: []const u8, id: Identity } = null,
+    pending_drained: bool = false,
+    /// The last rebind in the ledger, in ledger order.
+    committed: ?Identity = null,
 
     /// The identity in force, given the header the same reader already holds.
     pub fn identity(self: SessionScan, header: Header) Identity {
@@ -1285,37 +1363,52 @@ pub const SessionScan = struct {
         self.arena.deinit();
     }
 
-    /// One committed line or one deposited body. A body this cannot decode is
-    /// skipped rather than fatal: these are gates, and the writer is the one
-    /// that gets to declare a ledger corrupt.
-    ///
-    /// `accept_rebind` false still reads the body for images: an image is a
-    /// fact that only ever accumulates, while a rebind REPLACES the answer and
-    /// so may only be taken from a pass that is allowed to speak.
-    fn observe(self: *SessionScan, a: std.mem.Allocator, body: []const u8, accept_rebind: bool) void {
-        // The substring tests are a pre-filter so a gate does not decode a
-        // whole transcript; the decoded `kind` is what decides (the same
-        // discipline `session list` follows).
+    /// The cheap pre-filter both passes share: return the decoded line, or null
+    /// when it cannot say anything this scan cares about. A body it cannot
+    /// decode is skipped rather than fatal — these are gates, and the writer is
+    /// the one that gets to declare a ledger corrupt. Images are folded in here
+    /// because they are the same question in both passes: they only ever
+    /// accumulate, and either pass may be the one that sees them.
+    fn look(self: *SessionScan, a: std.mem.Allocator, body: []const u8) ?WireEvent {
+        // The substring tests keep a gate from decoding a whole transcript; the
+        // decoded `kind` is what decides (the same discipline `session list`
+        // follows).
         const may_be_rebind = std.mem.indexOf(u8, body, "\"kind\":\"model_rebind\"") != null;
         const may_have_images = !self.has_images and std.mem.indexOf(u8, body, "\"images\":") != null;
-        if (!may_be_rebind and !may_have_images) return;
-        const parsed = parseEventLine(a, body) catch return;
+        if (!may_be_rebind and !may_have_images) return null;
+        const parsed = parseEventLine(a, body) catch return null;
         if (std.mem.eql(u8, parsed.value.kind, "user_text")) {
             if (parsed.value.images) |images| {
                 if (images.len != 0) self.has_images = true;
             }
         }
-        if (accept_rebind and std.mem.eql(u8, parsed.value.kind, "model_rebind")) {
-            if (parsed.value.identity) |id| {
-                self.rebound = .{
-                    .profile = parsed.value.profile orelse "",
-                    .identity = id,
-                };
-                self.rebinds_seen += 1;
+        if (!std.mem.eql(u8, parsed.value.kind, "model_rebind")) return null;
+        if (parsed.value.identity == null) return null;
+        return parsed.value;
+    }
+
+    fn observeDeposit(self: *SessionScan, a: std.mem.Allocator, name: []const u8, body: []const u8) void {
+        const line = self.look(a, body) orelse return;
+        self.pending = .{ .name = name, .id = identityOfLine(line) };
+    }
+
+    fn observeCommitted(self: *SessionScan, a: std.mem.Allocator, body: []const u8) void {
+        const line = self.look(a, body) orelse return;
+        self.committed = identityOfLine(line);
+        // The same fact, seen twice: this line IS the deposit the inbox pass
+        // read, drained between the two passes. Knowing that is what lets the
+        // ledger speak again — see `scanSession`.
+        if (self.pending) |p| {
+            if (line.origin) |o| {
+                if (std.mem.eql(u8, o, p.name)) self.pending_drained = true;
             }
         }
     }
 };
+
+fn identityOfLine(line: WireEvent) Identity {
+    return .{ .profile = line.profile orelse "", .identity = line.identity.? };
+}
 
 pub fn scanSession(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) !SessionScan {
     var scan: SessionScan = .{ .arena = .init(alloc) };
@@ -1325,37 +1418,30 @@ pub fn scanSession(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, sessi
     // The INBOX first and the ledger second, which is the opposite of the order
     // the drain applies them in — because a drain moves an event by appending it
     // to the ledger and THEN deleting its file. A reader that looked at the
-    // ledger first and the inbox second could see a fact in neither place:
+    // ledger first and the inbox second could see a fact in NEITHER place:
     // committed just after the ledger was read, deleted just before the inbox
     // was listed. Read this way round, every fact decided before the scan began
-    // is in at least one of the two passes — still waiting, or already committed
-    // by the time the ledger is read.
+    // is in at least one of the two passes.
     try scanInbox(&scan, a, io, base, session_path);
+    try scanLedger(&scan, a, io, base, session_path);
 
-    // The price of that order is precedence: the ledger can hold a rebind OLDER
-    // than one still waiting. So a committed rebind is taken only when the inbox
-    // held none — a file still waiting is applied after everything already
-    // committed, and is therefore the one the next step ends on. Images have no
-    // such contest: they only ever accumulate, so every pass adds to them.
-    const accept_rebind = scan.rebinds_seen == 0;
-    const bytes = try base.readFileAlloc(io, session_path, a, .unlimited);
-    var lines = std.mem.splitScalar(u8, bytes[0..@intCast(lastCompleteLineEnd(bytes))], '\n');
-    var header_seen = false;
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len == 0) continue;
-        if (!header_seen) {
-            header_seen = true;
-            continue;
-        }
-        scan.observe(a, line, accept_rebind);
-    }
+    // Which of the two answers is the next step's. A file still waiting is
+    // applied AFTER everything already committed, so it wins — but only if it is
+    // still genuinely waiting. That caveat is the whole subtlety: the inbox pass
+    // reads files one at a time, so a drain running alongside it can commit and
+    // delete a LATER deposit between two of those reads, leaving this scan
+    // holding an earlier one and unable to see the later one anywhere it looked.
+    // Answering "pending wins" flatly would then name a model that is already
+    // two facts out of date. The deposit's own delivery id settles it: if the
+    // ledger carries it as an `origin`, the drain has been through here and its
+    // last committed rebind is the newer truth (that is also, for free, the
+    // right answer for a file left behind by a crash between append and delete).
+    const pending_wins = scan.pending != null and !scan.pending_drained;
+    scan.rebound = if (pending_wins) scan.pending.?.id else scan.committed;
     return scan;
 }
 
-/// Every deposited body still waiting, in the order the drain will apply it. A
-/// file left behind by a crash between append and delete is one that is also
-/// committed, and reading it changes no answer: it is the same fact.
+/// Every deposited body still waiting, in the order the drain will apply it.
 fn scanInbox(scan: *SessionScan, a: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) !void {
     const inbox = try inboxPath(a, session_path);
     var dir = base.openDir(io, inbox, .{ .iterate = true }) catch |err| switch (err) {
@@ -1375,8 +1461,26 @@ fn scanInbox(scan: *SessionScan, a: std.mem.Allocator, io: std.Io, base: std.Io.
         }
     }.lessThan);
     for (names.items) |name| {
+        // A file that vanished between the listing and here was drained by the
+        // writer; the ledger pass is where it turns up.
         const body = dir.readFileAlloc(io, name, a, .limited(max_inbox_event_bytes)) catch continue;
-        scan.observe(a, body, true);
+        scan.observeDeposit(a, name, body);
+    }
+}
+
+/// Every committed line, in ledger order, minus the torn tail replay drops too.
+fn scanLedger(scan: *SessionScan, a: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) !void {
+    const bytes = try base.readFileAlloc(io, session_path, a, .unlimited);
+    var lines = std.mem.splitScalar(u8, bytes[0..@intCast(lastCompleteLineEnd(bytes))], '\n');
+    var header_seen = false;
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        if (!header_seen) {
+            header_seen = true;
+            continue;
+        }
+        scan.observeCommitted(a, line);
     }
 }
 
@@ -1666,6 +1770,35 @@ test "a rebind still waiting outranks one already committed" {
     try std.testing.expectEqualStrings("waiting", scan.identity(header).identity.model);
 }
 
+test "a deposit the ledger already applied does not outrank what came after it" {
+    // The interleaving this defends against: the inbox pass reads its files one
+    // at a time, and a drain running alongside can commit AND delete a later
+    // deposit between two of those reads. The scan is then holding an earlier
+    // deposit and cannot see the later one in either place it looked — and
+    // "what is waiting wins" would answer with a model two facts out of date.
+    // The state below is that moment frozen: the file the scan read is one the
+    // ledger has already applied (its delivery id is right there as `origin`),
+    // and a newer rebind is committed behind it.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spath = "s.jsonl";
+    const header: Header = .{ .model = "openai", .model_identity = .{ .provider = "openai", .model = "frozen" } };
+
+    {
+        var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s", .model = header.model, .model_identity = header.model_identity });
+        defer l.deinit();
+        try l.appendWithOrigin(.{ .model_rebind = .{ .profile = "p", .identity = .{ .provider = "openai", .model = "first" } } }, "rebind-0001.json");
+        try l.appendWithOrigin(.{ .model_rebind = .{ .profile = "p", .identity = .{ .provider = "openai", .model = "second" } } }, "rebind-0002.json");
+    }
+    try depositEvent(alloc, io, tmp.dir, spath, "rebind-0001", .{ .model_rebind = .{ .profile = "p", .identity = .{ .provider = "openai", .model = "first" } } });
+
+    var scan = try scanSession(alloc, io, tmp.dir, spath);
+    defer scan.deinit();
+    try std.testing.expectEqualStrings("second", scan.identity(header).identity.model);
+}
+
 test "an event too large to read back is refused at the deposit" {
     // The invariant: whatever the inbox accepts, a step boundary can read. Take
     // it away and `session append` can accept a durable fact that makes every
@@ -1696,17 +1829,33 @@ test "an event too large to read back is refused at the deposit" {
     try std.testing.expectEqual(@as(usize, 0), l.len());
 }
 
-test "a delivery id is distinct on every call" {
-    // Distinctness is the contract (the name is the exactly-once key), and it is
-    // all that is asserted: the ordering the drain gets from these names is only
-    // as good as the clock, and pinning it here would pin the clock.
+test "a delivery id is distinct, and sorts after what is already waiting" {
+    // Distinctness is the exactly-once key. Order is the queue position, and it
+    // is a PROPERTY OF THE INBOX, not of the clock: the deposit below carries a
+    // stamp from the far future, and the next name still has to land after it —
+    // which is what makes two rebinds issued in a row apply in that order even
+    // if the clock repeated or stepped back between them.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
-    const first = try freshDeliveryName(alloc, io, "rebind");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spath = "s.jsonl";
+
+    const first = try freshDeliveryName(alloc, io, tmp.dir, spath, "rebind");
     defer alloc.free(first);
-    const second = try freshDeliveryName(alloc, io, "rebind");
+    const second = try freshDeliveryName(alloc, io, tmp.dir, spath, "rebind");
     defer alloc.free(second);
     try std.testing.expect(!std.mem.eql(u8, first, second));
+
+    try depositEvent(alloc, io, tmp.dir, spath, "rebind-9000000000000000000-ff", .{ .user_text = .{ .text = "from the future" } });
+    const after = try freshDeliveryName(alloc, io, tmp.dir, spath, "rebind");
+    defer alloc.free(after);
+    try std.testing.expect(std.mem.lessThan(u8, "rebind-9000000000000000000-ff.json", after));
+
+    // Another prefix is another queue; it does not drag this one forward.
+    const other = try freshDeliveryName(alloc, io, tmp.dir, spath, "msg");
+    defer alloc.free(other);
+    try std.testing.expect(std.mem.lessThan(u8, other, "msg-9000000000000000000"));
 }
 
 test "identityEqual covers the profile, not just the descriptor" {

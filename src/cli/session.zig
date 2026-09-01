@@ -103,9 +103,10 @@ pub fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []con
     if (std.mem.eql(u8, sub, "events")) return sessionEvents(alloc, io, rest);
     if (std.mem.eql(u8, sub, "cancel")) return sessionCancel(alloc, io, rest);
     if (std.mem.eql(u8, sub, "rebind")) return sessionRebind(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "discard")) return sessionDiscard(alloc, io, rest);
     if (std.mem.eql(u8, sub, "outcome")) return sessionOutcome(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return session_list.sessionList(alloc, io, sliceHasFlag(rest, "--json"));
-    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|rebind|outcome|list\n");
+    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|rebind|discard|outcome|list\n");
     return 1;
 }
 
@@ -900,6 +901,24 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         return 1;
     }
 
+    // Held from here to the deposit (`depositLease`). Three things need it: the
+    // images gate below reads the session and then deposits, and so does the
+    // OTHER half of that same rule in `session rebind`; the delivery id is
+    // minted from what is already waiting, so two appends racing would otherwise
+    // be able to take the same queue position; and `session discard` may not
+    // take the session away between the check below and the deposit.
+    var lease = depositLease(alloc, io, spath, .block) catch {
+        try printErr(io, "session append failed: cannot open this session's inbox\n");
+        return 1;
+    };
+    defer lease.close(io);
+    // Under the lease, because waiting for it is a moment in which the session
+    // can have been discarded.
+    if (!sessionExists(io, spath)) {
+        try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
+        return 1;
+    }
+
     // Images: the gates (DESIGN §9's "decisions live in the shell") — can this
     // session's frozen model see an image at all, is this file even an image,
     // is it small enough. Every one of them refuses BEFORE anything is
@@ -909,15 +928,7 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         for (images.items) |img| alloc.free(img.data);
         images.deinit(alloc);
     }
-    // …and the gate is held for the whole read-then-deposit, because the other
-    // half of the same rule is a different command (`depositLease`).
-    var lease: ?std.Io.File = null;
-    defer if (lease) |*f| f.close(io);
     if (image_args.items.len != 0) {
-        lease = depositLease(alloc, io, spath) catch {
-            try printErr(io, "session append failed: cannot open this session's inbox\n");
-            return 1;
-        };
         if (!try visionAccepted(alloc, io, spath)) return 1;
         for (image_args.items) |path| {
             const img = loadImage(alloc, io, path) catch |err| {
@@ -932,7 +943,7 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     // user turn is deposited into the session inbox under a fresh name and
     // appended at the next step boundary — including mid-run, if a step
     // process is going right now.
-    const name = try ledger.freshDeliveryName(alloc, io, "msg");
+    const name = try ledger.freshDeliveryName(alloc, io, std.Io.Dir.cwd(), spath, "msg");
     defer alloc.free(name);
     ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{
         .user_text = .{ .text = text, .images = images.items },
@@ -954,6 +965,146 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     return 0;
 }
 
+/// `nulya session discard <id>` — un-create a session that never recorded
+/// anything.
+///
+/// The only command that REMOVES a session, and it can only ever remove one
+/// that holds nothing: a header and no events is not a ledger, it is a name
+/// (physics #1 is about history, and there is none here). What makes these:
+/// `session new` runs before the first message, so a compaction whose driver
+/// never came back, or a front end that opened a session and was closed, leaves
+/// a file nobody will ever add to.
+///
+/// It exists because deciding this from OUTSIDE is not something a reader can
+/// do. The two facts that say "leave it alone" are both LOCKS — a step writing
+/// it, a deposit in flight — and a lock can only be answered by taking it, not
+/// by looking at it. A front end that probes instead (is there a lock file? can
+/// I read byte 0 of it?) is guessing, and its guess is wrong exactly when it
+/// matters: while another process sits between its check and its deposit. Here
+/// the checks and the removal happen under both leases, so "nothing holds this"
+/// is true for as long as it takes to act on it.
+///
+/// Exit 0 means one thing only: it is gone because this command removed it.
+/// Every refusal — no such session, a step running, a queued turn, a deposit in
+/// flight, any event at all — is exit 1 with the reason, so a caller can treat
+/// the code as the answer.
+fn sessionDiscard(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len != 1) {
+        try printErr(io, "usage: nulya session discard <id>\n");
+        return 1;
+    }
+    const id = args[0];
+    if (!launch.isValidSessionId(id)) {
+        try printErr(io, "invalid session id\n");
+        return 1;
+    }
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+    if (!sessionExists(io, spath)) {
+        try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
+        return 1;
+    }
+
+    // Both leases, in the order that cannot deadlock: nothing in the system
+    // takes the writer lease and then a deposit lease (`step` never deposits),
+    // so this is the only place the two are held at once.
+    var deposits = depositLease(alloc, io, spath, .fail_fast) catch |err| switch (err) {
+        error.WouldBlock => {
+            try printErrFmt(alloc, io, "session discard refused: something is depositing into '{s}' right now\n", .{id});
+            return 1;
+        },
+        else => {
+            try printErrFmt(alloc, io, "session discard failed: cannot open the inbox of '{s}'\n", .{id});
+            return 1;
+        },
+    };
+    var deposits_open = true;
+    defer if (deposits_open) deposits.close(io);
+
+    var writer = ledger.acquireWriterLease(alloc, io, std.Io.Dir.cwd(), spath) catch |err| switch (err) {
+        error.SessionBusy => {
+            try printErrFmt(alloc, io, "session discard refused: a step is running '{s}'\n", .{id});
+            return 1;
+        },
+        else => return err,
+    };
+    var writer_open = true;
+    defer if (writer_open) writer.close(io);
+
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, spath, alloc, .unlimited) catch {
+        try printErrFmt(alloc, io, "session discard failed: cannot read '{s}'\n", .{id});
+        return 1;
+    };
+    defer alloc.free(bytes);
+    var lines = std.mem.splitScalar(u8, bytes[0..@intCast(ledger.lastCompleteLineEnd(bytes))], '\n');
+    var complete: usize = 0;
+    while (lines.next()) |raw| {
+        if (std.mem.trim(u8, raw, " \t\r").len != 0) complete += 1;
+    }
+    if (complete > 1) {
+        try printErrFmt(alloc, io, "session discard refused: '{s}' has recorded events\n", .{id});
+        return 1;
+    }
+    if (try inboxHoldsDeposit(alloc, io, spath)) {
+        try printErrFmt(alloc, io, "session discard refused: a turn is queued for '{s}' and no step has drained it\n", .{id});
+        return 1;
+    }
+
+    // The session file first: its absence is what every other process reads as
+    // "gone" (both depositors re-check it under the lease this still holds).
+    // Then each lease is closed before its own file is removed — Windows will
+    // not unlink a file that is open, and here the opener is us.
+    try std.Io.Dir.cwd().deleteFile(io, spath);
+    try deleteIfPresent(io, try ledger.siblingPath(alloc, spath, ".cancel"), alloc);
+    writer.close(io);
+    writer_open = false;
+    try deleteIfPresent(io, try ledger.siblingPath(alloc, spath, ".lock"), alloc);
+    deposits.close(io);
+    deposits_open = false;
+    try deleteIfPresent(io, try depositLockPath(alloc, spath), alloc);
+    const inbox = try ledger.inboxPath(alloc, spath);
+    defer alloc.free(inbox);
+    // Whatever is left in there arrived after the checks above, and belongs to
+    // nobody now; the directory goes only if it is empty.
+    std.Io.Dir.cwd().deleteDir(io, inbox) catch {};
+    try printOut(alloc, io, "discarded {s}\n", .{id});
+    return 0;
+}
+
+fn deleteIfPresent(io: std.Io, path: []u8, alloc: std.mem.Allocator) !void {
+    defer alloc.free(path);
+    std.Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+}
+
+/// Is a drainable event waiting in this session's inbox? Only `*.json` counts —
+/// the directory also holds the deposit lease, which is not a fact about the
+/// session (`depositLease`).
+fn inboxHoldsDeposit(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !bool {
+    const inbox = try ledger.inboxPath(alloc, spath);
+    defer alloc.free(inbox);
+    var dir = std.Io.Dir.cwd().openDir(io, inbox, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".json")) return true;
+    }
+    return false;
+}
+
+/// Whether taking the deposit lease waits for whoever has it.
+///
+/// The commands that deposit WAIT: they are here to add a fact, and the other
+/// holder is about to finish. `session discard` does NOT: it is here to take a
+/// session away, so "somebody is depositing right now" is an answer, not a
+/// queue to join.
+const Wait = enum { block, fail_fast };
+
 /// The exclusive right to deposit into this session, held across a gate's
 /// read-then-deposit.
 ///
@@ -970,13 +1121,24 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 /// nor a scan looks at anything but `*.json` there, and this is emphatically NOT
 /// the session's `<id>.lock`: that one belongs to `step`, and every gate here
 /// has to work while a step is running.
-fn depositLease(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !std.Io.File {
+fn depositLease(alloc: std.mem.Allocator, io: std.Io, spath: []const u8, wait: Wait) !std.Io.File {
     const inbox = try ledger.inboxPath(alloc, spath);
     defer alloc.free(inbox);
     try std.Io.Dir.cwd().createDirPath(io, inbox);
-    const lock_rel = try std.fmt.allocPrint(alloc, "{s}{c}.deposit.lock", .{ inbox, std.fs.path.sep });
+    const lock_rel = try depositLockPath(alloc, spath);
     defer alloc.free(lock_rel);
-    return std.Io.Dir.cwd().createFile(io, lock_rel, .{ .truncate = false, .read = true, .lock = .exclusive });
+    return std.Io.Dir.cwd().createFile(io, lock_rel, .{
+        .truncate = false,
+        .read = true,
+        .lock = .exclusive,
+        .lock_nonblocking = wait == .fail_fast,
+    });
+}
+
+fn depositLockPath(alloc: std.mem.Allocator, spath: []const u8) ![]u8 {
+    const inbox = try ledger.inboxPath(alloc, spath);
+    defer alloc.free(inbox);
+    return std.fmt.allocPrint(alloc, "{s}{c}.deposit.lock", .{ inbox, std.fs.path.sep });
 }
 
 /// The largest image one turn may carry, raw bytes before base64 (the tightest
@@ -1661,11 +1823,17 @@ fn sessionRebind(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     // Held from before the read until after the deposit: the images gate below
     // and `session append --image` are two halves of one rule, and each is a
     // read followed by a deposit (`depositLease`).
-    var lease = depositLease(alloc, io, spath) catch {
+    var lease = depositLease(alloc, io, spath, .block) catch {
         try printErrFmt(alloc, io, "session rebind failed: cannot open the inbox of '{s}'\n", .{id});
         return 1;
     };
     defer lease.close(io);
+    // Under the lease: waiting for it is a moment in which the session can have
+    // been discarded out from under this command.
+    if (!sessionExists(io, spath)) {
+        try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
+        return 1;
+    }
 
     var header = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch {
         try printErrFmt(alloc, io, "session rebind failed: cannot read '{s}'\n", .{id});
@@ -1741,7 +1909,7 @@ fn sessionRebind(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     // again: the name is the inbox's exactly-once key, so a fixed one would
     // make every rebind after the first collapse into the one already applied
     // and vanish at the next drain (`ledger.freshDeliveryName`).
-    const name = try ledger.freshDeliveryName(alloc, io, "rebind");
+    const name = try ledger.freshDeliveryName(alloc, io, std.Io.Dir.cwd(), spath, "rebind");
     defer alloc.free(name);
     try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{
         .model_rebind = .{ .profile = profile, .identity = wanted },

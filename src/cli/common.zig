@@ -230,6 +230,7 @@ pub const session_usage =
     \\                                                    stays, the reasoning recorded before it does not, and a cold prompt cache is the cost
     \\  nulya session outcome <id> <success|partial|failure> [--note <text>] [--seq N]
     \\                                                    record how a session turned out (a journal, never the session file)
+    \\  nulya session discard <id>                        remove a session that recorded nothing and holds nothing
     \\  nulya session list [--json]                       every session here: composition, cost, latest verdict
     \\
 ;

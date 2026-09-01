@@ -6,7 +6,6 @@
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import {
-  discardIfUntouched,
   listExtensions,
   probeWriterLease,
   readDelegationRecord,
@@ -15,7 +14,7 @@ import {
   storeRoots,
   type LeaseState,
 } from "../src/nulya/files.ts"
-import { sessionAppend, sessionList, sessionNew, sessionStep } from "../src/nulya/cli.ts"
+import { sessionAppend, sessionDiscard, sessionList, sessionNew, sessionStep } from "../src/nulya/cli.ts"
 import { scripted_env, scripted_loop_env, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 import { join } from "node:path"
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
@@ -201,25 +200,25 @@ test("readToolUsage projects the journal without ranking it", async () => {
  * Un-creating a session the TUI made and never used. The guards are the test:
  * every way a session can carry meaning must keep it.
  */
-test("discardIfUntouched removes only a session that recorded nothing and holds nothing", async () => {
+test("sessionDiscard removes only a session that recorded nothing and holds nothing", async () => {
   // Fresh from `session new`: a header and no events → removed, siblings too.
   const empty = await sessionNew(ws, { profile: "scripted" })
   expect(sessionExists(ws, empty)).toBe(true)
-  expect(discardIfUntouched(ws, empty)).toBe(true)
+  expect(sessionDiscard(ws, empty)).toBe(true)
   expect(sessionExists(ws, empty)).toBe(false)
   expect((await sessionList(ws)).map((entry) => entry.id)).not.toContain(empty)
   // Twice is a no-op, not an error.
-  expect(discardIfUntouched(ws, empty)).toBe(false)
+  expect(sessionDiscard(ws, empty)).toBe(false)
 
   // A turn waiting in the inbox: the user said something nobody has drained
   // yet. Deleting would lose it → kept.
   const queued = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, queued, "not yet stepped")
-  expect(discardIfUntouched(ws, queued)).toBe(false)
+  expect(sessionDiscard(ws, queued)).toBe(false)
   expect(sessionExists(ws, queued)).toBe(true)
   // …and once it IS drained it is a ledger with events → kept, forever.
   await drainStep(queued)
-  expect(discardIfUntouched(ws, queued)).toBe(false)
+  expect(sessionDiscard(ws, queued)).toBe(false)
   expect(sessionExists(ws, queued)).toBe(true)
 
   // A step holding the lease right now → kept, whatever the file says.
@@ -232,7 +231,7 @@ test("discardIfUntouched removes only a session that recorded nothing and holds 
   })()
   try {
     await until(() => holding, 30_000)
-    expect(discardIfUntouched(ws, held)).toBe(false)
+    expect(sessionDiscard(ws, held)).toBe(false)
     expect(sessionExists(ws, held)).toBe(true)
   } finally {
     step.kill()

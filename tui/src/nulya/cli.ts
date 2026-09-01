@@ -1095,6 +1095,36 @@ export async function sessionCancel(ws: Workspace, id: string): Promise<void> {
   if (result.code !== 0) fail("session cancel failed", result)
 }
 
+/**
+ * `nulya session discard <id>` — un-create a session that never recorded
+ * anything. Returns whether it was removed.
+ *
+ * Synchronous, and a subprocess rather than a few `unlinkSync` calls, because
+ * the question "may this be removed?" cannot be answered from out here. Two of
+ * the facts that forbid it are LOCKS — a step writing the session, a deposit in
+ * flight — and a lock is answered by taking it, not by looking at it. The
+ * probing this file used to do (is there a lock file? can I read byte 0?) is a
+ * guess that goes wrong exactly when it matters: while another process sits
+ * between its own check and its deposit. The CLI holds both leases across the
+ * checks and the removal, so it is the one place that can be right.
+ *
+ * Callers pass only ids THIS process created; a session opened by id, or
+ * somebody else's, is never a candidate — another front end sitting on its own
+ * fresh session looks exactly like this from the outside.
+ */
+export function sessionDiscard(ws: Workspace, id: string): boolean {
+  const result = Bun.spawnSync({
+    cmd: [ws.bin, "session", "discard", id],
+    cwd: ws.dir,
+    env: process.env,
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  // Exit 0 means one thing: it is gone because that command removed it. Every
+  // refusal, including "no such session", is a non-zero code and a reason.
+  return result.exitCode === 0
+}
+
 /** What `session rebind` said, in the kernel's own words. */
 export interface RebindResult {
   /** Its one line on stdout: `<id> will run on <provider>/<model> from its next step`. */

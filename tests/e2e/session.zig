@@ -221,6 +221,60 @@ test "durable ledger: a tool result carrying non-utf-8 bytes is still a JSON str
     try std.testing.expect(checked);
 }
 
+test "session cli: discard removes a session that holds nothing, and refuses one that holds anything" {
+    // The one command that removes a session, and the reason it is a command at
+    // all: two of the facts that forbid it are locks, and a lock is answered by
+    // taking it. Exit 0 means it is gone because this removed it — nothing else.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const empty = std.mem.trim(u8, new.stdout, " \r\n");
+    const spath = try std.fmt.allocPrint(alloc, "{s}{c}{s}.jsonl", .{ sessions_dir_rel, std.fs.path.sep, empty });
+    defer alloc.free(spath);
+
+    const gone = try runCli(alloc, io, ws, &.{ exe_abs, "session", "discard", empty });
+    defer alloc.free(gone.stdout);
+    try std.testing.expectEqual(@as(u8, 0), gone.code);
+    try std.testing.expectError(error.FileNotFound, ws.access(io, spath, .{}));
+    // The siblings go with it: a lock or a marker beside no session is litter.
+    for ([_][]const u8{ ".lock", ".cancel", ".inbox" }) |suffix| {
+        const sibling = try std.fmt.allocPrint(alloc, "{s}{c}{s}{s}", .{ sessions_dir_rel, std.fs.path.sep, empty, suffix });
+        defer alloc.free(sibling);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, sibling, .{}));
+    }
+    // Twice is a refusal, not a success: there is nothing left to remove.
+    const again = try runCli(alloc, io, ws, &.{ exe_abs, "session", "discard", empty });
+    defer alloc.free(again.stdout);
+    try std.testing.expect(again.code != 0);
+
+    // A turn nobody has drained is a turn the person typed. Removing the
+    // session would lose it, so the answer is no and the session stays.
+    const second = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(second.stdout);
+    const queued = std.mem.trim(u8, second.stdout, " \r\n");
+    const appended = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", queued, "not yet stepped" });
+    defer alloc.free(appended.stdout);
+    try std.testing.expectEqual(@as(u8, 0), appended.code);
+
+    const refused = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "discard", queued }, &.{});
+    defer alloc.free(refused);
+    try std.testing.expect(std.mem.indexOf(u8, refused, "queued") != null);
+    const kept = try std.fmt.allocPrint(alloc, "{s}{c}{s}.jsonl", .{ sessions_dir_rel, std.fs.path.sep, queued });
+    defer alloc.free(kept);
+    try ws.access(io, kept, .{});
+}
+
 test "session cli: append refuses a message that is not valid UTF-8 and records nothing" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

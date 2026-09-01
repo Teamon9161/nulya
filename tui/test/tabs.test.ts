@@ -8,7 +8,7 @@
  * exactly what these pin: the slot does not move, the sibling tab beside it
  * is untouched, and a session with something in it survives being cleared
  * even though this very process created it — the same guard `close` and
- * `replace` already lean on (`discardIfUntouched`), now exercised on the
+ * `replace` already lean on (`sessionDiscard`), now exercised on the
  * path `/clear` takes rather than the paths that already tested it
  * (`lifecycle.test.tsx`).
  *
@@ -55,7 +55,7 @@ test("clearing a session tab does not touch its file, even one this process crea
   const id = await sessionNew(ws, { profile: "scripted" })
   // Queued, not stepped: the ledger file itself stays header-only, but the
   // inbox this deposits into is non-empty — and that alone is enough for
-  // `discardIfUntouched` to refuse to remove the session (`files.ts`). The
+  // `sessionDiscard` to refuse to remove the session (`files.ts`). The
   // point under test is that `clear` goes through that same guard rather
   // than some more eager "this tab is mine, throw it away" shortcut.
   await sessionAppend(ws, id, "hello")

@@ -23,8 +23,8 @@ import { createAttachment, type AttachOptions, type Attachment } from "./attach.
 import { reportFailure } from "./driver.ts"
 import { createTaskWatch, type TaskWatch } from "./tasks.ts"
 import { sessionPins, type ModelPick } from "./tui_state.ts"
-import { discardIfUntouched, readActiveContributions, readHeader, type Contributions } from "../nulya/files.ts"
-import { sessionEvents, sessionNew } from "../nulya/cli.ts"
+import { readActiveContributions, readHeader, type Contributions } from "../nulya/files.ts"
+import { sessionDiscard, sessionEvents, sessionNew } from "../nulya/cli.ts"
 import { withOptions, type WithRef } from "../with.ts"
 import { sameWorkspace } from "../workspaces.ts"
 import { createPaneStore, main_surface, type PaneStore } from "./panes.ts"
@@ -145,7 +145,7 @@ export interface SessionTab extends TabCommon {
   /**
    * This process ran `session new` for it. Only such a session is un-created
    * again when it closes without ever having recorded anything
-   * (`files.discardIfUntouched`); one opened by id, or somebody else's, is
+   * (`cli.sessionDiscard`); one opened by id, or somebody else's, is
    * never touched.
    */
   created: boolean
@@ -454,7 +454,7 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
     // The tab's OWN workspace: the session file is in that directory and
     // nowhere else, so a discard aimed at the process's launch directory would
     // either miss or, worse, name somebody else's file.
-    if (tab.created) discardIfUntouched(tab.ws, tab.id)
+    if (tab.created) sessionDiscard(tab.ws, tab.id)
   }
 
   setTabs([

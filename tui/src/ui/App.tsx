@@ -1878,7 +1878,7 @@ export function App(props: AppProps) {
    * otherwise the front tab gives up its place. What it gives up is what
    * closing that tab would have given up — a draft is nothing on disk, and a
    * session this process created and nobody ever said anything in is discarded
-   * by the same `discardIfUntouched` (`state/tabs.ts`). Nothing running is
+   * by the same `sessionDiscard` (`state/tabs.ts`). Nothing running is
    * killed: a step is a kernel process with its own ledger, and leaving it is
    * leaving it, not stopping it.
    */

@@ -5,7 +5,7 @@
  * That is the load-bearing fact here — composition freezes at `session new`
  * (physics #2), so a session created before the first word would have decided
  * its tools, its pins and its model on nobody's behalf. The old guard
- * (`discardIfUntouched`, which un-created an empty session on the way out) is
+ * (`sessionDiscard`, which un-created an empty session on the way out) is
  * still tested, because the paths that DO create one early still exist.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
