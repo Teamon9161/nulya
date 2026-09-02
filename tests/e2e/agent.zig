@@ -58,7 +58,7 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
         \\description: a read-only prober
         \\permissions: readonly
         \\max_steps: 2
-        \\pins: [nonsense]
+        \\with: [../nonsense]
         \\---
         \\You only read. Report what you found.
         \\
@@ -80,9 +80,9 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
         try std.testing.expectEqualStrings("agent-prober", obj.get("label").?.string);
         try std.testing.expectEqual(true, obj.get("readonly").?.bool);
         try std.testing.expectEqual(@as(i64, 2), obj.get("max_steps").?.integer);
-        // A pin the kernel could not resolve refuses the whole `session new`, so
-        // a malformed one is dropped here — and said out loud.
-        try std.testing.expectEqual(@as(usize, 0), obj.get("pins").?.array.items.len);
+        // A member the kernel could not resolve refuses the whole `session new`,
+        // so a malformed one is dropped here — and said out loud.
+        try std.testing.expectEqual(@as(usize, 0), obj.get("with").?.array.items.len);
         try std.testing.expect(std.mem.indexOf(u8, obj.get("warnings").?.array.items[0].string, "nonsense") != null);
         prompt_rel = try alloc.dupe(u8, obj.get("prompt").?.string);
 
@@ -248,7 +248,7 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
     }
 }
 
-test "bundled agent: the personas the package ships need no files — list layers workspace over user over builtin and marks what it shadows, and a delegation to the builtin explore runs read-only with the pins its definition asks for" {
+test "bundled agent: the personas the package ships need no files — list layers workspace over user over builtin and marks what it shadows, and a delegation to the builtin explore runs read-only with the members its definition asks for" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -284,7 +284,7 @@ test "bundled agent: the personas the package ships need no files — list layer
                 try std.testing.expect(row.object.get("description").?.string.len != 0);
                 // Every persona brings SOMETHING: tools to work with, or the
                 // names it may pass work to (the coordinator's whole job).
-                try std.testing.expect(row.object.get("pins").?.array.items.len != 0 or
+                try std.testing.expect(row.object.get("with").?.array.items.len != 0 or
                     row.object.get("agents").?.array.items.len != 0);
                 break;
             } else return error.TestUnexpectedResult;
@@ -324,21 +324,20 @@ test "bundled agent: the personas the package ships need no files — list layer
     }
     try ws.deleteFile(io, ".nulya/agents/explore.md");
 
-    // ③ The builtin `explore` pins `std`'s read-only tools. `render` hands
-    // those pins on as written and has no opinion about whether they resolve —
-    // a pin brings its own package into the session, so `session new` is the
-    // one judge of that.
+    // ③ The builtin `explore` composes `std`'s read-only tools. `render` hands
+    // that member on as written and has no opinion about whether it resolves —
+    // `session new` is the one judge of that.
     {
         const rendered = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "render", "{\"name\":\"explore\"}" });
         defer alloc.free(rendered.stdout);
         try std.testing.expectEqual(@as(u8, 0), rendered.code);
-        try std.testing.expect(std.mem.indexOf(u8, rendered.stdout, "\"ext:std/read\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered.stdout, "\"std:read,grep,glob\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered.stdout, "\"members\"") == null);
     }
 
-    // ④ With `std` active, the builtin persona delegates for real: its pins
-    // become the child's tool face, the membership they imply comes with them,
-    // and `readonly` is held at the kernel's gate.
+    // ④ With `std` active, the builtin persona delegates for real: its member
+    // becomes the child's tool face, and `readonly` is held at the kernel's
+    // gate.
     const std_ref = try buildBundled(alloc, io, ws, exe_abs, "std");
     defer alloc.free(std_ref);
     const std_version = std_ref[std.mem.indexOfScalar(u8, std_ref, '@').? + 1 ..];
@@ -387,9 +386,8 @@ test "bundled agent: the personas the package ships need no files — list layer
     }
 
     // The child's frozen composition: the persona as BYTES the header holds,
-    // `std` as the only member (its pins implied membership; nothing on the
-    // command line named it), and exactly its three read-only tools on the
-    // native face. The persona is not an extension — the store gained nothing.
+    // `std` as the only member (the persona's own `with`, nothing else on the
+    // command line), and exactly its three read-only tools on the native face. The persona is not an extension — the store gained nothing.
     {
         const header = try support.readSessionFile(alloc, io, ws, child);
         defer alloc.free(header);
@@ -425,7 +423,7 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
     const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
     defer alloc.free(ref);
 
-    // No pins: this test is about the conversation, not about a tool face.
+    // No members: this test is about the conversation, not about a tool face.
     try ws.createDirPath(io, ".nulya/agents");
     try ws.writeFile(io, .{
         .sub_path = ".nulya/agents/worker.md",

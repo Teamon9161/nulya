@@ -193,12 +193,10 @@ label = "Tencent Hy3 (free)"
 context_window = 262144
 
 [registry]
+# The ceiling on a session's model-facing tool count, the builtin included.
+# Which tools are on the face is decided by [extensions] with, never derived —
+# nothing promotes itself from the usage journal.
 max_tools = 20
-# Extension tools exposed on the model's tool face, as stable ids
-# ("ext:<extension-id>/<tool>"). A pin is a decision — nothing promotes itself
-# from the usage journal. Each one costs a slot in max_tools and prefix tokens
-# in every session.
-pinned_native_tools = []
 
 [environment]
 backend = "local"
@@ -206,3 +204,8 @@ shell = "auto"
 
 [extensions]
 paths = []
+# The members of every session opened here, each "<id>[@<version>][:<tool>,…]".
+# The part after ":" names the tools that take a slot on the model's face beyond
+# the package's own `surface: auto` default; ":none" means a member with nothing
+# there. Each tool costs a slot in max_tools and prefix tokens in every session.
+with = []

@@ -364,18 +364,18 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
         defer tool_stats.freeEvents(alloc, events);
         try std.testing.expect(events.len != 0);
 
-        var unpinned = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{});
-        defer unpinned.deinit(alloc);
-        try std.testing.expectEqual(@as(usize, 1), unpinned.tools.tools.len);
-        try std.testing.expect(unpinned.tools.lookup("web_search") == null);
+        var uncomposed = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{});
+        defer uncomposed.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 1), uncomposed.tools.tools.len);
+        try std.testing.expect(uncomposed.tools.lookup("web_search") == null);
     }
 
-    // --- Session B: the pin puts it on the tool face, and freezes it. ---
-    const pins = [_][]const u8{"ext:web.search/web_search"};
-    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .pinned_native_tools = &pins });
+    // --- Session B: the selection puts it on the tool face, and freezes it. ---
+    const with_search: []const composition.WithRef = &.{.{ .id = "web.search", .tools = .{ .named = &.{"web_search"} } }};
+    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .with = with_search });
     defer comp_b.deinit(alloc);
 
-    // The pinned tool is native and model-facing, and calling it through the
+    // The selected tool is native and model-facing, and calling it through the
     // ToolExecutor actually spawns the frozen v1 binary.
     const tool_b = comp_b.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     {
@@ -409,8 +409,8 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
         try std.testing.expect(std.mem.indexOf(u8, run.stdout, "greeting-v2") != null);
     }
 
-    // 3. A fresh session with the same pin freezes on v2.
-    var comp_c = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .pinned_native_tools = &pins });
+    // 3. A fresh session with the same member freezes on v2.
+    var comp_c = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .with = with_search });
     defer comp_c.deinit(alloc);
     const tool_c = comp_c.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     {
@@ -898,7 +898,7 @@ test "cli: activating into the user store from inside a session says so on stder
     {
         const stderr = try runCliStderr(alloc, io, ws, &.{ exe_abs, "ext", "activate", "--user", "prompts.demo", version }, &.{home_env});
         defer alloc.free(stderr);
-        try std.testing.expect(std.mem.indexOf(u8, stderr, "note: activating") == null);
+        try std.testing.expect(std.mem.indexOf(u8, stderr, "in the user store from inside session") == null);
     }
 
     // And the listing marks the package as one that contributes a system prompt.
@@ -2572,10 +2572,11 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> pinn
         try std.testing.expect(std.mem.indexOf(u8, run.stdout, "hello from a Nulya script extension") != null);
     }
 
-    // A session that pins the script tool exposes it natively, and its
+    // A session that selects the script tool exposes it natively, and its
     // ToolExecutor runs the frozen script (via its interpreter) end to end.
-    const pins = [_][]const u8{"ext:greeter/greet"};
-    var comp = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .pinned_native_tools = &pins });
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{
+        .with = &.{.{ .id = "greeter", .tools = .{ .named = &.{"greet"} } }},
+    });
     defer comp.deinit(alloc);
     const greet = comp.tools.lookup("greet") orelse return error.TestUnexpectedResult;
     // The binding names the frozen version; that the frozen SCRIPT under
@@ -2654,8 +2655,8 @@ test "manifest surface: the frozen version keeps what the draft declared, and an
     // while the reading of it is `auto`.
     try std.testing.expect(frozen.tools[3].surface == null);
     try std.testing.expectEqual(manifest_mod.Surface.auto, frozen.tools[3].surfaceOf());
-    // And the kernel acts on it: only the `manual` tool takes a pin, while
-    // membership alone puts the `auto` one on the face and leaves the rest off.
+    // And the kernel acts on it: a selection reaches the `manual` tool, a bare
+    // member puts the `auto` one on the face, and nothing reaches `internal`.
     var ws_real: [std.fs.max_path_bytes]u8 = undefined;
     const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
     {
@@ -2663,18 +2664,16 @@ test "manifest surface: the frozen version keeps what the draft declared, and an
         defer ext_root.close(io);
         try store.Store.init(io, ext_root).activate(alloc, "faces", version);
     }
-    const pins = [_][]const u8{"ext:faces/pinny"};
     var comp = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{
-        .pinned_native_tools = &pins,
-        .with = &.{.{ .id = "faces" }},
+        .with = &.{.{ .id = "faces", .tools = .{ .named = &.{"pinny"} } }},
     });
     defer comp.deinit(alloc);
     try std.testing.expect(comp.tools.lookup("pinny") != null);
     try std.testing.expect(comp.tools.lookup("ask") != null);
     try std.testing.expect(comp.tools.lookup("quiet") != null);
     try std.testing.expect(comp.tools.lookup("drive") == null);
-    try std.testing.expectError(error.PinToolNotPinnable, composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{
-        .pinned_native_tools = &[_][]const u8{"ext:faces/drive"},
+    try std.testing.expectError(error.WithToolNotDeclared, composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{
+        .with = &.{.{ .id = "faces", .tools = .{ .named = &.{"drive"} } }},
     }));
 
     // A word outside the three is a manifest fault: `ext build` names it and

@@ -287,21 +287,11 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
     }
     try w.writeAll("\nmodels:\n");
     for (view.models) |m| try writeModelLine(w, m);
-    // Under the exact key names a reader writes back into a config file. An
-    // empty list prints as "(none)": that is an answer, a missing section is
+    // Under the exact key names a reader writes back into a config file.
+    try w.print("\nregistry:\n  max_tools            {d}\n", .{view.registry.max_tools});
+    // An empty list prints as "(none)": that is an answer, a missing section is
     // not.
-    try w.print("\nregistry:\n  max_tools            {d}\n  pinned_native_tools  ", .{view.registry.max_tools});
-    if (view.registry.pinned_native_tools.len == 0) {
-        try w.writeAll("(none)");
-    } else {
-        for (view.registry.pinned_native_tools, 0..) |pin, i| {
-            if (i != 0) try w.writeAll(", ");
-            try w.writeAll(pin);
-        }
-    }
-    // The membership axis, beside the tool face, empty-prints for the same
-    // reason.
-    try w.writeAll("\n\nextensions:\n  with                 ");
+    try w.writeAll("\nextensions:\n  with                 ");
     if (view.extensions.with.len == 0) {
         try w.writeAll("(none)");
     } else {
@@ -346,9 +336,8 @@ test "config show projects profiles with credential availability and the catalog
         .{ .id = "deepseek-v4-flash", .label = "DeepSeek V4 Flash", .efforts = &.{ "off", "low", "high", "max" }, .context_window = 1_000_000 },
     };
     cfg.models = &models;
-    var pins = [_][]const u8{ "ext:date.now/print_date", "ext:notes/append" };
-    cfg.registry = .{ .max_tools = 6, .pinned_native_tools = &pins };
-    cfg.extensions = .{ .with = &.{"guide"} };
+    cfg.registry = .{ .max_tools = 6 };
+    cfg.extensions = .{ .with = &.{ "guide", "std:read,grep" } };
 
     var env: std.process.Environ.Map = .init(alloc);
     defer env.deinit();
@@ -416,12 +405,12 @@ test "config show projects profiles with credential availability and the catalog
 
     const registry = root.get("registry").?.object;
     try std.testing.expectEqual(@as(i64, 6), registry.get("max_tools").?.integer);
-    const projected_pins = registry.get("pinned_native_tools").?.array.items;
-    try std.testing.expectEqual(@as(usize, 2), projected_pins.len);
-    try std.testing.expectEqualStrings("ext:date.now/print_date", projected_pins[0].string);
     const projected_with = root.get("extensions").?.object.get("with").?.array.items;
-    try std.testing.expectEqual(@as(usize, 1), projected_with.len);
+    try std.testing.expectEqual(@as(usize, 2), projected_with.len);
     try std.testing.expectEqualStrings("guide", projected_with[0].string);
+    // A member's tool selection rides along verbatim: the projection is what a
+    // reader writes back.
+    try std.testing.expectEqualStrings("std:read,grep", projected_with[1].string);
     // `extensions.paths` is NOT projected.
     try std.testing.expect(root.get("extensions").?.object.get("paths") == null);
 
@@ -434,7 +423,7 @@ test "config show projects profiles with credential availability and the catalog
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "effort off|low|high|max (default auto)") != null);
     // Under the same key names the config file uses, so reading is enough to write.
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "max_tools            6") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text.written(), "pinned_native_tools  ext:date.now/print_date, ext:notes/append") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "with                 guide, std:read,grep") != null);
 }
 
 /// A models_cache.json the way the Codex CLI leaves one: the default model is
@@ -552,8 +541,7 @@ test "config show prints both standing lists, empty ones as such rather than as 
         .registry = .{},
         .extensions = .{ .with = &.{} },
     });
-    // "no extension tool is native here" is an answer; a silent section is not.
-    try std.testing.expect(std.mem.indexOf(u8, text.written(), "pinned_native_tools  (none)") != null);
+    // "this session composes nothing" is an answer; a silent section is not.
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "max_tools            20") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "with                 (none)") != null);
 

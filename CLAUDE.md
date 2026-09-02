@@ -2,9 +2,9 @@
 
 Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自演化的能力层**。
 内核只暴露**一个**内置工具（`shell`），其余能力由 agent 自己制造成 extension。
-工具进模型工具面只有两条路：`surface:"manual"` 由 **pin** 在 session 边界加入，
-`surface:"auto"`（缺省）随 membership 加入——成员来自包级 `apply:"auto"`（激活即每场常驻）、config `[extensions] with` 或 `--with`；
-`surface:"internal"` 永不上模型面（只被 `ext run` 调用）。usage journal 只是证据，内核不读它排序。
+一场 session 的 composition 只有**一根轴**：一张成员表，每个成员写作 `<id>[@<version>][:<tool>,…]`，
+来自 config `[extensions] with` 或 `session new --with`。裸 id 带这个包的 `surface:"auto"` 工具，
+`:a,b` 再加上它的 `surface:"manual"` 工具，`:none` 一个都不加；`surface:"internal"` 永不上模型面（只被 `ext run` 调用）。usage journal 只是证据，内核不读它排序。
 内核不负责"聪明地进化"，只负责让进化 **安全、可观测、可回退、可学习**。
 
 ## 先读什么
@@ -37,7 +37,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 **内核**：durable ledger（一文件 = 一 generation；header 冻结 composition + 模型身份 + inline prompts，其后是 `seq` JSONL；单写者由 `<id>.lock` 排他 advisory 锁强制，别的进程经 inbox 投递、写者在 step 边界排干、按 `origin` 去重做到 exactly-once）→ PromptIR 纯投影 → 一次 step（批量 tool call、串行执行、**一条** tool_results 回传、可取消、每个 call 可过 gate）。六种事件：`user_text` / `assistant` / `tool_results` / `capability_note` / `task_finished` / `model_rebind`。
 
-**工具面**：唯一 builtin 是 `shell`（前台带超时、`background:true` 起活得过 step 进程的任务）。其余能力都是 extension——内容寻址的不可变版本 + `current` 指针，`activate` 只移指针。上模型面两条路：`surface:"auto"` 随 membership 上，`surface:"manual"` 要 pin，`internal` 永不上。成员来自包级 `apply:"auto"`、config `[extensions] with`、`--with`、以及 pin 蕴含。
+**工具面**：唯一 builtin 是 `shell`（前台带超时、`background:true` 起活得过 step 进程的任务）。其余能力都是 extension——内容寻址的不可变版本 + `current` 指针，`activate` 只移指针、一场都不组合。上模型面只有一条路：成为这一场的成员，并由那一行的工具选择决定带哪些 tool（`auto` 随成员上，`manual` 要点名，`internal` 永不上）。
 
 **自带扩展**（顶层 `extensions/`，十个，随二进制分发，`ext seed` 落盘）：`std`（六个文件 tool）· `agent`（委派；五种 runner：nulya / codex / claude / pi / `ext:<id>` 外置）· `compact`（fork 压缩）· `handoff` · `plan` · `ask` · `ground`（开场把「这一场在哪」写成 per-session prompt）· `coding`（工作纪律）· `evolution` · `guide`（自描述 skill）。
 
@@ -66,7 +66,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `prompt.zig` | `Ledger → PromptIR` 纯投影 | 一个事件一个 turn，turn 不拆散；`usage` / `stop_reason` / `origin` 在类型里**没有字段**，所以不可能被投影 |
 | `loop.zig` | 一次 step：freeze → collect → 串行执行 batch → 一条 tool_results | 取消与截断都要补齐整批（marker），ledger 永远处于合法状态 |
 | `session.zig` | ledger 生命周期 + step 边界（补残尾 → 消费 cancel → 排干 inbox）+ 预算 + usage 记账 | 排干在补残尾之后、模型跑之前，所以排干的事件永远不落在 tool batch 中间 |
-| `composition.zig` | session 开始冻结 tools / skills / system prompts / 成员版本 | **版本冻结 ≠ pin**，但 pin 蕴含成员；成员解析失败一律硬失败并点名 |
+| `composition.zig` | session 开始冻结 tools / skills / system prompts / 成员版本 | 成员一根轴，工具选择挂在成员上；成员或选择解析失败一律硬失败并点名 |
 | `registry.zig` | `ToolSetSnapshot` | builtin 固定最前，extras 按稳定 id 排序 |
 | `tool.zig` | `ToolExecutor` / `ToolDefinition` / `ToolContext` | tool 拿不到 ledger（需要对话的东西是 subagent，不是 tool） |
 | `tools/shell.zig` | 唯一的永久 builtin | 前台默认 120s / 上限 600s；`background:true` 不夹不缺省，回执立刻返回 |
@@ -121,4 +121,4 @@ Zig 0.16（新 `std.Io` API）。发布版加 `-Dembed-toolchain -Dzig-archive=<
 - **测试守机制，不守细枝末节。** 测试是保障代码逻辑正确性的：测一个机制有没有生效、一条不变量有没有守住、一个边界条件对不对。不要断言无关紧要的具体数值与显然的细节（文案的措辞、界面的具体行数列宽、常量的字面值、同一机制的每一种排列组合）——这样的断言不增加正确性保障，只让每次无害改动多付一轮改测试的税。写测试前问一句：**这条断言失败时，是代码逻辑错了，还是只是某个无关紧要的细节变了？** 后者不值得写；review 时发现存量测试属于后者，删。
 - 改 `§15.1 frozen core`（见 DESIGN.md）的语义要有明确理由并同步文档；往外挂能力优先于改 kernel。
 - docs 之间引用设计条目用 `DESIGN §x` / `PLAN §x`（别引用 history/ 里的章节号）；**源代码里一个都不写**（上一条）。
-- 改 extension / config / session 组成的**用户可见语法**时，同步检查 `extensions/guide/skills/guide/SKILL.md`：manifest 字段（如 `apply` / `surface` / `readonly` / `commands` / `ui`）、`[extensions] with` / `pinned_native_tools` / `session new --with|--pin`、`ext seed|sync|activate`、skill / system prompt / driver 的最短配方都在那份 skill 里。它是模型按需 `skill load guide` 读到的自描述入口；只改 DESIGN / CLAUDE / `ext api` 而漏掉 guide，会把下一轮 agent 带回旧语义。
+- 改 extension / config / session 组成的**用户可见语法**时，同步检查 `extensions/guide/skills/guide/SKILL.md`：manifest 字段（如 `surface` / `readonly` / `commands` / `ui`）、`[extensions] with` / `session new --with <id>[@<v>][:<tool>,…]`、`ext seed|sync|activate`、skill / system prompt / driver 的最短配方都在那份 skill 里。它是模型按需 `skill load guide` 读到的自描述入口；只改 DESIGN / CLAUDE / `ext api` 而漏掉 guide，会把下一轮 agent 带回旧语义。

@@ -188,7 +188,7 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     // 5. The fork. The kernel checks the parent exists and carries its frozen
     //    model identity over (a compaction must not change who the conversation
     //    is with); composition is resolved fresh, because a new session is
-    //    exactly where new pins and newly activated versions take hold — so
+    //    exactly where a new composition and newly activated versions take hold — so
     //    no `--with` / `--pin` here.
     const parent_ref = try std.fmt.allocPrint(alloc, "{s}:{d}", .{ args.session, found.seq });
     const forked = try runNulya(alloc, io, exe, &.{ "session", "new", "--parent", parent_ref });

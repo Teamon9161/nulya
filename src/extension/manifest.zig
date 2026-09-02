@@ -113,15 +113,11 @@ pub fn implementationKind(m: Manifest) ImplementationKind {
 /// and how?
 ///
 ///   - `auto`     : it reaches the model as soon as the package is a member
-///                  (`--with`, config `[extensions] with`, `apply: "auto"`, or
-///                  a driver's equivalent). THE DEFAULT. Membership is
-///                  membership: a package a pin brought in is a member like
-///                  any other, so its `auto` tools reach the model too.
-///   - `manual`   : membership is not enough; a person has to name this tool
-///                  (`session new --pin ext:<id>/<tool>`, config
-///                  `[registry] pinned_native_tools`). The only surface a pin
-///                  accepts — what a package writes for a tool that should
-///                  take a native slot only when somebody says so.
+///                  (`--with <id>`, config `[extensions] with`, or a driver's
+///                  equivalent). THE DEFAULT.
+///   - `manual`   : membership is not enough; the member has to name this tool
+///                  (`--with <id>:<tool>`). What a package writes for a tool
+///                  that should take a native slot only when somebody says so.
 ///   - `internal` : never on the model face at all; called by outside code
 ///                  through `nulya ext run`. A driver's tool.
 pub const Surface = enum {
@@ -137,34 +133,9 @@ pub const Surface = enum {
     }
 };
 
-/// What ACTIVATING this package means for the sessions that follow — the
-/// package author's default on the membership axis, and the only thing a
-/// manifest may say about reach:
-///
-///   - `manual` : the default. Activation says which version `<id>` means and
-///                nothing more; the package joins the sessions that name it
-///                (config `[extensions] with`, `session new --with`, or a pin
-///                that implies membership).
-///   - `auto`   : while this package has a `current`, it is a standing member of
-///                every fresh, non-`--bare` session on this machine.
-///
-/// It is a DEFAULT, never a ceiling: config's `[extensions] with` can always
-/// add a package the author left at `manual`, and `nulya ext deactivate <id>`
-/// is how a person turns `auto` off.
-pub const Apply = enum {
-    auto,
-    manual,
-
-    pub fn fromString(s: []const u8) ?Apply {
-        if (std.mem.eql(u8, s, "auto")) return .auto;
-        if (std.mem.eql(u8, s, "manual")) return .manual;
-        return null;
-    }
-};
-
 /// Where this package's system prompt block sits among the OTHER packages' —
 /// the one thing a manifest may say about system-prompt order, a closed
-/// three-word vocabulary like `surface` and `apply`:
+/// three-word vocabulary like `surface`:
 ///
 ///   - `early`  : before the packages that said nothing.
 ///   - `normal` : THE DEFAULT. Member order decides, as it always did.
@@ -245,13 +216,6 @@ pub const ToolSpec = struct {
     /// This tool's placement (see `Surface`), kept as WRITTEN. Read through
     /// `surfaceOf`, which supplies the default.
     surface: ?[]const u8 = null,
-    /// Should whoever installs this package switch this `manual` tool on?
-    /// Only meaningful for `manual` tools — an `auto` tool is already on, an
-    /// `internal` one can never be pinned, so `validate` refuses the key on
-    /// either (`InvalidRecommended`). `true` (the default) is on once the
-    /// package is installed; `false` marks an extra, off until asked for.
-    /// Kept as WRITTEN and read through `recommendedOf`.
-    recommended: ?bool = null,
     /// This tool's front-end rendering hints (see `ToolUi`), or null when the
     /// package made neither claim.
     ui: ?ToolUi = null,
@@ -263,11 +227,6 @@ pub const ToolSpec = struct {
         return .auto;
     }
 
-    /// Would an installer switch this tool on? Meaningful only for `manual`
-    /// tools.
-    pub fn recommendedOf(self: ToolSpec) bool {
-        return self.recommended orelse true;
-    }
 };
 
 /// A slash command this package offers whoever drives a session. Declared in
@@ -388,24 +347,9 @@ pub const Manifest = struct {
     /// This package's front-end modules, one per host (see `UiHost`). Absent
     /// reads as empty — same convention as `skills` / `system_prompts`.
     ui: []const UiHost = &.{},
-    /// What activating this package means for the sessions that follow (see
-    /// `Apply`), kept as WRITTEN. Read through `applyOf`, which supplies the
-    /// default. A top-level key rather than one under `contributes`: it is
-    /// not a contribution, it is what the author thinks installing the whole
-    /// package should mean.
-    apply: ?[]const u8 = null,
-
     pub fn deinit(self: *Manifest) void {
         self.arena.deinit();
         self.* = undefined;
-    }
-
-    /// This package's membership default, `manual` unless it says otherwise.
-    /// `validate` refuses a word outside the two, so the unwrap is safe on
-    /// any validated manifest.
-    pub fn applyOf(self: Manifest) Apply {
-        if (self.apply) |s| return Apply.fromString(s).?;
-        return .manual;
     }
 
     /// Enforce the deterministic kernel rules. Whether a tool is "good taste"
@@ -413,12 +357,6 @@ pub const Manifest = struct {
     pub fn validate(self: Manifest) ValidateError!void {
         if (!std.mem.eql(u8, self.schema, schema_id)) return error.UnsupportedSchema;
         if (!isValidId(self.id)) return error.InvalidId;
-        // A closed two-word vocabulary, so a typo is refused rather than read
-        // as the default: `aply: "auot"` must not silently mean `manual` — the
-        // author would install a mode package and never see it in a session.
-        if (self.apply) |s| {
-            if (Apply.fromString(s) == null) return error.InvalidApply;
-        }
         if (self.tools.len == 0 and self.skills.len == 0 and self.system_prompts.len == 0 and
             self.commands.len == 0 and !policyContributes(self.policy) and self.ui.len == 0) return error.NoContributions;
 
@@ -465,10 +403,6 @@ pub const Manifest = struct {
             if (t.surface) |s| {
                 if (Surface.fromString(s) == null) return error.InvalidSurface;
             }
-            // `recommended` is advice about a pin, so it only makes sense on a
-            // `manual` tool. Checked after `surface`, so a manifest with both
-            // wrong is told about the word it misspelled first.
-            if (t.recommended != null and t.surfaceOf() != .manual) return error.InvalidRecommended;
             for (self.tools[i + 1 ..]) |other| {
                 if (std.mem.eql(u8, t.name, other.name)) return error.DuplicateToolName;
             }
@@ -557,11 +491,6 @@ pub const ValidateError = error{
     /// A tool's `surface` is a string, but not one of `auto` / `manual` /
     /// `internal`.
     InvalidSurface,
-    /// A tool declares `recommended` without being `surface: "manual"` — advice
-    /// about a pin, on a tool no pin can name.
-    InvalidRecommended,
-    /// The manifest's `apply` is a string, but not one of `auto` / `manual`.
-    InvalidApply,
     InvalidSkillPath,
     DuplicateSkillPath,
     InvalidSystemPromptPath,
@@ -623,7 +552,6 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     // LATER field would mutate the local arena after the copy already
     // snapshotted it: if that allocation needs a fresh chunk, the chunk is
     // not in the returned arena and nothing ever frees it.
-    const apply = try optionalString(a, obj, "apply");
     return .{
         .arena = arena,
         .schema = schema,
@@ -635,7 +563,6 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
         .commands = commands,
         .policy = policy,
         .ui = ui,
-        .apply = apply,
     };
 }
 
@@ -752,7 +679,6 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
             .timeout_ms = try optionalU32(to, "timeout_ms"),
             .readonly = try optionalBool(to, "readonly"),
             .surface = try optionalString(a, to, "surface"),
-            .recommended = try optionalBool(to, "recommended"),
             .ui = try dupToolUi(a, to),
         };
     }
@@ -1029,7 +955,6 @@ test "keys the schema has retired — activation, permissions, runtime.wire — 
     );
     defer m.deinit();
     try m.validate();
-    try std.testing.expectEqual(Apply.manual, m.applyOf());
     try std.testing.expectEqual(Surface.auto, m.tools[0].surfaceOf());
 }
 
@@ -1275,57 +1200,13 @@ test "a tool's surface is auto, manual or internal; silence means auto and an un
     ));
 }
 
-test "recommended is advice to whoever installs a manual tool, and cannot be said about the other two surfaces" {
-    const alloc = std.testing.allocator;
-
-    var m = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"kit","runtime":{"entry":"bin/kit"},"contributes":{"tools":[
-        \\  {"name":"core","input":{},"surface":"manual"},
-        \\  {"name":"extra","input":{},"surface":"manual","recommended":false},
-        \\  {"name":"also","input":{},"surface":"manual","recommended":true}
-        \\]}}
-    );
-    defer m.deinit();
-    try m.validate();
-    // Silence is the default and it points at ON: `manual` means a tool an
-    // installer switches on and a person can switch back off, which is the whole
-    // difference from `auto`. Only the extras have to say anything.
-    try std.testing.expect(m.tools[0].recommended == null);
-    try std.testing.expect(m.tools[0].recommendedOf());
-    try std.testing.expect(!m.tools[1].recommendedOf());
-    try std.testing.expect(m.tools[2].recommendedOf());
-
-    // On the other two surfaces the key could only mislead: an `auto` tool is
-    // already on, and no pin can ever name an `internal` one.
-    for ([_][]const u8{ "auto", "internal" }) |word| {
-        const src = try std.fmt.allocPrint(alloc,
-            \\{{"schema":"nulya.extension/v2","id":"a","runtime":{{"entry":"bin/a"}},"contributes":{{"tools":[{{"name":"t","input":{{}},"surface":"{s}","recommended":true}}]}}}}
-        , .{word});
-        defer alloc.free(src);
-        var bad = try parse(alloc, src);
-        defer bad.deinit();
-        try std.testing.expectError(error.InvalidRecommended, bad.validate());
-    }
-    // Including the default surface, which is `auto` without saying so.
-    var implicit = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"recommended":false}]}}
-    );
-    defer implicit.deinit();
-    try std.testing.expectError(error.InvalidRecommended, implicit.validate());
-
-    try std.testing.expectError(error.WrongType, parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"surface":"manual","recommended":"yes"}]}}
-    ));
-}
-
 // A parsed manifest owns ONE arena and `deinit` is the whole story, so nothing
-// `parse` allocates may escape it. The way that broke was invisible at any
-// single size: `apply` was read inside the result's initializer, after the
-// arena had been copied by value, so its allocation landed in a chunk the
-// returned arena did not know about — but only when it needed a NEW chunk, so
-// whether a package leaked depended on how much the fields before it happened
-// to allocate. Hence the sweep rather than one manifest: the sizes are here to
-// cross a chunk boundary somewhere, not because any particular one matters.
+// `parse` allocates may escape it. A field read inside the result's initializer
+// — after `.arena = arena` has already copied the arena by value — allocates
+// into a chunk the returned arena does not know about, and only when it needs a
+// NEW chunk, so whether a package leaks depends on how much the fields before it
+// happened to allocate. Hence the sweep rather than one manifest: the sizes are
+// here to cross a chunk boundary somewhere, not because any one matters.
 test "parse allocates nothing outside the arena it returns, at any size" {
     const alloc = std.testing.allocator;
     var len: usize = 1;
@@ -1335,53 +1216,13 @@ test "parse allocates nothing outside the arena it returns, at any size" {
         @memset(path, 'p');
         const text = try std.fmt.allocPrint(
             alloc,
-            "{{\"schema\":\"nulya.extension/v2\",\"id\":\"a\",\"apply\":\"auto\",\"contributes\":{{\"system_prompts\":[\"{s}\"]}}}}",
+            "{{\"schema\":\"nulya.extension/v2\",\"id\":\"a\",\"contributes\":{{\"system_prompts\":[\"{s}\"]}}}}",
             .{path},
         );
         defer alloc.free(text);
         var m = try parse(alloc, text);
         m.deinit();
     }
-}
-
-test "apply says what activating this package means; silence means manual and an unknown word is refused" {
-    const alloc = std.testing.allocator;
-
-    var auto = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"kong","apply":"auto","contributes":{"system_prompts":["p.md"]}}
-    );
-    defer auto.deinit();
-    try auto.validate();
-    try std.testing.expectEqual(Apply.auto, auto.applyOf());
-
-    var manual = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"kong","apply":"manual","contributes":{"system_prompts":["p.md"]}}
-    );
-    defer manual.deinit();
-    try manual.validate();
-    try std.testing.expectEqual(Apply.manual, manual.applyOf());
-
-    // Silence is the conservative half: a package nobody named is in no
-    // session, which is what every package written before this key assumed.
-    var quiet = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"b","contributes":{"system_prompts":["p.md"]}}
-    );
-    defer quiet.deinit();
-    try quiet.validate();
-    try std.testing.expect(quiet.apply == null);
-    try std.testing.expectEqual(Apply.manual, quiet.applyOf());
-
-    // A typo must not read as `manual`: the author would install a mode and
-    // never see it in a session, with nothing anywhere saying why.
-    var typo = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"b","apply":"always","contributes":{"system_prompts":["p.md"]}}
-    );
-    defer typo.deinit();
-    try std.testing.expectError(error.InvalidApply, typo.validate());
-
-    try std.testing.expectError(error.WrongType, parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"b","apply":true,"contributes":{"system_prompts":["p.md"]}}
-    ));
 }
 
 test "rejects entry that escapes the extension dir" {

@@ -758,7 +758,7 @@ test "a version the far machine does not hold is a failed call pointing at push,
 // ── the extension runs over there ───────────────────────────────────────────
 
 /// The bundled `std`, built into `ws`'s workspace store (compiled at most once
-/// per checkout by the suite's shared cache) and activated, so a `--pin` can
+/// per checkout by the suite's shared cache) and activated, so a `--with std:read` can
 /// reach it. Returns its version; caller frees.
 fn installStd(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, exe: []const u8) ![]u8 {
     const version = try support.stageBundled(alloc, io, ws, "std");
@@ -813,7 +813,7 @@ test "an extension tool reads the FAR workspace, and keeps its per-session state
     const version = try pushStd(alloc, io, ws, exe, spec);
     defer alloc.free(version);
 
-    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs, "--pin", "ext:std/read" });
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs, "--with", "std:read" });
     defer alloc.free(new.stdout);
     try std.testing.expectEqual(@as(u8, 0), new.code);
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
@@ -862,7 +862,7 @@ test "a package pushed nowhere fails its call and says which command delivers it
     const version = try installStd(alloc, io, ws, exe);
     defer alloc.free(version);
 
-    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs, "--pin", "ext:std/read" });
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs, "--with", "std:read" });
     defer alloc.free(new.stdout);
     try std.testing.expectEqual(@as(u8, 0), new.code);
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
@@ -1000,7 +1000,7 @@ test "a member with no build for the far machine stops creation, naming the two 
     const version = try installStd(alloc, io, ws, exe);
     defer alloc.free(version);
 
-    const argv = [_][]const u8{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", "/srv/app", "--pin", "ext:std/read" };
+    const argv = [_][]const u8{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", "/srv/app", "--with", "std:read" };
     const new = try runCli(alloc, io, ws, &argv);
     defer alloc.free(new.stdout);
     try std.testing.expectEqual(@as(u8, 1), new.code);
@@ -1034,7 +1034,7 @@ test "a session whose header predates the exec-version column still steps" {
     const version = try installStd(alloc, io, ws, exe);
     defer alloc.free(version);
 
-    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--pin", "ext:std/read" });
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--with", "std:read" });
     defer alloc.free(new.stdout);
     try std.testing.expectEqual(@as(u8, 0), new.code);
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));

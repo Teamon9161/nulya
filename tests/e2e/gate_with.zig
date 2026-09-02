@@ -7,11 +7,9 @@
 //! the gate has to open a manifest — a derivation that three drivers each wrote
 //! separately, and that failed silently in one of them.
 //!
-//! **A pin implies membership**. A tool cannot take a native slot
-//! in a session its package is not a member of, so `--pin ext:<id>/<tool>` brings
-//! that package in at `current`. The refusals stay distinguishable: a package no
-//! root holds is still `PinNamesUnknownExtension`, and one that is held but has
-//! no `current` fails the way `--with` does, with the pin named.
+//! **A member carries its own tool selection**. `--with <id>:<tool>` is the one
+//! way a `surface:"manual"` tool takes a native slot: activating the package
+//! does not compose it, and composing it bare does not surface that tool.
 
 const std = @import("std");
 const support = @import("support.zig");
@@ -37,8 +35,7 @@ fn buildScriptPackage(
     tool_name: []const u8,
     /// JSON fragments spliced into the manifest: extra top-level keys, and extra
     /// keys inside the one tool spec. Each begins with its own comma. The tool
-    /// is `surface: "manual"` because every test here pins it, and only a
-    /// `manual` tool can be pinned.
+    /// is `surface: "manual"` because every test here selects it by name.
     top_extra: []const u8,
     tool_extra: []const u8,
 ) ![]u8 {
@@ -132,7 +129,7 @@ test "gate: the request line carries the stable tool id and the frozen readonly 
     defer alloc.free(activated.stdout);
     try std.testing.expectEqual(@as(u8, 0), activated.code);
 
-    const readonly_id = try newSession(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:probe/handoff" });
+    const readonly_id = try newSession(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "probe:handoff" });
     defer alloc.free(readonly_id);
     {
         const ap = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", readonly_id, "go" });
@@ -157,8 +154,8 @@ test "gate: the request line carries the stable tool id and the frozen readonly 
         try std.testing.expectEqualStrings("request", obj.get("event").?.string);
         // The name the model used…
         try std.testing.expectEqualStrings("handoff", obj.get("tool").?.string);
-        // …the stable id a pin and the usage journal use, which the name alone
-        // could never give…
+        // …the stable id the gate and the usage journal use, which the name
+        // alone could never give…
         try std.testing.expectEqualStrings("ext:probe/handoff", obj.get("tool_id").?.string);
         // …and the package's own claim, frozen with the version.
         try std.testing.expectEqual(true, obj.get("readonly").?.bool);
@@ -197,7 +194,7 @@ test "gate: the request line carries the stable tool id and the frozen readonly 
     }
 }
 
-test "pin: a package nothing else names joins the session that pins one of its tools, and no other" {
+test "with: activating a package does not compose it, and a bare member does not surface its manual tool" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -211,8 +208,8 @@ test "pin: a package nothing else names joins the session that pins one of its t
     defer tmp.cleanup();
     const ws = tmp.dir;
 
-    // Activated, which says only that `optin` means this version
-    // — and named by neither `[extensions] with` nor `--with`.
+    // Activated, which says only that `optin` means this version — and named by
+    // neither `[extensions] with` nor `--with`.
     const version = try buildScriptPackage(alloc, io, ws, exe_abs, "optin", "look", "", "");
     defer alloc.free(version);
     {
@@ -230,23 +227,32 @@ test "pin: a package nothing else names joins the session that pins one of its t
         try std.testing.expect(std.mem.indexOf(u8, header, "\"active\":[]") != null);
     }
 
-    // The pin alone brings it in — no `--with` on the command line, and no
-    // driver deriving one. The version is `current`, and the tool is on the face.
+    const member = try std.fmt.allocPrint(alloc, "\"id\":\"optin\",\"version\":\"{s}\"", .{version});
+    defer alloc.free(member);
+
+    // A bare member freezes the version and contributes everything the package
+    // declares — but `look` is `surface: manual`, so the face stays empty.
     {
-        const pinned = try newSession(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:optin/look" });
-        defer alloc.free(pinned);
-        const header = try readSessionFile(alloc, io, ws, pinned);
+        const bare = try newSession(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "optin" });
+        defer alloc.free(bare);
+        const header = try readSessionFile(alloc, io, ws, bare);
         defer alloc.free(header);
-        // The PAIRING is the fact — this id at this version — not what else the
-        // frozen entry happens to record beside it.
-        const member = try std.fmt.allocPrint(alloc, "\"id\":\"optin\",\"version\":\"{s}\"", .{version});
-        defer alloc.free(member);
+        try std.testing.expect(std.mem.indexOf(u8, header, member) != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"native_tools\":[]") != null);
+    }
+
+    // Naming the tool is what puts it there.
+    {
+        const selected = try newSession(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "optin:look" });
+        defer alloc.free(selected);
+        const header = try readSessionFile(alloc, io, ws, selected);
+        defer alloc.free(header);
         try std.testing.expect(std.mem.indexOf(u8, header, member) != null);
         try std.testing.expect(std.mem.indexOf(u8, header, "ext:optin/look") != null);
     }
 }
 
-test "pin: a package with no current refuses and names the pin; one nothing holds is still unknown" {
+test "with: a member with no current refuses and names it; a tool the version never declared refuses too" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -261,44 +267,48 @@ test "pin: a package with no current refuses and names the pin; one nothing hold
     const ws = tmp.dir;
 
     // Built here, never activated: there is a version to name, so the way out is
-    // to name it — and the sentence has to say so, because nothing on the
-    // command line spells `shy` out.
+    // to name it — and the sentence has to say so.
     const version = try buildScriptPackage(alloc, io, ws, exe_abs, "shy", "peek", "", "");
     defer alloc.free(version);
     {
-        const refused = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:shy/peek" });
+        const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--with", "shy:peek" };
+        const refused = try runCli(alloc, io, ws, &argv);
         defer alloc.free(refused.stdout);
         try std.testing.expectEqual(@as(u8, 1), refused.code);
         try std.testing.expectEqualStrings("", refused.stdout); // refusals are stderr
 
-        const said = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:shy/peek" }, &.{});
+        const said = try runCliStderr(alloc, io, ws, &argv, &.{});
         defer alloc.free(said);
         try std.testing.expect(std.mem.indexOf(u8, said, "no such built version") != null);
-        // Named, with both ways out — a person cannot act on a refusal about a
-        // package they never typed.
-        try std.testing.expect(std.mem.indexOf(u8, said, "a pin brings its own package into the session") != null);
-        try std.testing.expect(std.mem.indexOf(u8, said, "shy") != null);
+        // The member is named back, with both ways out.
+        try std.testing.expect(std.mem.indexOf(u8, said, "shy:peek") != null);
         try std.testing.expect(std.mem.indexOf(u8, said, "--with <id>@<version>") != null);
         try std.testing.expect(std.mem.indexOf(u8, said, "nulya ext activate") != null);
     }
 
-    // Naming the version is the way in, and the pin then resolves.
+    // Naming the version is the way in, and the selection then resolves.
+    const with_ref = try std.fmt.allocPrint(alloc, "shy@{s}:peek", .{version});
+    defer alloc.free(with_ref);
     {
-        const with_ref = try std.fmt.allocPrint(alloc, "shy@{s}", .{version});
-        defer alloc.free(with_ref);
-        const id = try newSession(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", with_ref, "--pin", "ext:shy/peek" });
+        const id = try newSession(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", with_ref });
         defer alloc.free(id);
         const header = try readSessionFile(alloc, io, ws, id);
         defer alloc.free(header);
         try std.testing.expect(std.mem.indexOf(u8, header, "ext:shy/peek") != null);
     }
 
-    // An id no store root holds at all cannot be brought in by anything, so it
-    // keeps the older, more specific refusal.
+    // A tool this version does not declare fails the session rather than
+    // starting one quietly missing what it was asked for.
     {
-        const said = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:never.built/tool" }, &.{});
+        const bad_ref = try std.fmt.allocPrint(alloc, "shy@{s}:nope", .{version});
+        defer alloc.free(bad_ref);
+        const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--with", bad_ref };
+        const refused = try runCli(alloc, io, ws, &argv);
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        const said = try runCliStderr(alloc, io, ws, &argv, &.{});
         defer alloc.free(said);
-        try std.testing.expect(std.mem.indexOf(u8, said, "no store root holds") != null);
-        try std.testing.expect(std.mem.indexOf(u8, said, "ext:never.built/tool") != null);
+        try std.testing.expect(std.mem.indexOf(u8, said, "does not declare") != null);
+        try std.testing.expect(std.mem.indexOf(u8, said, "nope") != null);
     }
 }

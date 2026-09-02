@@ -11,7 +11,7 @@
 //!
 //! The front matter dialect is deliberately small — `key: value`, `key: [a, b]`,
 //! and the `- item` block form. Every field below is a word, a flag, a number or
-//! a list of tool ids; the day one needs nesting is the day this reads real YAML.
+//! a list; the day one needs nesting is the day this reads real YAML.
 
 const std = @import("std");
 const builtin = @import("builtin.zig");
@@ -53,8 +53,9 @@ pub const Def = struct {
     /// The other is dropped with a warning once the front matter has been read
     /// WHOLE (`crossCheck`) — a definition may write its fields in any order.
     runner_model: []const u8 = "",
-    /// `ext:<id>/<tool>` ids for `--pin`, on top of the session's usual face.
-    pins: []const []const u8 = &.{},
+    /// `<id>[@<version>][:<tool>,…]` members for `--with`, on top of the
+    /// session's usual composition.
+    with: []const []const u8 = &.{},
     /// The agents this one may delegate to. EMPTY IS A LEAF, the default: a
     /// delegated session carries this package only when its definition names
     /// somebody to pass work to, so "can it delegate" is one decision in one
@@ -106,18 +107,21 @@ pub fn isPlainSessionId(id: []const u8) bool {
     return id.len > "s-".len;
 }
 
-/// A pin has one shape. One the kernel cannot resolve does not cost a tool — it
-/// refuses the whole `session new` — so a malformed one is dropped HERE.
-pub fn isPin(text: []const u8) bool {
-    if (!std.mem.startsWith(u8, text, "ext:")) return false;
-    const rest = text["ext:".len..];
-    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return false;
-    const id = rest[0..slash];
-    const tool = rest[slash + 1 ..];
-    if (id.len == 0 or tool.len == 0) return false;
-    for (rest, 0..) |c, i| {
-        if (i == slash) continue;
-        if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.')) return false;
+/// A member has one shape: `<id>[@<version>][:<tool>,…]`. One the kernel cannot
+/// resolve does not cost a tool — it refuses the whole `session new` — so a
+/// malformed one is dropped HERE.
+pub fn isMemberSpec(text: []const u8) bool {
+    const colon = std.mem.indexOfScalar(u8, text, ':') orelse text.len;
+    const head = text[0..colon];
+    const at = std.mem.indexOfScalar(u8, head, '@') orelse head.len;
+    if (!isPlainName(head[0..at])) return false;
+    if (at != head.len and head[at + 1 ..].len == 0) return false;
+    if (colon == text.len) return true;
+    const selection = text[colon + 1 ..];
+    if (selection.len == 0) return false;
+    var tools = std.mem.splitScalar(u8, selection, ',');
+    while (tools.next()) |tool_name| {
+        if (!isPlainName(tool_name)) return false;
     }
     return true;
 }
@@ -140,6 +144,33 @@ pub fn parseModelRef(value: []const u8) ?ModelRef {
     if (profile.len == 0 or model.len == 0) return null;
     return .{ .profile = profile, .model = model };
 }
+
+/// `a, "b,c", d` — the items of an inline front-matter list. A comma inside
+/// quotes is not a separator, which is what lets one item carry a tool selection
+/// (`"std:read,grep"`).
+const InlineItems = struct {
+    rest: []const u8,
+
+    fn next(self: *InlineItems) ?[]const u8 {
+        if (self.rest.len == 0) return null;
+        var quote: u8 = 0;
+        for (self.rest, 0..) |c, i| {
+            if (quote != 0) {
+                if (c == quote) quote = 0;
+                continue;
+            }
+            if (c == '"' or c == '\'') quote = c;
+            if (c == ',') {
+                const item = self.rest[0..i];
+                self.rest = self.rest[i + 1 ..];
+                return item;
+            }
+        }
+        const item = self.rest;
+        self.rest = "";
+        return item;
+    }
+};
 
 fn unquote(value: []const u8) []const u8 {
     const t = std.mem.trim(u8, value, " \t\r");
@@ -168,7 +199,7 @@ pub fn parse(
     if (body.len == 0) return error.NoBody;
 
     var def: Def = .{ .name = stem, .prompt = body, .layer = layer, .source = source };
-    var pins: std.ArrayList([]const u8) = .empty;
+    var members: std.ArrayList([]const u8) = .empty;
     var agents: std.ArrayList([]const u8) = .empty;
     // The key a bare `- item` list belongs to, or empty between lists.
     var list_key: []const u8 = "";
@@ -179,7 +210,7 @@ pub fn parse(
         const lead = std.mem.trimStart(u8, line, " \t");
         if (lead.len == 0 or lead[0] == '#') continue;
         if (std.mem.startsWith(u8, lead, "- ")) {
-            if (list_key.len != 0) try addItem(alloc, list_key, unquote(lead[2..]), &pins, &agents, warnings, source);
+            if (list_key.len != 0) try addItem(alloc, list_key, unquote(lead[2..]), &members, &agents, warnings, source);
             continue;
         }
         const colon = std.mem.indexOfScalar(u8, lead, ':') orelse continue;
@@ -187,18 +218,18 @@ pub fn parse(
         const value = std.mem.trim(u8, lead[colon + 1 ..], " \t");
         list_key = "";
 
-        if (std.mem.eql(u8, key, "pins") or std.mem.eql(u8, key, "agents")) {
+        if (std.mem.eql(u8, key, "with") or std.mem.eql(u8, key, "agents")) {
             list_key = key;
             if (value.len == 0) continue;
             if (!(value.len >= 2 and value[0] == '[' and value[value.len - 1] == ']')) {
                 try warn(alloc, warnings, source, try std.fmt.allocPrint(alloc, "{s} must be a list, ignored", .{key}));
                 continue;
             }
-            var items = std.mem.splitScalar(u8, value[1 .. value.len - 1], ',');
+            var items: InlineItems = .{ .rest = value[1 .. value.len - 1] };
             while (items.next()) |item| {
                 const one = unquote(item);
                 if (one.len == 0) continue;
-                try addItem(alloc, key, one, &pins, &agents, warnings, source);
+                try addItem(alloc, key, one, &members, &agents, warnings, source);
             }
             continue;
         }
@@ -232,7 +263,7 @@ pub fn parse(
     }
 
     if (!isPlainName(def.name)) return error.BadName;
-    def.pins = pins.items;
+    def.with = members.items;
     def.agents = agents.items;
     try crossCheck(alloc, &def, warnings, source);
     return def;
@@ -248,7 +279,7 @@ pub fn parse(
 /// model nobody serves. A warning rather than a refusal, because this can only
 /// run the persona on the harness's default.
 ///
-/// Nulya composition — pins, a step budget, a list of agents — is CLEARED for an
+/// Nulya composition — members, a step budget, a list of agents — is CLEARED for an
 /// external harness so no field silently does nothing: `agents: [explore]` on a
 /// codex persona would otherwise read as "this one can delegate".
 fn crossCheck(
@@ -272,9 +303,9 @@ fn crossCheck(
     // One sentence for all of them: three warnings about the same mistake would
     // bury the one thing the author has to change.
     var inert: std.ArrayList([]const u8) = .empty;
-    if (def.pins.len != 0) {
-        try inert.append(alloc, "pins");
-        def.pins = &.{};
+    if (def.with.len != 0) {
+        try inert.append(alloc, "with");
+        def.with = &.{};
     }
     if (def.agents.len != 0) {
         try inert.append(alloc, "agents");
@@ -298,14 +329,14 @@ fn addItem(
     alloc: std.mem.Allocator,
     key: []const u8,
     item: []const u8,
-    pins: *std.ArrayList([]const u8),
+    members: *std.ArrayList([]const u8),
     agents: *std.ArrayList([]const u8),
     warnings: *std.ArrayList([]const u8),
     source: []const u8,
 ) !void {
     if (item.len == 0) return;
-    if (std.mem.eql(u8, key, "pins")) {
-        if (isPin(item)) try pins.append(alloc, item) else try warnPin(alloc, warnings, source, item);
+    if (std.mem.eql(u8, key, "with")) {
+        if (isMemberSpec(item)) try members.append(alloc, item) else try warnMember(alloc, warnings, source, item);
         return;
     }
     if (isPlainName(item)) try agents.append(alloc, item) else {
@@ -317,8 +348,8 @@ fn warn(alloc: std.mem.Allocator, into: *std.ArrayList([]const u8), source: []co
     try into.append(alloc, try std.fmt.allocPrint(alloc, "{s}: {s}", .{ source, what }));
 }
 
-fn warnPin(alloc: std.mem.Allocator, into: *std.ArrayList([]const u8), source: []const u8, item: []const u8) !void {
-    try into.append(alloc, try std.fmt.allocPrint(alloc, "{s}: '{s}' is not a pin (want ext:<id>/<tool>), dropped", .{ source, item }));
+fn warnMember(alloc: std.mem.Allocator, into: *std.ArrayList([]const u8), source: []const u8, item: []const u8) !void {
+    try into.append(alloc, try std.fmt.allocPrint(alloc, "{s}: '{s}' is not a member (want <id>[@<version>][:<tool>,…]), dropped", .{ source, item }));
 }
 
 /// Where definitions live, relative to the workspace (this process's cwd).
@@ -531,7 +562,7 @@ test "front matter reads into the arguments of one session new" {
         \\description: "Read-only, and thorough"
         \\permissions: readonly
         \\model: deepseek/deepseek-v4-pro
-        \\pins: [ext:std/read, ext:std/grep]
+        \\with: ["std:read,grep"]
         \\max_steps: 12
         \\---
         \\You only read.
@@ -546,8 +577,8 @@ test "front matter reads into the arguments of one session new" {
     try std.testing.expectEqual(@as(u32, 12), def.max_steps);
     // Unwritten means this nulya, which is what every persona shipped here is.
     try std.testing.expectEqual(runners.Runner.nulya, def.runner);
-    try std.testing.expectEqual(@as(usize, 2), def.pins.len);
-    try std.testing.expectEqualStrings("ext:std/read", def.pins[0]);
+    try std.testing.expectEqual(@as(usize, 1), def.with.len);
+    try std.testing.expectEqualStrings("std:read,grep", def.with[0]);
     // The body is the system prompt, verbatim and nothing else.
     try std.testing.expectEqualStrings("You only read.", def.prompt);
     try std.testing.expectEqual(@as(usize, 0), warnings.items.len);
@@ -565,7 +596,7 @@ test "which model vocabulary a definition writes in is decided by its runner, wh
         var warnings: std.ArrayList([]const u8) = .empty;
         const def = try parseOne(
             a,
-            "---\nmodel: deepseek/deepseek-v4-pro\npins: [ext:std/read]\nagents: [explore]\nmax_steps: 12\nmax_exchanges: 3\nrunner_model: gpt-5-codex\nrunner: codex\n---\nbody\n",
+            "---\nmodel: deepseek/deepseek-v4-pro\nwith: [std:read]\nagents: [explore]\nmax_steps: 12\nmax_exchanges: 3\nrunner_model: gpt-5-codex\nrunner: codex\n---\nbody\n",
             &warnings,
         );
         try std.testing.expectEqual(runners.Runner.codex, def.runner);
@@ -574,7 +605,7 @@ test "which model vocabulary a definition writes in is decided by its runner, wh
         try std.testing.expectEqualStrings("", def.model);
         // Nulya composition, cleared rather than left to look like it does
         // something.
-        try std.testing.expectEqual(@as(usize, 0), def.pins.len);
+        try std.testing.expectEqual(@as(usize, 0), def.with.len);
         try std.testing.expectEqual(@as(usize, 0), def.agents.len);
         try std.testing.expectEqual(@as(u32, 0), def.max_steps);
         // …but exchanges are counted from the record, which every runner has.
@@ -601,10 +632,10 @@ test "the block list form, the stem as a default name, and CRLF" {
     const a = arena.allocator();
     var warnings: std.ArrayList([]const u8) = .empty;
 
-    const def = try parseOne(a, "---\r\npins:\r\n  - ext:std/read\r\n  - ext:std/glob\r\n---\r\njust a persona\r\n", &warnings);
+    const def = try parseOne(a, "---\r\nwith:\r\n  - std:read\r\n  - other\r\n---\r\njust a persona\r\n", &warnings);
     try std.testing.expectEqualStrings("stem", def.name);
-    try std.testing.expectEqual(@as(usize, 2), def.pins.len);
-    try std.testing.expectEqualStrings("ext:std/glob", def.pins[1]);
+    try std.testing.expectEqual(@as(usize, 2), def.with.len);
+    try std.testing.expectEqualStrings("other", def.with[1]);
     // An unwritten ceiling is an ordinary delegation.
     try std.testing.expectEqual(record.Permissions.default, def.permissions);
     try std.testing.expectEqual(@as(u32, 0), def.max_steps);
@@ -633,7 +664,7 @@ test "a file that is not a definition is refused; a bad field is a warning and a
     const def = try parseOne(a,
         \\---
         \\model: /nope
-        \\pins: [read, ext:std/read]
+        \\with: [ext:std/read, std:read]
         \\max_steps: soon
         \\---
         \\body
@@ -641,10 +672,10 @@ test "a file that is not a definition is refused; a bad field is a warning and a
     , &warnings);
     try std.testing.expectEqualStrings("", def.profile);
     try std.testing.expectEqual(@as(u32, 0), def.max_steps);
-    // An unresolvable pin refuses the whole `session new`, so it never reaches
-    // one.
-    try std.testing.expectEqual(@as(usize, 1), def.pins.len);
-    try std.testing.expectEqualStrings("ext:std/read", def.pins[0]);
+    // An unresolvable member refuses the whole `session new`, so a malformed
+    // spec never reaches one.
+    try std.testing.expectEqual(@as(usize, 1), def.with.len);
+    try std.testing.expectEqualStrings("std:read", def.with[0]);
     try std.testing.expectEqual(@as(usize, 3), warnings.items.len);
 }
 
@@ -707,14 +738,16 @@ test "a model reference is a profile, optionally with an id inside it" {
     try std.testing.expect(parseModelRef("   ") == null);
 }
 
-test "a pin has one shape, and a name is one path component" {
-    try std.testing.expect(isPin("ext:std/read"));
-    try std.testing.expect(isPin("ext:my-ext/some_tool"));
-    try std.testing.expect(!isPin("read"));
-    try std.testing.expect(!isPin("ext:std"));
-    try std.testing.expect(!isPin("ext:/read"));
-    try std.testing.expect(!isPin("ext:std/"));
-    try std.testing.expect(!isPin("ext:../std/read"));
+test "a member spec has one shape, and a name is one path component" {
+    try std.testing.expect(isMemberSpec("std"));
+    try std.testing.expect(isMemberSpec("std:read"));
+    try std.testing.expect(isMemberSpec("my-ext:some_tool,other"));
+    try std.testing.expect(isMemberSpec("std@v-0123456789abcdef01234567:read"));
+    try std.testing.expect(!isMemberSpec("ext:std/read"));
+    try std.testing.expect(!isMemberSpec("std:"));
+    try std.testing.expect(!isMemberSpec("std:read,"));
+    try std.testing.expect(!isMemberSpec("std@"));
+    try std.testing.expect(!isMemberSpec("../std"));
 
     try std.testing.expect(isPlainName("explore"));
     try std.testing.expect(isPlainName("my.agent_2-b"));
@@ -808,9 +841,9 @@ test "the bundled personas parse, and explore is the read-only one" {
         // the sub-agent off mid-investigation, and everything it found dies in a
         // session nobody will ever read.
         try std.testing.expectEqual(@as(u32, 0), def.max_steps);
-        // The coordinator has no pins on purpose: delegation is its whole job.
-        try std.testing.expect(def.pins.len != 0 or def.agents.len != 0);
-        for (def.pins) |pin| try std.testing.expect(isPin(pin));
+        // The coordinator composes nothing on purpose: delegation is its job.
+        try std.testing.expect(def.with.len != 0 or def.agents.len != 0);
+        for (def.with) |member| try std.testing.expect(isMemberSpec(member));
         // Nothing names a model: a persona that does not care runs on whatever
         // asked for it.
         try std.testing.expectEqualStrings("", def.profile);

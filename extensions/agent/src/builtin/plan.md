@@ -1,7 +1,7 @@
 ---
 name: plan
 description: Implementation-plan draft the parent reviews and submits
-pins: [ext:std/read, ext:std/grep, ext:std/glob]
+with: ["std:read,grep,glob"]
 ---
 # nulya plan sub-agent
 
