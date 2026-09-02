@@ -288,37 +288,12 @@ vtable 后面这道缝。
   （单独重跑 `e2e-core` 64 pass 1 skip、`e2e-remote` 29 pass）。断言这三句话的 e2e
   （`ext_cli.zig` 的 broken `current`、`remote.zig` 的"没有对面机器的 build"）一字未改仍绿。
   `tui/` 本刀未触及。
-- **2026-09-02 · 小刀 1–2**（`3cb9cf6` step 单一行协议 · `d0c6f08` append 回执 · `319a043` 合入；补记于 2026-09-03）：
-  `session step` 的 stdout 只剩行协议一种形状——不带 flag 时也按行输出，`--stream` 降为无操作别名保留
-  一个版本期（`nulya help` 里写明"does nothing"）；`--gate` 仍蕴含它，诊断行照旧走 stderr。
-  `session append` 打印投递名作为回执，driver 按 `origin` 对账而不是按文本回显。
-  DESIGN §3.4/§14、tui.md、`extensions/guide` 的 SKILL.md 同 commit 同步。
-  这两条当时漏了本节的记录行，事后按契约补上；代码与文档在合入时就是同步的。
-
-- **2026-09-03 · 小刀 2–3（注释与 DESIGN.md）· 本 commit**：先纠一处契约冲突——小刀第 2 条写的
-  "纯注释行降到 12% 以下"与 `docs/goals/comments.md` §3 直接矛盾：那份契约在第一轮之后**明确删掉了
-  百分比目标**，理由是剩下的注释是锁序、崩溃安全、wire 形状与 OS 陷阱，"删它们就是删正确性"。
-  所以这一刀按 comments.md 现行的三条可检查目标做，占比是结果不是靶子（21% → 20.1%，正如它预言的小）。
-  ① **模块头**：`src/` 里超 15 行的八个（`journals/{outcome,journal,tool_stats}`、`emit`、
-  `providers/codex`、`root`、`tool`、`environment/remote/mod`）全部收进 15 行以内，
-  `extensions/` 里十一个收窄；删的是论辩（`journal.zig` 的"There is deliberately no `Journal(T)`"、
-  `std/main.zig` 的"Compiled Zig rather than a script: …"、`claude.zig` 的"The Agent SDK … is not used"）
-  与重复（`pi.zig` 与 `runners.zig` 各写了一遍 pi 没有 `unsafe`，留在表的脚注那份）。
-  ② **各刀留下的过期措辞**——这是本刀真正的收获，比行数重要：`runner.zig` / `agent/main.zig` /
-  `agent/proc.zig` 还在说 `task_finished`（Lane D 已合成 `note`）；`cli/config.zig` 的注释同时引用
-  `extensions.paths`（Lane B 删）与"pins"（Lane C 删）；`registry.zig` 与 `ext_seed.zig` 的模块头写着
-  `SessionComposition` pins 与"trust 门"；`journals/journal.zig` 的测试注释还在讲 trust journal；
-  `environment/remote/mod.zig` 两处以"exec target"作对照（中刀 E 已退役）；`ext_push.zig` 的
-  "`--env wsl`"（Lane B 记录里点名留下的那处，现在一并改掉）。另有七处考古式措辞（"used to"/"no longer"）
-  改写成事实。
-  ③ **DESIGN.md**：§5.4 从"为什么不做动态 promotion / eviction"改成"没有动态 promotion / eviction"
-  （标题不再是一个问句，正文只留不变量，节号不动以免打断既有引用）；§7.2.1 "曾经有、为什么退场"改成
-  "退役的键：今天写它会怎样"（表是现状契约，留；"不留兼容垫片"那段论证删）；`jsonrpc` 那种 wire 的
-  整段悼词删掉（§17 已有一行，退役键表已有一行，§17 的节号改指 §7.2.1）；`WorkspaceFs`、
-  `edit` 曾是第二个 builtin、`NULYA_SESSION*` 从前是一个变量、handoff 从前写文件——四处考古删掉；
-  §7.2 与 §9 各写了一遍 trust gate 的死因，留 §9 那份。249 KB。
-  一处偏离：**`src/lease.zig` 的 38 行模块头没动。** 它是中刀 F 立的锁顺序表，CLAUDE.md 已宣告"表是契约，
-  新增一把锁先加一行"，全是不变量与顺序、没有一句辩护；删行就是删正确性。相应地把它登记进
-  CLAUDE.md 与 comments.md 的契约模块例外（那两处都还写着"今天有三个"）。
-  验收：`zig build test` 590/590 · `zig build e2e` 172 pass 1 skip（与中刀 F 记的基线一致）。
-  `tui/` 本刀未触及。
+- **2026-09-03 · 小刀最后一条（DESIGN.md「留事实与不变量，删论证」）**（`fefb8b2` DESIGN · `f584539` CLAUDE / README / PLAN）：
+  按契约的四类删：编年史（「曾经有 / 退场 / 已删」的段落与两张退场表）· 未采纳备选的辩护（那句话若是某条不变量唯一的落点就留不变量、删辩护）· 评审轮次 / 任务号 / 日期 · 复述代码名字与在别处已定义过的规则。
+  留的一个没动：全部数据格式、全部不变量、`cli/common.zig` usage 里的每个动词与 flag、§-编号（别的文档按 §x 引用）。
+  §17 收成"读者今天还可能重新提出来"的那些备选，`apply` / pin 家族 / 兼容垫片那几行随机制一起删掉。
+  `extensions/agent` / `ground` / `std` 三节从"逐条讲实现"收成"内核面上是什么 + 包自己的不变量"，细节指回 `docs/goals/`。
+  **顺带对齐三处与代码的漂移**：`ext build` 没有 `--user`（Lane B 之后版本只有一个落点）· `session new|step` 与 `remote check|ls` 认 `--ssh-password-stdin` · e2e 是**五**组（`e2e_remote` 那组以前没算进 §16 与 CLAUDE 的构建说明）。
+  **一处没做到契约**：目标是"至多减半"，实际 256563 → 179225 字节（1750 → 1423 行，−30%）。做了三轮通读收缩之后，剩下的体积是**格式、不变量与 CLI 表面本身**——`nulya help` 那张表、manifest schema、header / 事件行 / `status.json` / 帧协议 / 行协议、以及每一节的不变量清单，加起来就是这个量级；再往下减只能删事实，而契约同时要求"每个数据格式、每条不变量、每个 CLI 动词与 flag 都留着"。真要到一半，唯一诚实的做法是把 §7.8 整节搬去 `docs/goals/`（约再省 18 KB）与把 §14 的 usage 表交给 `nulya help` 作唯一真相（约再省 12 KB），两件都是**语义决定**而不是一次收缩，没有在这一刀里自己拍。
+  CLAUDE.md 只剩四处要改（执行环境那句的编年史、`--stream` 的措辞、sandbox 不再靠已删字段描述自己、四组→五组）；README 的 Status 段整段重写；PLAN 删掉描述"现在已经不可能"的段落并把它们各收成一句仍然为真的规则，路线图与占位项一条没删。
+  验收：`zig build e2e-core` 64 pass 1 skip（断言 model-facing 文本不含 `DESIGN` / `PLAN` 的那条仍绿——docs 不进二进制，这只是形式确认）。
