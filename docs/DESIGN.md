@@ -230,9 +230,9 @@ session 文件**只有一个写者**：`createDurable` / `openDurable` 打开时
 
 **投递锁的纪律**：写 inbox 的每一个人都拿 `<id>.inbox/.deposit.lock`——缺省 `depositEvent` 自己拿，只有已经持锁跨越"先读后投"的调用方走 `depositEventLeased`（重复拿会自己死锁自己）。它是 **inbox 自己**的并发原语而不是某个 CLI helper 的私有约定，新的投递者不必*记得*遵守它。配套的另一半：**每次投递都在锁下重新确认 session 文件还在**（不在就 `NoSuchSession`，一个字节都不写），所以 `session prune`（§14）"什么都没有才删"这句话一直到删完为止都成立——否则一个 supervisor 可以正卡在自己的写 `.tmp` 与 rename 之间，最后留下一条没有 session 的 durable 事实。
 
-**它同时是 session lifetime 冻结的一半**：不只"要投一条事件"的人拿它，**要在这一场底下开一个长命写者**的人也拿——`nulya task run` 跨越"这场还在吗"与 spawn 全程持它，因为 supervisor 会往 `.nulya/scratch/<id>/` 里写到它跑完为止，而那棵树正是 prune 要删的。另一半是写者租约：任务的第二条起法是 step 里的 `shell {background:true}`，那条由它那一步已经持着的写者租约盖住。两把一起才是冻结（`ledger.SessionLeases`），所以 `session prune` **两把都自己拿**、在两把下面问"这一场底下还有活着的任务吗"，再把它们交给 `ledger.pruneSessionLeased`（`depositEvent` / `depositEventLeased` 那对的同一种分法）。只拿一把、或者先问后锁，都只是把窗口改窄：两条命令双双返回成功，而系统里已经没有那个 task 所属的 session。配套的一条：prune 持锁时问的那趟投影**一个字节都不投递**（`liveTaskFor`），否则它会等一把自己正握着的锁。
+**它同时是 session lifetime 冻结的一半**：不只"要投一条事件"的人拿它，**要在这一场底下开一个长命写者**的人也拿——`nulya task run` 跨越"这场还在吗"与 spawn 全程持它，因为 supervisor 会往 `.nulya/scratch/<id>/` 里写到它跑完为止，而那棵树正是 prune 要删的。另一半是写者租约：任务的第二条起法是 step 里的 `shell {background:true}`，那条由它那一步已经持着的写者租约盖住。两把一起才是冻结（`ledger.SessionLeases`），所以 `session prune` **两把都自己拿**、在两把下面问"这一场底下还有活着的任务吗"，再把它们交给 `ledger.pruneSessionLeased`（`depositEvent` / `depositEventLeased` 那对的同一种分法）。只拿一把、或者先问后锁，都只是把窗口改窄：两条命令双双返回成功，而系统里已经没有那个 task 所属的 session。配套的一条：prune 持锁时问的那趟投影**一个字节都不投递**（`heldTaskFor`），否则它会等一把自己正握着的锁。也正因为不投递，那趟投影要多答一件事：远端任务 `done` 结束的是**进程**不是**投递**（报告还在那台机器上，`report_pending`），本机这个 task 目录是"这份结果欠给谁"的唯一记录，所以它和"还在跑"一样拦住 prune。
 
-**锁顺序**：没有任何地方先拿写者租约再拿投递锁（`step` 从不投递）；唯一同时握两把的 `ledger.acquireSessionLeases` 先拿投递锁，写者租约用 non-blocking。同时握**两个 session** 的投递锁的只有 `ledger.moveDeposit`（retarget 把一条没排干的 `task_finished` 从 A 的 inbox 搬到 B 的）：它按 **session 路径序**拿，不按调用方向拿——否则 `A→B` 与 `B→A` 各握着对方在等的那一把。搬家写的是**两个** inbox，所以两把都要：只拿目的地那把的话，prune 一边持着 A 的锁清点 A 还剩什么、一边有人把 A 的投递搬走了，"持锁即冻结"就不成立。
+**锁顺序**：没有任何地方先拿写者租约再拿投递锁（`step` 从不投递）；唯一同时握两把的 `ledger.acquireSessionLeases` 先拿投递锁，写者租约用 non-blocking。同时握**两个 session** 的投递锁的是 `ledger.acquireDepositPair`：它按 **session 路径序**拿，不按调用方向拿——否则 `A→B` 与 `B→A` 各握着对方在等的那一把；两头同名只拿一把（拿两次会自己死锁）。两个用它的动作都是"改结果落到哪"：`moveDeposit`（把一条没排干的 `task_finished` 从 A 的 inbox 搬到 B 的）写的是**两个** inbox，只拿目的地那把的话，prune 一边持着 A 的锁清点 A 还剩什么、一边有人把 A 的投递搬走了，"持锁即冻结"就不成立；`task retarget` 则要把 `notify` 指针与那次搬家一起做完（`moveDepositLeased`）——**写 `notify` 本身就是在改目的地的 lifetime graph**（"有任务往这一场报告"正是 prune 删之前要看的），不持目的地那把锁写下去，指针会落在别的进程正在删的一场上，任务最后报告进一个不存在的 session。
 
 #### 应用 exactly-once，投递 at-least-once
 
@@ -1323,7 +1323,7 @@ resume 时按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDe
 `session new --parent` 对任务一无所知，这是对的（将来的 subagent 也走这条路，而一个子场不该抢走父场的工作）。但压缩不是分叉——它是同一场对话换了个文件，把结果投进一个再没人读的 session 就是把结果丢了。所以**继承发生在 `extensions/compact` 里**（两条路径同一段代码，fork 成功之后、carry 之前）：`nulya task list --session <parent> --json` → 每个 `nulya task retarget <task> --to <child>` → carried 文本末尾由**代码**追加 footer。
 
 - **retarget 的是每一行，不只是还在跑的那些**：`task retarget` 的另一半是 `moveDeposit`——"结果已经落地、还没人排干"，而那正是 fork 与任务完成之间那个窗口留下的状态，把它过滤掉就是在这个窗口里丢结果。
-- **`.done` 行上 `taskRetarget` 分两条路**：先试 `moveDeposit`，**只有真的搬走了什么才写 `notify` 指针**——一个早已排干、结果被读过的任务不再留下指针，否则它会在往后每一次 compact 里被再指一次、沿 fork 链无限迁移，`/tasks` 的噪音随 compact 次数线性增长而永不停止。非 `.done` 的行仍是"`notify` 先落地、`moveDeposit` 随后"的老顺序（正在跑的 supervisor 完成时要看得见新目标）。
+- **`.done` 行上 `taskRetarget` 分两条路**：先试 `moveDeposit`，**只有真的搬走了什么才写 `notify` 指针**——一个早已排干、结果被读过的任务不再留下指针，否则它会在往后每一次 compact 里被再指一次、沿 fork 链无限迁移，`/tasks` 的噪音随 compact 次数线性增长而永不停止。非 `.done` 的行仍是"`notify` 先落地、搬家随后"的顺序（正在跑的 supervisor 完成时要看得见新目标）。两条路都在**两把投递锁**下从头做到尾（`acquireDepositPair` → `moveDepositLeased`，§3.4）：目的地还在不在、指针写不写、投递搬不搬，是同一件事的三半。
 - **footer 分两句、互斥**：还活着的那些说 `Background tasks still running when this session was forked: <sid>/t3 (<command>, 41s so far) … — nulya task status <sid>/t3; their results will arrive here when they finish.`；远端状态问不出来的（`unreachable`，§8.2）单独一句 `Background tasks with unknown remote state at fork: … they were retargeted here and may still report`。什么算"还活着"由**内核**回答（行上的 `state`，与 `task list --running` 同一投影，不在这里重算 `lost`）。
 - **retarget 失败绝不让 fork 失败**——stderr 说一句、照常返回，那个任务照旧报告进父场的 inbox。
 
@@ -1544,13 +1544,13 @@ nulya                                            ← 无参数：同 `nulya help
 
 **唯一一个删 session 的动词。** 缺省只删得掉什么都没记下的那种（header 一行、没有事件——那不是 ledger，只是一个名字；physics #1 管的是历史，这里没有历史），前端自动调的就是这一档；`--force` 连**有历史**的一起删。只收一个 id、永远不收 pattern（"这一场不值得留"是判断）。
 
-**它是个动词而不是前端自己 unlink**，因为「能不能删」的三条判据都要在**锁**下回答（有人在 `step` / 有人正在投递 / 底下还有活着的后台任务），而锁只能靠**拿**来回答、不能靠看：探测锁的前端恰好在最要紧的那一刻猜错——另一个进程正卡在它自己的 check 与 deposit 之间。
+**它是个动词而不是前端自己 unlink**，因为「能不能删」的判据都要在**锁**下回答（有人在 `step` / 有人正在投递 / 底下还有活着的后台任务），而锁只能靠**拿**来回答、不能靠看：探测锁的前端恰好在最要紧的那一刻猜错——另一个进程正卡在它自己的 check 与 deposit 之间。
 
 机制在内核（`ledger.pruneSessionLeased`：哪些文件构成一场 session、两把租约的编排、两个计数；typed error `NoSuchSession` / `SessionBusy` / `DepositInFlight` / `HasEvents` / `HoldsDeposits`），检查与删除全程持两把租约（deposit lease 用 non-blocking：「有人正在投递」是答案不是队列）。其中一把是 **inbox 的**租约，投递者一个不落地都持它（§3.4）：supervisor 送回的 `task_finished`、`ext activate` 的 capability note，与一条排队的 turn 一样是「别动这场 session」的理由。**两把租约由壳层先拿**，因为「还有没有活着的后台任务」只有壳层答得出（要读遍每个 task 目录、远端还要问另一台机器），而两条起任务的路各被其中一把盖住（§3.4），所以那个答案在删除发生之前不会翻篇。
 
-**它在哪一刻 commit**：删掉 session 文件那一刻。在此之前的任何失败都是 refusal，一个字节不动；这之后没有回滚可言（别的进程读到的「没了」就是这个文件的不在场），所以后续 sidecar / inbox / scratch 的清理**只报不抛**——`PruneReport.leftovers` 与一句 `note:`，exit 仍是 0。一场 session 不能有两套完成语义。
+**它在哪一刻 commit**：删掉 session 文件那一刻。在此之前的任何失败都是 refusal，一个字节不动；这之后没有回滚可言（别的进程读到的「没了」就是这个文件的不在场），所以后续 sidecar / inbox / scratch 的清理**只报不抛**——`PruneReport.leftovers` 与一句 `note:`，exit 仍是 0。一场 session 不能有两套完成语义。**只报不抛不等于不报**：inbox 目录清点过的 `*.json` 之外还留着东西（某个投递者死在自己的写 `.tmp` 与 rename 之间）就删不掉，那条错误照样一路上浮成 `leftovers`——真删不干净的时候闷声吞掉，等于磁盘上唯一剩下的那个东西正好是没人提的那个。
 
-**`--force` 掀不动的三条**（它管的是这一场*握着*什么，不是谁正握着它）：有人在 `step`（写者租约）· 有正在飞的投递 · 这一场还有活着的后台任务（壳层用 `task list` 那同一份投影问，refusal 点名 `nulya task kill <task>`；`done`/`lost` 不拦——它们的目录随 scratch 一起走）。
+**`--force` 掀不动的四条**（它管的是这一场*握着*什么，不是谁正握着它）：有人在 `step`（写者租约）· 有正在飞的投递 · 这一场还有活着的后台任务 · 这一场有个任务已经在另一台机器上跑完、报告还没取回来。后两条壳层用 `task list` 那同一份投影问（`heldTaskFor`），refusal 分别点名 `nulya task kill <task>` 与 `nulya task status <task>`：`done`/`lost` 本身不拦（目录随 scratch 一起走），拦的是**结果还欠着**——欠给的可能是别的 session（retarget 过），删掉这个目录连"欠给谁"都没了。取回来之后它变成一条排队的投递，那才是 `--force` 该管的判断。
 
 删的东西：session 文件（**先删**，它的不在场就是别人读到的「没了」）· `.cancel` · 两个 lease 文件 · inbox（`--force` 连里面排队的一起）· `.nulya/scratch/<id>/`。**不删的**：两条 journal 的行（「没有行 = unknown」本来就是纪律，§3.3），以及 `--parent` fork 出去的子场（fork 不复制任何东西，照常能跑；只是 `session list` 的 episode 分组从此连不回那个 root）。
 

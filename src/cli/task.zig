@@ -1050,8 +1050,11 @@ const Far = struct {
 /// machine's own answer to "is a supervisor still holding this task's lease",
 /// carried in the SAME poll (`TaskSnapshot.lease_held`) so a far `lost` costs no
 /// second question — null only when the far agent predates the column.
+/// `report_present` says that machine is still holding a report file for this
+/// task; whether THIS machine has taken it is a different question, answered
+/// here by the `delivered` marker.
 const FarAnswer = union(enum) {
-    status: struct { bytes: []const u8, lease_held: ?bool },
+    status: struct { bytes: []const u8, lease_held: ?bool, report_present: bool },
     /// This host could not get an answer: the machine did not answer, or
     /// refused the question. Nothing is known about the task — not that it is
     /// running, not that it died.
@@ -1082,7 +1085,11 @@ fn pollAndDeliver(
 ) !FarAnswer {
     const snap = remote.pollTaskOn(ch, cwd, full) catch return .unreached;
     const status_bytes = try arena.dupe(u8, snap.status);
-    const answer: FarAnswer = .{ .status = .{ .bytes = status_bytes, .lease_held = snap.lease_held } };
+    const answer: FarAnswer = .{ .status = .{
+        .bytes = status_bytes,
+        .lease_held = snap.lease_held,
+        .report_present = snap.report.len != 0,
+    } };
     if (!deliver) return answer;
     if (snap.report.len == 0 or status_bytes.len == 0) return answer;
     if (markerPresent(alloc, io, host_dir, delivered_file)) return answer;
@@ -1157,20 +1164,40 @@ fn scopeOf(only: ?[]const u8) Scope {
     return if (only) |id| .{ .reports_into = id } else .all;
 }
 
-/// The first task still alive that `session prune` would take the ground out
-/// from under, or null when there is none — its full name, for a refusal that
-/// can name what to kill.
+/// One task that still needs the ground `session prune` is about to remove.
+/// `full` is allocated by the caller's allocator, so a refusal can name what to
+/// do about it.
+pub const HeldTask = struct {
+    full: []u8,
+    why: enum {
+        /// Something may still be writing under this session's scratch tree.
+        alive,
+        /// Nothing is writing, but a finished result is still owed to a
+        /// session, and this directory is what says to whom.
+        undelivered,
+    },
+
+    pub fn deinit(self: HeldTask, alloc: std.mem.Allocator) void {
+        alloc.free(self.full);
+    }
+};
+
+/// The first task holding `session_id`'s ground, or null when none does.
 ///
 /// Asks the same projection the `task` verbs answer with (`collectRows` /
 /// `readRow`), so "is this task running?" has one answer. The scope is
 /// `touches`, not the narrower one `task list --session` uses: a task this
 /// session started and retargeted elsewhere still writes into a directory under
-/// this session's scratch tree, which is what prune is about to remove. `done`
-/// and `lost` rows do not block — nothing is writing there any more.
+/// this session's scratch tree, which is what prune is about to remove.
+///
+/// A `done` row holds nothing — unless its result is still on another machine
+/// (`report_pending`), because then this directory is the only record of where
+/// that result is owed, and deleting it strands a report a DIFFERENT session
+/// may be waiting for.
 ///
 /// The one reading path that deposits NOTHING, because its caller asks while
 /// holding the session's leases.
-pub fn liveTaskFor(alloc: std.mem.Allocator, io: std.Io, session_id: []const u8) !?[]u8 {
+pub fn heldTaskFor(alloc: std.mem.Allocator, io: std.Io, session_id: []const u8) !?HeldTask {
     var arena_state: std.heap.ArenaAllocator = .init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1182,7 +1209,11 @@ pub fn liveTaskFor(alloc: std.mem.Allocator, io: std.Io, session_id: []const u8)
     for (rows) |row| {
         // `unreachable` counts as alive: that machine did not answer, and not
         // knowing is not grounds to delete what a supervisor may still be using.
-        if (isLive(row.state) or row.state == .@"unreachable") return try alloc.dupe(u8, row.full);
+        if (isLive(row.state) or row.state == .@"unreachable")
+            return .{ .full = try alloc.dupe(u8, row.full), .why = .alive };
+    }
+    for (rows) |row| {
+        if (row.report_pending) return .{ .full = try alloc.dupe(u8, row.full), .why = .undelivered };
     }
     return null;
 }
@@ -1319,6 +1350,18 @@ const Row = struct {
     /// `dir` and the log path under it are then paths on ANOTHER machine, which
     /// a reader here cannot open.
     machine: ?[]const u8 = null,
+    /// This task is finished and its result is still on the other machine —
+    /// nobody has turned it into the `task_finished` its target is owed.
+    ///
+    /// A remote task has TWO lifetimes, and `done` ends only the first: the
+    /// process is over, the delivery is not. A local supervisor deposits
+    /// BEFORE it writes `done`, so the two coincide there and this is always
+    /// false; a far one writes its report where it ran and waits for this
+    /// machine to fetch it. Which is why `done` alone is not grounds to delete
+    /// the ground under it (`heldTaskFor`) — the host-side directory holding
+    /// this task's identity, `notify` and `delivered` is exactly what says
+    /// where that report is owed.
+    report_pending: bool = false,
 };
 
 /// The identity half of a row, known before anything is read.
@@ -1382,6 +1425,10 @@ fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef, deliver
             .lost
         else
             .running;
+        // Asked after the poll, so a delivery this very call made counts: the
+        // marker goes down only once the deposit landed.
+        row.report_pending = outcome.report_present and row.state == .done and
+            !markerPresent(far.alloc, io, ref.dir, delivered_file);
         return row;
     }
     const parsed = readStatus(arena, io, ref.dir) catch return null;
@@ -1911,15 +1958,36 @@ fn taskRetarget(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
         try printErrFmt(alloc, io, "no such task '{s}'\n", .{named});
         return 1;
     };
+    const cwd = std.Io.Dir.cwd();
+    const from = row.session;
+    const name = try depositName(arena, from, std.fs.path.basename(row.dir));
+    // Where this task's result goes today — the source end of the change, and
+    // not necessarily the session that started it.
+    const current = if (row.notify) |n| n else from;
+    const current_path = try launch.sessionPath(arena, current);
     const to_path = try launch.sessionPath(arena, to);
-    std.Io.Dir.cwd().access(io, to_path, .{}) catch {
+
+    // Cheap and not authoritative — the answer that counts is the one under the
+    // leases below. Here so a mistyped id is refused before this command
+    // creates an inbox for it.
+    cwd.access(io, to_path, .{}) catch {
         try printErrFmt(alloc, io, "no such session '{s}'\n", .{to});
         return 1;
     };
 
-    const cwd = std.Io.Dir.cwd();
-    const from = row.session;
-    const name = try depositName(arena, from, std.fs.path.basename(row.dir));
+    // BOTH inboxes' leases, held across everything below. The `notify` pointer
+    // and an undrained deposit are two physical halves of one routing fact, so
+    // they move together or not at all; and writing that pointer is itself a
+    // mutation of the DESTINATION's lifetime graph — "a task reports into this
+    // session" is exactly what `session prune` looks for before it removes one.
+    // Written without the destination's lease, the pointer can land on a
+    // session another process is removing at that moment, and the task then
+    // finishes into a session that does not exist.
+    var pair = try ledger.acquireDepositPair(arena, io, cwd, current_path, to_path, .block);
+    defer pair.close(io);
+
+    // Under the leases, so it stays true for as long as this command needs it.
+    cwd.access(io, to_path, .{}) catch return retargetLostTarget(alloc, io, to);
 
     // `.done` is terminal: no supervisor is still racing to deposit, so
     // "write the marker first" protects against nothing, and the only thing
@@ -1928,16 +1996,8 @@ fn taskRetarget(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     // along every future continuation forever. So: move first, and mark the
     // notify pointer only when there was something to move.
     if (row.state == .done) {
-        const moved = moveDeposit(arena, io, if (row.notify) |n| n else from, to, name) catch |err| switch (err) {
-            error.NoSuchSession => return retargetLostTarget(alloc, io, to),
-            else => return err,
-        };
-        if (moved) {
-            const tmp = try std.fs.path.join(arena, &.{ row.dir, ".notify.tmp" });
-            const final = try std.fs.path.join(arena, &.{ row.dir, notify_file });
-            try cwd.writeFile(io, .{ .sub_path = tmp, .data = to });
-            try cwd.rename(tmp, cwd, final, io);
-        }
+        const moved = try ledger.moveDepositLeased(arena, io, cwd, current_path, to_path, name);
+        if (moved) try writeNotify(arena, io, row.dir, to);
         try printOut(alloc, io, "{s} -> {s}{s}\n", .{ row.full, to, if (moved) " (result moved)" else "" });
         return 0;
     }
@@ -1945,17 +2005,21 @@ fn taskRetarget(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     // Still live: the marker goes down FIRST, so a supervisor finishing right
     // now sees the new target (and re-checks after depositing, which closes
     // the remaining window).
-    const tmp = try std.fs.path.join(arena, &.{ row.dir, ".notify.tmp" });
-    const final = try std.fs.path.join(arena, &.{ row.dir, notify_file });
-    try cwd.writeFile(io, .{ .sub_path = tmp, .data = to });
-    try cwd.rename(tmp, cwd, final, io);
-    const moved = moveDeposit(arena, io, if (row.notify) |n| n else from, to, name) catch |err| switch (err) {
-        error.NoSuchSession => return retargetLostTarget(alloc, io, to),
-        else => return err,
-    };
+    try writeNotify(arena, io, row.dir, to);
+    const moved = try ledger.moveDepositLeased(arena, io, cwd, current_path, to_path, name);
 
     try printOut(alloc, io, "{s} -> {s}{s}\n", .{ row.full, to, if (moved) " (result moved)" else "" });
     return 0;
+}
+
+/// Point a task's result at `to`, atomically enough that a supervisor reading
+/// it concurrently sees one whole session id or the other.
+fn writeNotify(arena: std.mem.Allocator, io: std.Io, dir: []const u8, to: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    const tmp = try std.fs.path.join(arena, &.{ dir, ".notify.tmp" });
+    const final = try std.fs.path.join(arena, &.{ dir, notify_file });
+    try cwd.writeFile(io, .{ .sub_path = tmp, .data = to });
+    try cwd.rename(tmp, cwd, final, io);
 }
 
 /// The destination was there when this command checked for it and gone by the

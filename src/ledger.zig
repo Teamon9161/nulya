@@ -1177,6 +1177,45 @@ pub fn depositEventLeased(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir
     try base.rename(tmp_rel, base, final_rel, io);
 }
 
+/// The deposit leases of TWO sessions, held at once — what any act that changes
+/// WHERE a result will land needs, because such an act touches both ends and
+/// neither end may be pruned out from under it in between. Naming one session
+/// twice takes one lease; taking the same lease twice would deadlock on the
+/// second.
+///
+/// LOCK ORDER: in session-path order, never in call order — two such pairs in
+/// opposite directions would otherwise each hold what the other waits for.
+pub const DepositPair = struct {
+    first: Lease,
+    second: ?Lease,
+
+    pub fn close(self: *DepositPair, io: std.Io) void {
+        if (self.second) |*l| l.close(io);
+        self.first.close(io);
+    }
+};
+
+pub fn acquireDepositPair(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    a_session_path: []const u8,
+    b_session_path: []const u8,
+    wait: DepositWait,
+) !DepositPair {
+    if (std.mem.eql(u8, a_session_path, b_session_path)) {
+        return .{ .first = try leaseOrRefuse(alloc, io, base, a_session_path, wait), .second = null };
+    }
+    const a_first = std.mem.lessThan(u8, a_session_path, b_session_path);
+    const first_path = if (a_first) a_session_path else b_session_path;
+    const second_path = if (a_first) b_session_path else a_session_path;
+
+    var first = try leaseOrRefuse(alloc, io, base, first_path, wait);
+    errdefer first.close(io);
+    const second = try leaseOrRefuse(alloc, io, base, second_path, wait);
+    return .{ .first = first, .second = second };
+}
+
 /// Move the undrained deposit `name` from one session's inbox to another's —
 /// the second way a fact reaches an inbox, and the only way one leaves an inbox
 /// without being drained. False when there was nothing to move, which is the
@@ -1185,9 +1224,7 @@ pub fn depositEventLeased(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir
 /// It is a WRITE OF BOTH INBOXES, so it holds BOTH leases: the destination's,
 /// like every depositor, and the source's, because "having the lease means this
 /// inbox does not change under me" is what `pruneSession` counts on when it
-/// lists what a session still holds. Taken in path order, never in call order:
-/// two moves in opposite directions would otherwise each hold what the other
-/// waits for.
+/// lists what a session still holds.
 ///
 /// Under the leases: a destination session that is gone is `error.NoSuchSession`
 /// and the file stays where it is; a source deposit drained in the meantime is
@@ -1201,27 +1238,39 @@ pub fn moveDeposit(
     name: []const u8,
     wait: DepositWait,
 ) !bool {
-    // One session: there is nowhere to move to, and taking its lease twice
-    // would deadlock on the second.
+    if (std.mem.eql(u8, from_session_path, to_session_path)) return false;
+
+    const src = try depositFilePath(alloc, from_session_path, name);
+    defer alloc.free(src);
+
+    // Before any lock: the common answer is "nothing to move", and it costs
+    // nobody the leases to say so.
+    base.access(io, src, .{}) catch return false;
+
+    var pair = try acquireDepositPair(alloc, io, base, from_session_path, to_session_path, wait);
+    defer pair.close(io);
+    return moveDepositLeased(alloc, io, base, from_session_path, to_session_path, name);
+}
+
+/// `moveDeposit` for a caller that ALREADY holds both inboxes' leases
+/// (`acquireDepositPair`) — because the move is only half of what it has to do
+/// atomically. `task retarget` is the case: the `notify` pointer it writes and
+/// the deposit it moves are two physical halves of ONE routing fact, and the
+/// destination has to still exist for both of them or neither.
+pub fn moveDepositLeased(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    from_session_path: []const u8,
+    to_session_path: []const u8,
+    name: []const u8,
+) !bool {
     if (std.mem.eql(u8, from_session_path, to_session_path)) return false;
 
     const src = try depositFilePath(alloc, from_session_path, name);
     defer alloc.free(src);
     const dst = try depositFilePath(alloc, to_session_path, name);
     defer alloc.free(dst);
-
-    // Before any lock: the common answer is "nothing to move", and it costs
-    // nobody the leases to say so.
-    base.access(io, src, .{}) catch return false;
-
-    const first_is_src = std.mem.lessThan(u8, from_session_path, to_session_path);
-    const first = if (first_is_src) from_session_path else to_session_path;
-    const second = if (first_is_src) to_session_path else from_session_path;
-
-    var first_lease = try leaseOrRefuse(alloc, io, base, first, wait);
-    defer first_lease.close(io);
-    var second_lease = try leaseOrRefuse(alloc, io, base, second, wait);
-    defer second_lease.close(io);
 
     base.access(io, to_session_path, .{}) catch return error.NoSuchSession;
     // A second look under the lease: the source may have been drained while
@@ -1501,7 +1550,10 @@ pub fn pruneSessionLeased(
 
 /// Remove the deposit lock, the deposits this prune counted, and then the inbox
 /// directory — which goes only if empty, since anything else in there is
-/// something this prune never accounted for.
+/// something this prune never accounted for: a `<name>.tmp` a depositor died
+/// halfway through, say. That directory is then a LEFTOVER and says so; the
+/// error rides out to `pruneSessionLeased`, which is past its commit point and
+/// turns it into the report's flag.
 fn removeInbox(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1520,7 +1572,10 @@ fn removeInbox(
         defer alloc.free(rel);
         try deleteIfPresent(io, base, rel);
     }
-    base.deleteDir(io, inbox) catch {};
+    base.deleteDir(io, inbox) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
 }
 
 fn deleteSibling(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8, suffix: []const u8) !void {
@@ -2268,6 +2323,59 @@ test "pruneSession commits at the session file: what will not go afterwards is r
     try std.testing.expect(report.leftovers);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, spath, .{}));
     try tmp.dir.access(io, "stuck.cancel", .{});
+}
+
+test "an inbox that will not go is a leftover too, not a silence" {
+    // A depositor that died between its write and its rename leaves a `.tmp`
+    // this prune never counted, so the directory stays — and the caller has to
+    // hear about it, or the one thing left on disk is the one thing nobody says.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spath = "residue.jsonl";
+
+    var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "residue" });
+    l.deinit();
+    try tmp.dir.createDirPath(io, "residue.inbox");
+    try tmp.dir.writeFile(io, .{ .sub_path = "residue.inbox/msg-0001.tmp", .data = "half" });
+
+    const report = try pruneSession(alloc, io, tmp.dir, spath, .{});
+    try std.testing.expect(report.leftovers);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, spath, .{}));
+    try tmp.dir.access(io, "residue.inbox/msg-0001.tmp", .{});
+}
+
+test "a held deposit pair freezes BOTH sessions, in path order either way round" {
+    // What `task retarget` needs: the pointer it writes and the deposit it
+    // moves are one routing fact, and neither end may be pruned while it is
+    // being changed. Order is by path, never by call, or two opposite retargets
+    // each hold what the other waits for.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var a = try createDurable(alloc, io, tmp.dir, "a.jsonl", .{ .session = "a" });
+    a.deinit();
+    var b = try createDurable(alloc, io, tmp.dir, "b.jsonl", .{ .session = "b" });
+    b.deinit();
+
+    {
+        var pair = try acquireDepositPair(alloc, io, tmp.dir, "b.jsonl", "a.jsonl", .block);
+        defer pair.close(io);
+        // Both ends, not just the one named first.
+        try std.testing.expectError(error.DepositInFlight, pruneSession(alloc, io, tmp.dir, "a.jsonl", .{}));
+        try std.testing.expectError(error.DepositInFlight, pruneSession(alloc, io, tmp.dir, "b.jsonl", .{}));
+    }
+
+    // Naming one session twice is one lease: taking it twice would deadlock on
+    // the second, and there is no second inbox to protect.
+    var same = try acquireDepositPair(alloc, io, tmp.dir, "a.jsonl", "a.jsonl", .block);
+    try std.testing.expect(same.second == null);
+    same.close(io);
+
+    _ = try pruneSession(alloc, io, tmp.dir, "a.jsonl", .{});
 }
 
 test "moveDeposit takes BOTH inboxes' leases, and moves only what is still there" {

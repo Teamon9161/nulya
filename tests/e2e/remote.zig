@@ -1229,6 +1229,75 @@ test "a step collects a far task's report even when no task verb ever asked" {
     try std.testing.expect(std.mem.indexOf(u8, step2.stdout, launch.ScriptedProvider.background_marker) != null);
 }
 
+test "prune leaves a session alone while a far task's report is still over there" {
+    // `done` ends a remote task's PROCESS, not its delivery: the report waits on
+    // that machine until this one fetches it, and the host-side task directory
+    // is the only record of where it is owed. Removing it on `done` alone would
+    // strand a result — and for a retargeted task, one that a DIFFERENT session
+    // is waiting for. So this refusal is not a judgment `--force` may overrule;
+    // collecting the report is what turns it into one.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const spec = try execSpec(alloc, exe, "");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs });
+    defer alloc.free(new.stdout);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    const step = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "background");
+    defer alloc.free(step.stdout);
+    try std.testing.expectEqual(@as(u8, 0), step.code);
+
+    // Watched on that machine's own file system, so nothing here collects the
+    // report on the way past.
+    const report_rel = try relTaskPath(alloc, id, "t1", "report.txt");
+    defer alloc.free(report_rel);
+    var tries: usize = 0;
+    while (tries < 3600 and !exists(io, far.dir, report_rel)) : (tries += 1) {
+        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    }
+    try std.testing.expect(exists(io, far.dir, report_rel));
+
+    const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+    defer alloc.free(spath);
+    {
+        const refused = try runCli(alloc, io, ws, &.{ exe, "session", "prune", id, "--force" });
+        defer alloc.free(refused.stdout);
+        try std.testing.expect(refused.code != 0);
+        try ws.access(io, spath, .{});
+    }
+
+    // Any reading verb collects it — and then the only thing standing between
+    // this session and removal is the deposit it just gained, which IS a
+    // judgment.
+    const task_name = try std.fmt.allocPrint(alloc, "{s}/t1", .{id});
+    defer alloc.free(task_name);
+    {
+        const collected = try runCli(alloc, io, ws, &.{ exe, "task", "status", task_name });
+        defer alloc.free(collected.stdout);
+        try std.testing.expectEqual(@as(u8, 0), collected.code);
+    }
+    {
+        const gone = try runCli(alloc, io, ws, &.{ exe, "session", "prune", id, "--force" });
+        defer alloc.free(gone.stdout);
+        try std.testing.expectEqual(@as(u8, 0), gone.code);
+    }
+    try std.testing.expectError(error.FileNotFound, ws.access(io, spath, .{}));
+}
+
 test "a report present while status still says running is not delivered — only `done` is finished" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

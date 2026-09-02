@@ -98,7 +98,8 @@ zig build e2e-ext   #   tests/e2e_ext.zig   extension 生命周期：build / sto
 zig build e2e-core  #   tests/e2e_core.zig  内核面：durable ledger、`session *`、gate、vision、后台任务
 zig build e2e-agent #   tests/e2e_agent.zig 委派：`extensions/agent` 与它的五种 runner（离线 fake）
 zig build e2e-std   #   tests/e2e_std.zig   自带 `std` 扩展的六个 tool
-zig build e2e -Dtest-filter="follow-up"   # 只跑名字含该子串的测试（四组 / test / integration 都认，可重复）
+zig build e2e-remote #  tests/e2e_remote.zig 整个工作区搬到别的机器：`remote serve` 的两头、远端任务与报告
+zig build e2e -Dtest-filter="follow-up"   # 只跑名字含该子串的测试（五组 / test / integration 都认，可重复）
 zig build run       # nulya demo：固定 prompt 的一场 session（无 API key 时走 scripted provider）
 
 # 唯一联网的测试（DESIGN §13.2）。不设变量就整体 skip，不会让没 key 的机器变红。

@@ -864,14 +864,15 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 /// and no events is a name, not a ledger. `--force` takes one with history too;
 /// it accepts one id and never a pattern.
 ///
-/// `--force` does not lift the three refusals that are not judgments: a step
-/// writing this session, a deposit in flight, a background task of it still
-/// running. All three are answered under LOCKS, and a lock can only be answered
-/// by TAKING it — probing guesses wrong exactly when it matters, while another
-/// process sits between its own check and its write. So this command takes
-/// BOTH of the session's leases itself, asks the third question under them, and
-/// hands them to `ledger.pruneSessionLeased`, which holds them across the
-/// counting and the removal.
+/// `--force` does not lift the refusals that are not judgments: a step writing
+/// this session, a deposit in flight, a task of it still running, a finished
+/// task whose result is still sitting on another machine. The first three are
+/// answered under LOCKS, and a lock can only be answered by TAKING it — probing
+/// guesses wrong exactly when it matters, while another process sits between
+/// its own check and its write. So this command takes BOTH of the session's
+/// leases itself, asks the task question under them, and hands them to
+/// `ledger.pruneSessionLeased`, which holds them across the counting and the
+/// removal.
 ///
 /// Exit 0 means one thing only: it is gone because this command removed it.
 fn sessionPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -927,17 +928,29 @@ fn sessionPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     defer leases.close(io);
 
     // Under both leases, and it deposits nothing on the way past
-    // (`liveTaskFor`) — a reading verb collects a far machine's finished
+    // (`heldTaskFor`) — a reading verb collects a far machine's finished
     // reports as it goes, and doing that here would wait for a lease this
-    // process is holding.
-    if (try task_cli.liveTaskFor(alloc, io, session_id)) |live| {
-        defer alloc.free(live);
-        try printErrFmt(
-            alloc,
-            io,
-            "session prune refused: background task {s} is still running; `nulya task kill {s}` first\n",
-            .{ live, live },
-        );
+    // process is holding. Which is why the second answer exists: a report
+    // waiting on another machine is a fact this session's directory is holding
+    // for somebody, and `--force` does not lift it either — collecting it
+    // (`nulya task status`) turns it into a deposit, and THAT is a judgment
+    // `--force` may then make.
+    if (try task_cli.heldTaskFor(alloc, io, session_id)) |held| {
+        defer held.deinit(alloc);
+        switch (held.why) {
+            .alive => try printErrFmt(
+                alloc,
+                io,
+                "session prune refused: background task {s} is still running; `nulya task kill {s}` first\n",
+                .{ held.full, held.full },
+            ),
+            .undelivered => try printErrFmt(
+                alloc,
+                io,
+                "session prune refused: background task {s} finished on another machine and its result has not been collected; `nulya task status {s}` first\n",
+                .{ held.full, held.full },
+            ),
+        }
         return 1;
     }
 
