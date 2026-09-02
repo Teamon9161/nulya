@@ -182,3 +182,15 @@ vtable 后面这道缝。
 ## 4. 落地记录
 
 （各 lane 合入时在此追加一行：日期、commit、偏离契约之处与理由。）
+
+- **2026-09-02 · Lane C**（`5d8ce04` 内核 + docs、`f242590` TUI + tui.md）：契约逐条落地。
+  `:none` 采用契约给的那个拼法（空选择 `<id>:` 也读作 none）；选择**加在**包的 `auto` 缺省
+  之上而不是替换它，并允许点名一个 `auto` tool（去重后是空操作）——这样 `WithToolNotDeclared`
+  只有「没声明」与「是 internal」两种含义，模型少一条要记的规则。
+  三处契约没点名、但删掉 `--pin` 逼出来的连带改动：① `extensions/agent` 的 persona front matter
+  `pins:` 改名 `with:`（条目从 `ext:<id>/<tool>` 变成成员 spec），否则委派出的子场会静默丢工具面；
+  内联列表的逗号切分因此改成引号感知，好让 `with: ["std:read,grep"]` 写得下一个选择。
+  ② `tui.toml` 的 `env.<kind>.pins` 删除——成员 spec 自己带得动选择。
+  ③ TUI 的 `ext list` `standing` 判据改成「某张常驻成员表点了名」。
+  遗留：`tui/` 的 `bun test` 有一条红的（`/ext` 的 `r` 帮助行断言），是 worktree 路径过长把那行
+  折成两行所致，`git stash` 后同样红。
