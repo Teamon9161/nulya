@@ -440,7 +440,7 @@ schema 恒定 `{ command, cwd?, timeout_ms?, background? }`。命令用哪种语
 
 **为什么是 `shell` 上的一个 flag 而不是另一个 CLI 动词**：gate 与前端的审批规则读的是 `shell` 自己的 `command`（§4/§9），一层 `nulya task run -- …` 的包装会让它们同时失明，转录上显示的也不再是真命令。代价是 builtin 定义变了一次，`kernel_hash` 因此变一次。
 
-后台与前台**跑在同一台机器上**：exec target（§8.1）下 supervisor 仍是 host 进程（它持租约、排日志、往本机文件投递事件），`startShellTask` 把本场 spec 作为 `--env <spec>` 传给它；**`remote:` 一族（§8.2）下连 supervisor 都在对面**，log 与 status 在对面的工作区。两条路上 `nulya task run` 都从那一场的 header 读同一个字段并建同一个 environment（`launch.sessionEnvironment`）。
+本地 session 的后台与前台**跑在同一台机器上**：supervisor 是 host 进程（它持租约、排日志、往本机文件投递事件），跑的就是本机命令——不需要一个 `--env` 告诉它跑在哪；**`remote:` 一族（§8.2）下连 supervisor 都在对面**，log 与 status 在对面的工作区。两条路上 `nulya task run` 都从那一场的 header 读同一个字段并建同一个 environment（`launch.sessionEnvironment`）。
 
 三条与前台相反的纪律：**没有缺省 timeout、没有上限**（活得过 step 正是它的意义，收口靠 `task kill`）· **取消 step 不碰任务** · **usage journal 记的是那次发射**（`ok=true`、耗时≈spawn），那正是 `builtin.shell` 这一次真正做的事。没有 session 可报告 → `ok=false` + 一句教学式文案，**什么都不启动**；`background` 不是 bool 就当场拒绝。
 
@@ -1030,38 +1030,19 @@ Environment { runShell(cmd, dialect) / runExtension(id, version, tool, request_j
 
 ### 8.1 Exec target：`shell` 的命令跑在哪（`session new --env`）
 
-**第三根轴**，与已有的两根正交：`Dialect` 说命令用哪种语言写、`config.environment.backend` 说它被关得多紧（sandbox 那根轴），这一根说**哪台机器的 shell 读它**。`wsl` 既不比 host 窄也不比它宽，它在**别处**——所以不是 `EnvironmentBackend` 的第四个词。
+`--env` 只认两种拼法：`local`（缺省，归一成 `""`）或 §8.2 的 `remote:…` 一族——后者搬走**整个工作区**。曾经有过一根"只搬命令、工作区留在 host"的轴（`wsl[:<distro>]`，更早还有 `ssh:<destination>`），两个拼法都已退役：一旦有什么超出 `shell` 本身（extension 子进程、task supervisor、extension store、三条 journal、`emit` 的 spill 文件——这些全是 harness 自己的机器，为 host 编译），"只搬命令"这条边界就是裂脑的。
 
-本节是这根轴的一半（**只搬命令**）；搬整个工作区的那一半是 §8.2 的 `remote:` 一族。
-
-```
-ExecTarget = local | wsl{distro?}
-spec 语法    local | wsl | wsl:<distro>
-```
-
-**`ssh:<destination>` 这个拼法已删除**：它只搬 `shell` 而工作区、extension、每个 spill 文件全留 host——一旦有什么超出 `shell` 本身，这条边界就是裂脑的。想搬 `shell` 到一台 ssh 机器上、工作区跟着一起搬，写 `--env remote:ssh:<destination>`（外加 `--workspace`）；只想搬命令、不搬工作区，`wsl` 仍然是那个答案（WSL 经 `/mnt/` 本来就与 host 共享文件系统）。老 header 里冻着这个拼法的场 resume 时**响亮失败**，refusal 里带上指向 `remote:ssh:` 与 `--workspace` 的那句话（`launch.legacySshHint`），绝不静默改跑别处。
-
-**只有 `shell` 的命令搬走。** extension 子进程、task supervisor、extension store、三条 journal、`emit` 的 spill 文件——全部留在 host（这些是 harness 自己的机器，它们是为这个 host 编译的）。
+老 header 里冻着这两种退役拼法的场 resume 时**响亮失败**，refusal 里带上指向 `remote:wsl` / `remote:ssh:` 与 `--workspace` 的那句话（`launch.legacyExecHint`），绝不静默改跑别处；`nulya task supervise` 同理不再收 `--env`——一个只跑 local 命令的 supervisor 没有这个问题要问。想要"只搬 shell、工作区留在 host"，今天没有答案（PLAN 记这条欠账）；想搬 shell 到 WSL 或 ssh 机器、工作区跟着一起搬，写 `--env remote:wsl[:<distro>]` / `--env remote:ssh:<destination>`（外加 `--workspace`）。
 
 **为什么冻进 header**（`Header.environment`，可空、老 header 读回 `""`，§3.4）：与 `model_identity` 同一个理由，且**不是**缓存理由（它从不进模型的 prompt）。一份转录只在产出它的那台机器上才有意义：路径、模型以为自己在什么平台上、下一步还看得见哪些文件，全从这里来。所以 `session new --env` 决定一次，`session step` 不认这个 flag、只读 header；resume 时目标不可达就**响亮失败**（与 `MissingCredential` 对称）。同理 `nulya task run` 读的是那一场的 header——**任务跑在它那场 session 跑的地方**。
 
 **`session new --parent` 继承它**：`--env` **缺席**时 `environment` 与 `remote_workspace` 一起从父 header 的冻结值取（它是创建时的身份事实，和 `model_identity` 同一类，不是"新 session 边界该重新 resolve 的 composition"）。**唯一覆盖入口是显式命名 `--env`**（哪怕是归一成 `""` 的 `--env local`）——命名了就完全按 argv 取，父场的两列一概不参与。单独给出 `--workspace`（不带 `--env`）只覆盖目录那一列。继承来的值走与 argv **完全同一条**校验，拒绝文案点名这个值来自哪一场父 session。
 
-**没有对应的 config 键**，这是有意的：给 `[environment]` 加一个默认值就要回答"`wsl` 比 `local` 更严还是更松"，而 project 层收窄规则（§9.5）对这个问题没有诚实答案。想每场都用同一个目标，那是驱动者记住一个选择的事。
-
-**argv 与 cwd**（`LocalEnvironment.shellArgv`，argv 决定的唯一一处；`local` 分支逐字节不变）：
-
-- `wsl.exe [-d <distro>] -e bash -lc "cd '<translated>' || exit 1\n<command>"`。`-e` 绕开发行版的默认 shell，所以解释器一定是 bash。cwd 由**纯函数** `wslPath` 翻译（`C:\code\x` → `/mnt/c/code/x`）；翻不了的（UNC 共享）**原样传过去**，让发行版用它自己的话报错。`|| exit 1` 与换行而不是 `;`：`cd` 失败不许接着跑，首行是注释的命令也不许把 `;` 后面吞掉。
-- 目标非 local 时 dialect **恒为 bash**，config 的 `environment.shell` 与 host 探测都不参与。
-
-**两条如实记录的局限**（不是欠账，是这条边界的形状）：
-
-1. **kill 杀得到本地客户端，不保证杀得到对面。** `Tree` 照旧包着 `wsl.exe`，所以超时与取消**一定**结束这一步；杀掉 WSL relay 通常带走它的 Linux 进程，但自己 detach 了的命令能活下来。（`remote:` 一族没有这条局限——对面有一个真的 `Tree`，§8.2。）
-2. **子进程环境是目标那侧的。** WSL 只转发 `WSLENV` 点名的，所以 `NULYA_EXE` / `NULYA_SESSION` **到不了对面**。physics #6 不受影响——净化过的 map 正是 `wsl.exe` 自己拿到的那份，没有 secret 可供转发。WSL 下工作区是同一个目录换个名字看，所以这条局限只关于 env，不关于 cwd。
+**没有对应的 config 键**，这是有意的：给 `[environment]` 加一个默认值要回答"这个目标比 local 更严还是更松"，而 project 层收窄规则（§9.5）对这个问题没有诚实答案。想每场都用同一个目标，那是驱动者记住一个选择的事。
 
 ### 8.2 Remote environment：工作区住在别的机器上（`--env remote:…`，`environment/remote/`）
 
-`--env wsl` **包住每条命令**：工作区仍在本机，extension 仍在本机，每次调用都付一次连接。`--env remote:…` 是**同一根轴上的另一个点**——第二个 `Environment` 实现（`environment/remote/mod.zig`）：工作区在对面，通道**一场 session 开一次**，对面那个常驻进程**就是 nulya 自己**（`nulya remote serve`，与 `nulya task supervise` 同一个壳层角色先例）。两族词汇分开，老的一族一个字未改。
+`--env remote:…` 是第二个 `Environment` 实现（`environment/remote/mod.zig`）：工作区在对面，通道**一场 session 开一次**，对面那个常驻进程**就是 nulya 自己**（`nulya remote serve`，与 `nulya task supervise` 同一个壳层角色先例）。
 
 ```
 spec  remote:wsl | remote:wsl:<distro> | remote:ssh:<destination> | remote:exec:<argv…>
@@ -1120,7 +1101,7 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Roots.resol
 
 #### 后台任务：命令在对面，名字与投递在这边
 
-`shell {background:true}` 与 `nulya task run` 在远端场上照常工作，分界只有一条：**名字**（`<sid>/t<N>`）是 ledger 说的东西而 ledger 在 host，所以 host claim 它（`claimTaskSlot`，与本机同一段代码）；**log / `status.json` / 租约 / kill 标记**在命令旁边，也就是对面，**活得过这条通道**（agent 死了任务不死）。**路径不过通道**——三个动词（`start-task` / `task-poll` / `task-kill`）带的都是那个全名，两侧各用 `cli/task.zig` 的 `taskDirRel` 对着自己的工作区拼路径。`task supervise --env remote:…` 仍然拒绝——supervisor **包**一条命令，而 remote spec 是一条通道。
+`shell {background:true}` 与 `nulya task run` 在远端场上照常工作，分界只有一条：**名字**（`<sid>/t<N>`）是 ledger 说的东西而 ledger 在 host，所以 host claim 它（`claimTaskSlot`，与本机同一段代码）；**log / `status.json` / 租约 / kill 标记**在命令旁边，也就是对面，**活得过这条通道**（agent 死了任务不死）。**路径不过通道**——三个动词（`start-task` / `task-poll` / `task-kill`）带的都是那个全名，两侧各用 `cli/task.zig` 的 `taskDirRel` 对着自己的工作区拼路径。`task supervise` 没有 `--env`——supervisor **包**一条命令，remote spec 是一条通道，两者不是同一件事；远端场的后台任务由对面自己的 supervisor 起，不经这条 flag。
 
 **报告是被取回来的，不是推回来的**（协议里没有 unsolicited 帧，而对面那个 supervisor 也投递不了——session 文件在 host）：
 
@@ -1148,7 +1129,7 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Roots.resol
 
 - extension 与 shell 共享同一个 session authority（≈ 当前用户全权限）。明说，不给虚假安全感。不变量：`extension_permissions ⊆ session_authority`——注册成 extension 不获得 shell 没有的权限。
 - **env 净化**：子进程 env 过 `isSecretKey` denylist（大小写不敏感子串：`SECRET / TOKEN / PASSWORD / API_KEY / ACCESS_KEY / PRIVATE_KEY / CREDENTIAL / SSH_AUTH_SOCK …`）。非 secret 变量（PATH / HOME）照传，命令才能工作。host env 的**来源**是 `environment.registerHostEnviron`（std 0.16 删掉了全局 environ，`main` 启动时注册一次，所有读 host env 的层都走 `environment.hostEnvironMap`；测试构建缺省落回 test runner 的 environ）。边界是"无明显 secret 泄漏"，**不是**完全不继承、也不是 fs 隔离。kernel 往这份净化 env 里**加**的几个变量（§7.6）都是 provenance 型信息，不拓宽任何权限。
-- **exec target 不是权限边界**（§8.1）：把 `shell` 指向一个 WSL 发行版改变的是命令**在哪跑**，不是它**能碰什么**（WSL 经 `/mnt/` 看得见整个工作区）。净化这一侧仍然成立，代价是 `NULYA_EXE` / `NULYA_SESSION` 也到不了对面。`remote:` 一族同样净化 env，且 `SSH_AUTH_SOCK` 在 denylist 上，所以 `remote:ssh:` 用不了本机的 ssh-agent（缺省走密钥文件）。
+- **exec target 不是权限边界**（§8.1/§8.2）：把 `shell` 指向另一台机器改变的是命令**在哪跑**，不是它**能碰什么**（`remote:wsl` 经 `/mnt/` 看得见整个工作区，`remote:ssh:` 是对方账号的全部权限）。净化这一侧仍然成立，代价是 `NULYA_EXE` / `NULYA_SESSION` 也到不了对面（`remote:wsl` 只转发 `WSLENV` 点名的）。`remote:` 一族同样净化 env，且 `SSH_AUTH_SOCK` 在 denylist 上，所以 `remote:ssh:` 用不了本机的 ssh-agent（缺省走密钥文件）。
 - **driver 手上有一票否决**（§4 的 gate，`session step --gate`）：每个 tool call 执行前问一次，拒绝作为该 call 的 `tool_results` 回给模型。这**不是** sandbox：它拦的是"这一次要不要发生"，不是"发生时能碰什么"——一个被允许的 call 照旧与 shell 同权。manifest 的 `readonly` 同理是**给答题人的提示**，driver 有权不信。
 - OS 强制（sandbox）见 PLAN §3.8。
 
@@ -1428,9 +1409,9 @@ nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--carry] [--
                   [--prompt <file>]… [--bare] [--env <spec>] [--workspace <dir>]
                                                 ← 冻结 composition + 模型身份、写 header，打印 session id
                                                   `--carry` 把父场 1..seq 复制进来（§11）：换模型 / 换工具 / 换 prompt 的**唯一**原语
-                                                  `--env` 两族词汇（§8.1/§8.2）：`local|wsl|wsl:<distro>` 只搬 `shell` 的命令；
+                                                  `--env`（§8.1/§8.2）：`local`（缺省）或
                                                     `remote:wsl|remote:wsl:<distro>|remote:ssh:<dest>|remote:exec:<argv…>` 搬整个工作区
-                                                    （`ssh:<dest>` 已删除，指路 `remote:ssh:`）
+                                                    （只搬命令的 `wsl[:<distro>]`、更早的 `ssh:<dest>` 均已删除，指路各自的 `remote:` 拼法）
                                                   `--workspace` = 远端那台机器上的绝对目录，**只对 `remote:` 族接受**
                                                   三种 exit 1、什么都不创建：credential 解析不到（§9.5）· `--env`/`--workspace`
                                                     解析不出或本 host 够不着 · `remote:` 且有 compiled 成员时那台机器没答 /
@@ -1747,7 +1728,7 @@ GapDetector · WorkflowMiner · ToolSynthesisManager · AutoRefactor · RewardMo
 | 给 tool 传 ledger（或 ledger 文件路径） | 开销 × N、路由塞进 tool、毁最小权限与可复现 | §7.6 |
 | 放弃的 runner 再派生一个 runner（保 liveness） | 无人值守下对着死路烧钱的循环 | §7.8 |
 | ACP 作为 Environment backend | 方向相反：ACP 是 client→agent，Environment 是 agent→世界 | §8 |
-| `[environment]` 的 exec target 默认值 | "wsl 比 local 更严还是更松"在只能收窄的 config 链里没有诚实答案 | §8.1 |
+| `[environment]` 的 exec target 默认值 | "这个目标比 local 更严还是更松"在只能收窄的 config 链里没有诚实答案 | §8.1 |
 | 远端通道上的字节级心跳 | 一条正当的十分钟构建按设计就是静默的 | §8.2 |
 | 按需下载 Zig + hash 校验 | 网络 / 漂移 / 失败处理整套复杂度；内嵌净简化 | §10 |
 | per-command 输出过滤子系统 | accretion；统一 `emit` + 自动落盘兜底 | base-tools.md |

@@ -1,8 +1,7 @@
 //! The second `Environment` implementation: the session's commands run on
 //! ANOTHER machine, through one long-lived channel to a `nulya remote serve`
-//! there. `--env wsl` (`environment.zig`) only WRAPS each command and leaves the
-//! workspace here; this MOVES the workspace and opens the channel once per
-//! session process.
+//! there — the workspace MOVES too, and the channel opens once per session
+//! process.
 //!
 //! All four verbs cross it. `startShellTask` starts a `nulya task supervise` on
 //! THAT machine, so a background command outlives this channel; its report is

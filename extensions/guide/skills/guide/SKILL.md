@@ -277,24 +277,18 @@ Store and scope:
   `vision = true`. Which models are worth switching between is your call, not
   the kernel's: it holds no compatibility table.
 - `nulya session new --env <spec>` chooses WHERE this session's `shell` commands
-  run: `local` (the default), `wsl`, or `wsl:<distro>`. It is frozen in the
-  header, so `step` takes no such flag and a resume that cannot reach the
-  target fails rather than running the commands here instead.
-  **Only `shell` moves.** Extension processes, background-task supervisors, the
-  extension store, the journals and every spilled tool output stay on this
-  host — the workspace is the same directory seen as `/mnt/<drive>` under WSL.
-  Two more honest limits: killing a command reaches the local `wsl.exe` client,
-  not necessarily the process on the other end; and `NULYA_EXE` /
-  `NULYA_SESSION` do not survive the hop (WSL forwards only what `WSLENV`
-  names), so a command that wants to call `nulya` again has to find it itself.
-  (There used to be a bare `ssh:<destination>` spelling here too — retired
-  2026-08-30, because it moved only the shell while the workspace, extensions
-  and every spilled file stayed on this host, which was dishonest the moment
-  anything besides `shell` mattered. `--env ssh:…` is refused now, pointing at
-  the replacement below. Want a machine reachable over ssh but only for
-  `shell`, with the workspace staying here? Nothing offers that today — use
-  `wsl`, or reach for the `remote:` family and accept that the workspace moves
-  too.)
+  run: `local` (the default) or a `remote:…` spec that moves the whole
+  workspace there too. It is frozen in the header, so `step` takes no such
+  flag and a resume that cannot reach the target fails rather than running
+  the commands here instead.
+  (There used to be exec-target spellings that moved only the shell while the
+  workspace, extensions and every spilled file stayed on this host —
+  `wsl[:<distro>]`, and before that a bare `ssh:<destination>`. Both are
+  retired now (`ssh:` in 2026-08-30, `wsl` in 2026-09-02): `--env ssh:…` /
+  `--env wsl…` are refused, each pointing at its `remote:` replacement below.
+  Want a machine reachable over ssh or WSL but only for `shell`, with the
+  workspace staying here? Nothing offers that today — the `remote:` family
+  moves the workspace along with it.)
 - **When the WORKSPACE itself lives on the other machine**, `--env` takes a
   second family of spellings: `remote:wsl`, `remote:wsl:<distro>`,
   `remote:ssh:<destination>`, or the general `remote:exec:<argv…>` — which is

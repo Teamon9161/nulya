@@ -460,9 +460,8 @@ pub fn createSession(
 
     // Which directory ON THAT MACHINE this session works in. Only a remote
     // environment has the question: a local session works where nulya was
-    // started, and a `wsl` exec target does not move the workspace at all. On
-    // an inherited `--env`, an unnamed `--workspace` inherits the parent's
-    // directory too.
+    // started. On an inherited `--env`, an unnamed `--workspace` inherits the
+    // parent's directory too.
     const remote_workspace = flagValue(args, "--workspace") orelse
         (if (inherit_env) parent_header.?.value.remote_workspace else "");
     if (remote_workspace.len != 0 and !launch.isRemoteSpec(exec)) {
@@ -530,17 +529,17 @@ pub fn createSession(
 
     // No session ref: `session new` composes and writes a header, it never runs
     // a tool, so nothing here can start a background task. `exec` was vetted
-    // above, so the two target errors cannot land here.
+    // above.
     //
-    // A REMOTE spec is deliberately not passed: building that environment means
-    // opening a connection, and `session new` runs nothing. Freezing the spec
-    // is the whole of its job; the first `step` is where that machine has to
-    // answer.
+    // A remote environment is deliberately not built here even when `exec`
+    // names one: building it means opening a connection, and `session new`
+    // runs nothing. Freezing the spec is the whole of its job; the first
+    // `step` is where that machine has to answer. This `LocalEnvironment` only
+    // resolves extension roots for the composition below.
     const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
     defer launch.freeExtensionRoots(alloc, ext_roots);
 
-    const compose_exec = if (launch.isRemoteSpec(exec)) "" else exec;
-    var lenv = launch.localEnvironment(alloc, io, &cfg, null, compose_exec, ext_roots) catch |err| switch (err) {
+    var lenv = launch.localEnvironment(alloc, io, &cfg, null, ext_roots) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return null;
@@ -1360,11 +1359,11 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         error.UnsupportedEnvironmentBackend => {
             return stepFail(alloc, io, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
         },
-        error.InvalidExecTarget, error.ExecTargetUnsupportedOnHost, error.InvalidRemoteSpec, error.RemoteSpecUnsupportedOnHost => {
-            // A header frozen with the retired `ssh:` exec target gets the
-            // same specific pointer a fresh `--env ssh:…` does — never a silent
-            // re-interpretation as `remote:ssh:`.
-            if (launch.legacySshHint(environment.normalizeExecSpec(hdr.value.environment))) |hint| {
+        error.InvalidExecTarget, error.InvalidRemoteSpec, error.RemoteSpecUnsupportedOnHost => {
+            // A header frozen with a retired exec-target spelling (`ssh:…` or
+            // `wsl…`) gets the same specific pointer a fresh `--env` naming
+            // it would — never a silent re-interpretation as `remote:…`.
+            if (launch.legacyExecHint(environment.normalizeExecSpec(hdr.value.environment))) |hint| {
                 return stepFail(alloc, io, stream, "session '{s}' runs its commands in '{s}', which this binary on this host cannot reach; refusing to run them here instead ({s})", .{ id, hdr.value.environment, hint });
             }
             return stepFail(alloc, io, stream, "session '{s}' runs its commands in '{s}', which this binary on this host cannot reach; refusing to run them here instead", .{ id, hdr.value.environment });

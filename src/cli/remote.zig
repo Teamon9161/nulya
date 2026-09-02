@@ -288,7 +288,7 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // names a directory on this machine.
     const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
     defer launch.freeExtensionRoots(alloc, ext_roots);
-    var lenv = try launch.localEnvironment(alloc, io, &cfg, null, "", ext_roots);
+    var lenv = try launch.localEnvironment(alloc, io, &cfg, null, ext_roots);
     defer lenv.deinit();
 
     const read_buf = try alloc.alloc(u8, protocol.max_header_bytes);

@@ -423,9 +423,11 @@ pub const Header = struct {
     /// separately in `model_identity`, which config changes can never alter.
     model: []const u8 = "",
     model_identity: ModelDescriptor = .{},
-    /// WHERE this session's `shell` commands run: `""` = this host, `wsl`,
-    /// `wsl:<distro>` (`environment.ExecTarget`'s spec), or a `remote:…` spec
-    /// that moves the whole workspace rather than just the command.
+    /// WHERE this session's `shell` commands run: `""` = this host, or a
+    /// `remote:…` spec that moves the whole workspace. A header written before
+    /// the retired `wsl`/`wsl:<distro>`/`ssh:<dest>` exec-target spellings may
+    /// still hold one of those; resuming such a session refuses loudly rather
+    /// than falling back to this host.
     ///
     /// Frozen because a transcript only means something against the machine that
     /// produced it — paths, the platform the model believes it is on, and which
