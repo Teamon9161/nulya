@@ -221,3 +221,26 @@ vtable 后面这道缝。
   验收：`zig build test` 593/593 · `zig build e2e` 172 pass 3 skip ·
   `tui/` 下 `bun test` 769 pass 1 fail，那一条仍是 `/ext` 的 `r` 帮助行在本机 worktree
   长路径下折行（与 Lane C/D 记的是同一条）。`nulya help` 净减一行。
+
+- **2026-09-02 · 中刀 E**（`0fa2835` 内核 + docs · `56fb0e4` TUI + tui.md）：契约逐条落地。
+  `ExecTarget` / `parseExecTarget` / `execTargetSupportedOnHost` / `exec_target_syntax` /
+  `wslPath` / `wslScript` / `appendSingleQuoted` 与 `LocalEnvironment` 的 `exec_spec` /
+  `target`（连同 `shellArgv` 的 wsl 分支与不再需要的 `cwd` 参数、argv buf 从 `[8]` 收到
+  `[5]`）一并删除；`LocalOptions.exec`、`task supervise --env`、`SupervisorSpawn.exec_spec`
+  同理。`launch.execTargetRefusal` 收窄成三档：`remote:*` 的解析/可达判定、两个退役拼法
+  （`legacySshHint` 与新 `legacyWslHint`，合成 `legacyExecHint`）、其余一律 unrecognized；
+  `sessionEnvironment` 把"非空且非 `remote:`"直接判 `error.InvalidExecTarget`，老 header
+  里的 `wsl` / `wsl:<distro>` resume 时在 `session step` 与 `task run` 两处都响亮拒绝并
+  指路 `remote:wsl`。`remote:wsl` 一族（`environment/remote/mod.zig` 里 WSL 自己那份实现）
+  一字未动。TUI：`state/envprofile.ts` 的 `ExecTargetKind` 从三档收成 `local | remote`，
+  `[env.wsl]` 变成未识别键（同 `[env.ssh]` 的待遇）；`state/targets.ts` 的 picker 不再产
+  裸 `wsl:<name>` 行；`state/tui_state.ts` 读老状态文件里的 `wsl`/`wsl:<distro>` 同 `ssh:`
+  一样丢回本机，不重写升级。
+  两处偏离：① `src/cli/ext_push.zig` 里"`--env wsl`"的过时措辞留着没改——那个文件属于
+  Lane B 并行占用的 `src/cli/ext*.zig`，契约点名不碰；② `docs/PLAN.md` §3.8 的
+  "exec target 的三件已知欠账"整段改写而非删除，换成一句"只搬 shell、其余留在 host 今天
+  没有答案"——三件旧欠账里两件（config 缺省的比较对象、kill 保证）随 wsl 退役本身消失，
+  第三件（`NULYA_EXE` 到不了对面）本来就是 wsl 独有的失效点，不值得留一具体面目的空壳。
+  验收：`zig build test` 592/592 · `zig build e2e` 174 pass 1 skip · `tui/` 下 `bun test`
+  769 pass 1 fail，那一条仍是 `/ext` 的 `r` 帮助行在本机 worktree 长路径下折行（与
+  Lane A/C/D 记的是同一条，与本刀无关）。
