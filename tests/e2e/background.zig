@@ -625,15 +625,16 @@ test "background shell: the model starts a task, is told so, and reads the repor
     // …and the model demonstrably READ it, rather than merely being stepped.
     try std.testing.expect(std.mem.indexOf(u8, second.stdout, "background done") != null);
 
-    // The ledger keeps it as the fifth kind, and `session events` prints the
-    // line exactly as the file holds it.
+    // The ledger keeps it as a note, and `session events` prints the line
+    // exactly as the file holds it — the exit code inside the `meta` column,
+    // which is one JSON value stored as text.
     const file = try support.readSessionFile(alloc, io, ws, id);
     defer alloc.free(file);
     try std.testing.expect(std.mem.indexOf(u8, file, "\"source\":\"task\"") != null);
     const events = try runCli(alloc, io, ws, &.{ exe, "session", "events", id });
     defer alloc.free(events.stdout);
     try std.testing.expect(std.mem.indexOf(u8, events.stdout, "\"source\":\"task\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, events.stdout, "\"exit_code\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, events.stdout, "\\\"exit_code\\\":0") != null);
 }
 
 test "background shell: the gate sees the real command, not a wrapper" {
