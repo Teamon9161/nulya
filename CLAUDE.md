@@ -73,7 +73,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `emit.zig` | 输出预算、UTF-8 边界、超限落盘留指针 | 非法字节换 U+FFFD 并按 truncation 留原始字节——ledger 里的字符串必须是合法 UTF-8 |
 | `environment.zig` + `environment/tree.zig` | `runShell` / `runExtension` / `startShellTask` / `putWorkspaceFile`；进程树与有界等待 | 超时与取消杀**整棵**进程树，否则孙进程攥着管道写端让 drain 等不到 EOF；子进程 env 过 secret denylist |
 | `environment/remote/` | 帧协议 + `nulya remote serve` 的另一半 | 随对面持有的东西一起长的一律走**负载**不走 JSON 头 |
-| `provider.zig` `providers/` | `Model` vtable + `TurnCollector`；四个 provider，wire 底座共用 | provider 只能优化序列化，不能破坏 turn 前缀不变量；`reasoning` 原样交回同一 provider |
+| `provider.zig` `providers/` | `Model` vtable + `TurnCollector`；四个 provider（`openai`/`anthropic`/`codex` 共用 wire 底座，`scripted.zig` 是离线替身），`launch.ScriptedProvider` 是它的重导出 | provider 只能优化序列化，不能破坏 turn 前缀不变量；`reasoning` 原样交回同一 provider |
 | `config.zig` + `default.toml` | `default → system → user → project` 合并 | project 层只能收窄；`[extensions] paths` 只认 trusted 层，`with` project 层也读 |
 | `extension/manifest.zig` | `nulya.extension/v2` schema | 三层听众：内核强制 / driver 声明 / 前端声明。manifest 是 schema 唯一真相，不问 binary |
 | `extension/protocol.zig` `invoke.zig` | 唯一那种 wire（stdin 参数 JSON、env、stdout 即结果、退出码即 ok） | stderr 就是失败消息，所以包必须独占它 |

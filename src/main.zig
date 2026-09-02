@@ -55,6 +55,7 @@ test {
     _ = @import("providers/openai.zig");
     _ = @import("providers/anthropic.zig");
     _ = @import("providers/codex.zig");
+    _ = @import("providers/scripted.zig");
     _ = @import("environment.zig");
     _ = @import("environment/tree.zig");
     _ = @import("environment/remote/mod.zig");
