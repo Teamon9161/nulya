@@ -198,3 +198,26 @@ vtable 后面这道缝。
   ③ TUI 的 `ext list` `standing` 判据改成「某张常驻成员表点了名」。
   遗留：`tui/` 的 `bun test` 有一条红的（`/ext` 的 `r` 帮助行断言），是 worktree 路径过长把那行
   折成两行所致，`git stash` 后同样红。
+
+- **2026-09-02 · Lane A**（`a719a6d` 内核 + docs · `925af3f` TUI + tui.md）：`model_rebind`
+  整族退场，换模型 / 换工具 / 换 system prompt 收成一个原语
+  `session new --parent <id>:<seq> --carry`（复制经 `parseEventLine`→`toEvent`→`append`
+  同一套 codec，`origin` 不带、`reasoning` 置空，父文件一字节不动）。
+  契约点名要删的每一样都删了；`session step` 的 effort 缺省与 `--image` 的 vision 门
+  改读 header，`session list` 不再有 rebind 分支。投递锁按契约保留。
+  四处偏离或契约没点名的连带决定：
+  ① 兼容用的错误叫 `LegacyModelRebind`，它由 **`toEvent`** 抛出而不是 `openDurable`——
+  于是 `openDurable`、`readCarry`、`drainInbox`（inbox 里躺着一条老 rebind 投递的情形）
+  三个读点白拿地共用同一句判断，`session step` 在 open 与 run 两处各翻一次同一句指路。
+  ② vision 门抽成一个判据 `visionClaimed(cfg, model_id, what)` 两个入口，
+  但**保留了两种拒绝措辞**（"有条目却没主张" vs "没有条目"）——e2e 靠这个区别钉的是
+  "没有条目 = 不主张" 这条规则本身，合并成一句会让它测不出来。
+  ③ TUI 的 `/model` 用 `tabs.carryFork` + `replace`（`/sessions <id>` 的那条 tab-switch 路），
+  **不是**新开一个 tab：一场对话仍然在一个 tab 里，而 `replace` 顺带把"这个进程刚建、
+  还一句话都没说过"的空父场 prune 掉（既有语义，carry 0 条历史的 fork 正好落在这一档）。
+  ④ e2e 的"reasoning 置空"那条要一个带 reasoning 的父场，而 scripted provider 不产出
+  reasoning，所以测试往父文件**追加一行**合法的 assistant 事件当 fixture
+  （文件格式就是契约），再断言子场逐块相等且不含 `reasoning` / `origin`。
+  验收：`zig build test` 593/593 · `zig build e2e` 172 pass 3 skip ·
+  `tui/` 下 `bun test` 769 pass 1 fail，那一条仍是 `/ext` 的 `r` 帮助行在本机 worktree
+  长路径下折行（与 Lane C/D 记的是同一条）。`nulya help` 净减一行。
