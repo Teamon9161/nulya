@@ -83,7 +83,8 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `skill.zig` | `SkillSetSnapshot` + 渐进披露文本 | Agent Skills 兼容（`SKILL.md` frontmatter） |
 | `journals/journal.zig` | 三条 journal 共用的文件层与时钟 | append 持锁并修残尾，读端不拿锁且忽略残尾；文件不存在 = 还没有事实 |
 | `journals/{tool_stats,outcome,trust}.zig` | 证据 / 评判 / 授权 | 都只加可选列、不升 `v`；没有行 = unknown ≠ failure |
-| `cli/task.zig` | 后台任务的 supervisor 与读者面 | supervisor 顺序承重：拿租约 → status → spawn → **deposit 后**才写 done。`status.json` 是真相，`starting`/`lost`/`unreachable` 只活在投影里 |
+| `cli/task.zig` | 后台任务的 supervisor 与读者面（全部动词、`Row` 投影、本机读法） | supervisor 顺序承重：拿租约 → status → spawn → **deposit 后**才写 done。`status.json` 是真相，`starting`/`lost`/`unreachable` 只活在投影里 |
+| `cli/task_remote.zig` | 任务在别的机器上时的那一半：`Far` 连接收集器 + 把远端 poll 答案投成 `Row` | `readRow` 只在已经知道任务是远端的（`Far.isRemote`）才落进这个文件；本机路径与全部动词仍在 `cli/task.zig` |
 | `launch.zig` | session 启动共享件：模型解析、credential 顺序、scratch 路径、workspace store 的 trust gate | 门只在这一层返回 error，内核不知道 trust 存在 |
 | `source.zig` `bundled.zig` | `nulya src` / `ext seed` 的数据（build.zig `@embedFile`） | 剥 test 块的是**投影**不是存储；靠 zig-fmt 第 0 列 `}` 不变量 |
 

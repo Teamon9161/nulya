@@ -1168,7 +1168,7 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Roots.resol
 **报告是被取回来的，不是推回来的**（协议里没有 unsolicited 帧，而对面那个 supervisor 也投递不了——session 文件在 host）：
 
 - 对面把报告写成 `<task dir>/report.txt`，**在写 `done` 之前**（与本机"先 deposit 后写 done"同一条承重顺序：谁看见 `done`，谁必须已经看得见结果）。
-- host 侧读它的一端守同一条顺序的另一半：`pollAndDeliver` **只在 `status.state == .done` 时**才把 report 变成 `task_finished`。report 存在但 status 还没追上，是同一个"这一轮还没定"的分支，下一次 poll 自然会再问——否则一次恰好落在那两次写之间的 poll 会把旧 status 的 `exit_code` 当成真的，且 `delivered` 一旦落地，后到的正确 `done` 永远不会再被看。
+- host 侧读它的一端守同一条顺序的另一半：`cli/task_remote.zig` 的 `pollAndDeliver` **只在 `status.state == .done` 时**才把 report 变成 `task_finished`。report 存在但 status 还没追上，是同一个"这一轮还没定"的分支，下一次 poll 自然会再问——否则一次恰好落在那两次写之间的 poll 会把旧 status 的 `exit_code` 当成真的，且 `delivered` 一旦落地，后到的正确 `done` 永远不会再被看。
 - host 侧**任何一个问它的动词**（`task list|status|wait|kill`，以及 `session step` 在自己那条通道上开步之前的一次扫描）顺手把它翻成 `task_finished` 投进**任务当前 `notify` 指向的那一场**的 inbox。**driver 看见的东西一个字没变**：仍然是一条在 step 边界排干的 inbox 事件，而不是第二种要认的盘面文件。
 - **翻译只发生一次**：host 在自己那半目录里记一个 `delivered`（`origin` 去重管的是"事件不重复进对话"，而**投递文件重新出现**会让 `depositPending` 永远说"有未读结果"，`wait --any` 于是永远答 0）。
 - **"哪些任务报告进这一场"只有一份答案**（`cli/task.zig` 的 `collectRows`）：owner 是它的，加上别的 session `task retarget` 过来的。`session step` 的那次扫描就是"跑一遍 `collectRows(only=<本场>)`、把行丢掉"，不是第二份遍历（从前它只走 `sessionTasksDir(<本场>)`，于是 retarget 过来的远端任务永远扫不到）。每个任务的 `cwd` 取它 **owner 场**冻结的工作区。已经开着的那条通道是**借**给这次扫描的（按 spec 匹配，不是按 session——retarget 之后问的是别人的机器），owner 在另一台机器上时照常连一次。**本场是 local 时不扫**（没有可借的通道，而让每次本机 step 冒着连远端机器的风险不值）：那种任务由任何 `task` 动词收走。
@@ -1642,9 +1642,9 @@ nulya                                            ← 无参数：同 `nulya help
 - **fail closed**：认不出的答案、读失败、以及最要紧的 **EOF**（答的人走了）→ 一律 deny，EOF 之后的每个 call 不再问、直接 deny；每种情况在 stderr 说一句（stdout 保持纯协议）。写失败记下来、收尾 exit 1。
 - **不带 `--gate` 的 `--stream` 输出逐字节不变**；带 `--gate` 时多出的只有 `gate request` 这一种行。
 
-### `nulya task *`（`cli/task.zig`，全部是壳层）
+### `nulya task *`（`cli/task.zig`，全部是壳层；远端轮询另见 §8.2）
 
-内核为后台只长了两块 substrate（`Environment.startShellTask` 与 `task_finished` 事件，§3.1/§8）；文件放哪、状态叫什么、什么时候不等了，全在这个文件里。
+内核为后台只长了两块 substrate（`Environment.startShellTask` 与 `task_finished` 事件，§3.1/§8）；文件放哪、状态叫什么、什么时候不等了，全在 `cli/task.zig` 里——全部动词与本机读法都在这个文件里，任务在别的机器上时怎么问、怎么把答案投成一行，在 `cli/task_remote.zig`（`readRow` 只在已知任务是远端时才落进那个文件）。
 
 **supervisor 的顺序承重**（`nulya task supervise --dir <task_dir> --session <session_path> --cwd <dir> [--timeout-ms N] -- <command>`）：
 
