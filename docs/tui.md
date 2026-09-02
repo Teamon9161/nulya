@@ -1,7 +1,7 @@
 # Nulya TUI — 设计与计划
 
 > **状态：T0–T115 全部落地**（T10 `/goal` 仍是占位）。前端在仓库顶层 `tui/`（见 [`../tui/README.md`](../tui/README.md)）；本文是它的设计契约（§1–§10）+ 实施日志（§11，T0–T114 已归档到 [`history/tui-implementation-log.md`](history/tui-implementation-log.md)）。`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文，不进 DESIGN.md。
-> **内核为它长的东西**（都在 [DESIGN.md](DESIGN.md) 里）：`session step --stream`（纯观测的行协议）· `session step --gate`（每个 tool call 执行前的一票否决，§4/§14）· `session new --parent` 的 fork 语义（§11/§14）· `NULYA_EXE`（子进程 env 里的本二进制路径，§7.6）。其余每一样（`--prompt` / `--with` / `--carry` / `--bare` / `--env` / `--workspace` / `task *` / `remote *`）都是内核为**每个** driver 长的动词，前端只是第一个 consumer。
+> **内核为它长的东西**（都在 [DESIGN.md](DESIGN.md) 里）：`session step` 的行协议（纯观测，`--stream` 现在是无操作别名）· `session step --gate`（每个 tool call 执行前的一票否决，§4/§14）· `session new --parent` 的 fork 语义（§11/§14）· `NULYA_EXE`（子进程 env 里的本二进制路径，§7.6）。其余每一样（`--prompt` / `--with` / `--carry` / `--bare` / `--env` / `--workspace` / `task *` / `remote *`）都是内核为**每个** driver 长的动词，前端只是第一个 consumer。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -62,7 +62,7 @@
 | `nulya session new --parent <id>:<seq> --carry …` | 已经开始的 session 上的 `/model`：把这场对话带进一个新 session（`tabs.carryFork`），composition 现解、tab 换过去（`replace`，与 `/sessions <id>` 同一条路）。父文件一个字节不变。内核的门（凭据 · 带过去的 turn 里有图时新模型要主张 vision · 切点超过 tail）前端原样显示 |
 | `nulya session step <id> --effort e` | 每个 step 按本 tab 的 effort 传（`/model` 选的、`/effort` 改的）；不传 = kernel 默认 |
 | `nulya config show --json` | `/model` 的行、启动时判断隐式选择能不能跑（`launch.planLaunch`）、draft 的 model id（profile 只给了名字时取它的默认 model）与 `registry`（`max_tools`）、`extensions.with`（合并后的成员表，draft 的工具面 = 它选中的 tool ∪ `tui-state.json` 的 `session_with` 选中的）；只报 env var 名与 credential 布尔 |
-| `nulya session append <id> --file f` | 发送：写 `.nulya/scratch/tui-<nonce>.txt` 再 `--file`（多行 / Windows 引号安全）；投进 inbox，**下一 step 边界才进 ledger**（PLAN §4 边角）→ TUI 乐观回显、标 `queued`，见到对应 `user_text` 事件后转正——那条事件行现在在 `model started` **之前**就到（DESIGN §14，T27），所以 `queued` 只在真正还排着队的时候挂着，而不是整整一个 step |
+| `nulya session append <id> --file f` | 发送：写 `.nulya/scratch/tui-<nonce>.txt` 再 `--file`（多行 / Windows 引号安全）；投进 inbox，**下一 step 边界才进 ledger**（PLAN §4 边角）→ TUI 乐观回显、标 `queued`，见到对应 `user_text` 事件后转正——那条事件行现在在 `model started` **之前**就到（DESIGN §14，T27），所以 `queued` 只在真正还排着队的时候挂着，而不是整整一个 step。stdout 现在多印一行投递名回执（DESIGN §14）；`session.ts` 的转正还是按文本拼接匹配 `queued` 项，没有改接这个回执 |
 | `nulya session step <id> --stream --gate` | 每次发送后 spawn 一个；stdout 见 §2.2。**`--gate` 常开**：每个 tool call 执行前内核打一行请求、等 stdin 一行 `allow` / `deny [note]`，答案由 §5.7 的 mode + 规则给（T24） |
 | `nulya session events <id> [--since N]` | 打开 / resume 时一次性回放；**不**用 `--follow`（driver 模式下 step 的 stdout 已是全量实时源） |
 | `nulya session cancel <id>` | `Esc` |
@@ -88,7 +88,7 @@
 | 取消标记文本 | `loop.zig` 四种 marker（interrupted / canceled executing / recording canceled / not executed）→ 识别成 canceled 卡片 |
 | `emit` 溢出 | `tool_results[].spill_path` → 卡片尾部 "full output → path"，`o` 打开（`$EDITOR` / 展开读文件） |
 
-### 2.2 内核改动之一：`nulya session step <id> --stream` `[已落地 · T0 → DESIGN §14]`
+### 2.2 内核改动之一：`nulya session step` 的行协议 `[已落地 · T0 → DESIGN §14]`
 
 **协议与机制的真相在 [DESIGN.md](DESIGN.md) §14**（`loop.StepContext.observer` 纯观测钩子 + 行协议）。这里只留 TUI 侧的消费约定：
 
@@ -97,7 +97,7 @@
 - `reasoning_item` 不出现在流里（不透明、只为回放）；thinking 的可显示文本只有 `thinking_delta`，turn 结束后从 ledger 的 `reasoning` 尽力抽（§4.2）。
 - 诊断也是 JSON（`{"stream":"run","event":"error","message":"…"}` + 非零退出），所以 `nulya/cli.ts` 的解析器**永远**不必处理裸文本行。
 
-**明确不做的内核改动**（放进 §10 待议）：`session new` 自动记 spawned-by；`session append` 打印投递回执；`<id>.live` sidecar。（`nulya config show` 与 `session step --gate` 当时也在这张单子上，后来都做了——前者因为前端不该复刻配置合并链，后者因为"前端自己发明审批"会让模型永远不知道自己被拒了，见 §5.7。）
+**明确不做的内核改动**（放进 §10 待议）：`session new` 自动记 spawned-by；`<id>.live` sidecar。（`nulya config show`、`session step --gate` 与 `session append` 的投递回执当时也在这张单子上，后来都做了——前两条因为前端不该复刻配置合并链、"前端自己发明审批"会让模型永远不知道自己被拒了（§5.7）；`session append` 的回执因为 core-review 小刀那一轮把 `--stream` 收成唯一协议时顺带做了，见 [core-review.md](goals/core-review.md) §4。TUI 侧还没接它——`session.ts` 的 `queued` 转正仍按拼接文本匹配，§2.1。）
 
 ## 3. 目录与模块（`tui/`）
 

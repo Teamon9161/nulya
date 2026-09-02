@@ -242,9 +242,12 @@ Store and scope:
 ## Sessions and drivers
 
 - `nulya session new` freezes composition and prints an id. `append` queues a
-  user turn. `step` runs to the end of a turn or its budget. `events` tails the
-  log. `cancel` asks it to stop at the next step boundary. `outcome` records a
-  verdict. `list` projects them all.
+  user turn and prints the delivery name it deposited under — the name that
+  later shows up as `origin` (or one entry of `origins`) on the drained
+  `user_text` event, so a caller can match its own turn against the log rather
+  than guessing from text. `step` runs to the end of a turn or its budget.
+  `events` tails the log. `cancel` asks it to stop at the next step boundary.
+  `outcome` records a verdict. `list` projects them all.
 - Only `step` writes the session file. `append`, `note` and `cancel` deposit
   into sibling files that the next step boundary drains, so all three work on a
   session another process is currently running.
@@ -361,9 +364,13 @@ Store and scope:
   does; what differs is that the log does not claim a person said it. `--source`
   is your own short label, carried and never interpreted; `--meta` is one JSON
   value kept verbatim for readers that should not parse the text.
-- `nulya session step <id> --stream` adds a line protocol: transient
-  `{"stream":…}` lines while it runs, interleaved with the same event lines the
-  log receives. Behaviour is otherwise identical to a plain step.
+- `nulya session step <id>` prints a line protocol as it runs: transient
+  `{"stream":…}` lines interleaved with the same event lines the log receives,
+  ending in a `{"stream":"run","event":"done",…}` verdict; a failure is a
+  `{"stream":"run","event":"error",…}` line plus a non-zero exit — never a bare
+  text line on either stream. `--gate` asks stdin to approve each tool call on
+  the same lines, no other flag needed. `--stream` is accepted and does
+  nothing, kept for one release for a caller that still passes it.
 - A driver is any script that composes those verbs — nothing more. In a nulya
   checkout, `drivers/goal.sh` and `drivers/goal.ps1` are the first: they step
   one step at a time, watch for a handover brief, fork through the bundled

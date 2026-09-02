@@ -1252,7 +1252,7 @@ resume 时按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDe
 
 ### `extensions/compact`：第一个 consumer
 
-一个 **compiled** extension，contribute 一个 `compact{session, focus?, max_steps?}` tool（`surface: internal`）。默认那条路是七步：找到 harness（`NULYA_EXE`，§7.6）→ 往**旧** session append 一条带 `<nulya:compact-request>` 标记的请求 → `session step` 它并**解析它打印的事件 JSONL** → 没拿到摘要就什么都不动（一次失败的调用，消息说"什么都没动、旧 session 还是活的那个"，两条真实事件留在旧 ledger 里说明它为什么停）→ `session new --parent <old>:<seq>` → 往新 session append `<nulya:context-summary>` + 摘要 → 返回 `{session, parent{session,seq}, summary_bytes}`。
+一个 **compiled** extension，contribute 一个 `compact{session, focus?, max_steps?}` tool（`surface: internal`）。默认那条路是七步：找到 harness（`NULYA_EXE`，§7.6）→ 往**旧** session append 一条带 `<nulya:compact-request>` 标记的请求 → `session step` 它并**从行协议里挑出事件行解析**（跳过没有 `kind` 字段的 `{"stream":…}` 行）→ 没拿到摘要就什么都不动（一次失败的调用，消息说"什么都没动、旧 session 还是活的那个"，两条真实事件留在旧 ledger 里说明它为什么停）→ `session new --parent <old>:<seq>` → 往新 session append `<nulya:context-summary>` + 摘要 → 返回 `{session, parent{session,seq}, summary_bytes}`。
 
 它是 **compiled** 而不是脚本，只因为要解析 JSONL：`sh` 没有 JSON 读取器（jq 不保证有）、Windows 两者都没有。TUI 的 `/compact` 只做三件事：`ext build extensions/compact` → `ext run compact@<v>` → 把 tab 换到返回的 session；它跑的时候持着旧 session 的写者 lease，所以那个 tab 自己翻成 observer 跟着看。**内核既不知道也不关心发生过一次压缩**，`src/` 为它加的只有 `NULYA_EXE` 一个变量。
 
@@ -1423,13 +1423,14 @@ nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--carry] [--
                                                     解析不出或本 host 够不着 · `remote:` 且有 compiled 成员时那台机器没答 /
                                                     本 store 没有它那个 target 的 build（指路 `ext build --target` + `ext push`）
           | append <id> [<text>|--file f] [--image <path>]…
-                                                ← 把一条 user turn 投进 inbox（下一 step 边界进 ledger）；`--image` 可重复，与文本合成**同一条**事件
+                                                ← 把一条 user turn 投进 inbox（下一 step 边界进 ledger），成功时印投递名一行回执；`--image` 可重复，与文本合成**同一条**事件
           | note <id> --source <label> [--meta <json>] (<text>|--file f)
                                                 ← 把一条**机器事实**投进 inbox（§3.1 的 `note`）：driver / 插件 / watcher 看见的东西，不是人说的话
                                                   `--source` 必给且非空（内核不解释）；`--meta` 给了就必须是**一个合法 JSON 值**，否则 exit 1、什么都不投
                                                   投递名每次都新（两条一样的 note 是两件事）
-          | step <id> [--max-steps N] [--effort E] [--stream] [--gate]
-                                                ← 跑到本 turn 结束或预算耗尽；stdout = 本次 append 的事件 JSONL
+          | step <id> [--max-steps N] [--effort E] [--gate] [--stream]
+                                                ← 跑到本 turn 结束或预算耗尽；stdout 一律是行协议（一行一 JSON，边跑边吐），诊断也是协议里的一行；
+                                                  `--gate` 不需要别的 flag 同用；`--stream` 是无操作别名，保留一个版本期
                                                   **没有 `--env`**：命令跑在哪由 header 说了算，够不着就响亮失败
           | events <id> [--since N] [--follow]   ← 只读 tail 原始事件行（follow 轮询）
           | cancel <id>                          ← 写 cancel 标记，下一 step 边界消化
@@ -1477,9 +1478,9 @@ nulya                                            ← 无参数：同 `nulya help
 
 `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`（带着历史换就是 `session new --parent … --carry`，§11）。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `note` 投递到 `<id>.inbox/`、`cancel` 写 `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append / note / cancel），`events` 是只读 tail。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。
 
-**stdout 只放数据与成功输出**（新 session 的 id、事件 JSONL、`list` 的两种形态、`<id>: <verdict>`、`cancel requested for <id>`）：所有拒绝与警告一律走 stderr，所以一个 driver 拿到的 stdout 要么是它要的东西要么什么都没有。唯一的例外是 `--stream`，那里诊断是协议的一部分。
+**stdout 只放数据与成功输出**（新 session 的 id、`append` 的投递名、事件 JSONL、`list` 的两种形态、`<id>: <verdict>`、`cancel requested for <id>`）：所有拒绝与警告一律走 stderr，所以一个 driver 拿到的 stdout 要么是它要的东西要么什么都没有。唯一的例外是 `session step`：它的诊断是行协议的一部分，走 stdout 而非 stderr。
 
-`events` 打印时**唯一的例外**是带 `images` 的 `user_text` 行：每张图的 base64 换成 `[image <media_type>, N base64 bytes]` 再重编码，`seq` / `origin` / 其它列一字不动，解析不了的行照旧原样打印（ledger 存事实、投影选择呈现，几百 KB 的截图没有一个转录读者想要它；原始字节仍在文件里）。而 **`--stream` 的 ledger 行不省略**——那是 driver 面，要与文件同形，前端自己折叠。
+`events` 打印时**唯一的例外**是带 `images` 的 `user_text` 行：每张图的 base64 换成 `[image <media_type>, N base64 bytes]` 再重编码，`seq` / `origin` / 其它列一字不动，解析不了的行照旧原样打印（ledger 存事实、投影选择呈现，几百 KB 的截图没有一个转录读者想要它；原始字节仍在文件里）。而 **`session step` 的 ledger 行不省略**——那是 driver 面，要与文件同形，前端自己折叠。
 
 `session step` 读完 header 就核一次 `nulya.kernel_hash`（§3.4）：与本二进制不符就往 **stderr** 打一行 `warning: session <id> was created by nulya <ver> whose kernel prompt/builtins differ from this binary's; its frozen system prompt has changed`，然后照跑。空 stamp 的老 session 不警告。
 
@@ -1531,6 +1532,8 @@ nulya                                            ← 无参数：同 `nulya help
 
 `session append` 全程持 `<id>.inbox/.deposit.lock`（§3.4）：投递名是从"inbox 里已经等着什么"铸出来的，两条并发的 append 不串起来会取到同一个队列位置；而 `session prune` 不能在这条命令的检查与投递之间把这一场拿走。
 
+**成功时 stdout 印这个投递名一行，作为回执**（例如 `msg-0003.json`）：这正是排干时落进 `origin`（或合并批次时 `origins` 里的一项）的那个名字，所以一个 driver 能拿它去认下一次 `step` / `events` 里的哪条 `user_text` 是它刚发的那条，不必靠比对文本做乐观回显。`session note` 同一条投递机制，不印回执——它的调用方是 driver / 插件自己，不是"发了话等着认出来"的那一半。
+
 #### `session outcome` 与 `session list`
 
 `session outcome <id> <verdict> [--note …] [--seq N]`：校验 id 形状与 session 文件存在、校验 verdict（`--seq` 只校验是正整数），然后**只**往 `.nulya/session-outcomes.jsonl` append 一行（§3.3）。它**不打开 session 文件、不拿 `<id>.lock`**——verdict 是关于这场 session 的判断而不是其中一轮，所以正在跑 `step` 的 session 也能当场评。`NULYA_SESSION_ID` 在环境里（即这条命令是模型经 `shell` 从某场 session 里调的）就记 `source:"agent"` + `by:<那场的 id>`；`--seq N` 把这条收窄成对第 N 轮的判断，不参与 `latestFor`。
@@ -1555,13 +1558,13 @@ nulya                                            ← 无参数：同 `nulya help
 - **`composition.system_prompts`** = 每个冻结 active 版本的 manifest 声明的 system prompt，写成 `<id>@<version>/<path>`。best-effort：这台机器读不出的版本就不列（"没列" = 不知道，不是"没有"）。
 - **`outcome.source` / `outcome.by`**（§3.3）：`agent` 的 verdict 是**主张**不是 ground truth，文本形态在 verdict 后面直接标 `(self)`（`by == id`）或 `(by agent)`。
 
-#### `session step --stream`：纯观测的行协议
+#### `session step`：唯一的行协议
 
-语义与不带 `--stream` 完全相同（同一 `AgentSession.run`、同一预算夹取、同一 cancel 消化、**同一 ledger**）；区别只是 stdout **在跑的过程中**逐行输出。
+stdout **只有一种形状**：一行一个 JSON，写完即 flush，跑的过程中逐行输出。`--stream` 作为无操作别名保留一个版本期（接受、解析、不改变任何行为）；下一个版本删除这个 flag。同一 `AgentSession.run`、同一预算夹取、同一 cancel 消化、**同一 ledger**——`stream` 不是可选状态，每次 `step` 都接一个。
 
-机制是 `loop.StepContext.observer`（可选 `StepObserver{ptr,vtable}`）。observer **无权力**：五个回调全部返回 `void`、只拿只读视图（`stepEnd` 拿整个 `StepOutcome`），所以它不能 append、不能改 model-visible 状态、不能让一个 step 失败——带 observer 的 step 与不带的走同一条路径（physics #1/#3）。回调点：`collectTurn` 把 provider 流 **tee** 给 observer 再交给 `TurnCollector`，瞬态失败重发前一次 `modelRetry`（§13）；`execOne` 前后各一次（未被派发的尾部调用两个回调都不发）；`AgentSession.step` 在 step 边界一次（含 canceled）。
+机制是 `loop.StepContext.observer`（`StepObserver{ptr,vtable}`）。observer **无权力**：五个回调全部返回 `void`、只拿只读视图（`stepEnd` 拿整个 `StepOutcome`），所以它不能 append、不能改 model-visible 状态、不能让一个 step 失败。回调点：`collectTurn` 把 provider 流 **tee** 给 observer 再交给 `TurnCollector`，瞬态失败重发前一次 `modelRetry`（§13）；`execOne` 前后各一次（未被派发的尾部调用两个回调都不发）；`AgentSession.step` 在 step 边界一次（含 canceled）。
 
-行协议（一行一个 JSON，写完即 flush）：带 `stream` 字段的是瞬态观测行，不带的就是与 `session events` **同形**的 ledger 事件行（同一个 `encodeEventLine`、同一套 seq）。
+行协议：带 `stream` 字段的是瞬态观测行，不带的就是与 `session events` **同形**的 ledger 事件行（同一个 `encodeEventLine`、同一套 seq）。
 
 ```jsonl
 {"seq":6,"kind":"user_text","text":"…"}                     ← 这一步的边界从 inbox 排干的（§3.4），在 started 之前
@@ -1582,11 +1585,11 @@ nulya                                            ← 无参数：同 `nulya help
 - `reasoning_item`（不透明、只为回放）**不转发**；`stopped ∈ end_turn | budget | canceled | max_tokens`。
 - 每个 step 的 ledger 行在该 step 的 `step end` **之前**刷出：读者见到 `step end` 就知道这一步的事件已全。
 - **已经是事实的行不等到 step 末尾**：`started` 一到就先把尚未报告的 ledger 行刷出去——那一刻唯一可能存在的就是这一步边界从 inbox 排干的 `user_text`，于是"消息落地了 / 这是对它的回答"按真实发生的顺序到达读者（否则乐观回显的前端要等整整一个 step 才知道那条消息进了 ledger，而模型明明已经在答它）。
-- 诊断在 `--stream` 下变成 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**。
+- 诊断一律是 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**，`--stream` 给不给都一样；`stepFail` 只有这一条路。
 
 #### `session step --gate`：谁来批准
 
-§4 的 `loop.ToolGate` 接到一条管道上。**要求与 `--stream` 同用**（单独给 `--gate` → stderr 一句 usage + exit 1）：请求本身就是那个协议的一行，没有那条线就没有地方问。
+§4 的 `loop.ToolGate` 接到一条管道上——那条线随每次 `step` 都在，所以 `--gate` 不要求别的 flag 同用。
 
 每个 tool call 执行前，stdout 多一行
 
@@ -1599,7 +1602,7 @@ nulya                                            ← 无参数：同 `nulya help
 - `args` 是模型写的原文——shell 的 command 就在里面，怎么读是 driver 的事。
 - `tool_id` / `readonly` 是**这一场冻结的声明**（§4）：稳定 id（成员的工具选择与 usage journal 用的就是它）与包对这个 tool 的 `readonly` 主张。一个选中的 tool 是 `"tool_id":"ext:std/read","readonly":true`；`readonly` 的 `null` 是"没说"不是 `false`；本场工具面没有这个名字时两列都是 `null`。有了这两列，答题人不必再去开 manifest 反推。
 - **fail closed**：认不出的答案、读失败、以及最要紧的 **EOF**（答的人走了）→ 一律 deny，EOF 之后的每个 call 不再问、直接 deny；每种情况在 stderr 说一句（stdout 保持纯协议）。写失败记下来、收尾 exit 1。
-- **不带 `--gate` 的 `--stream` 输出逐字节不变**；带 `--gate` 时多出的只有 `gate request` 这一种行。
+- **不带 `--gate` 的行协议输出逐字节不变**；带 `--gate` 时多出的只有 `gate request` 这一种行。
 
 ### `nulya task *`（`cli/task.zig`，全部是壳层；远端轮询另见 §8.2）
 
