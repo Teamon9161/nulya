@@ -1,16 +1,14 @@
 //! Capability notes: announcing a newly active extension version to a running
 //! conversation.
 //!
-//! When the agent builds and activates an extension mid-conversation (via
-//! `shell` -> `nulya ext …`), the CLI runs in a subprocess and cannot touch the
-//! session's ledger — the session file has one writer. So the CLI, when
-//! `NULYA_SESSION` names the session file, deposits a `note` into the
-//! session's inbox (`ledger.depositEvent`); the session drains it at its next
-//! step boundary as a plain append. Promotion into `tools[]` still waits for
-//! the next session.
+//! The CLI activating an extension runs in a subprocess and cannot touch the
+//! session's ledger — the session file has one writer. So when `NULYA_SESSION`
+//! names the session file it deposits a `note` into the inbox, which the
+//! session drains at its next step boundary as a plain append. Promotion into
+//! `tools[]` still waits for the next session.
 //!
-//! This module owns only what a note SAYS. The inbox mechanics live in
-//! `ledger.zig`; the drain is `AgentSession.prepareStep`.
+//! This module owns only what a note SAYS; the inbox mechanics are in
+//! `ledger.zig`.
 
 const std = @import("std");
 const ledger = @import("../ledger.zig");
@@ -20,7 +18,6 @@ const skill = @import("../skill.zig");
 const store = @import("store.zig");
 const testkit = @import("testkit.zig");
 
-/// Model-facing announcement text for one active extension version.
 /// Deterministic: the same inputs always yield the same bytes.
 pub fn noteText(alloc: std.mem.Allocator, id: []const u8, version: []const u8, tools: []const manifest.ToolSpec, skills: []const skill.SkillDescriptor) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -47,8 +44,7 @@ pub fn noteText(alloc: std.mem.Allocator, id: []const u8, version: []const u8, t
     return out.toOwnedSlice(alloc);
 }
 
-/// Deterministic model-facing announcement for one active extension version, or
-/// null when the version declares nothing to announce (no tools, no skills) or
+/// Null when the version declares nothing to announce (no tools, no skills) or
 /// cannot be read. `root` is the extensions store root. Caller owns the result.
 pub fn buildActiveNoteText(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !?[]u8 {
     const st = store.Store.init(io, root);
@@ -70,12 +66,11 @@ pub fn buildActiveNoteText(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Di
     return try noteText(alloc, m.id, version, m.tools, descriptors.items);
 }
 
-/// Deposit a capability note for active `id@version` into the session inbox, so
-/// the session process appends it at its next step boundary. `base` is the
-/// directory `session_path` is relative to (or `cwd()` when `session_path` is
+/// Deposit a capability note for active `id@version` into the session inbox.
+/// `base` is the directory `session_path` is relative to (or `cwd()` when it is
 /// absolute); `ext_root` is the extensions store. A version with nothing to
-/// announce deposits nothing. Idempotent per active version: the deposit name is
-/// `note-<id>-<version>`, and the drain skips a note the ledger already holds.
+/// announce deposits nothing. Idempotent per active version: the deposit name
+/// `note-<id>-<version>` is the exactly-once key.
 pub fn depositActiveNote(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -125,9 +120,8 @@ test "noteText is deterministic and names every invocation" {
 
 const session_rel = ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "s.jsonl";
 
-/// A deposit goes into a session that EXISTS (`ledger.depositEventLeased`
-/// refuses one that does not), so the tests below put a file where the ledger
-/// they drain into would have written one.
+/// A deposit goes into a session that EXISTS, so the tests put a file where the
+/// ledger they drain into would have written one.
 fn touchSession(io: std.Io, dir: std.Io.Dir) !void {
     try dir.createDirPath(io, comptime std.fs.path.dirname(session_rel).?);
     try dir.writeFile(io, .{ .sub_path = session_rel, .data = "" });
@@ -149,7 +143,6 @@ test "a deposited note is drained into the ledger and is idempotent" {
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
 
-    // The CLI deposits; the session drains at its step boundary.
     try depositActiveNote(alloc, io, tmp.dir, session_rel, root, "demo", version);
     try ledger.drainInbox(alloc, io, &l, tmp.dir, session_rel);
     try std.testing.expectEqual(@as(usize, 1), l.len());
@@ -161,8 +154,8 @@ test "a deposited note is drained into the ledger and is idempotent" {
     try ledger.drainInbox(alloc, io, &l, tmp.dir, session_rel);
     try std.testing.expectEqual(@as(usize, 1), l.len());
 
-    // A re-deposit of the same active version reuses the delivery name, which is
-    // the exactly-once key, so the drain applies nothing.
+    // A re-deposit reuses the delivery name, the exactly-once key, so the
+    // drain applies nothing.
     try depositActiveNote(alloc, io, tmp.dir, session_rel, root, "demo", version);
     try ledger.drainInbox(alloc, io, &l, tmp.dir, session_rel);
     try std.testing.expectEqual(@as(usize, 1), l.len());

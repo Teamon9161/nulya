@@ -1,9 +1,8 @@
 //! Test-only fixtures: materialize seal-valid frozen extension versions on disk.
 //!
-//! One place for the snapshot -> canonical -> versionId -> freeze -> seal dance,
-//! so a fixture can never drift from the real definitions in `integrity.zig`.
-//! Fixture *shape* (which manifest, which files) stays local to each test; only
-//! the plumbing lives here.
+//! The snapshot -> canonical -> versionId -> freeze -> seal dance in one place,
+//! so fixtures cannot drift from the real definitions in `integrity.zig`.
+//! Fixture *shape* (which manifest, which files) stays local to each test.
 
 const std = @import("std");
 const integrity = @import("integrity.zig");
@@ -12,10 +11,9 @@ const store = @import("store.zig");
 const target_mod = @import("target.zig");
 
 const compiler = "zig test";
-/// A fixture's binary is written with the HOST's exe suffix, so its seal has to
-/// say so: validation reads the suffix off `seal.target` (`integrity.openVersion`),
-/// and a made-up target word would send it looking for `bin/demo` next to a
-/// `bin/demo.exe` this file just wrote.
+/// A fixture's binary is written with the HOST's exe suffix, so its seal must
+/// say so: validation reads the suffix off `seal.target`, and a made-up target
+/// word would send it looking for `bin/demo` next to a `bin/demo.exe`.
 const target = target_mod.host;
 const default_main = "pub fn main() void {}\n";
 const stub_binary = "stub-binary\n";
@@ -79,9 +77,7 @@ pub fn writeFrozenVersion(
     defer if (binary_digest) |d| alloc.free(d);
     // A SCRIPT version has no separately-built binary: its entry is frozen
     // inside `package/` and covered by the package digest, so its seal must
-    // record no binary digest at all (`integrity.openVersion`). Writing one
-    // would make every script fixture fail validation for a reason that has
-    // nothing to do with what the test is about.
+    // record no binary digest at all.
     if (if (m.runtime) |rt| (if (manifest.isScript(rt)) null else rt) else null) |rt| {
         const host_entry = rt.entry.forHost() orelse return error.EntryUnsupportedOnHost;
         const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ host_entry, integrity.exe_suffix });
@@ -104,10 +100,8 @@ pub fn writeFrozenVersion(
     return version;
 }
 
-/// A frozen contribution-only version of `id` carrying one skill whose body is
-/// `body` — the smallest real version there is (no runtime, so no binary), which
-/// is what makes it the fixture of choice for store / roots tests. Caller owns
-/// the returned version id.
+/// A frozen contribution-only version of `id` carrying one skill — the smallest
+/// real version there is (no runtime, so no binary). Caller owns the result.
 pub fn writeSkillVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, body: []const u8) ![]u8 {
     const manifest_bytes = try std.fmt.allocPrint(alloc,
         \\{{"schema":"nulya.extension/v2","id":"{s}","contributes":{{"skills":["skills/demo"]}}}}

@@ -2,13 +2,12 @@
 //!
 //! Built version BYTES live in exactly one directory per machine:
 //! `<NULYA_HOME | ~/.nulya>/store/<id>/versions/<v>/`. A workspace holds only
-//! drafts and, optionally, a `current` pointer of its own under
+//! drafts and, optionally, a `current` of its own under
 //! `.nulya/extensions/<id>/`; it never holds versions.
 //!
 //! A workspace pointer wins over the store's; with neither, the id is not
-//! activated here. So a pointer answers exactly one question — which version
-//! `<id>` means — and never "whose bytes", which content addressing already
-//! settled.
+//! activated here. A pointer answers exactly one question — which version
+//! `<id>` means — never "whose bytes", which content addressing settled.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -20,29 +19,23 @@ const integrity = @import("integrity.zig");
 /// The workspace's drafts and its pointer layer, relative to the workspace.
 pub const workspace_rel = ".nulya/extensions";
 
-/// Which `current` a pointer is written to or read from. `workspace` is
-/// `.nulya/extensions/<id>/current`, `user` is `<store>/<id>/current`.
+/// `workspace` is `.nulya/extensions/<id>/current`, `user` `<store>/<id>/current`.
 pub const Layer = enum {
     workspace,
     user,
 
-    /// The word `ext list` prints and `ext activate --user` selects.
     pub fn label(self: Layer) []const u8 {
         return @tagName(self);
     }
 };
 
-/// Where a repair line goes.
+/// Where a repair line goes. A Zig error carries no payload, so which package,
+/// which version and the verb that fixes it have to be SAID separately or lost.
+/// The kernel never picks a destination: a shell that has one passes a sink in,
+/// and the default reports nothing.
 ///
-/// A Zig error carries no payload, so which package, which version and the verb
-/// that fixes it have to be SAID separately or lost. The kernel never picks a
-/// destination for that sentence: a shell that has one passes a sink in, and the
-/// default reports nothing — which is what a unit test wants, since it builds a
-/// broken store on purpose and asserts the error.
-///
-/// Stateless sinks are the point of passing `io` at report time rather than
-/// holding it: the one the CLI installs is a constant, so nothing here owns a
-/// lifetime that could outlive the `Site` it was copied into.
+/// `io` is passed at report time rather than held, so a sink stays stateless
+/// and nothing here owns a lifetime outliving the `Site` it was copied into.
 pub const Diag = struct {
     ptr: ?*anyopaque = null,
     reportFn: ?*const fn (ptr: ?*anyopaque, io: std.Io, line: []const u8) void = null,
@@ -58,22 +51,21 @@ pub const Site = struct {
     io: std.Io,
     /// The workspace everything relative resolves against, owned.
     cwd: []const u8,
-    /// Where the one store is, owned: the resolved real path once the
-    /// directory exists, and the configured path until then. Empty only when
-    /// this machine has no home directory at all, so nothing can be built.
+    /// Owned: the resolved real path once the directory exists, the configured
+    /// path until then. Empty only when this machine has no home directory at
+    /// all, so nothing can be built.
     store_path: []const u8,
     store_dir: ?std.Io.Dir,
     ws_dir: ?std.Io.Dir,
-    /// Where this site says what an error cannot carry. Reports nothing by
-    /// default.
+    /// Where this site says what an error cannot carry; silent by default.
     diag: Diag = .{},
 
     pub const Pointer = struct { layer: Layer, version: []const u8 };
     pub const ActiveEntry = struct { id: []const u8, layer: Layer, version: []const u8 };
 
     /// The single answer to `id[@version] -> manifest -> entry path`. Session
-    /// composition, `nulya ext run` and the skill loader all ask for it here,
-    /// so none of them can drift on where a frozen entry lives.
+    /// composition, `ext run` and the skill loader all ask here, so none of
+    /// them can drift on where a frozen entry lives.
     pub const Resolved = struct {
         /// Owned.
         id: []const u8,
@@ -89,10 +81,9 @@ pub const Site = struct {
             m.deinit();
         }
 
-        /// Absolute path of this version's runtime entry — a compiled binary
-        /// under `bin/` or a frozen script under `package/`, per the runtime
-        /// kind. Absolute because an extension is spawned with the WORKSPACE as
-        /// cwd, which is not this process's cwd. Caller owns the result.
+        /// A compiled binary under `bin/` or a frozen script under `package/`.
+        /// ABSOLUTE because an extension is spawned with the WORKSPACE as cwd,
+        /// which is not this process's cwd. Caller owns the result.
         pub fn entryPathAbs(self: Resolved, alloc: std.mem.Allocator, site: *const Site) ![]u8 {
             const rt = self.manifest.runtime orelse return error.MissingRuntime;
             const st = site.store() orelse return error.VersionNotFound;
@@ -109,9 +100,9 @@ pub const Site = struct {
         }
     };
 
-    /// Open what is there, creating nothing: a machine with no store and a
-    /// workspace with no `.nulya/extensions` are both ordinary. `store_path`
-    /// empty means this machine has no store at all.
+    /// Creating nothing: a machine with no store and a workspace with no
+    /// `.nulya/extensions` are both ordinary. An empty `store_path` means this
+    /// machine has no store at all.
     pub fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, store_path: []const u8, diag: Diag) !Site {
         const owned_cwd = try alloc.dupe(u8, cwd);
         errdefer alloc.free(owned_cwd);
@@ -148,9 +139,8 @@ pub const Site = struct {
         };
     }
 
-    /// Say what an error cannot carry. Silent when nobody is listening, and
-    /// silent when the line cannot be built — failing to SAY something never
-    /// changes what happened.
+    /// Silent when nobody is listening, and when the line cannot be built —
+    /// failing to SAY something never changes what happened.
     pub fn report(self: *const Site, alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) void {
         if (self.diag.reportFn == null) return;
         const line = std.fmt.allocPrint(alloc, fmt, args) catch return;
@@ -158,8 +148,8 @@ pub const Site = struct {
         self.diag.report(self.io, line);
     }
 
-    /// The store alone, for a caller with no pointer question — an execution
-    /// resolver, which is only ever handed an exact version.
+    /// For a caller with no pointer question — an execution resolver is only
+    /// ever handed an exact version.
     pub fn openStore(alloc: std.mem.Allocator, io: std.Io, store_path: []const u8, diag: Diag) !Site {
         var site = try open(alloc, io, ".", store_path, diag);
         if (site.ws_dir) |*d| {
@@ -182,15 +172,15 @@ pub const Site = struct {
         return ext_store.Store.init(self.io, dir);
     }
 
-    /// The store, created if it is not there yet — what a build or an activate
-    /// needs. Fails when this machine has no home to put one in.
+    /// Created if absent — what a build or activate needs. Fails when this
+    /// machine has no home to put one in.
     pub fn ensureStore(self: *Site) !ext_store.Store {
         if (self.store()) |st| return st;
         if (self.store_path.len == 0) return error.NoExtensionStore;
         const dir = try ext_store.openOrCreateRoot(self.io, self.cwd, self.store_path);
         self.store_dir = dir;
-        // Now that it exists, `store_path` can be what every absolute entry
-        // path is joined onto.
+        // Now that it exists, `store_path` is what absolute entry paths join
+        // onto.
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const resolved = try self.alloc.dupe(u8, buf[0..try dir.realPath(self.io, &buf)]);
         self.alloc.free(self.store_path);
@@ -198,7 +188,7 @@ pub const Site = struct {
         return ext_store.Store.init(self.io, dir);
     }
 
-    /// The directory holding a layer's `current` files, created if needed.
+    /// Created if needed.
     pub fn ensurePointerDir(self: *Site, layer: Layer) !std.Io.Dir {
         switch (layer) {
             .user => return (try self.ensureStore()).root,
@@ -218,9 +208,8 @@ pub const Site = struct {
         };
     }
 
-    /// Whether this workspace has a `<id>/` of its own — a draft, a pointer, or
-    /// both. The rule `ext activate` defaults on: a package this workspace
-    /// already has a directory for belongs to this workspace.
+    /// A draft, a pointer, or both. `ext activate` defaults on it: a package
+    /// this workspace already has a directory for belongs to this workspace.
     pub fn workspaceHas(self: *const Site, id: []const u8) bool {
         const dir = self.ws_dir orelse return false;
         if (!manifest.isValidId(id)) return false;
@@ -229,8 +218,7 @@ pub const Site = struct {
     }
 
     /// Which version `<id>` means here and which layer said so — the workspace
-    /// pointer first. Null when neither layer points at one. Caller owns
-    /// `version`.
+    /// pointer first. Null when neither points at one. Caller owns `version`.
     pub fn activePointer(self: *const Site, alloc: std.mem.Allocator, id: []const u8) !?Pointer {
         for ([_]Layer{ .workspace, .user }) |layer| {
             const dir = self.pointerDir(layer) orelse continue;
@@ -240,17 +228,16 @@ pub const Site = struct {
         return null;
     }
 
-    /// The version in effect for `id`, with its validated manifest. Null when no
-    /// layer points at one. Host faults — cancellation above all — propagate
-    /// unchanged: only a missing `current` is "not there".
+    /// Null when no layer points at one. Host faults — cancellation above all
+    /// — propagate: only a missing `current` is "not there".
     pub fn resolveActive(self: *const Site, alloc: std.mem.Allocator, id: []const u8, level: ext_store.Level) !?Resolved {
         const active = (try self.activePointer(alloc, id)) orelse return null;
         defer alloc.free(active.version);
         return try self.resolveVersion(alloc, id, active.version, level);
     }
 
-    /// A named built version, from the store. `error.VersionNotFound` when this
-    /// machine does not hold it; the store's own integrity faults otherwise.
+    /// `error.VersionNotFound` when this machine does not hold it; the store's
+    /// integrity faults otherwise.
     pub fn resolveVersion(self: *const Site, alloc: std.mem.Allocator, id: []const u8, version: []const u8, level: ext_store.Level) !Resolved {
         const st = self.store() orelse return error.VersionNotFound;
         var m = try st.readManifest(alloc, id, version, level);
@@ -261,15 +248,13 @@ pub const Site = struct {
         return .{ .id = owned_id, .version = owned_version, .manifest = m };
     }
 
-    /// The `Resolved` for an entry `listActive` already decided.
     pub fn resolveEntry(self: *const Site, alloc: std.mem.Allocator, entry: ActiveEntry, level: ext_store.Level) !Resolved {
         return self.resolveVersion(alloc, entry.id, entry.version, level);
     }
 
-    /// Every extension with a pointer in either layer, workspace winning,
-    /// sorted by id. Only `current` is read here (cheap); whether the version it
-    /// names is usable is the caller's concern. Caller owns the slice and each
-    /// `id`/`version`.
+    /// Sorted by id, workspace winning. Only `current` is read; whether the
+    /// version it names is usable is the caller's concern. Caller owns the
+    /// slice and each entry.
     pub fn listActive(self: *const Site, alloc: std.mem.Allocator) ![]ActiveEntry {
         var out: std.ArrayList(ActiveEntry) = .empty;
         errdefer freeActive(alloc, out.items);
@@ -306,21 +291,20 @@ pub const Site = struct {
         alloc.free(list);
     }
 
-    /// Point a layer's `current` at a built version. The writer lease and the
-    /// `.sealed` check always belong to the store that holds the bytes,
-    /// whichever layer records the choice.
+    /// The writer lease and the `.sealed` check always belong to the store that
+    /// holds the bytes, whichever layer records the choice.
     pub fn activate(self: *Site, alloc: std.mem.Allocator, layer: Layer, id: []const u8, version: []const u8) !void {
         const st = try self.ensureStore();
         const dir = try self.ensurePointerDir(layer);
         return st.activateInto(alloc, id, version, dir);
     }
 
-    /// Drop a layer's `current`. The versions stay.
+    /// The versions stay.
     pub fn deactivate(self: *const Site, alloc: std.mem.Allocator, layer: Layer, id: []const u8) !void {
         const dir = self.pointerDir(layer) orelse return;
         const st = self.store() orelse {
-            // No store to lease against: the pointer is still this layer's to
-            // drop, and a dangling one is exactly what wants dropping.
+            // No store to lease against, and a dangling pointer is exactly
+            // what wants dropping.
             return ext_store.Store.init(self.io, dir).dropPointer(alloc, id);
         };
         var held = try st.lease(alloc, id);
@@ -329,18 +313,13 @@ pub const Site = struct {
     }
 
     /// The sibling of `<id>@<version>` built for another machine: the version
-    /// whose seal records the same package bytes for `target_words`. Null when
-    /// the store holds none; caller owns the result.
+    /// whose seal records the same package bytes for `target_words` — how a
+    /// session whose tools run elsewhere learns which frozen implementation
+    /// serves its calls. Null when the store holds none; caller owns it.
     ///
-    /// This is how a session whose tools run elsewhere learns which frozen
-    /// implementation will actually serve its calls. The two versions are one
-    /// package that differs only in what it was compiled for, and
-    /// `(package_digest, target)` is the key `Store.findSealed` already matches
-    /// on — the same matcher a build asks about its own machine.
-    ///
-    /// No compiler is named: which zig produced the copy for that machine is
-    /// not something this session gets to require, and the sorted search inside
-    /// `findSealed` keeps the answer deterministic when several qualify.
+    /// No compiler is named: which zig produced that copy is not this session's
+    /// to require, and `findSealed`'s sorted search stays deterministic when
+    /// several qualify.
     pub fn resolveForTarget(
         self: *const Site,
         alloc: std.mem.Allocator,
@@ -373,7 +352,7 @@ test "a workspace pointer wins over the store's, and dropping it reveals the sto
     const store_path = try std.fs.path.join(alloc, &.{ base, "home", "store" });
     defer alloc.free(store_path);
 
-    // Both versions of `shared` live in the ONE store; only the pointers differ.
+    // Both versions of `shared` live in the ONE store; only pointers differ.
     var store_dir = try ext_store.openOrCreateRoot(io, base, store_path);
     defer store_dir.close(io);
     const old = try testkit.writeSkillVersion(alloc, io, store_dir, "shared", "older body");
@@ -415,8 +394,6 @@ test "a workspace pointer wins over the store's, and dropping it reveals the sto
         try std.testing.expectEqualStrings("shared", r.manifest.id);
     }
 
-    // Dropping the workspace pointer reveals the user one — for the listing and
-    // for the single lookup.
     try site.deactivate(alloc, .workspace, "shared");
     {
         const p = (try site.activePointer(alloc, "shared")).?;
@@ -425,7 +402,6 @@ test "a workspace pointer wins over the store's, and dropping it reveals the sto
         try std.testing.expectEqualStrings(old, p.version);
     }
 
-    // A named version resolves whether or not any pointer names it.
     {
         const r = try site.resolveVersion(alloc, "shared", new, .sealed);
         defer r.deinit(alloc);
@@ -468,8 +444,8 @@ test "resolveForTarget finds the sibling built for another machine, from the one
     const digest = try ext_store.Store.init(io, store_dir).readPackageDigest(alloc, "pkg", host_version);
     defer alloc.free(digest);
 
-    // The genuine cross-compiled sibling: the SAME package digest, sealed for
-    // another target — what a remote session's `exec_version` lookup is after.
+    // The cross-compiled sibling: SAME package digest, sealed for another
+    // target — what a remote session's `exec_version` lookup is after.
     const sibling = "v-" ++ ("a" ** 24);
     {
         const st = ext_store.Store.init(io, store_dir);

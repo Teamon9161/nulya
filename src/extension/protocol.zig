@@ -1,10 +1,9 @@
 //! Extension wire protocol.
 //!
-//! The transport is deliberately dumb and oneshot: the host spawns the
-//! extension, writes the call's arguments to stdin, reads its stdout, and the
-//! process exits. No daemon, no streaming, no bidirectional events, no host
-//! callbacks. The wire protocol IS the ABI, so extensions need not be written in
-//! Zig.
+//! The transport is oneshot: the host spawns the extension, writes the call's
+//! arguments to stdin, reads its stdout, and the process exits. No daemon, no
+//! streaming, no bidirectional events, no host callbacks. The wire IS the ABI,
+//! so extensions need not be written in Zig.
 //!
 //! There is ONE wire, `plain`, and everything about a call other than the four
 //! things below is the same whatever a runtime is written in: the same timeout,
@@ -26,9 +25,8 @@
 //!           Arrays, objects and null are not exported, nor is a key outside
 //!           [A-Za-z0-9_] — those live on stdin only.
 //!   stdout  The tool's output, VERBATIM. It reaches the model exactly as
-//!           printed — a file's contents, a search listing, or JSON when the
-//!           caller is a driver that parses one; stdout is bytes, so one wire
-//!           carries both.
+//!           printed — text, or JSON when the caller is a driver that parses
+//!           one; stdout is bytes, so one wire carries both.
 //!   exit    0 = success. Non-zero = a failed call, whose text is `exit <code>`
 //!           followed by stderr, and by stdout if anything was printed. So the
 //!           message a tool writes to stderr before failing IS what the model
@@ -46,8 +44,8 @@ pub const EnvVar = struct {
     value: []const u8,
 };
 
-/// The exact bytes that go to stdin: the model's arguments object, trimmed,
-/// with "nothing" spelled `{}`.
+/// The bytes that go to stdin: the model's arguments object, trimmed, with
+/// "nothing" spelled `{}`.
 pub fn normalizedArguments(args_json: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, args_json, " \t\r\n");
     return if (trimmed.len == 0) "{}" else trimmed;
@@ -64,9 +62,8 @@ pub fn requireArgumentsObject(alloc: std.mem.Allocator, arguments: []const u8) !
     if (parsed.value != .object) return error.ArgumentsNotObject;
 }
 
-/// The whole per-call environment for one invocation: `NULYA_TOOL`, every
-/// exported argument, and the presentation file when the caller has one.
-/// Caller deinits.
+/// `NULYA_TOOL`, every exported argument, and the presentation file when the
+/// caller has one. Caller deinits.
 pub fn callEnv(
     alloc: std.mem.Allocator,
     tool_name: []const u8,
@@ -104,22 +101,16 @@ pub const PlainEnv = struct {
     }
 
     /// `NULYA_ARG_<k>` for each TOP-LEVEL scalar argument. Arrays, objects and
-    /// null do not appear: an environment variable is a string, and inventing a
-    /// serialization for a structure would be a second argument format for a
-    /// script to parse — stdin already carries the whole object, exactly.
-    ///
-    /// Keys outside `[A-Za-z0-9_]+` are skipped rather than mangled, for the
-    /// same reason: a name a shell cannot read is not made readable by rewriting
-    /// it, and the value is still on stdin.
+    /// null do not appear: an environment variable is a string, and stdin
+    /// already carries the whole object exactly. Keys outside `[A-Za-z0-9_]+`
+    /// are skipped rather than mangled, for the same reason.
     ///
     /// The parse is also where "the arguments are a JSON object" is enforced,
-    /// before anything is spawned — nothing runs with something a tool's
-    /// declared `input` schema could not describe.
+    /// before anything is spawned.
     pub fn addArguments(self: *PlainEnv, alloc: std.mem.Allocator, arguments: []const u8) !void {
         const parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments, .{}) catch |err| switch (err) {
-            // The parser allocates while validating the arguments object: a host
-            // OOM is a resource fault and must not be misreported as malformed
-            // arguments.
+            // The parser allocates while validating: a host OOM is a resource
+            // fault and must not be misreported as malformed arguments.
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.InvalidArgumentsJson,
         };
@@ -143,8 +134,8 @@ pub const PlainEnv = struct {
                 else => continue,
             };
             // A NUL byte ENDS an environment string on both platforms, so a
-            // value carrying one would arrive silently truncated. Skipped
-            // instead — stdin still has it whole.
+            // value carrying one would arrive silently truncated. Skipped —
+            // stdin still has it whole.
             if (std.mem.indexOfScalar(u8, value, 0) != null) continue;
             const name = try std.fmt.allocPrint(alloc, "NULYA_ARG_{s}", .{key});
             defer alloc.free(name);
@@ -173,8 +164,7 @@ test "no arguments is the empty object, and anything else goes through as writte
     try testing.expectEqualStrings("[]", normalizedArguments("[]"));
 }
 
-/// Flatten a built environment to `NAME=VALUE\n` lines, so the assertions below
-/// read like the thing a script sees.
+/// `NAME=VALUE\n` lines, so assertions read like the thing a script sees.
 fn flatten(alloc: std.mem.Allocator, vars: *PlainEnv) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
@@ -225,9 +215,8 @@ test "one call's whole environment is the tool name, the scalars, and a presenta
     try testing.expect(std.mem.indexOf(u8, flat, "NULYA_ARG_list") == null);
     try testing.expect(std.mem.indexOf(u8, flat, "NULYA_PRESENTATION_FILE") == null);
 
-    // The tool name alone when there is nothing else to say — and the
-    // presentation file only when a driver offered one, which a remote
-    // environment never does.
+    // The presentation file appears only when a driver offered one, which a
+    // remote environment never does.
     var bare = try callEnv(alloc, "t", "{}", ".nulya/scratch/s/p.json");
     defer bare.deinit(alloc);
     const bare_flat = try flatten(alloc, &bare);
@@ -242,16 +231,15 @@ test "arguments that are not a JSON object are refused, before anything is spawn
     try testing.expectError(error.InvalidArgumentsJson, bad.addArguments(alloc, "{bad"));
     try testing.expectError(error.ArgumentsNotObject, bad.addArguments(alloc, "[]"));
 
-    // The same rule as its own question, which is what the seam asks before it
-    // spawns anything or sends a frame anywhere.
+    // The same rule as its own question, which is what the seam asks before
+    // spawning anything or sending a frame anywhere.
     try requireArgumentsObject(alloc, "{\"a\":1}");
     try testing.expectError(error.InvalidArgumentsJson, requireArgumentsObject(alloc, "{bad"));
     try testing.expectError(error.ArgumentsNotObject, requireArgumentsObject(alloc, "[]"));
 }
 
 test "an allocation failure surfaces as OutOfMemory, not as malformed arguments" {
-    // The first allocation inside `addArguments` is the parser building the
-    // Value tree. A host OOM there must propagate — folding it into
+    // A host OOM in the parser must propagate: folding it into
     // InvalidArgumentsJson would misreport a resource fault as a broken call.
     const alloc = testing.allocator;
     var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });

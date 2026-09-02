@@ -2,17 +2,13 @@
 //!
 //! The host-platform Zig release archive is `@embedFile`'d into the nulya
 //! binary and extracted on first use — one host Zig cross-compiles to every
-//! target, so a single embedded host archive buys cross-platform extension
-//! builds for free. The AI never calls `zig build` directly: it calls `nulya
-//! ext build`, and nulya alone fixes zig version / optimize / target / cache.
+//! target. The AI never calls `zig build` directly; nulya alone fixes zig
+//! version / optimize / target / cache.
 //!
-//! Embedding is gated behind the `-Dembed-toolchain` build option so day-to-day
-//! `zig build test` stays light. When the option is off, `@embedFile` resolves
-//! to an empty stub and there is nothing to extract — but the directory the
-//! extraction would land in is still the pinned compiler's home, so a build
-//! without the archive uses what is already there. Only when the archive is
-//! absent AND the directory is empty does `ensureExtracted` return
-//! `error.ToolchainNotEmbedded`.
+//! Embedding is gated behind `-Dembed-toolchain`, so with the option off there
+//! is nothing to extract — the directory is still the pinned compiler's home,
+//! and a build uses whatever is already there. Only archive absent AND
+//! directory empty gives `error.ToolchainNotEmbedded`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -22,10 +18,8 @@ pub const pinned_version = "0.16.0";
 
 pub const exe_name = if (builtin.os.tag == .windows) "zig.exe" else "zig";
 
-/// Where the pinned compiler lives under nulya's data directory — the one path
-/// that both the extraction and a person unpacking the release archive by hand
-/// have to agree on, so it is spelled once and printed in every "needs zig"
-/// sentence.
+/// The one path the extraction and a person unpacking the archive by hand must
+/// agree on.
 pub const managed_rel = "toolchains" ++ std.fs.path.sep_str ++ "zig" ++ std.fs.path.sep_str ++ pinned_version;
 
 /// The embedded archive. Empty when built without `-Dembed-toolchain`.
@@ -43,17 +37,12 @@ pub fn isEmbedded() bool {
     return embedded_archive.len != 0;
 }
 
-/// The pinned Zig under `data_dir/managed_rel`, as an absolute path to its
-/// `zig` executable (usable as `argv[0]` regardless of the child's cwd) —
-/// extracted from the embedded archive when this binary carries one and the
-/// directory does not hold it yet. Idempotent: a completed extraction is marked
-/// with a `.ok` file and skipped on subsequent calls.
+/// An absolute path to the pinned `zig` (usable as `argv[0]` whatever the
+/// child's cwd), extracted from the embedded archive when this binary carries
+/// one. Idempotent: a completed extraction is marked with a `.ok` file.
 ///
 /// A binary without the archive still answers from that directory when a whole
 /// toolchain is already in it (either layout `zigExeAbsPath` accepts).
-///
-/// NOTE: the extraction path is validated only via the manual embedded build
-/// (`-Dembed-toolchain`), since unit tests run with embedding off.
 pub fn ensureExtracted(alloc: std.mem.Allocator, io: std.Io, data_dir: std.Io.Dir) ![]u8 {
     const rel = managed_rel;
     const ok_marker = rel ++ std.fs.path.sep_str ++ ".ok";
@@ -70,8 +59,8 @@ pub fn ensureExtracted(alloc: std.mem.Allocator, io: std.Io, data_dir: std.Io.Di
         };
     }
 
-    // Fresh (or partial) extraction. Clear any partial dir, then extract into
-    // place and only then write the marker so an interrupted run re-extracts.
+    // Clear any partial dir, extract, and only THEN write the marker, so an
+    // interrupted run re-extracts.
     data_dir.deleteTree(io, rel) catch {};
     try data_dir.createDirPath(io, rel);
     var dest = try data_dir.openDir(io, rel, .{ .iterate = true });
@@ -92,15 +81,15 @@ fn extractTarXz(alloc: std.mem.Allocator, io: std.Io, dest: std.Io.Dir) !void {
     const window = try alloc.alloc(u8, 1 << 20);
     defer alloc.free(window);
     var xz = try std.compress.xz.Decompress.init(&input, alloc, window);
-    // `strip_components = 1` drops the leading `zig-<target>-<ver>/` directory so
-    // the executable lands directly at `<dest>/zig`.
+    // `strip_components = 1` drops the leading `zig-<target>-<ver>/` so the
+    // executable lands directly at `<dest>/zig`.
     try std.tar.extract(io, dest, &xz.reader, .{ .strip_components = 1 });
 }
 
 fn extractZip(alloc: std.mem.Allocator, io: std.Io, data_dir: std.Io.Dir, rel: []const u8, dest: std.Io.Dir) !void {
-    // std.zip needs a seekable reader, so spill the embedded bytes to a temp file
-    // first, then extract from it. zip has no strip_components, so the archive's
-    // leading `zig-<target>-<ver>/` directory is resolved later by `zigExeAbsPath`.
+    // std.zip needs a seekable reader, so spill the embedded bytes to a temp
+    // file first. zip has no strip_components, so the leading
+    // `zig-<target>-<ver>/` is resolved later by `zigExeAbsPath`.
     const tmp_rel = try std.fs.path.join(alloc, &.{ rel, ".archive.zip" });
     defer alloc.free(tmp_rel);
     try data_dir.writeFile(io, .{ .sub_path = tmp_rel, .data = embedded_archive });
@@ -113,14 +102,14 @@ fn extractZip(alloc: std.mem.Allocator, io: std.Io, data_dir: std.Io.Dir, rel: [
     try std.zip.extract(dest, &fr, .{ .allow_backslashes = true });
 }
 
-/// Resolve the absolute path of the extracted `zig` executable, handling both
-/// the flattened (tar strip) and nested (`zig-*/`) layouts.
+/// Absolute path of the extracted `zig`, in either the flattened (tar strip) or
+/// nested (`zig-*/`) layout.
 fn zigExeAbsPath(alloc: std.mem.Allocator, io: std.Io, data_dir: std.Io.Dir, rel: []const u8) ![]u8 {
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
     const base_len = data_dir.realPath(io, &real_buf) catch return error.ZigExeNotFound;
     const base = real_buf[0..base_len];
 
-    // Flattened layout: <data>/<rel>/zig[.exe]
+    // Flattened: <data>/<rel>/zig[.exe]
     {
         const flat = try std.fs.path.join(alloc, &.{ rel, exe_name });
         defer alloc.free(flat);
@@ -129,7 +118,7 @@ fn zigExeAbsPath(alloc: std.mem.Allocator, io: std.Io, data_dir: std.Io.Dir, rel
         } else |_| {}
     }
 
-    // Nested layout: <data>/<rel>/zig-<target>-<ver>/zig[.exe]
+    // Nested: <data>/<rel>/zig-<target>-<ver>/zig[.exe]
     var dir = data_dir.openDir(io, rel, .{ .iterate = true }) catch return error.ZigExeNotFound;
     defer dir.close(io);
     var it = dir.iterate();
@@ -163,8 +152,6 @@ test "ensureExtracted uses a toolchain already in the managed directory when not
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    // Flat layout: <data>/toolchains/zig/<ver>/zig — a tar strip, or a person
-    // copying an install's contents straight in.
     {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -175,8 +162,6 @@ test "ensureExtracted uses a toolchain already in the managed directory when not
         try std.testing.expect(std.fs.path.isAbsolute(found));
         try std.testing.expect(std.mem.endsWith(u8, found, managed_rel ++ std.fs.path.sep_str ++ exe_name));
     }
-    // Nested layout: the release archive unpacked as-is, `zig-<target>-<ver>/`
-    // and all.
     {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();

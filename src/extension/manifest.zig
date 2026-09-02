@@ -1,12 +1,10 @@
 //! `extension.json` — the manifest.
 //!
-//! The manifest is the single source of truth for an extension's identity and
-//! model-facing schema. Nulya never starts a binary just to ask what tools it
-//! has; runtime processes only ever handle calls declared by the manifest.
+//! The single source of truth for an extension's identity and model-facing
+//! schema: nulya never starts a binary to ask what tools it has.
 //!
-//! `parse` loads the structure into arena-owned memory (so the caller may free
-//! the source bytes); `validate` enforces the kernel's deterministic rules.
-//! Whether a tool is "good taste" is policy, not validation.
+//! `parse` loads into arena-owned memory (the caller may free the source
+//! bytes); `validate` enforces the kernel's deterministic rules.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -14,8 +12,7 @@ const tool = @import("../tool.zig");
 
 pub const schema_id = "nulya.extension/v2";
 
-/// Tool names permanently reserved for the kernel builtin; an extension may
-/// not declare a tool by this name.
+/// Reserved for the kernel builtin; no extension may declare these names.
 pub const reserved_tool_names = [_][]const u8{"shell"};
 
 /// A runtime string that may differ per host OS. Written either as a bare
@@ -25,18 +22,15 @@ pub const reserved_tool_names = [_][]const u8{"shell"};
 ///     "entry": "src/run.sh"
 ///     "entry": { "windows": "src/run.ps1", "default": "src/run.sh" }
 ///
-/// One package, one version id: the snapshot already collects the whole `src/`
-/// tree, so every platform's variant is inside the same content-addressed
-/// version — only WHICH file runs differs per host.
+/// One package, one version id: every platform's variant is inside the same
+/// content-addressed version, only WHICH file runs differs per host.
 pub const PlatformValue = struct {
     variants: []const Variant,
-    /// The manifest wrote an object. False = a bare string, in which case
-    /// `variants` holds exactly one entry whose `os` is empty.
+    /// False = a bare string, so `variants` holds one entry with empty `os`.
     per_os: bool = false,
 
     pub const Variant = struct {
-        /// A `std.Target.Os.Tag` name or `"default"` in the object form; empty
-        /// in the bare-string form.
+        /// A `std.Target.Os.Tag` name or `"default"`; empty in the bare form.
         os: []const u8,
         value: []const u8,
     };
@@ -47,9 +41,8 @@ pub const PlatformValue = struct {
         return .{ .variants = &.{.{ .os = "", .value = value }} };
     }
 
-    /// The value this OS gets: an exact match first, then `"default"`, then
-    /// null — "this version has no entry on that host", which is a real and
-    /// nameable state, not a fault in the package.
+    /// An exact match first, then `"default"`, then null — "no entry on that
+    /// host", a nameable state rather than a fault in the package.
     pub fn forOs(self: PlatformValue, os_name: []const u8) ?[]const u8 {
         if (!self.per_os) return if (self.variants.len == 0) null else self.variants[0].value;
         var fallback: ?[]const u8 = null;
@@ -60,31 +53,23 @@ pub const PlatformValue = struct {
         return fallback;
     }
 
-    /// `forOs` for the machine this binary runs on.
     pub fn forHost(self: PlatformValue) ?[]const u8 {
         return self.forOs(@tagName(builtin.os.tag));
     }
 };
 
 pub const Runtime = struct {
-    /// Relative path to the runtime entry within the package, possibly per-OS
-    /// (`PlatformValue`). A `bin/<name>` entry is a compiled Zig extension
-    /// (built from `src/main.zig`); any other entry (e.g. `src/run.ps1`) is a
-    /// script extension frozen as-is — see `isScript`. The per-OS form is for
-    /// scripts only: a compiled extension's cross-platform story is cross
-    /// compilation, not this field.
+    /// A `bin/<name>` entry is a compiled Zig extension (built from
+    /// `src/main.zig`); anything else is a script frozen as-is. The per-OS form
+    /// is for scripts only — compiled cross-platform means cross compilation.
     entry: PlatformValue,
-    /// For a script extension, the executable used to run `entry` (e.g. `sh`,
-    /// `powershell`, `python3`), possibly per-OS. Absent means the entry is
-    /// directly executable (a `.cmd`/`.bat` on Windows, or a shebang script
-    /// with the exec bit).
+    /// The executable a script `entry` runs through, possibly per-OS. Absent
+    /// means the entry is directly executable.
     interpreter: ?PlatformValue = null,
 };
 
-/// A script extension is frozen and run as-is (no compilation); a compiled Zig
-/// extension outputs a binary under `bin/`. The `bin/` prefix is the sole
-/// distinguisher, checked on EVERY declared variant — a per-OS entry cannot be
-/// one kind here and another kind there (`validate` refuses the mixture).
+/// The `bin/` prefix is the sole distinguisher, checked on EVERY variant — one
+/// package is one kind, and `validate` refuses the mixture.
 pub fn isScript(rt: Runtime) bool {
     for (rt.entry.variants) |v| {
         if (std.mem.startsWith(u8, v.value, "bin/")) return false;
@@ -92,15 +77,11 @@ pub fn isScript(rt: Runtime) bool {
     return true;
 }
 
-/// How an extension version is materialized — the axis that decides what
-/// belongs in its content-addressed version id:
-///   - `data`     : no runtime at all (pure skills / system prompts). Identity is
-///                  the package snapshot alone; building needs no compiler.
-///   - `script`   : a runtime entry frozen and run as-is (`src/…`). Same as data
-///                  for identity purposes: no compilation, so no compiler/target.
-///   - `compiled` : a Zig runtime built into `bin/…`. Its binary depends on the
-///                  compiler and host target, so both enter the version id.
-/// Only `compiled` requires a toolchain; `data` and `script` never touch zig.
+/// What enters the content-addressed version id:
+///   - `data`     : no runtime; identity is the snapshot alone.
+///   - `script`   : an entry frozen as-is; snapshot alone too.
+///   - `compiled` : built into `bin/…`, so the compiler and target enter the
+///                  id as well. The only kind needing a toolchain.
 pub const ImplementationKind = enum { data, script, compiled };
 
 pub fn implementationKind(m: Manifest) ImplementationKind {
@@ -108,18 +89,10 @@ pub fn implementationKind(m: Manifest) ImplementationKind {
     return if (isScript(rt)) .script else .compiled;
 }
 
-/// Where this tool belongs in a session's capability surface — given that
-/// this package IS a member of a session, does this tool reach the model,
-/// and how?
-///
-///   - `auto`     : it reaches the model as soon as the package is a member
-///                  (`--with <id>`, config `[extensions] with`, or a driver's
-///                  equivalent). THE DEFAULT.
-///   - `manual`   : membership is not enough; the member has to name this tool
-///                  (`--with <id>:<tool>`). What a package writes for a tool
-///                  that should take a native slot only when somebody says so.
-///   - `internal` : never on the model face at all; called by outside code
-///                  through `nulya ext run`. A driver's tool.
+/// Given that this package IS a session member, does this tool reach the model?
+///   - `auto`     : yes, with membership alone. THE DEFAULT.
+///   - `manual`   : only when the member names it (`--with <id>:<tool>`).
+///   - `internal` : never; called from outside through `nulya ext run`.
 pub const Surface = enum {
     auto,
     manual,
@@ -133,19 +106,14 @@ pub const Surface = enum {
     }
 };
 
-/// Where this package's system prompt block sits among the OTHER packages' —
-/// the one thing a manifest may say about system-prompt order, a closed
-/// three-word vocabulary like `surface`:
+/// Where this package's system prompt sits among the OTHER packages' — the only
+/// thing a manifest may say about prompt order. `early` / `normal` (THE
+/// DEFAULT, member order decides) / `late`, relative to the packages that said
+/// nothing.
 ///
-///   - `early`  : before the packages that said nothing.
-///   - `normal` : THE DEFAULT. Member order decides, as it always did.
-///   - `late`   : after the packages that said nothing.
-///
-/// Its scope is exactly the extension band of `PromptIR.system_blocks`: the
-/// kernel block stays first, `--prompt` inline text stays after every extension,
-/// and `skills:catalog` stays last (`composition.buildSystemPrompts`). Within one
-/// position the existing member order is untouched — this is a partition of the
-/// band, not a sort key a package can use to jump the kernel.
+/// Scope is exactly the extension band of `PromptIR.system_blocks`: the kernel
+/// block stays first, `--prompt` text after every extension, `skills:catalog`
+/// last. A partition of the band, not a sort key that can jump the kernel.
 pub const PromptPosition = enum {
     early,
     normal,
@@ -159,17 +127,13 @@ pub const PromptPosition = enum {
     }
 };
 
-/// One entry of `contributes.system_prompts`, written either as a bare path or
-/// as an object that also carries a `position` (see `PromptPosition`):
+/// A bare path, or an object also carrying a `position`; the bare form means
+/// `normal`:
 ///
 ///     "system_prompts": ["prompts/base.md", {"path": "prompts/tail.md", "position": "late"}]
-///
-/// The bare string stays legal and means `normal`.
 pub const SystemPromptSpec = struct {
     path: []const u8,
-    /// This prompt's band, kept as WRITTEN. Read through `positionOf`, which
-    /// supplies the default `normal` — every block lands somewhere whether or
-    /// not the manifest names a band.
+    /// Kept as WRITTEN; read through `positionOf`, which defaults `normal`.
     position: ?[]const u8 = null,
 
     pub fn positionOf(self: SystemPromptSpec) PromptPosition {
@@ -178,65 +142,46 @@ pub const SystemPromptSpec = struct {
     }
 };
 
-/// A tool's front-end rendering hints — the front-end tier of the manifest:
-/// an open vocabulary, never refused by `validate`, and read by nobody but
-/// whoever draws a tool's calls on a screen.
+/// An open vocabulary, never refused by `validate`, read by nobody but whoever
+/// draws a tool's calls on a screen.
 pub const ToolUi = struct {
-    /// A rendering hint for whoever draws this tool's calls — a word from an
-    /// OPEN vocabulary (`"checklist"`, `"markdown"`, more later), kept as
-    /// WRITTEN and never refused by `validate`. An unrecognized word is the
-    /// reader's decision (fall back to a plain card), not a build-time
-    /// refusal. Absent is null, not any particular word.
+    /// An OPEN vocabulary (`"checklist"`, `"markdown"`, …), kept as WRITTEN;
+    /// an unrecognized word is the reader's decision. Absent is null.
     render: ?[]const u8 = null,
-    /// The package's request that the latest call of this tool also be
-    /// projected as a persistent, foldable widget above the input — the
-    /// degraded display a front end with no plugin code can still give a
-    /// progress indicator. A declaration: absent is null, not `false`, and
-    /// the kernel does not act on it.
+    /// A request that the latest call also show as a foldable widget above the
+    /// input. A declaration: absent is null, and the kernel does not act on it.
     panel: ?bool = null,
 };
 
 pub const ToolSpec = struct {
     name: []const u8,
     description: []const u8,
-    /// Raw JSON of the tool's `input` schema. Only fed to the model when the
-    /// extension is promoted into `tools[]`; otherwise pure discoverability
-    /// metadata.
+    /// Raw JSON, fed to the model only once the tool is on its face.
     input_schema: []const u8,
-    /// Wall-clock cap for one call of THIS tool, when the host default
-    /// (`tool.Timeouts.extension_ms`, 30s) is not enough. Absent means the
-    /// default; the ceiling is `tool.Timeouts.extension_max_ms`.
+    /// Absent means the host default (`tool.Timeouts.extension_ms`); the
+    /// ceiling is `tool.Timeouts.extension_max_ms`.
     timeout_ms: ?u32 = null,
-    /// The package's claim that this tool only reads: it makes no change a
-    /// person would want to approve first. A declaration — the kernel parses
-    /// it, records it in the frozen manifest, and enforces nothing; the
-    /// consumer is a driver's own approval policy. Absent means the package
-    /// did not say, which is not the same as `false`.
+    /// The package's claim that this tool only reads: parsed and frozen,
+    /// enforced by nobody but a driver's approval policy. Absent means the
+    /// package did not say, which is not `false`.
     readonly: ?bool = null,
-    /// This tool's placement (see `Surface`), kept as WRITTEN. Read through
-    /// `surfaceOf`, which supplies the default.
+    /// Kept as WRITTEN; read through `surfaceOf` for the default.
     surface: ?[]const u8 = null,
-    /// This tool's front-end rendering hints (see `ToolUi`), or null when the
-    /// package made neither claim.
     ui: ?ToolUi = null,
 
-    /// This tool's placement, defaulting to `auto`. `validate` refuses a word
-    /// outside the three, so the unwrap is safe on any validated manifest.
+    /// `validate` refuses a word outside the three, so the unwrap is safe.
     pub fn surfaceOf(self: ToolSpec) Surface {
         if (self.surface) |s| return Surface.fromString(s).?;
         return .auto;
     }
-
 };
 
-/// A slash command this package offers whoever drives a session. Declared in
-/// the manifest — not in a sidecar the front end alone reads — so any driver,
-/// headless or not, sees the same commands a session's frozen composition
-/// actually carries.
+/// A slash command this package offers whoever drives a session. It lives in
+/// the manifest, not a front-end sidecar, so every driver sees the same
+/// commands a session's frozen composition carries.
 pub const Command = struct {
     name: []const u8,
     description: []const u8,
-    /// What typing this command does (see `Action`).
     action: Action,
 };
 
@@ -247,81 +192,56 @@ pub const Command = struct {
 ///     "action": { "run": "propose" }
 ///     "action": { "skill": "review/checklist" }
 ///
-/// The key is the verb and the value is its argument — a bare `true` when the
-/// verb takes none, a string when it does. The vocabulary is open, so an
-/// unrecognized key is the reader's decision (warn and skip), never a
-/// `validate` refusal. `validate` checks only the shape — one key, no more
-/// and no fewer (`InvalidCommandAction`) — and that a `run` command's
-/// `<tool>` names a tool this same manifest declares (`UnknownCommandTool`).
+/// The key is the verb, the value its argument — a bare `true` when the verb
+/// takes none. The vocabulary is OPEN: an unrecognized key is the reader's
+/// decision, never a refusal. `validate` checks only the shape (exactly one
+/// key) and that a `run` names a tool this same manifest declares.
 ///
-/// `with`'s string argument is the package's own default first message, sent
-/// verbatim as the opening user turn when the person typed the command bare;
-/// text typed after the command still wins over it.
+/// `with`'s string argument is the package's default first message, sent as the
+/// opening user turn when the command was typed bare; text typed after the
+/// command wins over it.
 pub const Action = struct {
-    /// The single key. Empty only when the object had no keys at all, which
-    /// `validate` refuses.
+    /// Empty only when the object had no keys at all.
     verb: []const u8,
-    /// The string under the key (`{"run": "propose"}` → `"propose"`,
-    /// `{"with": "Review…"}` → `"Review…"`). Null when the verb takes no
-    /// argument (`{"with": true}`).
+    /// Null when the verb takes no argument (`{"with": true}`).
     target: ?[]const u8 = null,
-    /// How many keys the object wrote — the one thing `validate` asks about an
-    /// action's shape (exactly one).
+    /// `validate` demands exactly one.
     keys: usize = 1,
 
-    /// The tool a `run` command names, or null for every other verb (including
-    /// a `run` with no argument at all). The only reference `validate` follows.
+    /// Null for every other verb. The only reference `validate` follows.
     pub fn runTarget(self: Action) ?[]const u8 {
         if (!std.mem.eql(u8, self.verb, "run")) return null;
         return self.target;
     }
 
-    /// The default first message a `with` command sends when typed bare
-    /// (`{"with": "…"}`), or null when the verb is not `with`, or is `with`
-    /// but wrote `true` (wear-and-wait). A caller still prefers whatever the
-    /// person typed after the command name over this — this is only the
-    /// fallback.
+    /// Null when the verb is not `with`, or wrote `true`. A caller prefers
+    /// whatever the person typed after the command; this is the fallback.
     pub fn withPrompt(self: Action) ?[]const u8 {
         if (!std.mem.eql(u8, self.verb, "with")) return null;
         return self.target;
     }
 };
 
-/// The narrowing this package asks an approval policy to apply while it is a
-/// member of a session's frozen composition. A declaration like
-/// `ToolSpec.readonly`: the kernel parses it, freezes it into the version,
-/// and enforces nothing — the consumer is a driver's own approval policy.
-///
-/// One field, and the shape can only narrow: an optional bool has no way to
-/// add an entry to an allow table, so a key like `allow` is refused nowhere
-/// special — it is just another unknown key.
+/// The narrowing this package asks an approval policy for while it is a session
+/// member: parsed, frozen into the version, enforced by nobody but a driver.
+/// One optional bool, so the shape can only NARROW — a key like `allow` needs
+/// no special refusal, it is just an unknown key.
 pub const Policy = struct {
-    /// Same three-state discipline as `ToolSpec.readonly`: absent is null,
-    /// not `false` — the package said nothing, which is not the same as
-    /// saying "not readonly".
+    /// Absent is null, not `false` — the package said nothing.
     readonly: ?bool = null,
 };
 
-/// One front end's module declaration inside `contributes.ui` — the
-/// front-end tier's own code layer. A declaration only: the kernel validates
-/// the shape (a known-charset host name, a safe relative path, a non-zero
-/// API version) and never loads or executes anything.
+/// A declaration only: the kernel validates the shape (host-name charset, safe
+/// relative path, non-zero API version) and never loads or executes anything.
 pub const UiHost = struct {
-    /// WHICH front end this module is for — the object key in
-    /// `"ui": {"tui": {…}}`. An open vocabulary: the kernel checks the
-    /// charset (`[a-z0-9-]+`, `InvalidUiHost`) and never the word. A front
-    /// end reads its own key and skips a package that has none.
+    /// The object key in `"ui": {"tui": {…}}`. An open vocabulary: the kernel
+    /// checks the charset (`[a-z0-9-]+`) and never the word.
     host: []const u8,
-    /// Package-relative path to the module that front end loads. Same
-    /// path-safety rule as `system_prompts` (`isSafeRelPath`, checked in
-    /// `validate`); a build that collects the package snapshot also checks
-    /// the file exists.
+    /// Package-relative (`isSafeRelPath`); a build also checks it exists.
     entry: []const u8,
-    /// The plugin-host API version this module was written against. A bare
-    /// number: API versions are linearly ordered and a front end's
-    /// compatibility check is "is my major version at least this"
-    /// (warn-and-skip on mismatch). Zero can never be a real version, so it
-    /// is the one value `validate` refuses (`InvalidUiApi`).
+    /// The plugin-host API version this module was written against. Linearly
+    /// ordered: a front end asks "is my major version at least this". Zero is
+    /// never a real version, so `validate` refuses it.
     api: u32,
 };
 
@@ -332,28 +252,20 @@ pub const Manifest = struct {
     runtime: ?Runtime,
     tools: []const ToolSpec,
     skills: []const []const u8,
-    /// This package's static system prompt contributions (see
-    /// `SystemPromptSpec`), in the order the manifest wrote them.
     system_prompts: []const SystemPromptSpec,
-    /// This package's slash commands (see `Command`). Absent reads as empty —
-    /// same convention as `skills` / `system_prompts`.
     commands: []const Command = &.{},
-    /// This package's approval-policy narrowing (see `Policy`), or null when
-    /// the package never wrote `contributes.policy` at all — so null and
-    /// present-but-every-field-empty (`{}`) stay different values a reader
-    /// can still tell apart. `NoContributions` reads them the same, though
-    /// (`policyContributes`): an empty `{}` narrows nothing.
+    /// Null when `contributes.policy` was never written, so null and a
+    /// present-but-empty `{}` stay distinguishable — though
+    /// `policyContributes` reads both as no contribution.
     policy: ?Policy = null,
-    /// This package's front-end modules, one per host (see `UiHost`). Absent
-    /// reads as empty — same convention as `skills` / `system_prompts`.
     ui: []const UiHost = &.{},
     pub fn deinit(self: *Manifest) void {
         self.arena.deinit();
         self.* = undefined;
     }
 
-    /// Enforce the deterministic kernel rules. Whether a tool is "good taste"
-    /// is policy, checked elsewhere — not here.
+    /// The deterministic kernel rules. Whether a tool is "good taste" is
+    /// policy, checked elsewhere.
     pub fn validate(self: Manifest) ValidateError!void {
         if (!std.mem.eql(u8, self.schema, schema_id)) return error.UnsupportedSchema;
         if (!isValidId(self.id)) return error.InvalidId;
@@ -366,12 +278,10 @@ pub const Manifest = struct {
             for (rt.entry.variants) |v| {
                 if (per_os and !isKnownOsKey(v.os)) return error.InvalidEntry;
                 if (!isSafeRelPath(v.value)) return error.InvalidEntry;
-                // A compiled entry lives under `bin/` (the build output); a
-                // script entry lives under `src/` (frozen with the source tree).
-                // In the per-OS form EVERY variant must be a script: a package
-                // compiled on one platform and a script on another would be two
-                // implementation kinds under one version id. Cross-platform
-                // compiled means cross compilation, not this field.
+                // Compiled lives under `bin/` (the build output), script under
+                // `src/` (frozen with the tree). In the per-OS form EVERY
+                // variant must be a script: two implementation kinds cannot
+                // share one version id.
                 if (per_os or isScript(rt)) {
                     if (!std.mem.startsWith(u8, v.value, "src/")) return error.InvalidEntry;
                 }
@@ -397,9 +307,8 @@ pub const Manifest = struct {
             if (t.timeout_ms) |ms| {
                 if (ms == 0 or ms > tool.Timeouts.extension_max_ms) return error.InvalidTimeout;
             }
-            // A word outside the three is refused rather than read as the
-            // default: a typo meaning `internal` would otherwise land its
-            // driver tool on the model's face.
+            // Refused rather than defaulted: a typo meaning `internal` would
+            // land a driver tool on the model's face.
             if (t.surface) |s| {
                 if (Surface.fromString(s) == null) return error.InvalidSurface;
             }
@@ -417,8 +326,8 @@ pub const Manifest = struct {
 
         for (self.system_prompts, 0..) |p, i| {
             if (!isSafeRelPath(p.path)) return error.InvalidSystemPromptPath;
-            // A closed vocabulary refused rather than read as the default: a
-            // typo would silently land the prompt in the wrong band.
+            // Refused rather than defaulted: a typo would land the prompt in
+            // the wrong band.
             if (p.position) |s| {
                 if (PromptPosition.fromString(s) == null) return error.InvalidPromptPosition;
             }
@@ -432,9 +341,8 @@ pub const Manifest = struct {
             for (self.commands[i + 1 ..]) |other| {
                 if (std.mem.eql(u8, c.name, other.name)) return error.DuplicateCommandName;
             }
-            // The two things `validate` asks of an otherwise open verb
-            // vocabulary (see `Action`): the object holds exactly one key, and
-            // a `run` command names a tool this manifest itself declares.
+            // The two things asked of an open verb vocabulary: one key, and a
+            // `run` naming a tool this manifest itself declares.
             if (c.action.keys != 1 or c.action.verb.len == 0) return error.InvalidCommandAction;
             if (c.action.runTarget()) |target| {
                 var found = false;
@@ -448,8 +356,8 @@ pub const Manifest = struct {
             }
         }
 
-        // `policy` needs no check: its one field is an optional bool, which
-        // cannot say anything a `validate` rule would have to refuse.
+        // `policy` needs no check: one optional bool cannot say anything a
+        // rule would have to refuse.
 
         for (self.ui) |u| {
             if (!isValidUiHost(u.host)) return error.InvalidUiHost;
@@ -459,11 +367,8 @@ pub const Manifest = struct {
     }
 };
 
-/// Whether a declared `policy` says anything at all — `{}` does not, and
-/// reads the same as `null` here even though the two stay distinguishable
-/// values on `Manifest.policy` itself. Used only by `NoContributions`: a
-/// policy that narrows nothing is not a reason a manifest with nothing else
-/// in it should be allowed to build.
+/// A policy that narrows nothing is no contribution, so `{}` reads as `null`
+/// here even though the two stay distinguishable on `Manifest.policy`.
 fn policyContributes(p: ?Policy) bool {
     const policy = p orelse return false;
     return policy.readonly != null;
@@ -486,38 +391,23 @@ pub const ValidateError = error{
     InvalidToolName,
     ReservedToolName,
     DuplicateToolName,
-    /// A tool's `timeout_ms` is zero or above `tool.Timeouts.extension_max_ms`.
     InvalidTimeout,
-    /// A tool's `surface` is a string, but not one of `auto` / `manual` /
-    /// `internal`.
     InvalidSurface,
     InvalidSkillPath,
     DuplicateSkillPath,
     InvalidSystemPromptPath,
     DuplicateSystemPromptPath,
-    /// A system prompt entry's `position` is a string, but not one of `early` /
-    /// `normal` / `late`.
     InvalidPromptPosition,
-    /// A command's `name` is empty or outside `[a-z0-9-]+`.
     InvalidCommandName,
     DuplicateCommandName,
-    /// A command's `action` object does not hold exactly one key (see
-    /// `Action`) — the only shape rule on an open verb vocabulary.
     InvalidCommandAction,
-    /// A command's `action` is `{"run": "<tool>"}`, but no tool this SAME
-    /// manifest declares is named `<tool>` (`Action`).
     UnknownCommandTool,
-    /// A `contributes.ui` host key is empty or outside `[a-z0-9-]+`.
     InvalidUiHost,
-    /// A `ui` entry's path escapes the package directory — `InvalidEntry` /
-    /// `InvalidSystemPromptPath`'s rule, applied to the same field.
     InvalidUiEntry,
-    /// A `ui` entry's `api` is zero, which can never be a real API version.
     InvalidUiApi,
 };
 
-/// Load `extension.json` into arena-owned memory. Structural only — call
-/// `validate` for the kernel rules.
+/// Structural only — call `validate` for the kernel rules.
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
@@ -546,12 +436,10 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     const commands = try dupCommands(a, contributes);
     const policy = try readPolicy(contributes);
     const ui = try dupUi(a, contributes);
-    // Every field must be read into a local BEFORE the result is built.
-    // `.arena = arena` copies the arena's state by value, and struct fields
-    // are evaluated in written order, so an allocation made through `a` in a
-    // LATER field would mutate the local arena after the copy already
-    // snapshotted it: if that allocation needs a fresh chunk, the chunk is
-    // not in the returned arena and nothing ever frees it.
+    // Every field is read into a local BEFORE the result is built: `.arena =
+    // arena` copies the arena by value and fields evaluate in written order, so
+    // an allocation through `a` in a LATER field lands in a chunk the returned
+    // arena does not know about, and nothing frees it.
     return .{
         .arena = arena,
         .schema = schema,
@@ -566,14 +454,13 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     };
 }
 
-/// A slash command name: `[a-z0-9-]+`. Deliberately narrower than
-/// `isValidId` (lowercase only, no `.` / `_`) — a command name is typed by a
-/// person after `/`, not carried as an opaque id.
+/// `[a-z0-9-]+` — narrower than `isValidId`, because a person types it after
+/// `/` rather than carrying it as an opaque id.
 fn isValidCommandName(s: []const u8) bool {
     return isLowerDashWord(s);
 }
 
-/// A `contributes.ui` host key: `[a-z0-9-]+`, same charset as a command name.
+/// `[a-z0-9-]+`, same charset as a command name.
 fn isValidUiHost(s: []const u8) bool {
     return isLowerDashWord(s);
 }
@@ -597,9 +484,8 @@ pub fn isValidId(s: []const u8) bool {
     return true;
 }
 
-/// An OS key in a per-OS `entry` / `interpreter` object: a `std.Target.Os.Tag`
-/// name, or `"default"`. A closed vocabulary, so a typo (`"win"`) is refused
-/// here rather than silently meaning "no entry on Windows".
+/// A `std.Target.Os.Tag` name or `"default"`. A closed vocabulary, so a typo
+/// (`"win"`) is refused rather than silently meaning "no entry on Windows".
 fn isKnownOsKey(key: []const u8) bool {
     if (std.mem.eql(u8, key, PlatformValue.default_key)) return true;
     return std.meta.stringToEnum(std.Target.Os.Tag, key) != null;
@@ -632,9 +518,8 @@ fn dupRuntime(a: std.mem.Allocator, obj: std.json.ObjectMap) ParseError!?Runtime
     };
 }
 
-/// A runtime string written either bare or keyed by OS (`PlatformValue`).
-/// Anything that is neither a string nor an object is a `WrongType` — a
-/// mistyped entry must not read as "absent".
+/// Neither a string nor an object is a `WrongType`: a mistyped entry must not
+/// read as "absent".
 fn dupPlatformValue(a: std.mem.Allocator, value: std.json.Value) ParseError!PlatformValue {
     switch (value) {
         .string => |s| {
@@ -685,8 +570,7 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
     return tools;
 }
 
-/// `contributes.system_prompts` (see `SystemPromptSpec`): each entry is a bare
-/// path or an object carrying `path` plus an optional `position`. Anything
+/// A bare path, or an object with `path` plus optional `position`; anything
 /// else is a `WrongType`.
 fn dupSystemPrompts(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]const SystemPromptSpec {
     const list = switch (contributes.get("system_prompts") orelse return a.alloc(SystemPromptSpec, 0)) {
@@ -707,7 +591,6 @@ fn dupSystemPrompts(a: std.mem.Allocator, contributes: std.json.ObjectMap) Parse
     return out;
 }
 
-/// A tool's `ui` block (see `ToolUi`), or null when the tool wrote none.
 fn dupToolUi(a: std.mem.Allocator, to: std.json.ObjectMap) ParseError!?ToolUi {
     const value = to.get("ui") orelse return null;
     const ui_obj = switch (value) {
@@ -740,10 +623,9 @@ fn dupCommands(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError
     return commands;
 }
 
-/// A command's `action` (see `Action`): one key, whose value is a bare `true`
-/// (the verb takes no argument) or a string (it does). Anything else under the
-/// key is a `WrongType`. The count of keys is not checked here: `validate`
-/// owns that, so a caller that only parses still gets the object it was given.
+/// One key whose value is a bare `true` or a string; anything else under it is
+/// a `WrongType`. The key COUNT is `validate`'s to check, so a parse-only
+/// caller still gets the object it was given.
 fn dupAction(a: std.mem.Allocator, value: std.json.Value) ParseError!Action {
     switch (value) {
         .object => |o| {
@@ -764,8 +646,7 @@ fn dupAction(a: std.mem.Allocator, value: std.json.Value) ParseError!Action {
     }
 }
 
-/// `contributes.policy` — one optional bool, so there is nothing to duplicate
-/// into the arena and no allocator to take.
+/// One optional bool: nothing to duplicate, so no allocator.
 fn readPolicy(contributes: std.json.ObjectMap) ParseError!?Policy {
     const value = contributes.get("policy") orelse return null;
     const policy_obj = switch (value) {
@@ -775,9 +656,9 @@ fn readPolicy(contributes: std.json.ObjectMap) ParseError!?Policy {
     return .{ .readonly = try optionalBool(policy_obj, "readonly") };
 }
 
-/// `contributes.ui`, keyed by host (see `UiHost`). A flat `{"entry": …, "api":
-/// …}` reads as a host named `entry` whose value is a string, so `WrongType`
-/// — the schema does not name one concrete front end.
+/// Keyed by host. A flat `{"entry": …, "api": …}` reads as a host named
+/// `entry` whose value is a string, hence `WrongType` — the schema names no
+/// concrete front end.
 fn dupUi(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]const UiHost {
     const value = contributes.get("ui") orelse return a.alloc(UiHost, 0);
     const ui_obj = switch (value) {
@@ -801,12 +682,8 @@ fn dupUi(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]con
     return hosts;
 }
 
-/// Read an optional non-negative integer field. A value that is not an integer,
-/// or does not fit, is a WrongType — never a silently dropped field, because
-/// Read an optional non-negative integer field. Absent stays absent; a value
-/// that is not an integer, or does not fit, is a `WrongType` rather than a
-/// silently ignored key — the same strictness `optionalBool` / `optionalString`
-/// below apply.
+/// A value that is not an integer, or does not fit, is a `WrongType` rather
+/// than a silently ignored key — as in `optionalBool` / `optionalString`.
 fn optionalU32(obj: std.json.ObjectMap, key: []const u8) ParseError!?u32 {
     return switch (obj.get(key) orelse return null) {
         .integer => |n| std.math.cast(u32, n) orelse error.WrongType,
@@ -814,7 +691,6 @@ fn optionalU32(obj: std.json.ObjectMap, key: []const u8) ParseError!?u32 {
     };
 }
 
-/// `optionalU32`, but missing is a `MissingField`.
 fn requiredU32(obj: std.json.ObjectMap, key: []const u8) ParseError!u32 {
     return switch (obj.get(key) orelse return error.MissingField) {
         .integer => |n| std.math.cast(u32, n) orelse error.WrongType,
@@ -945,9 +821,6 @@ test "rejects an empty interpreter" {
 
 test "keys the schema has retired — activation, permissions, runtime.wire — are ordinary unknown keys" {
     const alloc = std.testing.allocator;
-    // Each of the three was once parsed, frozen and read by something. Nothing
-    // reads them now, and nothing about a package carrying one changes: they
-    // are unknown keys, exactly like a key nobody has ever defined.
     var m = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","activation":"on_request","permissions":{"fs":"rw"},
         \\ "runtime":{"entry":"src/run.sh","interpreter":"sh","wire":"jsonrpc"},
@@ -966,7 +839,6 @@ test "entry and interpreter may be written per OS; the host picks, then `default
     defer m.deinit();
     try m.validate();
     const rt = m.runtime.?;
-    // Every variant is a script, so the package is one implementation kind.
     try std.testing.expect(isScript(rt));
     try std.testing.expectEqual(ImplementationKind.script, implementationKind(m));
     try std.testing.expectEqualStrings("src/run.ps1", rt.entry.forOs("windows").?);
@@ -974,9 +846,8 @@ test "entry and interpreter may be written per OS; the host picks, then `default
     try std.testing.expectEqualStrings("powershell", rt.interpreter.?.forOs("windows").?);
     try std.testing.expectEqualStrings("sh", rt.interpreter.?.forOs("macos").?);
 
-    // No `default`: a host outside the list simply has no entry here. That is a
-    // nameable state, not a broken package — the version stays buildable and
-    // installable, and only running it on that host fails.
+    // No `default`: a host outside the list has no entry, a nameable state —
+    // the version still builds and installs, only running there fails.
     var narrow = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"linux":"src/run.sh"},"interpreter":{"linux":"sh"}},"contributes":{"tools":[{"name":"t","input":{}}]}}
     );
@@ -985,7 +856,6 @@ test "entry and interpreter may be written per OS; the host picks, then `default
     try std.testing.expectEqualStrings("src/run.sh", narrow.runtime.?.entry.forOs("linux").?);
     try std.testing.expect(narrow.runtime.?.entry.forOs("windows") == null);
 
-    // A bare string still answers for every host — the shape most manifests use.
     var bare = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh"},"contributes":{"tools":[{"name":"t","input":{}}]}}
     );
@@ -1012,8 +882,8 @@ test "the per-OS entry form is scripts only, and its keys must be OS names" {
     defer all_compiled.deinit();
     try std.testing.expectError(error.InvalidEntry, all_compiled.validate());
 
-    // A typo'd OS key would otherwise mean "no entry on Windows", and say so a
-    // session later. Refused where the file is read instead.
+    // A typo'd OS key would otherwise mean "no entry on Windows", a session
+    // later. Refused where the file is read instead.
     var typo = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"win":"src/run.ps1"}},"contributes":{"tools":[{"name":"t","input":{}}]}}
     );
@@ -1026,14 +896,12 @@ test "the per-OS entry form is scripts only, and its keys must be OS names" {
     defer typo_interp.deinit();
     try std.testing.expectError(error.InvalidInterpreter, typo_interp.validate());
 
-    // An empty object declares nothing at all.
     var empty = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{}},"contributes":{"tools":[{"name":"t","input":{}}]}}
     );
     defer empty.deinit();
     try std.testing.expectError(error.InvalidEntry, empty.validate());
 
-    // A non-string variant is a parse error, like every other mistyped field.
     try std.testing.expectError(error.WrongType, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"windows":42}},"contributes":{"tools":[{"name":"t","input":{}}]}}
     ));
@@ -1089,8 +957,7 @@ test "rejects the one reserved tool name, and only that one" {
     defer m.deinit();
     try std.testing.expectError(error.ReservedToolName, m.validate());
 
-    // `edit` is an extension tool now (the bundled `std` package declares it),
-    // so the manifest layer must let a package claim that name.
+    // `edit` is an extension tool, so a package may claim that name.
     const editing =
         \\{"schema":"nulya.extension/v2","id":"b","runtime":{"entry":"bin/b"},"contributes":{"tools":[{"name":"edit","input":{}}]}}
     ;
@@ -1118,7 +985,6 @@ test "a tool may declare its own timeout, within the host ceiling" {
     try ok.validate();
     try std.testing.expectEqual(@as(?u32, 60000), ok.tools[0].timeout_ms);
 
-    // Absent means the host default; the field is optional and nothing else changes.
     var plain = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{}}]}}
     );
@@ -1140,7 +1006,6 @@ test "a tool may declare its own timeout, within the host ceiling" {
     try std.testing.expectError(error.InvalidTimeout, huge.validate());
     try std.testing.expectEqual(@as(u32, 600_000), tool.Timeouts.extension_max_ms);
 
-    // A mistyped timeout is a parse error, not a silently defaulted one.
     try std.testing.expectError(error.WrongType, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"timeout_ms":"60s"}]}}
     ));
@@ -1152,14 +1017,9 @@ test "a tool may declare itself readonly; the kernel records the claim and enfor
         \\{"schema":"nulya.extension/v2","id":"r","runtime":{"entry":"bin/r"},"contributes":{"tools":[{"name":"look","input":{},"readonly":true},{"name":"touch","input":{},"readonly":false},{"name":"quiet","input":{}}]}}
     );
     defer m.deinit();
-    // Nothing in `validate` looks at it: the claim is for a driver's approval
-    // policy to read, and a package that lies about it is exactly as dangerous
-    // as one that lies about anything else it declares.
     try m.validate();
     try std.testing.expectEqual(@as(?bool, true), m.tools[0].readonly);
     try std.testing.expectEqual(@as(?bool, false), m.tools[1].readonly);
-    // Absent is NOT false: the package said nothing, and a reader that turns
-    // silence into a claim would be inventing the one thing this field is for.
     try std.testing.expect(m.tools[2].readonly == null);
 
     try std.testing.expectError(error.WrongType, parse(alloc,
@@ -1177,12 +1037,9 @@ test "a tool's surface is auto, manual or internal; silence means auto and an un
     try std.testing.expectEqual(Surface.auto, m.tools[0].surfaceOf());
     try std.testing.expectEqual(Surface.manual, m.tools[1].surfaceOf());
     try std.testing.expectEqual(Surface.internal, m.tools[2].surfaceOf());
-    // Silence is the DEFAULT, not "did not say": a scaffolded tool reaches the
-    // model as soon as its package is composed in, with nothing else to write.
     try std.testing.expect(m.tools[3].surface == null);
     try std.testing.expectEqual(Surface.auto, m.tools[3].surfaceOf());
 
-    // A word outside the three is a named refusal, not a default.
     for ([_][]const u8{ "public", "pin", "with", "driver" }) |word| {
         const src = try std.fmt.allocPrint(alloc,
             \\{{"schema":"nulya.extension/v2","id":"a","runtime":{{"entry":"bin/a"}},"contributes":{{"tools":[{{"name":"t","input":{{}},"surface":"{s}"}}]}}}}
@@ -1193,19 +1050,14 @@ test "a tool's surface is auto, manual or internal; silence means auto and an un
         try std.testing.expectError(error.InvalidSurface, typo.validate());
     }
 
-    // And a wrong TYPE is a parse error, the same split `timeout_ms` makes.
     try std.testing.expectError(error.WrongType, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"surface":true}]}}
     ));
 }
 
-// A parsed manifest owns ONE arena and `deinit` is the whole story, so nothing
-// `parse` allocates may escape it. A field read inside the result's initializer
-// — after `.arena = arena` has already copied the arena by value — allocates
-// into a chunk the returned arena does not know about, and only when it needs a
-// NEW chunk, so whether a package leaks depends on how much the fields before it
-// happened to allocate. Hence the sweep rather than one manifest: the sizes are
-// here to cross a chunk boundary somewhere, not because any one matters.
+// A parsed manifest owns ONE arena, so nothing may escape it. A leak only
+// shows when an allocation needs a NEW chunk, so the sweep exists to cross a
+// chunk boundary somewhere — no single size matters.
 test "parse allocates nothing outside the arena it returns, at any size" {
     const alloc = std.testing.allocator;
     var len: usize = 1;
@@ -1291,11 +1143,9 @@ test "a system prompt entry is a bare path or an object with a position; silence
     try std.testing.expectEqual(PromptPosition.normal, m.system_prompts[0].positionOf());
     try std.testing.expectEqual(PromptPosition.early, m.system_prompts[1].positionOf());
     try std.testing.expectEqual(PromptPosition.late, m.system_prompts[2].positionOf());
-    // The object form without the key is silent, exactly like the bare string.
     try std.testing.expect(m.system_prompts[3].position == null);
     try std.testing.expectEqual(PromptPosition.normal, m.system_prompts[3].positionOf());
 
-    // A word outside the three is a refusal, not a silent `normal`.
     const typo =
         \\{"schema":"nulya.extension/v2","id":"p","contributes":{"system_prompts":[{"path":"a.md","position":"latte"}]}}
     ;
@@ -1303,7 +1153,6 @@ test "a system prompt entry is a bare path or an object with a position; silence
     defer t.deinit();
     try std.testing.expectError(error.InvalidPromptPosition, t.validate());
 
-    // The path rules still apply through the object form.
     const escape =
         \\{"schema":"nulya.extension/v2","id":"p","contributes":{"system_prompts":[{"path":"../evil.md","position":"late"}]}}
     ;
@@ -1311,7 +1160,6 @@ test "a system prompt entry is a bare path or an object with a position; silence
     defer e.deinit();
     try std.testing.expectError(error.InvalidSystemPromptPath, e.validate());
 
-    // Duplicates are duplicates whichever form each was written in.
     const dup =
         \\{"schema":"nulya.extension/v2","id":"p","contributes":{"system_prompts":["a.md",{"path":"a.md","position":"late"}]}}
     ;
@@ -1319,14 +1167,11 @@ test "a system prompt entry is a bare path or an object with a position; silence
     defer d.deinit();
     try std.testing.expectError(error.DuplicateSystemPromptPath, d.validate());
 
-    // A mistyped entry is a WrongType, never "absent".
     const wrong =
         \\{"schema":"nulya.extension/v2","id":"p","contributes":{"system_prompts":[42]}}
     ;
     try std.testing.expectError(error.WrongType, parse(alloc, wrong));
 }
-
-// --- tui-plugin U1: `commands` / `policy` / a tool's `ui` / the package `ui` -----
 
 test "round-trips commands, policy and ui, and a tool's ui hints" {
     const alloc = std.testing.allocator;
@@ -1355,14 +1200,11 @@ test "round-trips commands, policy and ui, and a tool's ui hints" {
 
     try std.testing.expectEqualStrings("checklist", m.tools[0].ui.?.render.?);
     try std.testing.expectEqual(@as(?bool, true), m.tools[0].ui.?.panel);
-    // Absent is null, not any particular word — same as `readonly`.
     try std.testing.expect(m.tools[1].ui == null);
 
     try std.testing.expectEqual(@as(usize, 2), m.commands.len);
     try std.testing.expectEqualStrings("plan", m.commands[0].name);
     try std.testing.expectEqualStrings("with", m.commands[0].action.verb);
-    // A verb that takes no argument carries none: `true` is the key's presence
-    // said out loud, not a value a reader has to interpret.
     try std.testing.expect(m.commands[0].action.target == null);
     try std.testing.expectEqualStrings("review", m.commands[1].name);
     try std.testing.expectEqualStrings("run", m.commands[1].action.verb);
@@ -1385,16 +1227,13 @@ test "an action is one key: zero or two is a shape error, and its value is `true
     defer empty.deinit();
     try std.testing.expectError(error.InvalidCommandAction, empty.validate());
 
-    // Two verbs is not "both": nothing could decide which one typing the
-    // command does, so the file is wrong rather than the reader guessing.
+    // Two verbs is not "both": nothing could decide which one runs.
     var two = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"x","description":"","action":{"with":true,"skill":"s"}}]}}
     );
     defer two.deinit();
     try std.testing.expectError(error.InvalidCommandAction, two.validate());
 
-    // A verb the kernel has never heard of is fine — the vocabulary is open,
-    // and skipping it is the reader's move.
     var unknown = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"x","description":"","action":{"review":"changes"}}]}}
     );
@@ -1403,8 +1242,6 @@ test "an action is one key: zero or two is a shape error, and its value is `true
     try std.testing.expectEqualStrings("review", unknown.commands[0].action.verb);
     try std.testing.expectEqualStrings("changes", unknown.commands[0].action.target.?);
 
-    // Anything but `true` or a string under the key is a parse error, not a
-    // verb that quietly lost its argument.
     for ([_][]const u8{
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"x","description":"","action":{"run":42}}]}}
         ,
@@ -1412,16 +1249,12 @@ test "an action is one key: zero or two is a shape error, and its value is `true
         ,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"x","description":"","action":["with"]}]}}
         ,
-        // The string mini-language (`"run propose"`) is gone with the rest of
-        // the folded shapes: a reader that had to split on a space to find out
-        // what it was holding is one shape too many.
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"x","description":"","action":"run propose"}]}}
         ,
     }) |src| {
         try std.testing.expectError(error.WrongType, parse(alloc, src));
     }
 
-    // And an action is required the moment a command is written at all.
     try std.testing.expectError(error.MissingField, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"x","description":""}]}}
     ));
@@ -1441,9 +1274,7 @@ test "`with`'s value may be a string — the default first message a bare comman
     try std.testing.expectEqualStrings("with", m.commands[0].action.verb);
     try std.testing.expectEqualStrings("Review the recent sessions.", m.commands[0].action.withPrompt().?);
 
-    // `true` still means "wear and wait" — no default to fall back on.
     try std.testing.expect(m.commands[1].action.withPrompt() == null);
-    // `withPrompt` only answers for the `with` verb, same discipline as `runTarget`.
     try std.testing.expect(m.commands[1].action.runTarget() == null);
 }
 
@@ -1472,7 +1303,6 @@ test "a command name is [a-z0-9-]+ and may not repeat within a package" {
 test "a `run` command must name a tool this same manifest declares; other verbs are the reader's word" {
     const alloc = std.testing.allocator;
 
-    // The open vocabulary: `validate` never refuses a verb it does not know.
     var with_action = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"plan","description":"","action":{"with":true}}]}}
     );
@@ -1502,26 +1332,21 @@ test "a `run` command must name a tool this same manifest declares; other verbs 
 test "policy is one optional bool, so nothing it can say has to be refused" {
     const alloc = std.testing.allocator;
 
-    // A package cannot place authority INTO an approval table, and with one
-    // narrow-only field left that rule is carried by the SHAPE: `allow` is
-    // simply an unknown key, and a policy that says nothing this build reads
-    // contributes nothing.
+    // With one narrow-only field the "no widening" rule is carried by the
+    // SHAPE: `allow` is just an unknown key.
     var allow = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"policy":{"allow":["shell"]}}}
     );
     defer allow.deinit();
     try std.testing.expectError(error.NoContributions, allow.validate());
 
-    // A `{}` is present but says nothing, and reads the same as never having
-    // written `contributes.policy` at all for `NoContributions`'s purposes.
     var alone = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"policy":{}}}
     );
     defer alone.deinit();
     try std.testing.expectError(error.NoContributions, alone.validate());
 
-    // Beside another contribution, the parsed VALUE is still there to read —
-    // present but empty, a different fact than never having written the key.
+    // Present but empty is a different fact than never having written the key.
     var declared_empty = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"x","description":"","action":{"with":true}}],"policy":{}}}
     );
@@ -1530,7 +1355,6 @@ test "policy is one optional bool, so nothing it can say has to be refused" {
     try std.testing.expect(declared_empty.policy != null);
     try std.testing.expect(declared_empty.policy.?.readonly == null);
 
-    // A mistyped `readonly` is a parse error, like every other bool field.
     try std.testing.expectError(error.WrongType, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"policy":{"readonly":"yes"}}}
     ));
@@ -1549,8 +1373,7 @@ test "contributes.ui is keyed by host; each entry needs a safe path and a real a
     try std.testing.expectEqualStrings("web", many.ui[1].host);
     try std.testing.expectEqual(@as(u32, 2), many.ui[1].api);
 
-    // The host key's charset is checked; the WORD never is — the kernel's
-    // schema must not name one front end.
+    // The charset is checked, the WORD never — no schema names a front end.
     var bad_host = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"ui":{"TUI":{"entry":"tui/panel.ts","api":1}}}}
     );
@@ -1569,13 +1392,10 @@ test "contributes.ui is keyed by host; each entry needs a safe path and a real a
     defer zero.deinit();
     try std.testing.expectError(error.InvalidUiApi, zero.validate());
 
-    // `api` is required the moment a host entry is written at all.
     try std.testing.expectError(error.MissingField, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"ui":{"tui":{"entry":"tui/panel.ts"}}}}
     ));
 
-    // An empty object declares no front-end module, which alone is no
-    // contribution at all.
     var none = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"ui":{}}}
     );
@@ -1584,11 +1404,8 @@ test "contributes.ui is keyed by host; each entry needs a safe path and a real a
 }
 
 test "the pre-host flat ui block is not a second shape: it reads as a host whose entry is a string" {
-    // `{"entry": …, "api": …}` was the spelling before a second front end was
-    // conceivable. There is one shape now, so the flat form is simply a host
-    // named `entry` whose value is not an object — a `WrongType`, like any
-    // other mistyped field. Nothing folds it, because the kernel's schema must
-    // not name one concrete front end (`UiHost`).
+    // The flat form is a host named `entry` whose value is not an object — a
+    // `WrongType`. Nothing folds it into the keyed shape.
     try std.testing.expectError(error.WrongType, parse(std.testing.allocator,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"ui":{"entry":"tui/panel.ts","api":1}}}
     ));
@@ -1603,8 +1420,6 @@ test "a command, a policy with content, or a ui block each alone counts as a con
     defer cmd.deinit();
     try cmd.validate();
 
-    // `readonly: true` is content; an empty `{}` would not be (see the
-    // "policy is one optional bool" test above).
     var pol = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"policy":{"readonly":true}}}
     );
@@ -1625,7 +1440,6 @@ test "a command, a policy with content, or a ui block each alone counts as a con
 }
 
 test "commands, policy and ui default to absent, and a manifest predating them still validates" {
-    // `valid_manifest` (top of file) has none of these three.
     var m = try parse(std.testing.allocator, valid_manifest);
     defer m.deinit();
     try m.validate();

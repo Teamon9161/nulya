@@ -1,22 +1,17 @@
 //! Scaffolding templates for `nulya ext init`.
 //!
-//! Two scaffolds, one wire: the model's arguments arrive on stdin as one JSON
-//! object, and whatever the process prints to stdout IS the result the model
-//! sees, no envelope, no id to echo.
+//! Two scaffolds, one wire — the model's arguments arrive on stdin as one JSON
+//! object and stdout IS the result:
 //!
-//!   default   a script extension — `src/run.sh` and `src/run.ps1`, three
-//!             lines each, selected per host by the manifest's per-OS `entry`
-//!             / `interpreter`. No compiler, no JSON parser needed at all.
-//!   `--zig`   a compiled Zig extension. The wire is the same one: how a
-//!             process is talked to is not a property of what kind of
-//!             process it is.
+//!   default   a script extension — `src/run.sh` and `src/run.ps1`, selected
+//!             per host by the manifest's per-OS `entry` / `interpreter`.
+//!   `--zig`   a compiled Zig extension, same wire.
 //!
-//! Both are real, buildable, runnable extensions the moment they are written.
+//! Both are buildable, runnable extensions the moment they are written.
 
 const std = @import("std");
 
-/// A minimal but complete extension entry point. Single-file so `zig build-exe
-/// src/main.zig` compiles it with no build.zig.
+/// Single-file, so `zig build-exe src/main.zig` compiles it with no build.zig.
 pub const main_zig =
     \\//! A generated Nulya extension (oneshot).
     \\//! stdin is this call's arguments as one JSON object (`{}` when there are
@@ -63,9 +58,8 @@ pub const main_zig =
     \\
 ;
 
-/// A real acceptance case: input the model/user can inspect, and the expected
-/// shape of a successful response — `request` is the arguments object,
-/// `expect.stdout` is the exact text the model would read back.
+/// An acceptance case: `request` is the arguments object, `expect.stdout` the
+/// exact text the model would read back.
 pub const example_test_json =
     \\{
     \\  "request": { "arguments": { "name": "world" } },
@@ -74,9 +68,7 @@ pub const example_test_json =
     \\
 ;
 
-/// The generated PowerShell entry: read one argument out of the environment,
-/// print one line. Frozen and run as-is — no compilation. Caller owns the
-/// returned bytes.
+/// The generated PowerShell entry, frozen and run as-is. Caller owns the bytes.
 ///
 /// `[Console]::Out.Write` rather than `Write-Output`: stdout IS the result the
 /// model sees, so the script decides its own trailing newline instead of a
@@ -100,9 +92,8 @@ pub fn scriptSh(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
     , .{id});
 }
 
-/// Render `extension.json` for a script extension: one entry and one
-/// interpreter per OS, so a single content-addressed version runs on every
-/// platform. Caller owns the returned bytes.
+/// One entry and one interpreter per OS, so a single content-addressed version
+/// runs on every platform. Caller owns the returned bytes.
 pub fn scriptManifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc,
         \\{{
@@ -124,9 +115,8 @@ pub fn scriptManifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []cons
     , .{ id, tool });
 }
 
-/// Render `extension.json` for a compiled `--zig` extension: the same shape as
-/// the script scaffold — a compiled runtime is a different `entry` prefix, not
-/// a different way of talking. Caller owns the returned bytes.
+/// The same shape as the script scaffold: a compiled runtime is a different
+/// `entry` prefix, not a different wire. Caller owns the returned bytes.
 pub fn manifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc,
         \\{{

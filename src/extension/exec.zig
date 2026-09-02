@@ -1,57 +1,46 @@
 //! Turning `(id, version)` into something to spawn, on the machine that holds
 //! the bytes.
 //!
-//! An `ExtensionRequest` names a frozen version and a tool, never a path.
-//! Which file to run is an answer only the executing machine can give: the
-//! entry variant is picked per OS, integrity has to be checked where the
-//! bytes are (or a host would verify its own copy and run someone else's),
-//! and the store is a directory on that machine. So both execution sides
-//! share this one resolver: the local backend and the remote agent.
+//! An `ExtensionRequest` names a frozen version and a tool, never a path. Only
+//! the executing machine can answer which file to run: the entry variant is per
+//! OS, integrity must be checked where the bytes are (or a host would verify
+//! its own copy and run someone else's), and the store is a directory on that
+//! machine. Both execution sides share this resolver.
 //!
 //! `.sealed` is paid once per (id, version) per resolver, not per call: a
-//! resolver lives as long as the process that owns it (one `session step`,
-//! one served channel), so "this process verified this version before it
-//! ran it" is exactly the guarantee needed.
+//! resolver lives as long as its process, so "this process verified this
+//! version before running it" holds.
 
 const std = @import("std");
 const manifest = @import("manifest.zig");
 const site_mod = @import("site.zig");
 const store = @import("store.zig");
 
-/// Is this a failure to resolve the version on this machine, rather than a
-/// fault of the host trying to run it?
-///
-/// A package this machine does not hold, holds broken, or declares no entry
-/// variant for, is the caller's business — something to be told about and
-/// possibly fixed (`nulya ext build`, `nulya ext push`) — while an
-/// out-of-memory or a cancellation is the step's. So the first kind becomes
-/// an ordinary failed call and the second propagates, on both sides of the
-/// seam: the remote agent answers such a version with a refusal that the
-/// host turns into exactly the same failed call.
+/// A failure to resolve the version HERE, rather than a fault of the host
+/// trying to run it: a package this machine does not hold, holds broken, or
+/// declares no entry variant for. That kind becomes an ordinary failed call;
+/// out-of-memory and cancellation propagate, on both sides of the seam.
 pub fn isUnrunnableHere(err: anyerror) bool {
     return store.isExtensionFault(err) or
         err == error.EntryUnsupportedOnHost or
         err == error.MissingRuntime;
 }
 
-/// What to spawn. Both strings are owned by the resolver and stay valid for its
-/// lifetime — a caller only needs them for the duration of one spawn.
+/// Both strings are owned by the resolver and valid for its lifetime.
 pub const Entry = struct {
     /// Absolute path of the frozen entry ON THIS MACHINE.
     path: []const u8,
-    /// The interpreter a script entry runs through (argv[0], the entry argv[1]);
-    /// null for a compiled entry, which runs directly.
+    /// argv[0], with the entry as argv[1]; null for a compiled entry.
     interpreter: ?[]const u8,
 };
 
 pub const Resolver = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
-    /// This machine's one store, owned; empty when it has none. Opened lazily,
-    /// so a process that never runs an extension never opens a directory.
+    /// Owned; empty when this machine has no store. Opened lazily, so a process
+    /// that never runs an extension never opens a directory.
     store_path: []const u8,
-    /// Where the resolver says what an error cannot carry (which package has no
-    /// entry for this OS). Reports nothing by default.
+    /// Where the resolver says what an error cannot carry; silent by default.
     diag: site_mod.Diag = .{},
     site: ?site_mod.Site = null,
     memo: std.ArrayList(Memo) = .empty,
@@ -63,9 +52,8 @@ pub const Resolver = struct {
         interpreter: ?[]const u8,
     };
 
-    /// Take a copy of the store path. Nothing is opened and nothing can fail
-    /// about the store here — an environment must be constructible on a machine
-    /// with no extensions at all.
+    /// Nothing is opened here: an environment must be constructible on a
+    /// machine with no extensions at all.
     pub fn init(alloc: std.mem.Allocator, io: std.Io, store_path: []const u8, diag: site_mod.Diag) !Resolver {
         return .{ .alloc = alloc, .io = io, .store_path = try alloc.dupe(u8, store_path), .diag = diag };
     }
@@ -83,8 +71,7 @@ pub const Resolver = struct {
         self.* = undefined;
     }
 
-    /// Where to find `<id>@<version>` on this machine, having verified it
-    /// against its own seal at least once in this process.
+    /// Verified against its own seal at least once in this process.
     pub fn resolve(self: *Resolver, id: []const u8, version: []const u8) !Entry {
         for (self.memo.items) |m| {
             if (std.mem.eql(u8, m.id, id) and std.mem.eql(u8, m.version, version)) {
@@ -119,9 +106,7 @@ pub const Resolver = struct {
         return .{ .path = path, .interpreter = interpreter };
     }
 
-    /// The store, opened once and kept for the resolver's life — one `session
-    /// step` or one served channel, which is exactly the span `.sealed` is paid
-    /// over.
+    /// Opened once and kept for the resolver's life.
     fn openSite(self: *Resolver) !*const site_mod.Site {
         if (self.site) |*s| return s;
         self.site = try site_mod.Site.openStore(self.alloc, self.io, self.store_path, self.diag);
@@ -157,18 +142,16 @@ test "a version is resolved to an entry on this machine, and verified once" {
 
     const first = try resolver.resolve("scripted", version);
     try testing.expect(std.fs.path.isAbsolute(first.path));
-    // A script's entry lives inside `package/`, and its interpreter comes off
-    // the frozen manifest — both decided here, by the machine that will spawn it.
+    // Both decided by the machine that will spawn it.
     try testing.expect(std.mem.indexOf(u8, first.path, "run.sh") != null);
     try testing.expectEqualStrings("sh", first.interpreter.?);
 
-    // The second call is the memo: the same strings, and no second digest. That
-    // is what keeps `.sealed` a per-process price rather than a per-call one.
+    // The memo: the same strings and no second digest, which keeps `.sealed` a
+    // per-process price rather than a per-call one.
     const second = try resolver.resolve("scripted", version);
     try testing.expectEqual(first.path.ptr, second.path.ptr);
     try testing.expectEqual(@as(usize, 1), resolver.memo.items.len);
 
-    // A version this machine does not hold is a refusal, not a guess.
     try testing.expectError(
         error.VersionNotFound,
         resolver.resolve("scripted", "v-000000000000000000000000"),

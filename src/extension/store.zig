@@ -1,9 +1,8 @@
 //! Extension version store — immutable versions + one atomic `activate`.
 //!
-//! Every build produces an immutable version, id
-//! `hash(package_snapshot + compiler + target)`; versions accumulate side by
-//! side and a `current` pointer selects the active one via atomic rename, so
-//! going back is just `activate` pointed at an older version.
+//! A version id is `hash(package_snapshot + compiler + target)`; versions
+//! accumulate side by side and `current` selects one by atomic rename, so
+//! going back is `activate` pointed at an older version.
 //!
 //! Layout under the store (`<NULYA_HOME | ~/.nulya>/store`):
 //!   <id>/versions/v-<hash>/{extension.json, package/{src,skills}/..., bin/<entry>}
@@ -20,10 +19,8 @@ const integrity = @import("integrity.zig");
 const testkit = @import("testkit.zig");
 
 pub const version_prefix = integrity.version_prefix;
-/// How hard a caller wants a frozen version checked (`integrity.Level`). Every
-/// read below takes one EXPLICITLY: a read-only projection asking for
-/// `.structural` and a session freeze asking for `.sealed` are different
-/// questions, and a default would silently answer one with the other.
+/// Every read below takes one EXPLICITLY: `.structural` and `.sealed` are
+/// different questions, and a default would answer one with the other.
 pub const Level = integrity.Level;
 const current_file = "current";
 const versions_dir = "versions";
@@ -38,8 +35,7 @@ pub const Store = struct {
         return .{ .io = io, .root = root };
     }
 
-    /// Inputs that make a build reproducible; identical inputs -> identical
-    /// version id.
+    /// Identical inputs -> identical version id.
     pub const VersionInputs = struct {
         snapshot: []const u8,
         compiler: []const u8,
@@ -73,8 +69,7 @@ pub const Store = struct {
         return std.fs.path.join(alloc, &.{ id, versions_dir, version, "extension.json" });
     }
 
-    /// Root-relative path of a COMPILED version's built entry binary (`bin/<name>`
-    /// plus the platform exe suffix). Caller owns the result.
+    /// A COMPILED version's built entry (`bin/…` plus the exe suffix). Owned.
     pub fn versionEntryPath(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, entry: []const u8) ![]u8 {
         _ = self;
         try validateIdentity(id, version);
@@ -83,21 +78,19 @@ pub const Store = struct {
         return std.fs.path.join(alloc, &.{ id, versions_dir, version, entry_rel });
     }
 
-    /// Root-relative path of a SCRIPT version's frozen entry (inside `package/`,
-    /// no exe suffix). Caller owns the result.
+    /// A SCRIPT version's frozen entry, inside `package/` and with no exe
+    /// suffix. Caller owns the result.
     pub fn versionScriptEntryPath(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, entry: []const u8) ![]u8 {
         _ = self;
         try validateIdentity(id, version);
         return std.fs.path.join(alloc, &.{ id, versions_dir, version, integrity.package_dir, entry });
     }
 
-    /// Root-relative path of the version's entry, dispatching on runtime kind.
-    /// Caller owns the result.
+    /// The version's entry, dispatching on runtime kind. Caller owns it.
     ///
     /// `error.EntryUnsupportedOnHost` when the frozen manifest declares entries
-    /// per OS and names none for this one — a real state of a perfectly valid
-    /// version (the package simply does not run here), so its own error rather
-    /// than an integrity fault.
+    /// per OS and names none for this one — a valid version that simply does
+    /// not run here, so its own error rather than an integrity fault.
     pub fn versionRuntimeEntryPath(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, rt: manifest.Runtime) ![]u8 {
         const entry = rt.entry.forHost() orelse return error.EntryUnsupportedOnHost;
         if (manifest.isScript(rt)) return self.versionScriptEntryPath(alloc, id, version, entry);
@@ -109,24 +102,22 @@ pub const Store = struct {
         return true;
     }
 
-    /// This store's writer lease on `<id>/`, held for the whole of a build,
-    /// activate or deactivate. Closing the returned handle releases it.
+    /// Held for the whole of a build, activate or deactivate; closing the
+    /// returned handle releases it.
     pub fn lease(self: Store, alloc: std.mem.Allocator, id: []const u8) !std.Io.File {
         if (!manifest.isValidId(id)) return error.InvalidId;
         return lease_mod.extensionStore(alloc, self.io, self.root, id);
     }
 
-    /// Point THIS store's `current` at `version`, refusing one that was never
-    /// fully built.
+    /// Refuses a version that was never fully built.
     pub fn activate(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !void {
         return self.activateInto(alloc, id, version, self.root);
     }
 
-    /// The same, recording the choice in `pointer_root` instead — the workspace
-    /// pointer layer. The lease and the `.sealed` check always belong to the
-    /// store holding the bytes: leasing first means a version another process
-    /// is still building parks the caller rather than drawing a spurious
-    /// refusal.
+    /// The same, recording the choice in `pointer_root` — the workspace pointer
+    /// layer. The lease and the `.sealed` check always belong to the store
+    /// holding the BYTES, and leasing comes FIRST so a version another process
+    /// is still building parks the caller instead of drawing a spurious refusal.
     pub fn activateInto(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, pointer_root: std.Io.Dir) !void {
         var held = try self.lease(alloc, id);
         defer held.close(self.io);
@@ -142,8 +133,7 @@ pub const Store = struct {
         return self.dropPointer(alloc, id);
     }
 
-    /// Delete this directory's `current`, taking no lease — for a caller that
-    /// already holds the store's (`site.Site.deactivate`).
+    /// Takes no lease — for a caller that already holds the store's.
     pub fn dropPointer(self: Store, alloc: std.mem.Allocator, id: []const u8) !void {
         if (!manifest.isValidId(id)) return error.InvalidId;
         const sub = try std.fs.path.join(alloc, &.{ id, current_file });
@@ -154,27 +144,22 @@ pub const Store = struct {
         };
     }
 
-    /// Parse and validate the frozen manifest of a built version at `level`.
-    /// Fails if the version does not pass validation at that level. Caller owns
-    /// the manifest.
-    ///
-    /// `.structural` is what a listing wants (is this a complete version, and
-    /// what does it declare); `.sealed` is what running or freezing these bytes
+    /// Parse and validate a built version's frozen manifest at `level`; caller
+    /// owns it. `.structural` is what a listing wants (is this complete, and
+    /// what does it declare), `.sealed` what running or freezing these bytes
     /// wants. Nothing here picks for the caller.
     pub fn readManifest(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, level: Level) !manifest.Manifest {
-        // Validate directly rather than through `versionExists`: that boolean
-        // convenience collapses every error to `false`, including
-        // `error.Canceled`, which must propagate unchanged instead.
+        // Not through `versionExists`: that boolean collapses every error to
+        // `false`, including `error.Canceled`, which must propagate.
         try validateIdentity(id, version);
         const version_rel = try self.versionDir(alloc, id, version);
         defer alloc.free(version_rel);
         return integrity.openVersion(alloc, self.io, self.root, version_rel, version, id, level);
     }
 
-    /// The version `<id>/current` names, or null if this root has no `current`
-    /// for the id. The only reader of that file. Trailing columns a later build
-    /// may add are ignored, so an old binary reads a new pointer. Caller owns
-    /// the returned slice.
+    /// The only reader of that file; null if this root has none. Trailing
+    /// columns a later build may add are ignored, so an old binary reads a new
+    /// pointer. Caller owns the result.
     pub fn activeVersion(self: Store, alloc: std.mem.Allocator, id: []const u8) !?[]u8 {
         if (!manifest.isValidId(id)) return error.InvalidId;
         const sub = try std.fs.path.join(alloc, &.{ id, current_file });
@@ -189,8 +174,8 @@ pub const Store = struct {
         return try alloc.dupe(u8, version);
     }
 
-    /// The package digest a built version's seal records — "which package bytes
-    /// these are", the key `findSealed` matches on. Caller owns the result.
+    /// "Which package bytes these are" — the key `findSealed` matches on.
+    /// Caller owns the result.
     pub fn readPackageDigest(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) ![]u8 {
         try validateIdentity(id, version);
         const version_rel = try self.versionDir(alloc, id, version);
@@ -208,22 +193,17 @@ pub const Store = struct {
     }
 
     /// The built version of `id` in this root whose seal records THESE package
-    /// bytes built for `target` — and, when the caller can name one, by that
-    /// compiler. Used both by a build asking about its own machine ("have I
-    /// already produced this?") and by a session whose tools run elsewhere
-    /// ("which of my versions can that machine run?") — same key, one matcher.
+    /// bytes built for `target` — and, when the caller names one, by that
+    /// compiler. Null when this root holds no such version; caller owns it.
     ///
-    /// Without a compiler identity several builds of one source can match, one
-    /// per compiler that ever produced it, so the search runs over sorted
-    /// version ids: which copy answers must not depend on directory listing
-    /// order. A half-written or otherwise broken version directory is skipped
-    /// rather than reported; host faults propagate. Null when this root holds
-    /// no such version. Caller owns the result.
+    /// Without a compiler identity several builds of one source can match, so
+    /// the search runs over SORTED version ids: which copy answers must not
+    /// depend on directory listing order. A half-written or broken version
+    /// directory is skipped; host faults propagate.
     ///
-    /// The check is `.structural`, not `.sealed`: the caller that is about to
-    /// run or freeze these bytes validates them itself, and re-digesting every
-    /// built binary here would make `ext sync --dry-run` hash the whole store
-    /// on every run.
+    /// The check is `.structural`, not `.sealed`: whoever is about to run or
+    /// freeze these bytes validates them itself, and re-digesting every built
+    /// binary here would hash the whole store on every `ext sync --dry-run`.
     pub fn findSealed(
         self: Store,
         alloc: std.mem.Allocator,
@@ -271,8 +251,8 @@ pub const Store = struct {
         return null;
     }
 
-    /// All built version ids for `id`, newest-first order not guaranteed. Caller
-    /// owns the outer slice and each entry.
+    /// All built version ids for `id`, in no guaranteed order. Caller owns the
+    /// outer slice and each entry.
     pub fn listVersions(self: Store, alloc: std.mem.Allocator, id: []const u8) ![]const []u8 {
         if (!manifest.isValidId(id)) return error.InvalidId;
         const sub = try std.fs.path.join(alloc, &.{ id, versions_dir });
@@ -299,22 +279,16 @@ pub const Store = struct {
     }
 };
 
-/// Store/manifest faults that mean "this directory is not a usable extension".
-/// What a caller does with one is the caller's rule: a read-only listing skips
-/// it, session composition fails on it, and a version lookup skips that root
-/// and keeps searching. Anything else — host cancellation, `OutOfMemory`, real
+/// Faults meaning "this directory is not a usable extension". What a caller
+/// does with one is its own rule: a listing skips it, composition fails on it,
+/// a lookup keeps searching. Anything else — cancellation, `OutOfMemory`, real
 /// I/O failures — is a host fault and must propagate.
 ///
-/// Derived from the error sets `manifest.zig` declares (plus the version/
-/// store-integrity errors below) by reflection rather than a hand-written
-/// `switch`, so a new `manifest.ValidateError` member is covered here
-/// automatically instead of silently propagating as a host fault until
-/// someone notices and adds a case.
+/// Derived by reflection from `manifest.zig`'s error sets, so a new
+/// `ValidateError` member is covered the moment it is added.
 pub fn isExtensionFault(err: anyerror) bool {
-    // Both manifest sets, not just `ValidateError`: `ParseError` carries
-    // manifest-shape refusals of its own (a mistyped field is as much a broken
-    // draft as one that fails a rule). `OutOfMemory` (via `Allocator.Error`)
-    // is skipped below — the doc comment's host-fault rule.
+    // Both manifest sets: a mistyped field is as broken a draft as one failing
+    // a rule. `OutOfMemory` arrives via `Allocator.Error` and is a host fault.
     const Faults = manifest.ParseError || manifest.ValidateError ||
         error{
             InvalidVersion,
@@ -331,11 +305,6 @@ pub fn isExtensionFault(err: anyerror) bool {
     return false;
 }
 
-// A reflection-driven check, not a hand-copied list: it walks the SAME
-// manifest error sets `isExtensionFault` reflects over, so it can never
-// itself drift the way the old hand-written `switch` did. Any future
-// `ParseError` or `ValidateError` member is covered the moment it is added
-// to `manifest.zig` — this test needs no edit to keep pinning the invariant.
 test "isExtensionFault covers every manifest parse/validate member, but never OOM" {
     inline for (@typeInfo(manifest.ParseError || manifest.ValidateError).error_set.?) |candidate| {
         if (comptime std.mem.eql(u8, candidate.name, "OutOfMemory")) continue;
@@ -348,10 +317,9 @@ test "isExtensionFault covers every manifest parse/validate member, but never OO
     try std.testing.expect(!isExtensionFault(error.OutOfMemory));
 }
 
-/// Open a store root, creating it (and its parents) if it is not there yet —
-/// what the WRITE side needs (`ext init`, `ext build`): a machine with no
-/// `~/.nulya/extensions` yet should get one the first time something is built
-/// into it. Read paths use `openRoot` / `Roots.open`, which skip what is absent.
+/// Creating it and its parents if absent — what the WRITE side needs, so a
+/// machine with no store gets one the first time something is built into it.
+/// Read paths use `openRoot`, which skips what is absent.
 pub fn openOrCreateRoot(io: std.Io, cwd: []const u8, spec: []const u8) !std.Io.Dir {
     if (std.fs.path.isAbsolute(spec)) {
         try std.Io.Dir.cwd().createDirPath(io, spec);
@@ -366,8 +334,7 @@ pub fn openOrCreateRoot(io: std.Io, cwd: []const u8, spec: []const u8) !std.Io.D
     return workspace.openDir(io, spec, .{ .iterate = true });
 }
 
-/// Open the extensions root directory (iterable) resolved against `cwd`. Shared
-/// by session composition and capability-note reconciliation.
+/// Open the extensions root directory (iterable) resolved against `cwd`.
 pub fn openRoot(io: std.Io, cwd: []const u8, ext_root_rel: []const u8) !std.Io.Dir {
     if (std.fs.path.isAbsolute(ext_root_rel)) {
         return std.Io.Dir.openDirAbsolute(io, ext_root_rel, .{ .iterate = true });
@@ -380,9 +347,9 @@ pub fn openRoot(io: std.Io, cwd: []const u8, ext_root_rel: []const u8) !std.Io.D
     return workspace.openDir(io, ext_root_rel, .{ .iterate = true });
 }
 
-/// Write `<id>/current` in `root`, atomically: temp file plus a rename in the
-/// same directory, so a crash mid-switch leaves the previous pointer intact.
-/// Creates `<id>/` when the layer has never held this id.
+/// Atomic: temp file plus a rename in the same directory, so a crash mid-switch
+/// leaves the previous pointer intact. Creates `<id>/` when the layer has never
+/// held this id.
 fn pointTo(io: std.Io, alloc: std.mem.Allocator, root: std.Io.Dir, id: []const u8, version: []const u8) !void {
     try root.createDirPath(io, id);
     const tmp_sub = try std.fs.path.join(alloc, &.{ id, ".current.tmp" });
@@ -461,8 +428,7 @@ test "current names one version, and a pointer with extra columns still names it
         try std.testing.expectEqualStrings(plain, active);
     }
 
-    // A pointer another build wrote with trailing columns still names its
-    // version: the first field is the pointer, the rest is not this reader's.
+    // The first field is the pointer; trailing columns are not this reader's.
     const with_columns = try std.fmt.allocPrint(alloc, "{s} something=else\n", .{plain});
     defer alloc.free(with_columns);
     try tmp.dir.writeFile(io, .{ .sub_path = "plain/current", .data = with_columns });
@@ -483,7 +449,6 @@ test "activate moves the current pointer atomically, forwards and back" {
     const second = try writeBuiltVersion(alloc, std.testing.io, tmp.dir, id, "two");
     defer alloc.free(second);
 
-    // No current pointer yet.
     try std.testing.expect((try store.activeVersion(alloc, id)) == null);
 
     try store.activate(alloc, id, first);
@@ -500,8 +465,6 @@ test "activate moves the current pointer atomically, forwards and back" {
         try std.testing.expectEqualStrings(second, active);
     }
 
-    // Going back is the same verb pointed at the older version: there is nothing
-    // a separate `rollback` could have done that this does not.
     try store.activate(alloc, id, first);
     {
         const active = (try store.activeVersion(alloc, id)).?;
@@ -604,13 +567,11 @@ test "the two levels answer different questions: a tampered binary passes struct
     try std.testing.expect(store.versionExists(alloc, "demo", version, .structural));
     try std.testing.expect(store.versionExists(alloc, "demo", version, .sealed));
 
-    // Tampered: the version directory is still COMPLETE (that is all a listing
-    // asks), but it is no longer the bytes that were sealed.
+    // Tampered: the directory is still COMPLETE (all a listing asks), but no
+    // longer the bytes that were sealed.
     try tmp.dir.writeFile(io, .{ .sub_path = entry_sub, .data = "tampered" });
     try std.testing.expect(store.versionExists(alloc, "demo", version, .structural));
     try std.testing.expect(!store.versionExists(alloc, "demo", version, .sealed));
-    // A structural read still yields the frozen manifest — what `ext list` and
-    // the skill catalog project.
     {
         var m = try store.readManifest(alloc, "demo", version, .structural);
         defer m.deinit();
@@ -618,7 +579,7 @@ test "the two levels answer different questions: a tampered binary passes struct
     }
     try std.testing.expectError(error.VersionSealInvalid, store.readManifest(alloc, "demo", version, .sealed));
 
-    // Missing entirely: incomplete, so BOTH levels refuse. Structural is about
+    // Missing entirely: incomplete, so BOTH refuse. Structural is about
     // completeness, never about trust.
     try tmp.dir.deleteFile(io, entry_sub);
     try std.testing.expect(!store.versionExists(alloc, "demo", version, .structural));
@@ -650,14 +611,11 @@ test "openOrCreateRoot creates a missing root, by absolute path as well as relat
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const base = buf[0..try tmp.dir.realPath(io, &buf)];
 
-    // Relative to a workspace…
     {
         var dir = try openOrCreateRoot(io, base, "nested" ++ std.fs.path.sep_str ++ "extensions");
         dir.close(io);
         try tmp.dir.access(io, "nested" ++ std.fs.path.sep_str ++ "extensions", .{});
     }
-    // …and by absolute path, which is how the user root (`~/.nulya/extensions`)
-    // arrives. Both are idempotent.
     const abs = try std.fs.path.join(alloc, &.{ base, "home", "extensions" });
     defer alloc.free(abs);
     for (0..2) |_| {
@@ -685,10 +643,10 @@ test "listVersions returns every built version" {
     try std.testing.expectEqual(@as(usize, 0), none.len);
 }
 
-/// Test-only coordination: consume the first cancelation at a deterministic gate,
-/// re-arm it via `io.recancel()`, then call `readManifest` so the pending
-/// cancelation lands on its first filesystem syscall. `recancel` must never
-/// appear in production control flow, which propagates `error.Canceled` instead.
+/// Test-only: consume the first cancelation at a deterministic gate, re-arm it
+/// via `io.recancel()`, then call `readManifest` so the pending cancelation
+/// lands on its first filesystem syscall. `recancel` must never appear in
+/// production control flow, which propagates `error.Canceled` instead.
 fn readManifestAfterRecancel(
     alloc: std.mem.Allocator,
     st: Store,
@@ -704,8 +662,7 @@ fn readManifestAfterRecancel(
         error.Canceled => io.recancel(),
     };
 
-    // `.sealed` — the level that does the most I/O, so the pending cancelation
-    // has the widest surface to land on.
+    // `.sealed` does the most I/O, the widest surface to land on.
     return st.readManifest(alloc, id, version, .sealed);
 }
 
@@ -724,11 +681,10 @@ test "readManifest propagates cancellation instead of folding it into an integri
     var ready: std.Io.Event = .unset;
     var release: std.Io.Event = .unset;
     var fut = io.async(readManifestAfterRecancel, .{ alloc, st, "demo", version, io, &ready, &release });
-    // Determinism contract: cancel only after the worker is known to sit at the
-    // gate. A timeout here means the worker never arrived — fail, don't proceed.
+    // Cancel only once the worker is known to sit at the gate.
     try ready.waitTimeout(io, .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5000) }) });
 
-    // Cancellation is host execution control, not corruption: it must surface as
-    // error.Canceled, never as VersionNotFound/VersionSealInvalid/Version*.
+    // Cancellation is host execution control, not corruption: it must surface
+    // as error.Canceled, never as a Version* integrity error.
     try std.testing.expectError(error.Canceled, fut.cancel(io));
 }

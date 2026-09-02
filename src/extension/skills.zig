@@ -1,8 +1,7 @@
 //! Extension-backed Agent Skill source.
 //!
-//! This adapter knows about frozen extension versions, extension manifests, and
-//! `ext:<id>@<version>/<skill>` refs. The core `skill.zig` module stays
-//! source-agnostic.
+//! This adapter knows frozen versions, manifests and
+//! `ext:<id>@<version>/<skill>` refs, so `skill.zig` stays source-agnostic.
 
 const std = @import("std");
 const skill = @import("../skill.zig");
@@ -103,8 +102,7 @@ pub fn validateSnapshot(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot
     }
 }
 
-/// Every skill of every extension a pointer names here, the workspace layer
-/// winning (`Site.listActive`).
+/// Every skill of every extension a pointer names here, workspace winning.
 pub fn listActive(
     alloc: std.mem.Allocator,
     site: *const site_mod.Site,
@@ -116,12 +114,10 @@ pub fn listActive(
     defer site_mod.Site.freeActive(alloc, active);
 
     for (active) |entry| {
-        // Skip broken extensions, but let host cancellation propagate rather than
-        // be misread as a malformed extension. This is a read-only listing, so
-        // showing the catalog it can beats refusing to show any of it.
-        // `.structural`: a catalog only has to name what a complete version
-        // declares — nothing here runs, and the paths that do ask `.sealed`
-        // themselves.
+        // Skip broken extensions, but let host cancellation propagate rather
+        // than be misread as a malformed one. `.structural`: a catalog only
+        // names what a complete version declares — nothing here runs, and the
+        // paths that do ask `.sealed` themselves.
         const r = site.resolveEntry(alloc, entry, .structural) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
@@ -133,17 +129,16 @@ pub fn listActive(
     return .{ .skills = try descriptors.toOwnedSlice(alloc) };
 }
 
-/// Load a full SKILL.md body from a frozen skill ref, out of this machine's
-/// store. This deliberately validates and reads the NAMED version; it never
-/// follows the extension's `current`.
+/// A full SKILL.md body from a frozen skill ref, out of this machine's store.
+/// Validates and reads the NAMED version; never follows `current`.
 pub fn loadFrozenInStore(
     alloc: std.mem.Allocator,
     site: *const site_mod.Site,
     frozen_ref: []const u8,
 ) ![]u8 {
     const parsed = try parseRef(frozen_ref); // malformed: fail before touching the store
-    // `.sealed`: a loaded SKILL.md body goes straight into the model's context,
-    // so this is a read that CONSUMES the frozen bytes, not one that lists them.
+    // `.sealed`: a loaded body goes straight into the model's context, so this
+    // read CONSUMES the frozen bytes rather than listing them.
     const r = try site.resolveVersion(alloc, parsed.extension_id, parsed.version, .sealed);
     defer r.deinit(alloc);
     return readSkillBody(alloc, site.io, site.store().?.root, parsed, r.manifest);
@@ -161,8 +156,8 @@ pub fn loadFrozen(
     return readSkillBody(alloc, io, root, parsed, m);
 }
 
-/// The SKILL.md body a parsed ref names, from an already-resolved version's
-/// manifest and the root holding it. Caller owns the result.
+/// The body a parsed ref names, from an already-resolved version's manifest and
+/// the root holding it. Caller owns the result.
 fn readSkillBody(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -186,9 +181,8 @@ fn readSkillBody(
 }
 
 fn readFrozenManifest(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !manifest.Manifest {
-    // Delegates to `Store.readManifest`, the single validate+parse path. That
-    // keeps integrity validation identical here and preserves `error.Canceled`
-    // instead of collapsing it into a spurious integrity error.
+    // The single validate+parse path, so `error.Canceled` is preserved rather
+    // than collapsed into a spurious integrity error.
     return store.Store.init(io, root).readManifest(alloc, id, version, .sealed);
 }
 

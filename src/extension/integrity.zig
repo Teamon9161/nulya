@@ -1,11 +1,10 @@
-//! Content-addressed extension identity and at-rest integrity helpers.
+//! Content-addressed extension identity and at-rest integrity.
 //!
 //! The version id is the content address of the frozen package snapshot plus,
-//! for a COMPILED extension only, the compiler identity and host target (a data
-//! or script version records both as ""; see `manifest.ImplementationKind`).
-//! `seal.json` records those reproducibility inputs plus the built binary digest
-//! so activation and `ext run` can detect a version directory that was modified
-//! after build.
+//! for a COMPILED extension only, the compiler identity and host target (data
+//! and script versions record both as ""). `seal.json` records those inputs
+//! plus the built binary digest, so a version directory modified after build
+//! is detectable.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -16,17 +15,14 @@ pub const version_prefix = "v-";
 pub const manifest_file = "extension.json";
 pub const package_dir = "package";
 pub const seal_file = "seal.json";
-/// The suffix a version built FOR THIS HOST carries. Derived from the same one
-/// function a seal's target goes through (`target.exeSuffixFor`), so the host
-/// case is not a second rule — it is the general rule asked about this machine.
-/// Callers that are about to run something here want this one; validation wants
-/// the seal's (see `openVersion`).
+/// `target.exeSuffixFor` asked about THIS machine, so the host case is not a
+/// second rule. Callers about to run something here want this; validation wants
+/// the seal's.
 pub const exe_suffix = target_mod.exeSuffixFor(target_mod.host);
 
 const max_snapshot_file_bytes: usize = 16 * 1024 * 1024;
 const digest_bytes = 12;
-/// How much of a file `fileDigestHex` holds at once. Only a hashing buffer —
-/// it bounds memory, never the file.
+/// A hashing buffer, so it bounds memory, never the file.
 const digest_read_chunk_bytes: usize = 64 * 1024;
 
 pub const SnapshotFile = struct {
@@ -76,25 +72,19 @@ pub const Seal = struct {
     }
 };
 
-/// How thoroughly a frozen version directory is checked. Two questions, not
-/// one: "is this directory a complete extension version?" and "are these
-/// still the bytes that were sealed?" — answering them together would make
-/// every read-only listing pay a full-tree sha256 of megabytes of built
-/// binary.
+/// Two questions, not one: "is this a complete extension version?" and "are
+/// these still the bytes that were sealed?" — answering both together would
+/// make every read-only listing pay a full-tree sha256 of built binary.
 pub const Level = enum {
-    /// Structure only: the directory is there, its `seal.json` parses, its
-    /// manifest parses, validates and names this id, and every path the manifest
-    /// declares — the frozen `src/` tree, each skill directory, each system
-    /// prompt, a compiled entry binary — exists. Nothing is digested, so the
-    /// cost is a handful of stats plus two small file reads and does not grow
-    /// with the package. What a READ-ONLY projection needs: it must not invent
-    /// an extension that is not there, and it is not about to run any of it.
+    /// Structure only: the directory is there, `seal.json` parses, the manifest
+    /// parses, validates and names this id, and every path it declares exists.
+    /// Nothing is digested, so the cost does not grow with the package — what a
+    /// READ-ONLY projection needs.
     structural,
-    /// Structural, plus the at-rest content re-digest: the frozen package must
-    /// hash to the seal's `package_digest`, that digest must reproduce this very
-    /// version id, and a compiled binary must hash to the sealed one. What every
-    /// path that is about to RUN these bytes or FREEZE them into a session
-    /// needs — session composition, `ext run`, activation, a copied version.
+    /// Structural, plus the at-rest re-digest: the frozen package must hash to
+    /// the seal's `package_digest`, that digest must reproduce this very version
+    /// id, and a compiled binary must hash to the sealed one. What every path
+    /// about to RUN these bytes or FREEZE them into a session needs.
     sealed,
 };
 
@@ -245,13 +235,10 @@ pub fn packageDigestHex(alloc: std.mem.Allocator, snapshot: PackageSnapshot) ![]
     return digestHex(alloc, canonical);
 }
 
-/// Digest a file on disk, hashed as it is read rather than after it is held —
-/// nothing on this path wants the bytes, only their digest, so there is no
-/// size cap on a built binary.
-///
-/// A file that will not open stays `VersionEntryNotFound` — that IS the entry
-/// missing, and `store.isExtensionFault` reads it as a broken extension. A read
-/// that fails after the file opened is a host fault and travels as itself.
+/// Hashed as it is read rather than held, so there is no size cap on a built
+/// binary. A file that will not open is `VersionEntryNotFound` — a broken
+/// extension to `store.isExtensionFault`; a read that fails after the file
+/// opened is a host fault and travels as itself.
 pub fn fileDigestHex(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, sub_path: []const u8) ![]u8 {
     var file = root.openFile(io, sub_path, .{}) catch return error.VersionEntryNotFound;
     defer file.close(io);
@@ -321,9 +308,8 @@ pub fn parseSeal(gpa: std.mem.Allocator, bytes: []const u8) !Seal {
     };
 }
 
-/// Re-raise `error.Canceled` unchanged; fold every other error into `fallback`.
-/// Lets integrity validation keep host cancellation distinct from corruption
-/// while still reporting descriptive `Version*` errors for real faults.
+/// Keeps host cancellation distinct from corruption while still reporting
+/// descriptive `Version*` errors for everything else.
 inline fn cancelable(err: anytype, comptime fallback: anyerror) (error{Canceled} || @TypeOf(fallback)) {
     return if (err == error.Canceled) error.Canceled else fallback;
 }
@@ -341,11 +327,9 @@ pub fn validateVersionDir(
     m.deinit();
 }
 
-/// `validateVersionDir` that hands back what it already parsed. Reading and
-/// validating the frozen manifest IS part of validation at either level, so the
-/// caller that also wants the manifest (`Store.readManifest`, and through it
-/// every `Roots.Resolved`) gets it from here instead of reading and parsing the
-/// same file a second time. Caller owns the result.
+/// `validateVersionDir` handing back what it already parsed: validating the
+/// frozen manifest IS part of validation at either level, so a caller wanting
+/// the manifest need not read the file twice. Caller owns it.
 pub fn openVersion(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -355,9 +339,8 @@ pub fn openVersion(
     expected_id: []const u8,
     level: Level,
 ) !manifest.Manifest {
-    // Integrity checks map I/O failures to descriptive `Version*` errors, but a
-    // cancellation is host execution control, not corruption — `cancelable`
-    // re-raises it as `error.Canceled` and folds everything else into `fallback`.
+    // I/O failures become descriptive `Version*` errors, but a cancellation is
+    // host execution control, not corruption: `cancelable` re-raises it.
     root.access(io, version_rel, .{}) catch |err| return cancelable(err, error.VersionNotFound);
 
     const seal_sub = try std.fs.path.join(alloc, &.{ version_rel, seal_file });
@@ -397,18 +380,15 @@ pub fn openVersion(
 
     if (m.runtime) |rt| {
         if (manifest.isScript(rt)) {
-            // A script extension is frozen into `package/` and covered by the
-            // package digest; it has no separately-built binary, so the seal must
-            // record none. Cheap either way — a shape check on the seal.
+            // A script is covered by the package digest and has no
+            // separately-built binary, so the seal must record none.
             if (seal.binary_digest != null) return error.VersionSealInvalid;
         } else {
             // A compiled entry is never per-OS (`manifest.validate` refuses the
-            // object form for `bin/` paths), so the host always has one.
-            //
-            // The suffix comes off the seal, not off this machine: a version
-            // cross-built for another target is validated here — on the host
-            // that produced it, and again on the machine it was pushed to —
-            // and asking `builtin` would send both of them looking for a file
+            // object form for `bin/` paths), so the host always has one. The
+            // suffix comes off the SEAL, not this machine: a cross-built
+            // version is validated both where it was produced and where it was
+            // pushed, and asking `builtin` would send both looking for a file
             // named for the wrong platform.
             const compiled_entry = rt.entry.forHost() orelse return error.VersionEntryNotFound;
             const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ compiled_entry, target_mod.exeSuffixFor(seal.target) });
@@ -416,9 +396,9 @@ pub fn openVersion(
             const entry_sub = try std.fs.path.join(alloc, &.{ version_rel, entry });
             defer alloc.free(entry_sub);
             switch (level) {
-                // The built binary is the one file whose size is unbounded, so
-                // it is exactly where the two levels part: is it there, versus
-                // is it byte for byte the one that was sealed.
+                // The built binary is the one unbounded file, so it is where
+                // the levels part: is it there, versus is it byte for byte the
+                // one that was sealed.
                 .structural => {
                     root.access(io, entry_sub, .{}) catch |err| return cancelable(err, error.VersionEntryNotFound);
                     if (seal.binary_digest == null) return error.VersionSealInvalid;
@@ -437,11 +417,9 @@ pub fn openVersion(
     return m;
 }
 
-/// Every path the frozen manifest declares is present — the existence half of
-/// what `Level.sealed` proves by digesting. `access` only: the frozen `src/`
-/// tree, each declared skill directory, each declared system prompt file. It
-/// answers "this version directory is complete", never "these are the sealed
-/// bytes", and its cost does not grow with the package.
+/// The existence half of what `Level.sealed` proves by digesting. `access`
+/// only: it answers "this directory is complete", never "these are the sealed
+/// bytes".
 fn requireDeclaredPaths(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -473,9 +451,8 @@ test "a built binary is digested at any size, and streaming does not change the 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    // Past the snapshot's per-source-file cap, and not a whole number of read
-    // chunks: a size a compiled extension actually reaches, where the last
-    // partial chunk is what ends the read loop.
+    // Past the per-source-file cap, and not a whole number of read chunks —
+    // the last partial chunk is what ends the read loop.
     const size = max_snapshot_file_bytes + digest_read_chunk_bytes + 7;
     const bytes = try alloc.alloc(u8, size);
     defer alloc.free(bytes);
@@ -488,7 +465,6 @@ test "a built binary is digested at any size, and streaming does not change the 
     defer alloc.free(one_shot);
     try std.testing.expectEqualStrings(one_shot, streamed);
 
-    // An entry that is not there is still the extension fault it always was.
     try std.testing.expectError(error.VersionEntryNotFound, fileDigestHex(alloc, io, tmp.dir, "absent"));
 }
 
@@ -556,10 +532,8 @@ fn collectTree(
     if (!saw_any) return error.SourceUnreadable;
 }
 
-/// Free a snapshot that was never finished: the strings each entry owns AND the
-/// list holding them. On the success path `finishSnapshot` hands the buffer on
-/// with `toOwnedSlice`, so nothing here runs; every path that refuses (a
-/// declared file that will not read, a duplicate path) arrives here instead.
+/// The strings each entry owns AND the list holding them. `finishSnapshot`
+/// hands the buffer on with `toOwnedSlice`, so only refusing paths arrive here.
 fn deinitPartialSnapshot(alloc: std.mem.Allocator, files: *std.ArrayList(SnapshotFile)) void {
     for (files.items) |file| {
         alloc.free(file.rel);
@@ -572,8 +546,7 @@ pub fn lessFileRel(_: void, a: SnapshotFile, b: SnapshotFile) bool {
     return std.mem.lessThan(u8, a.rel, b.rel);
 }
 
-/// The frozen bytes of `rel` inside a collected snapshot, or null. `rel` must be
-/// in canonical (forward-slash) form — see `canonicalRel`.
+/// `rel` must be in canonical (forward-slash) form — `canonicalRel`.
 pub fn findSnapshotFile(snapshot: PackageSnapshot, rel: []const u8) ?[]const u8 {
     for (snapshot.files) |file| {
         if (std.mem.eql(u8, file.rel, rel)) return file.bytes;
@@ -587,8 +560,8 @@ fn appendU64(out: *std.ArrayList(u8), alloc: std.mem.Allocator, value: usize) !v
     try out.appendSlice(alloc, &len_le);
 }
 
-/// Normalize a relative path to canonical form: forward-slash separators, no
-/// empty segments. The shared spelling used for snapshot file keys.
+/// Forward-slash separators, no empty segments — the one spelling snapshot file
+/// keys use.
 pub fn canonicalRel(alloc: std.mem.Allocator, rel: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
@@ -616,8 +589,8 @@ fn digestHex(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return finishHex(alloc, &h);
 }
 
-/// The hex of a finished hash. Shared so the one-shot and the streamed path
-/// cannot drift into two different spellings of the same digest.
+/// Shared so the one-shot and the streamed path cannot drift into two
+/// different spellings of the same digest.
 fn finishHex(alloc: std.mem.Allocator, h: *std.crypto.hash.sha2.Sha256) ![]u8 {
     var digest: [32]u8 = undefined;
     h.final(&digest);

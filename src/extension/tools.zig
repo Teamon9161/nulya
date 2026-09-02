@@ -1,16 +1,13 @@
 //! Extension tools as ordinary kernel tools.
 //!
 //! `Binding` pairs a tool's model-facing `tool.ToolDefinition` with the FROZEN
-//! VERSION that serves its calls, then adapts it into the kernel's single
-//! `tool.Tool` through the existing `ToolExecutor` seam — no second tool
-//! abstraction.
+//! VERSION that serves its calls, adapting it into the kernel's one `tool.Tool`
+//! through the `ToolExecutor` seam.
 //!
-//! Two invariants hold:
-//!   - The binding never touches the extension store, `current`, manifests, or
-//!     discovery; which version serves this tool was decided and frozen by the
-//!     caller, and which FILE that version means is answered later, by the
-//!     machine about to spawn it (`extension/exec.zig`).
-//!   - `ToolExecutor.ptr` borrows the binding, so the binding (and its borrowed
+//!   - It never touches the store, `current`, manifests or discovery: which
+//!     version serves this tool was frozen by the caller, and which FILE that
+//!     version means is answered by the machine about to spawn it.
+//!   - `ToolExecutor.ptr` borrows the binding, so it (and its borrowed
 //!     definition strings) must outlive every derived `Tool` and must not move.
 
 const std = @import("std");
@@ -19,28 +16,23 @@ const invoke = @import("invoke.zig");
 
 /// A frozen extension tool binding.
 pub const Binding = struct {
-    /// Model-facing identity and schema. `definition.id` is the stable logical
-    /// id (never version-qualified); `definition.name` is the tool name the
-    /// manifest declared, which is what reaches the child as `NULYA_TOOL`.
+    /// `definition.id` is the stable logical id (never version-qualified);
+    /// `definition.name` is the manifest's tool name, which reaches the child
+    /// as `NULYA_TOOL`.
     definition: tool.ToolDefinition,
-    /// The package this tool belongs to.
     ext_id: []const u8,
-    /// The frozen version that SERVES a call to it. For a session whose tools
-    /// run on another machine that is the header's `exec_version` — the sibling
-    /// build for that machine's target — and otherwise the member's own frozen
-    /// version. Either way the choice was made once, at freeze time, and is
-    /// merely carried here.
+    /// The frozen version that SERVES a call: the header's `exec_version` (the
+    /// sibling build for that target) when the session's tools run elsewhere,
+    /// otherwise the member's own. Chosen once, at freeze time, and only
+    /// carried here.
     version: []const u8,
-    /// The wall-clock cap this tool's frozen manifest declared for one call, or
-    /// null to take the host default (`invoke.Options.timeout_ms`). Frozen with
-    /// the version like everything else the manifest says.
+    /// Null takes the host default (`invoke.Options.timeout_ms`).
     timeout_ms: ?u32 = null,
 
-    /// Build a binding that owns copies of every string it exposes, so it can
-    /// outlive the transient manifest and version data it was resolved from. The
-    /// session composition holds these on the heap: once its `Binding[]` is
-    /// frozen (`toOwnedSlice`), each binding's address is stable and every
-    /// derived `Tool` may borrow it (see `asTool`).
+    /// Owns copies of every string it exposes, so it outlives the transient
+    /// manifest it was resolved from. Composition holds these on the heap: once
+    /// its `Binding[]` is frozen, each address is stable and every derived
+    /// `Tool` may borrow it.
     pub fn initOwned(
         alloc: std.mem.Allocator,
         definition: tool.ToolDefinition,
@@ -66,9 +58,7 @@ pub const Binding = struct {
                 .name = name,
                 .description = description,
                 .input_schema = input_schema,
-                // Copied, not re-read: an optional bool owns nothing, and this
-                // is the frozen manifest's claim travelling to whoever answers
-                // the gate. `null` stays `null` — silence is not "not read-only".
+                // `null` stays `null` — silence is not "not read-only".
                 .readonly = definition.readonly,
             },
             .ext_id = owned_ext_id,
@@ -77,8 +67,7 @@ pub const Binding = struct {
         };
     }
 
-    /// Release the strings an `initOwned` binding holds. Never call on a binding
-    /// built from static string literals (the tests below).
+    /// Never call on a binding built from static string literals.
     pub fn deinit(self: Binding, alloc: std.mem.Allocator) void {
         alloc.free(self.definition.id);
         alloc.free(self.definition.name);
@@ -88,7 +77,7 @@ pub const Binding = struct {
         alloc.free(self.version);
     }
 
-    /// Adapt into a kernel `Tool`. `executor.ptr` is this binding's address.
+    /// `executor.ptr` is this binding's address.
     pub fn asTool(self: *Binding) tool.Tool {
         return .{
             .definition = self.definition,
@@ -97,8 +86,7 @@ pub const Binding = struct {
     }
 };
 
-/// `ToolExecutor` callback: a thin passthrough — `invokeTool` owns the spawn,
-/// the capture and the failure taxonomy.
+/// A passthrough: `invokeTool` owns the spawn, capture and failure taxonomy.
 fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
     const self: *Binding = @ptrCast(@alignCast(ptr));
 
@@ -116,22 +104,16 @@ fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyer
         },
     );
 
-    // Ownership transfer: both slices are allocator-owned; returning moves
-    // `invocation.output` (no `deinit`, no copy).
+    // Returning MOVES `invocation.output` — no copy, and no `deinit` here.
     return .{ .ok = invocation.ok, .output = invocation.output };
 }
 
 const testing = std.testing;
 const environment = @import("../environment.zig");
 
-/// What a successful call prints: stdout is the result, so a driver-facing tool
-/// puts JSON here and a model-facing one puts text. Either way the executor
-/// hands the bytes on unchanged.
 const success_output = "{\"results\":[]}";
 
-/// Scripted environment backend: returns a canned `ExtensionOutcome` (or a
-/// canned error) and records what the helper sent, so the executor's
-/// orchestration is exercised without spawning a real process.
+/// A canned `ExtensionOutcome` (or error) plus a record of what was sent.
 const FakeEnv = struct {
     io: std.Io,
     response: []const u8 = "",
@@ -147,9 +129,8 @@ const FakeEnv = struct {
         const self: *FakeEnv = @ptrCast(@alignCast(ptr));
         if (self.err) |e| return e;
         self.saw_timeout_ms = req.timeout_ms;
-        // Allocate everything before publishing to `self`: a mid-way failure
-        // frees the locals via errdefer and leaves the saw fields empty, so
-        // `deinit` never double-frees.
+        // Allocate everything before publishing to `self`, so a mid-way
+        // failure leaves the saw fields empty and `deinit` cannot double-free.
         const saw_ref = try std.fmt.allocPrint(alloc, "{s}@{s}/{s}", .{ req.id, req.version, req.tool });
         errdefer alloc.free(saw_ref);
         const saw_request_json = try alloc.dupe(u8, req.request_json);
@@ -224,7 +205,7 @@ fn testBinding() Binding {
 test "initOwned copies every exposed string and survives the source being freed" {
     const alloc = testing.allocator;
 
-    // Sources on the heap, freed before use, to prove the binding took copies.
+    // Sources on the heap, freed below, to prove the binding took copies.
     const id = try alloc.dupe(u8, "ext:web.search/web_search");
     const name = try alloc.dupe(u8, "web_search");
     const description = try alloc.dupe(u8, "Search web");
@@ -240,7 +221,6 @@ test "initOwned copies every exposed string and survives the source being freed"
     }, ext_id, version, null);
     defer binding.deinit(alloc);
 
-    // Drop the sources; the binding must not alias them.
     alloc.free(id);
     alloc.free(name);
     alloc.free(description);
@@ -254,7 +234,6 @@ test "initOwned copies every exposed string and survives the source being freed"
     try testing.expectEqualStrings("{\"type\":\"object\"}", binding.definition.input_schema);
     try testing.expectEqualStrings("web.search", binding.ext_id);
     try testing.expectEqualStrings("v-000000000000000000000001", binding.version);
-    // Nothing was claimed, so nothing is claimed here either.
     try testing.expect(binding.definition.readonly == null);
 }
 
@@ -269,9 +248,7 @@ test "a manifest's readonly claim rides on the frozen definition" {
     }, "std", "v-000000000000000000000002", null);
     defer binding.deinit(alloc);
 
-    // The claim is what the gate is shown: the alternative — asking
-    // a manifest again at approval time — is a second derivation of a fact this
-    // session already froze.
+    // The gate is shown the claim this session froze, not a manifest re-read.
     try testing.expectEqual(@as(?bool, true), binding.asTool().definition.readonly);
 }
 
@@ -298,8 +275,6 @@ test "asTool exposes the frozen definition and binding pointer" {
     try testing.expectEqualStrings("Search web", t.definition.description);
     try testing.expectEqualStrings("{\"type\":\"object\"}", t.definition.input_schema);
 
-    // The callback recovers the binding from this pointer, so it must be the
-    // binding's own address.
     const binding_ptr: ?*anyopaque = @ptrCast(&binding);
     try testing.expectEqual(binding_ptr, t.executor.ptr);
 }
@@ -317,8 +292,7 @@ test "executor forwards the exact frozen identity" {
     defer alloc.free(result.output);
 
     // The frozen (package, version, tool) reaches the environment verbatim —
-    // no resolution here, and no path: the machine that spawns it decides which
-    // file that version means.
+    // no path: the machine that spawns it decides which file that version is.
     try testing.expectEqualStrings("web.search@v-000000000000000000000001/web_search", fake.saw_ref);
 }
 
@@ -335,8 +309,6 @@ test "a binding's declared timeout reaches the environment; without one the host
     defer alloc.free(default_result.output);
     try testing.expectEqual(@as(?u32, invoke.Options.default_timeout_ms), default_env.saw_timeout_ms);
 
-    // A tool that knows it is slow said so in its manifest; the
-    // binding carries that verbatim to the child.
     var slow_binding = testBinding();
     slow_binding.timeout_ms = 600_000;
     var slow_env = FakeEnv{ .io = testing.io, .response = success_output };
@@ -361,8 +333,6 @@ test "executor forwards the model's raw arguments to stdin" {
     });
     defer alloc.free(result.output);
 
-    // What the child is sent is the model's own arguments object — no envelope
-    // around it, and no re-emission of the JSON it wrote.
     try testing.expectEqualStrings("{\"query\":\"zig\"}", fake.saw_request_json);
 }
 
@@ -385,7 +355,6 @@ test "success maps to a raw success result carrying stdout verbatim" {
 test "application failure maps to a raw failed result without reformatting" {
     const alloc = testing.allocator;
     var binding = testBinding();
-    // A tool that failed: its message on stderr, a non-zero exit.
     var fake = FakeEnv{ .io = testing.io, .stderr_text = "down", .exit_code = 1 };
     defer fake.deinit(alloc);
 
@@ -396,7 +365,6 @@ test "application failure maps to a raw failed result without reformatting" {
     defer alloc.free(result.output);
 
     try testing.expect(!result.ok);
-    // The executor forwards invokeTool's diagnostic — no re-wrapping.
     try testing.expect(std.mem.indexOf(u8, result.output, "down") != null);
 }
 
