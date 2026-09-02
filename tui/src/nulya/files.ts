@@ -86,34 +86,12 @@ export interface Contributions {
   id: string
   version: string
   tools: string[]
-  /** The subset of `tools` whose surface is `manual`: model-facing only when a pin names it. */
+  /** The subset of `tools` whose surface is `manual`: model-facing only when a member selects it. */
   manualTools: string[]
-  /**
-   * The `manual` tools this package recommends switching on when it is
-   * installed (`manifest.ToolSpec.recommended`, default true).
-   *
-   * Distinct from `manualTools`, and the distinction is the point: a pin can
-   * name any of the latter, but turning a package ON should write only these.
-   * A package whose other tools are the point may declare extras
-   * `recommended: false` — off until somebody asks, still one `Space` away.
-   */
-  recommendedTools: string[]
   /** The subset of `tools` whose surface is `auto`: model-facing as soon as its package is a member. */
   autoTools: string[]
   /** The subset of `tools` whose surface is `internal`: callable with `ext run`, never on the model face. */
   internalTools: string[]
-  /**
-   * The package's own answer to "what does installing me mean" (`manifest.Apply`).
-   * `auto` = once it has a `current`, the kernel composes
-   * it into every fresh session that is not `--bare`; `manual` = it enters only
-   * the sessions somebody names it in.
-   *
-   * A DEFAULT, not "unsaid": a package that writes nothing means `manual`, the
-   * same way a tool that writes no `surface` means `auto`. So there is no null
-   * here to distinguish (unlike `tools[].readonly`, where nobody has claimed
-   * anything).
-   */
-  apply: PackageApply
   skills: string[]
   /**
    * Files whose text becomes a system block for any session carrying this
@@ -171,19 +149,6 @@ export interface Contributions {
   ui: PackageUi | null
 }
 
-/**
- * What a package says installing it means (`manifest.Apply`).
- *
- * The one axis a manifest gets an opinion on that reaches beyond a single
- * session: `auto` is a package asking to be a member of every fresh session on
- * a machine that has activated it — which the KERNEL then does, at
- * `session new`, so no front end has to write a standing list of its own. A
- * person still overrides it in both directions (`ext deactivate` takes it back,
- * `[extensions] with` adds a `manual` one), which is why it is a default rather
- * than a veto.
- */
-export type PackageApply = "auto" | "manual"
-
 /** One front end's module declaration (`manifest.UiHost`), for this host. */
 export interface PackageUi {
   /** Package-relative, checked safe by the kernel at build time. */
@@ -240,10 +205,8 @@ export async function readContributions(
     version,
     tools: [],
     manualTools: [],
-    recommendedTools: [],
     autoTools: [],
     internalTools: [],
-    apply: "manual",
     skills: [],
     systemPrompts: [],
     commands: [],
@@ -295,10 +258,8 @@ function contributionsOf(
   Contributions,
   | "tools"
   | "manualTools"
-  | "recommendedTools"
   | "autoTools"
   | "internalTools"
-  | "apply"
   | "systemPrompts"
   | "skills"
   | "commands"
@@ -319,21 +280,11 @@ function contributionsOf(
   }
   const tools = named.map((tool) => tool["name"] as string)
   const surfaces = new Map(named.map((tool) => [tool["name"] as string, toolSurfaceOf(tool)]))
-  // `recommended` defaults to TRUE, which is what `manual` means in practice:
-  // on once the package is installed, and closable one tool at a time. Only a
-  // package with extras it wants left off writes anything (`manifest.ToolSpec`).
-  const declined = new Set(
-    named.filter((tool) => tool["recommended"] === false).map((tool) => tool["name"] as string),
-  )
   return {
     tools,
     manualTools: tools.filter((tool) => surfaces.get(tool) === "manual"),
-    recommendedTools: tools.filter((tool) => surfaces.get(tool) === "manual" && !declined.has(tool)),
     autoTools: tools.filter((tool) => surfaces.get(tool) === "auto"),
     internalTools: tools.filter((tool) => surfaces.get(tool) === "internal"),
-    // Top level, not under `contributes`: it is not a contribution, it is the
-    // author's reading of what activating the package means.
-    apply: applyOf(manifest?.["apply"]),
     skills: stringList(contributes["skills"]),
     systemPrompts: promptPathList(contributes["system_prompts"]),
     commands: commandsOf(contributes["commands"]),
@@ -350,13 +301,13 @@ function contributionsOf(
  * question, which is why none of them names a CLI flag any more:
  *
  *   - `auto`     — on the model's face as soon as the package is composed in.
- *   - `manual`   — on it only when a pin names the tool (`pinned_native_tools`,
- *                  `session new --pin`).
+ *   - `manual`   — on it only when the member selects the tool by name
+ *                  (`[extensions] with`, `session new --with <id>:<tool>`).
  *   - `internal` — never on it; `nulya ext run` is how it is called.
  *
  * `auto` is also the DEFAULT, and matching the kernel there is the whole point
  * of this function: a package somebody deliberately composed means its tools to
- * be usable, and the front end that read a missing field as "pinnable" would
+ * be usable, and the front end that read a missing field as "selectable" would
  * draw an empty checkbox beside a tool the model can already call.
  */
 export type ToolSurface = "auto" | "manual" | "internal"
@@ -365,11 +316,6 @@ function toolSurfaceOf(tool: Record<string, unknown>): ToolSurface {
   const surface = tool["surface"]
   if (surface === "manual" || surface === "internal") return surface
   return "auto"
-}
-
-/** `manifest.apply`, defaulting to `manual` exactly as the kernel does. */
-function applyOf(value: unknown): PackageApply {
-  return value === "auto" ? "auto" : "manual"
 }
 
 /** A tool's `ui` object (`ToolSpec.ui`), or `{}` when absent or malformed. */
@@ -427,8 +373,8 @@ function policyOf(value: unknown): PackagePolicy | null {
 
 /**
  * The model-facing tools of a package: the ones that arrive with membership and
- * the ones a pin has to name, together. For readers that only need "not
- * internal"; `manualTools` is the answer for anything that WRITES a pin.
+ * the ones a member has to name, together. For readers that only need "not
+ * internal"; `manualTools` is the answer for anything that WRITES a selection.
  */
 export function modelTools(what: Pick<Contributions, "tools" | "internalTools">): string[] {
   return what.tools.filter((tool) => !what.internalTools.includes(tool))
@@ -635,35 +581,10 @@ export interface ExtensionEntry {
   tools: string[]
   /** The declared `manual`-surface subset of `tools`. */
   manualTools: string[]
-  /**
-   * The `manual` tools this version recommends switching on when the package is
-   * turned on (`Contributions.recommendedTools`). Every one of them unless the
-   * package declared an extra `recommended: false`.
-   */
-  recommendedTools: string[]
   /** The declared `auto`-surface subset of `tools`. */
   autoTools: string[]
   /** The declared `internal`-surface subset of `tools`. */
   internalTools: string[]
-  /**
-   * What ONE VERSION declares about what activating it means,
-   * defaulting to `manual`. Read this about a version that is about to become
-   * `current` — a candidate — because no record exists for it yet.
-   *
-   * For "is this package standing right now" read `standing` below instead: a
-   * declaration is not a state, and the two answer different questions.
-   */
-  apply: PackageApply
-  /**
-   * Whether the kernel composes this package into every fresh session on this
-   * machine right now (`ext list`'s `standing` marker).
-   *
-   * The kernel's own effective answer, written into the `current` record by the
-   * activation that verified the manifest — never re-derived here from a
-   * manifest's `apply`. An id with no `current` (a draft, a deactivated copy)
-   * is standing in nothing, whatever it declares.
-   */
-  standing: boolean
   skills: string[]
   systemPrompts: string[]
   /**
@@ -719,10 +640,8 @@ function manifestFacts(manifest: Record<string, unknown> | null): Pick<
   | "kind"
   | "tools"
   | "manualTools"
-  | "recommendedTools"
   | "autoTools"
   | "internalTools"
-  | "apply"
   | "skills"
   | "systemPrompts"
   | "commands"
@@ -794,10 +713,6 @@ export async function listExtensions(ws: Workspace): Promise<ExtensionEntry[]> {
       versions,
       root: entry.root,
       shadowed: entry.shadowed,
-      // The kernel's word, carried straight through: what a session gets is
-      // its answer to give, and the manifest read below says only what a
-      // version declares.
-      standing: entry.standing,
       ...manifestFacts(manifest),
     })
   }
@@ -841,9 +756,6 @@ export async function draftEntries(
         // the same directory two different ways.
         root: root === workspace ? extensions_dir : root,
         shadowed: false,
-        // Source with no built version: no `current`, so no record, so this id
-        // is standing in nothing — whatever its draft manifest declares.
-        standing: false,
         ...manifestFacts(manifest),
       })
       break
@@ -858,8 +770,9 @@ export async function draftEntries(
  * The projection of `.nulya/tool-usage.jsonl` — counts only.
  *
  * Deliberately NOT a ranking. Nothing ranks: a tool reaches the model's tool
- * face because somebody wrote a pin (`registry.pinned_native_tools`, or
- * `session new --pin`), and this journal is the evidence they read, never the
+ * face because somebody composed its package with the tool named
+ * (`[extensions] with`, or `session new --with`), and this journal is the
+ * evidence they read, never the
  * decision. Sorting it into "who is next" here would invent an order the kernel
  * does not have.
  */

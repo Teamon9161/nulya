@@ -13,18 +13,18 @@
  *    `frozen v-a · store v-b → next session`.
  *  - the USAGE table, a plain projection of `.nulya/tool-usage.jsonl`. It does
  *    NOT rank: a tool joins the model's tool face only when somebody writes a
- *    pin (the operator's `registry.pinned_native_tools`, or an evolution
- *    session's `session new --pin`), so there is no "next" for a table to
+ *    member entry (the operator's `[extensions] with`, or an evolution
+ *    session's `session new --with`), so there is no "next" for a table to
  *    predict — these counts are the evidence for that judgement, not it.
  *  - the SWITCH. `Enter` on an id makes the extension active or inactive for
- *    the next session: active = point `current` at a built version AND pin
- *    every `surface:"manual"` tool it declares; inactive = take those pins
+ *    the next session: active = point `current` at a built version AND select
+ *    every `surface:"manual"` tool it declares; inactive = take those
  *    back and clear `current`. Those are the only two things it writes.
  *    "Active" names what THIS store root points at, not whether the next
  *    session actually carries it — a `manual` package still needs naming
  *    (`/with`, a declared command, `[extensions] with`) to reach one; only
  *    `standing` (`apply: "auto"`) answers that. The axes are still two: the
- *    TOOLS pane is where one tool is pinned on its own,
+ *    TOOLS pane is where one tool is selected on its own,
  *    and the version line is where one specific build is pointed at.
  *
  * An extension id, a tool name and a store root are all as long as somebody
@@ -56,27 +56,34 @@ import {
   extSetCurrent,
   type SyncLine,
 } from "../../nulya/cli.ts"
-import { draftColumn, pinsOf, planStore, wearCommand } from "../../extensions.ts"
+import { draftColumn, planStore, selectableToolsOf, wearCommand } from "../../extensions.ts"
 import {
   builtin_tools,
+  deselectAll,
   faceFullLine,
-  orphanPins,
-  pinAll,
-  pinState,
+  faceState,
+  orphanTools,
   promote,
   quotaLine,
-  readUserPins,
-  resolvableStandingPins,
+  readUserSelection,
+  resolvableSelections,
+  selectAll,
   stateLabel,
   toggle,
   toolId,
-  unpinAll,
-  writeUserPins,
-  type PinChange,
-  type PinSources,
-  type PinState,
-} from "../../pins.ts"
-import { execEnv, lastPush, rememberPush, rememberSessionPins, sessionPins } from "../../state/tui_state.ts"
+  writeUserSelection,
+  type FaceChange,
+  type FaceSources,
+  type FaceState,
+} from "../../face.ts"
+import { parseWithRef, selectedToolIds } from "../../with.ts"
+import {
+  execEnv,
+  lastPush,
+  rememberPush,
+  rememberSessionSelection,
+  sessionSelection,
+} from "../../state/tui_state.ts"
 import { UsageTable } from "./UsageTable.tsx"
 import type { Workspace } from "../../nulya/bin.ts"
 import type { SessionHeader } from "../../nulya/ledger.ts"
@@ -88,7 +95,7 @@ type VisiblePane = Exclude<Pane, "versions">
 /**
  * The visible panes, in Tab order. They used to be reachable only by knowing
  * that `Tab` cycles and that `t` and `u` jump — which meant the usage table and
- * the pin panel were invisible until somebody read the footer. The version
+ * the tool panel were invisible until somebody read the footer. The version
  * timeline now lives in the extension detail itself, where the id is already
  * selected; `versions` remains only as an internal focus for that timeline.
  */
@@ -98,7 +105,7 @@ const panes: VisiblePane[] = ["extensions", "tools", "usage"]
  * An action waiting for `y`. Only two are left, and both name a VERSION: moving
  * the pointer along the timeline by hand, and the one action here that deletes
  * something. The active/inactive switch asks nothing — it moves a pointer and a
- * pin list, both of which the same key puts back.
+ * member list, both of which the same key puts back.
  */
 type Pending =
   | { kind: "activate"; id: string; version: string }
@@ -117,16 +124,16 @@ function confirmLine(pending: Pending): string {
  *
  * `active` means both axes agree: an active version, and every tool it
  * declares on the face. `partial` is the honest name for the states the
- * kernel can be left in — pinned but no longer active (a pointer moved back),
- * active with only some of its tools pinned (`Space` on one row) — and it is
+ * kernel can be left in — selected but no longer active (a pointer moved back),
+ * active with only some of its tools selected (`Space` on one row) — and it is
  * warn-coloured because the first of those is what makes `session new`
  * refuse.
  */
 export type SwitchState = "active" | "partial" | "inactive"
 
-export function switchState(active: boolean, tools: number, pinned: number): SwitchState {
-  if (active && pinned === tools) return "active"
-  if (!active && pinned === 0) return "inactive"
+export function switchState(active: boolean, tools: number, selected: number): SwitchState {
+  if (active && selected === tools) return "active"
+  if (!active && selected === 0) return "inactive"
   return "partial"
 }
 
@@ -138,24 +145,13 @@ const switch_width = 2
  * the kernel composes this package into every fresh session on this machine,
  * so the row is not "available", it is "in everything".
  *
- * Read from the kernel's record (`ext list`'s `standing` marker) rather than
- * from the current version's `apply`. The manifest field is what a
- * VERSION declares; the record is what the activation verified and what
- * sessions actually get, and only the second is a state this column can report.
- * A package that declares `apply: "auto"` and has no `current` is standing in
- * nothing — the detail pane says what activating it would do instead.
- *
- * The column used to say `mode`, meaning "contributes a system prompt". That
- * was the best guess available while nothing could state its own reach: a
- * prompt is the contribution whose cost is paid in every session, so a package
- * with one was the package worth flagging. It reads the wrong package now — a
- * `manual` prompt package is one declared command or `/with` away and costs
- * nothing until then, while an `apply: "auto"` package of pure tools is in
- * front of every model here. The fact the old column carried is still on
- * screen: the detail pane lists prompts and the package's declared commands.
+ * A membership decision, never a manifest field: no package can put itself in
+ * a session, so the answer lives in `[extensions] with` (the kernel's own
+ * standing list) or in `tui.toml`'s `session_with`. WHICH of the two said so is
+ * in the detail pane, because they are undone in different places.
  */
-export function standingCell(entry: { standing: boolean }): string {
-  return entry.standing ? "standing" : ""
+export function standingCell(standing: boolean): string {
+  return standing ? "standing" : ""
 }
 
 /** One row of the tools pane: a declared tool, its placement, state, and evidence. */
@@ -163,7 +159,7 @@ export interface ToolRow {
   id: string
   extension: string
   tool: string
-  state: PinState
+  state: FaceState
   uses: number
   ok: number
   /** `surface:"auto"`: exposed by package membership, not by a checkbox. */
@@ -175,14 +171,14 @@ export interface ToolRow {
 /**
  * Every tool an active extension declares, with the state each one is in.
  *
- * Only extensions with an ACTIVE, un-shadowed version are here: a pin on a
- * package with no `current` is refused by `session new` (a pin brings its
+ * Only extensions with an ACTIVE, un-shadowed version are here: a member with
+ * no `current` is refused by `session new` (nothing brings its
  * package in, and there is nothing to bring), which is not something a checkbox
  * should offer.
  */
 export function toolRows(
   extensions: readonly ExtensionEntry[],
-  sources: PinSources,
+  sources: FaceSources,
   usage: readonly ToolUsage[],
 ): ToolRow[] {
   const rows: ToolRow[] = []
@@ -195,7 +191,7 @@ export function toolRows(
         id,
         extension: entry.id,
         tool,
-        state: pinState(id, sources),
+        state: faceState(id, sources),
         uses: row?.uses ?? 0,
         ok: row?.ok ?? 0,
         auto: entry.autoTools.includes(tool),
@@ -209,16 +205,16 @@ export function toolRows(
 /**
  * A row the fold hides: one this pane cannot switch.
  *
- * `Space` writes and takes back PINS, and a pin is the way in for exactly one
+ * `Space` writes and takes back SELECTIONS, and one is the way in for exactly one
  * surface (`manual`). So the rows with a working checkbox are the
- * `manual` ones — plus any row that somehow HAS a pin down, whatever its
+ * `manual` ones — plus any row that somehow IS selected, whatever its
  * surface, because taking that back is a thing this pane can do and the one
  * wrong checkbox in the list is the last thing to hide.
  *
  * Everything else is a row whose answer was decided elsewhere: an `auto` tool
  * is on because its package is in the session, an `internal` one is never on
  * the model face at all. Offering either a checkbox that does nothing is worse
- * than not drawing it — the kernel refuses a pin naming them outright
+ * than not drawing it — the kernel refuses a selection naming an internal tool
  * (`PinToolNotPinnable`), so there is no state here for a person to be in.
  */
 function isFolded(row: ToolRow): boolean {
@@ -271,15 +267,16 @@ export function foldLine(rows: readonly ToolRow[], expanded: boolean): string {
 }
 
   /**
-   * What the NEXT session's face would carry: merged config pins, this TUI's
-   * own pins, and `surface:"auto"` tools from packages composed every session.
+   * What the NEXT session's face would carry: the merged config's selections,
+   * this TUI's own, and `surface:"auto"` tools from packages composed every
+   * session.
    * It is the same face the draft status counts, even though the last group is
-   * derived from membership rather than written as `--pin`.
+   * derived from membership rather than named in a selection.
    */
-export function nextFace(sources: PinSources): string[] {
+export function nextFace(sources: FaceSources): string[] {
   const face = [...sources.merged]
-  for (const pin of sources.session) if (!face.includes(pin)) face.push(pin)
-  for (const pin of sources.composed ?? []) if (!face.includes(pin)) face.push(pin)
+  for (const id of sources.session) if (!face.includes(id)) face.push(id)
+  for (const id of sources.composed ?? []) if (!face.includes(id)) face.push(id)
   return face
 }
 
@@ -356,7 +353,7 @@ function stamp(mtime: number): string {
 
 /**
  * What the state column says about a row. An `internal` tool's state is not a
- * pin state — it says who calls it, which is the answer to the question the
+ * face state — it says who calls it, which is the answer to the question the
  * empty checkbox raises. An `auto` one says what puts it on the face.
  */
 export function labelOf(row: ToolRow): string {
@@ -384,11 +381,11 @@ export function ExtView(props: {
    * that a running session can do anything about.
    */
   sessionFile?: string
-  /** Where `session_pins` is remembered; tests point it elsewhere. */
+  /** Where `session_with` is remembered; tests point it elsewhere. */
   statePath?: string
   /**
    * Bumped by the host whenever something outside this view wrote to the store
-   * or the pin list. Every read here is a file read, so a number that changes
+   * or the member list. Every read here is a file read, so a number that changes
    * is the only thing that can tell an open view to look again.
    */
   tick?: number
@@ -453,7 +450,7 @@ export function ExtView(props: {
   const [pushTick, setPushTick] = createSignal(0)
   const [drafts, setDrafts] = createSignal<SyncLine[]>([])
   const [confirm, setConfirm] = createSignal<Pending | null>(null)
-  // The three places a pin can be written, plus the quota the kernel enforces.
+  // The three places a selection can be written, plus the quota the kernel enforces.
   // `userPath` comes from the kernel's own projection: we write where it reads.
   const [maxTools, setMaxTools] = createSignal(8)
   const [merged, setMerged] = createSignal<string[]>([])
@@ -467,7 +464,7 @@ export function ExtView(props: {
   const [configWith, setConfigWith] = createSignal<string[]>([])
   const [userPath, setUserPath] = createSignal("")
   const [userPins, setUserPins] = createSignal<string[]>([])
-  const [tuiPins, setTuiPins] = createSignal<string[]>(sessionPins(props.statePath))
+  const [tuiPins, setTuiPins] = createSignal<string[]>(sessionSelection(props.statePath))
   /**
    * `surface:"auto"` tool ids from packages that every session started here is
    * composed with. They are native tools, but not pins; the kernel derives them
@@ -494,7 +491,7 @@ export function ExtView(props: {
   const paneHover = createHover()
   const help = createKeyHelp()
 
-  const sources = createMemo<PinSources>(() => ({
+  const sources = createMemo<FaceSources>(() => ({
     user: userPins(),
     session: tuiPins(),
     merged: merged(),
@@ -502,23 +499,23 @@ export function ExtView(props: {
   }))
 
   const refreshPins = async () => {
-    setTuiPins(sessionPins(props.statePath))
+    setTuiPins(sessionSelection(props.statePath))
     try {
       const view = await configShow(props.ws)
       setMaxTools(view.registry.max_tools)
-      setMerged(view.registry.pinned_native_tools)
-      setConfigWith(view.extensions.with)
-      const named = new Set([...view.extensions.with, ...style.settings.extensions.session_with])
+      setMerged(selectedToolIds(view.extensions.with))
+      setConfigWith(memberIds(view.extensions.with))
+      const named = new Set([...memberIds(view.extensions.with), ...style.settings.extensions.session_with])
       setComposedTools(
         listed()
-          .filter((entry) => isActive(entry) && (named.has(entry.id) || entry.standing))
+          .filter((entry) => isActive(entry) && named.has(entry.id))
           .flatMap((entry) => entry.autoTools.map((tool) => toolId(entry.id, tool))),
       )
       setUserPath(view.paths.user)
-      setUserPins(readUserPins(view.paths.user))
+      setUserPins(readUserSelection(view.paths.user))
     } catch {
       // No projection is "unknown", never a wrong state: with `merged` empty
-      // the panel simply shows nothing as pinned from a config layer, and the
+      // the panel simply shows nothing as selected by a config layer, and the
       // kernel still has the last word at `session new`.
     }
   }
@@ -575,7 +572,7 @@ export function ExtView(props: {
    * journal — neither can be moved by pointing `current` somewhere.
    */
   const reconcile = async () => {
-    dropOrphanPins(await loadListing())
+    dropOrphanTools(await loadListing())
     await refreshPins()
   }
 
@@ -584,7 +581,7 @@ export function ExtView(props: {
     await loadListing()
     setUsage(await readToolUsage(props.ws))
     await Promise.all([refreshPins(), loadPlans()])
-    dropOrphanPins(extensions())
+    dropOrphanTools(extensions())
   }
 
   /**
@@ -596,14 +593,14 @@ export function ExtView(props: {
    * repair is to drop it, out loud, rather than to keep offering a session that
    * will not open.
    */
-  const dropOrphanPins = (entries: readonly ExtensionEntry[]) => {
-    const available = resolvableStandingPins(entries)
-    const orphans = orphanPins(tuiPins(), available)
+  const dropOrphanTools = (entries: readonly ExtensionEntry[]) => {
+    const available = resolvableSelections(entries)
+    const orphans = orphanTools(tuiPins(), available)
     if (orphans.length === 0) return
     const kept = tuiPins().filter((pin) => !orphans.includes(pin))
-    rememberSessionPins(kept, props.statePath)
+    rememberSessionSelection(kept, props.statePath)
     setTuiPins(kept)
-    setNotice(`${orphans.join(" ")} unpinned · nothing active declares them any more`)
+    setNotice(`${orphans.join(" ")} off · nothing active declares them any more`)
   }
 
   onMount(() => void refresh())
@@ -651,6 +648,8 @@ export function ExtView(props: {
 
   /** An extension takes part in the next session: an active version, not shadowed. */
   const isActive = (entry: ExtensionEntry) => entry.current !== null && !entry.shadowed
+  /** Just the ids out of a member list, which is what a row is keyed by. */
+  const memberIds = (members: readonly string[]) => members.map((spec) => parseWithRef(spec)?.id ?? spec)
   /**
    * …and one that is a MEMBER of every session opened here, from any of the
    * three things that can say so: the package asked and the kernel
@@ -667,23 +666,21 @@ export function ExtView(props: {
    * given id came from is in the detail pane below, where the answer differs.
    */
   const composedEverySession = (entry: ExtensionEntry) =>
-    entry.standing ||
-    configWith().includes(entry.id) ||
-    style.settings.extensions.session_with.includes(entry.id)
+    configWith().includes(entry.id) || style.settings.extensions.session_with.includes(entry.id)
   /**
-   * The pins this pane's switch writes for a row: one per `surface:"manual"`
+   * The tools this pane's switch selects for a row: one per `surface:"manual"`
    * tool. `auto` tools come with membership, and `internal` tools stay off the
-   * model face unless an old pin is being removed.
+   * model face unless an old selection is being removed.
    */
-  const pinnable = (entry: ExtensionEntry) => pinsOf(entry)
+  const pinnable = (entry: ExtensionEntry) => selectableToolsOf(entry)
   const pinnedCount = (entry: ExtensionEntry) =>
-    pinnable(entry).filter((id) => pinState(id, sources()) !== "off").length
+    pinnable(entry).filter((id: string) => faceState(id, sources()) !== "off").length
   const stateOf = (entry: ExtensionEntry): SwitchState =>
     switchState(isActive(entry), pinnable(entry).length, pinnedCount(entry))
   /** The short cell beside a half-active package: which half. */
   const switchCell = (entry: ExtensionEntry): string => {
     if (stateOf(entry) !== "partial") return ""
-    if (!isActive(entry)) return "pins only"
+    if (!isActive(entry)) return "tools only"
     return `${pinnedCount(entry)}/${pinnable(entry).length} tools`
   }
   const switchColor = (state: SwitchState) =>
@@ -709,7 +706,7 @@ export function ExtView(props: {
     const [id, standing, on, draft, shadow] = squeeze(
       [
         columnWidth(list.map((entry) => entry.id), 2, 24),
-        columnWidth(list.map(standingCell), 2, 10),
+        columnWidth(list.map((entry) => standingCell(composedEverySession(entry))), 2, 10),
         columnWidth(list.map(switchCell), 2, 12),
         columnWidth(
           list.map((entry) => (outdated().includes(entry.id) ? "differs" : draftColumn(draftOf(entry.id), entry.current))),
@@ -815,16 +812,16 @@ export function ExtView(props: {
 
   /**
    * Carry out one pin decision. The config file is written by text surgery that
-   * re-reads and checks itself (`pins.ts`), so a failure here means nothing
+   * re-reads and checks itself (`face.ts`), so a failure here means nothing
    * changed on disk and the sentence says which file to look at.
    */
-  const applyPin = async (change: PinChange, options: { reconcile?: boolean } = {}): Promise<boolean> => {
+  const applyPin = async (change: FaceChange, options: { reconcile?: boolean } = {}): Promise<boolean> => {
     try {
       if (change.user) {
         if (userPath().length === 0) throw new Error("config show did not say where the user config lives")
-        writeUserPins(userPath(), change.user)
+        writeUserSelection(userPath(), change.user)
       }
-      if (change.session) rememberSessionPins(change.session, props.statePath)
+      if (change.session) rememberSessionSelection(change.session, props.statePath)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
       return false
@@ -887,7 +884,7 @@ export function ExtView(props: {
       setNotice("A promotes one tool · Tab to the tools pane and pick it")
       return
     }
-    setNotice("Enter activates or deactivates the whole extension · Space pins one tool, in the tools pane")
+    setNotice("Enter activates or deactivates the whole extension · Space picks one tool, in the tools pane")
   }
 
   /**
@@ -970,7 +967,7 @@ export function ExtView(props: {
     const added = ids.filter((id) => !face.includes(id))
     const room = builtin_tools + face.length + added.length <= maxTools()
 
-    const change = room && ids.length > 0 ? pinAll(ids, sources()) : null
+    const change = room && ids.length > 0 ? selectAll(ids, sources()) : null
     hold(entry.id)
     const before = { current: entry.current, pins: pinSnapshot() }
     setNotice(`activating ${entry.id}…`)
@@ -1008,46 +1005,38 @@ export function ExtView(props: {
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
-      // Three shapes, and each one names what Enter just made reachable: a
-      // package that asked to be everywhere is everywhere now; a mode is worn
-      // through its own declared command, or `/with` when it declared none;
+      // Two shapes, and each one names what Enter just made reachable: a mode is
+      // worn through its own declared command, or `/with` when it declared none;
       // everything else gets the version and what its tools did.
-      //
-      // `apply`, not `standing`: this sentence is about the version just
-      // pointed at, and the kernel's record for it does not exist until the
-      // activation that is finishing right now. `reconcile()` below brings the
-      // store's own answer back for the row to draw.
-      entry.apply === "auto"
-        ? `${entry.id} active · ${version} · composed into every session on this machine · Enter again takes it back`
-        : entry.systemPrompts.length > 0
-          ? `${entry.id} active · /${wearCommand(entry)?.name ?? `with ${entry.id}`} opens a new tab wearing it for one session · Enter again takes that away`
-          : `${entry.id} active · ${version}` +
-            (ids.length > 0
-              ? room
-                ? ` · ${ids.length} tool(s) pinned`
-                : ` · ${faceFullLine(maxTools(), face.length, added.length)}`
-              : entry.autoTools.length > 0
-                ? ` · ${entry.autoTools.length} tool(s) come with sessions that compose it`
-                : entry.tools.length > 0
-                  ? // A package whose tools are an `ext run` interface: it is
-                    // fully active, and none of it is on the model's face by design.
-                    ` · its ${entry.tools.length} tool(s) stay off the model face · /compact and drivers call them with ext run`
-                  : ""),
+      entry.systemPrompts.length > 0
+        ? `${entry.id} active · /${wearCommand(entry)?.name ?? `with ${entry.id}`} opens a new tab wearing it for one session · Enter again takes that away`
+        : `${entry.id} active · ${version}` +
+          (ids.length > 0
+            ? room
+              ? ` · ${ids.length} tool(s) selected`
+              : ` · ${faceFullLine(maxTools(), face.length, added.length)}`
+            : entry.autoTools.length > 0
+              ? ` · ${entry.autoTools.length} tool(s) come with sessions that compose it`
+              : entry.tools.length > 0
+                ? // A package whose tools are an `ext run` interface: it is
+                  // fully active, and none of it is on the model's face by design.
+                  ` · its ${entry.tools.length} tool(s) stay off the model face · /compact and drivers call them with ext run`
+                : ""),
     )
     // The store has the last word, but it says it after the screen already moved.
     void reconcile()
   }
 
   const deactivateExtension = async (entry: ExtensionEntry, ids: string[]) => {
-    // Pins first. A pin naming an extension with no `current` is refused by
-    // `session new` outright, so the order that leaves a legal world at every
-    // point is: take the pins away, then the pointer.
+    // Selections first. A member with no `current` is refused by `session new`
+    // outright, so the order that leaves a legal world at every point is: take
+    // the selections away, then the pointer.
     hold(entry.id)
     const before = { current: entry.current, pins: pinSnapshot() }
     setNotice(`deactivating ${entry.id}…`)
     let stuck = ""
     if (ids.length > 0) {
-      const change = unpinAll(ids, sources())
+      const change = deselectAll(ids, sources())
       if (change.user || change.session) await applyPin(change, { reconcile: false })
       stuck = change.notice
     }
@@ -1064,14 +1053,11 @@ export function ExtView(props: {
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
-      // What actually leaves, per shape. `ext deactivate` is the ONE way back
-      // for a standing package — with no `current` it is in
-      // nothing — so that is the sentence its row gets. Read from the kernel's
-      // record: what this takes away is what the package HAD, and a manifest
-      // declaring `apply: "auto"` that no activation recorded was taking part
-      // in nothing to begin with.
-      (entry.standing
-        ? `${entry.id} inactive · it leaves every session composed here`
+      // What actually leaves, per shape. A member with no `current` refuses the
+      // whole `session new`, so an id a standing list still names is the one
+      // case worth saying out loud.
+      (composedEverySession(entry)
+        ? `${entry.id} inactive · every session composed here still names it and will now refuse to start`
         : entry.systemPrompts.length > 0
           ? `${entry.id} inactive · ${wearCommand(entry) ? `/${wearCommand(entry)!.name} is gone` : `it can no longer be worn`}`
           : `${entry.id} inactive · its skills leave the composition`) +
@@ -1486,13 +1472,13 @@ export function ExtView(props: {
           when={folded().length === 0}
           fallback={
             <Lines
-              text="nothing pinnable or auto-surfaced here · every active extension in this list declares internal tools only"
+              text="nothing selectable or auto-surfaced here · every active extension in this list declares internal tools only"
               fg={style.theme.muted}
             />
           }
         >
           <Lines
-            text="nothing can be pinned yet · a tool reaches the model only through an extension with an active version"
+            text="nothing can be selected yet · a tool reaches the model only through an extension with an active version"
             fg={style.theme.muted}
           />
           <Lines text="put its source in a store directory, then `b` builds it and Enter turns it on" />
@@ -1684,7 +1670,7 @@ export function ExtView(props: {
                         to spot without reading a detail pane. */}
                     <box width={idCols().standing} flexShrink={0}>
                       <text fg={rowText(style, tone(), on() === "inactive" ? style.theme.faint : style.theme.warn)}>
-                        {fit(standingCell(entry()), Math.max(0, idCols().standing - 2))}
+                        {fit(standingCell(composedEverySession(entry())), Math.max(0, idCols().standing - 2))}
                       </text>
                     </box>
                     {/* Half active: which half. `3/5 tools` and `pins only` are
@@ -1741,7 +1727,7 @@ export function ExtView(props: {
                       entry.tools.length === 0
                         ? ""
                         : pinnable(entry).length > 0
-                          ? ` · tools ${pinnedCount(entry)}/${entry.tools.length} pinned`
+                          ? ` · tools ${pinnedCount(entry)}/${entry.tools.length} on the face`
                           : entry.autoTools.length > 0
                             ? ` · tools ${entry.autoTools.length}/${entry.tools.length} with the package`
                             : ` · tools ${entry.tools.length} · called with ext run, never on the model face`
@@ -1770,16 +1756,13 @@ export function ExtView(props: {
                     width={detailWidth()}
                     fg={style.theme.muted}
                   />
-                  {/* …and what that prompt count MEANS. For a `manual`
-                      package: Enter moves `current`, and the way to wear the
-                      prompt for one session is the command the package itself
-                      declared — or `/with` when it declared none — and nothing
-                      here composes it standing (T1, ext-review-2 §3b). Keyed on
-                      the DECLARATION, because this sentence is about what Enter
-                      would do; a package declaring `apply: "auto"` has one of
-                      the two sentences below instead, whether or not it is
-                      standing yet. */}
-                  <Show when={entry.systemPrompts.length > 0 && entry.apply !== "auto"}>
+                  {/* …and what that prompt count MEANS: Enter moves `current`,
+                      and the way to wear the prompt for one session is the
+                      command the package itself declared — or `/with` when it
+                      declared none. Nothing here composes it standing; a
+                      package a standing list already names has the sentence
+                      below instead. */}
+                  <Show when={entry.systemPrompts.length > 0 && !composedEverySession(entry)}>
                     <Lines
                       text={`a mode · once on, \`/${wearCommand(entry)?.name ?? `with ${entry.id}`}\` wears its prompt for one session · nothing here composes it standing`}
                       width={detailWidth()}
@@ -1806,26 +1789,12 @@ export function ExtView(props: {
                       fg={style.theme.warn}
                     />
                   </Show>
-                  {/* Declared `apply: "auto"` and NOT standing: inactive, or a
-                      `current` written before the record existed. The column
-                      and the sentence below both report the kernel's answer
-                      about now, which is "in nothing" — but what Enter would do
-                      is the thing worth knowing before it is pressed. */}
-                  <Show when={entry.apply === "auto" && !entry.standing}>
-                    <Lines
-                      text={'`apply: "auto"` in its own manifest · activating it composes it into every session started here'}
-                      width={detailWidth()}
-                      fg={style.theme.muted}
-                    />
-                  </Show>
                   <Show when={composedEverySession(entry)}>
                     <Lines
                       text={`composed into every session started here · ${
-                        entry.standing
-                          ? "`apply: \"auto\"` in its own manifest · the kernel composes it while it has a current · Enter again takes it back"
-                          : configWith().includes(entry.id)
-                            ? "`[extensions] with` in config — `nulya config show`"
-                            : "`[extensions] session_with` in tui.toml · its tools are on the face there, not from this list"
+                        configWith().includes(entry.id)
+                          ? "`[extensions] with` in config — `nulya config show`"
+                          : "`[extensions] session_with` in tui.toml · its tools are on the face there, not from this list"
                       }`}
                       width={detailWidth()}
                       fg={style.theme.muted}
@@ -1943,9 +1912,9 @@ export function ExtView(props: {
         notice={confirm() ? null : notice()}
         brief="Enter active/inactive · j/k move · h/l pane · Esc close"
         more={[
-          "Enter activates the extension and pins its tools, again makes both inactive · a click on the row the cursor is already on does the same",
+          "Enter activates the extension and puts its tools on the face, again makes both inactive · a click on the row the cursor is already on does the same",
           "h/l ←/→ Tab move across the panes · j/k ↑/↓ move down a list",
-          "Space pin one tool · A promote it to always · d fold the internal tools in or out · b build the source · s take this binary's copy of a bundled draft (`differs`) · p prune old versions",
+          "Space one tool on or off · A promote it to always · d fold the internal tools in or out · b build the source · s take this binary's copy of a bundled draft (`differs`) · p prune old versions",
           "a activate one named version, on the version line — an older one is the rollback · t tools · u usage",
           ...(remoteTarget() ? [pushHint(remoteTarget()!, selected())] : []),
         ]}

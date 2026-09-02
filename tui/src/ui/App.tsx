@@ -90,10 +90,10 @@ import {
   rememberModel,
   rememberMode,
   rememberRemoteCwd,
-  rememberSessionPins,
+  rememberSessionSelection,
   rememberSidebar,
   rememberTabs,
-  sessionPins,
+  sessionSelection,
   type ModelPick,
 } from "../state/tui_state.ts"
 import {
@@ -167,8 +167,8 @@ import { createPluginHost, pluginKeyOf } from "../plugins/host.ts"
 import { PluginContext } from "../plugins/context.ts"
 import { wrapExtNote } from "../extnote.ts"
 import { renderSessionPrompt } from "../sessionprompt.ts"
-import { formatWithRef, parseWithRef, type WithRef } from "../with.ts"
-import { builtin_tools, orphanPins, resolvableStandingPins, toolId } from "../pins.ts"
+import { formatWithRef, parseWithRef, splitToolId, type WithRef } from "../with.ts"
+import { builtin_tools, orphanTools, resolvableSelections, toolId } from "../face.ts"
 import {
   agent_id,
   agentPick,
@@ -262,7 +262,7 @@ export interface AppProps {
    * launch. Unioned with this TUI's own `session_pins` it is the face the next
    * session would carry — which is what a draft has instead of a frozen one.
    */
-  pinnedTools?: string[]
+  configTools?: string[]
   /**
    * Which store roots to build on the way in, and whether to let that pass move
    * `current`. The user root needs no permission; the project
@@ -794,23 +794,24 @@ export function App(props: AppProps) {
   const refreshComposedMembership = async () => {
     try {
       const [listed, config] = await Promise.all([listExtensions(ws()), configShow(ws(), props.driver?.env)])
-      healStandingPins(listed)
+      healOrphanSelections(listed)
       const profile = envProfile(execEnv(props.statePath))
-      // Three ways a package is in every session started here: it asked
-      // and the kernel recorded it (`standing` — the kernel's own answer, never
-      // an `apply` re-read here), config named it, or this front end always
-      // brings it. Under `--bare` (the default for `remote` exec targets)
-      // neither standing table applies — config's `with` and every
-      // `apply:"auto"` package's own bit — so only THIS list's own `--with`
-      // refs count.
-      const named = profile.bare ? new Set(profile.with) : new Set([...config.extensions.with, ...profile.with])
+      // Two ways a package is in every session started here: config's
+      // `[extensions] with` named it, or this front end always brings it. Under
+      // `--bare` (the default for `remote` exec targets) the config layer drops
+      // out, so only THIS list's own members count.
+      const named = new Set(
+        [...(profile.bare ? [] : config.extensions.with), ...profile.with].map(
+          (spec) => parseWithRef(spec)?.id ?? spec,
+        ),
+      )
       setComposedWithTools(
         listed
-          .filter((entry) => entry.current && !entry.shadowed && (named.has(entry.id) || (!profile.bare && entry.standing)))
+          .filter((entry) => entry.current && !entry.shadowed && named.has(entry.id))
           .flatMap((entry) => entry.autoTools.map((tool) => toolId(entry.id, tool))),
       )
     } catch {
-      // No listing is "unknown"; the pin files still say what they say.
+      // No listing is "unknown"; the state files still say what they say.
       setComposedWithTools([])
     }
   }
@@ -833,26 +834,26 @@ export function App(props: AppProps) {
     )
 
   /**
-   * Take back standing pins this front end should no longer hold — before the
+   * Take back selections this front end should no longer hold — before the
    * first message, not when somebody happens to open `/ext`.
    *
-   * One kind of stale line: a pin whose package has no `current` any more. A
-   * pin brings its package in, and with nothing to bring the
-   * session does not start at all (`WithVersionNotFound`, `cli/session.zig`).
-   * `/ext` has repaired this list but only while its panel was up.
-   * The list is our own program state; dropping a line out loud is the honest
-   * repair, and the same one `ExtView.dropOrphanPins` makes.
+   * One kind of stale line: a tool whose package has no `current` any more. A
+   * member with nothing to resolve does not start the session at all
+   * (`WithVersionNotFound`, `cli/session.zig`). `/ext` has repaired this list
+   * but only while its panel was up. The list is our own program state; dropping
+   * a line out loud is the honest repair, and the same one
+   * `ExtView.dropOrphanTools` makes.
    */
-  const healStandingPins = (listed: readonly ExtensionEntry[]) => {
-    const pins = sessionPins(props.statePath)
-    const orphans = orphanPins(pins, resolvableStandingPins(listed))
+  const healOrphanSelections = (listed: readonly ExtensionEntry[]) => {
+    const selected = sessionSelection(props.statePath)
+    const orphans = orphanTools(selected, resolvableSelections(listed))
     if (orphans.length === 0) return
-    rememberSessionPins(
-      pins.filter((pin) => !orphans.includes(pin)),
+    rememberSessionSelection(
+      selected.filter((id) => !orphans.includes(id)),
       props.statePath,
     )
     setPlanTick((tick) => tick + 1)
-    setNotice(`${orphans.join(" ")} unpinned · nothing composed into every session declares them`)
+    setNotice(`${orphans.join(" ")} off · nothing composed into every session declares them`)
   }
 
   /**
@@ -1993,23 +1994,20 @@ export function App(props: AppProps) {
    * What the next `session new` from this TUI would put on the model's face:
    * the merged config pins, this TUI's own pin list, and `surface:"auto"` tools
    * from packages composed into every session started here — all of it
-   * filtered through the exec-target profile (`envProfile`): under
-   * `--bare` the config's own pin list drops out entirely, and the env
-   * profile's own `pins` list joins in.
+   * filtered through the exec-target profile (`envProfile`): under `--bare` the
+   * config's own member list drops out entirely.
    *
-   * The composed entries are counted for display only. They are not passed as
-   * `--pin`; the kernel derives them from the `--with` membership when the
-   * session is created.
+   * The composed entries are counted for display only. The kernel derives them
+   * from the `--with` membership when the session is created.
    */
-  // A memo, because reading the session pins is a file read: it is asked for
-  // once per frame by both the status line and the draft card, and it can only
-  // change when something wrote that file — which is what `planTick` says.
+  // A memo, because reading the session member list is a file read: it is asked
+  // for once per frame by both the status line and the draft card, and it can
+  // only change when something wrote that file — which is what `planTick` says.
   const plannedFaceTools = createMemo((): string[] => {
     planTick()
     const profile = envProfile(execEnv(props.statePath))
-    const face = profile.bare ? [] : [...(props.pinnedTools ?? [])]
-    for (const pin of sessionPins(props.statePath)) if (!face.includes(pin)) face.push(pin)
-    for (const pin of profile.pins) if (!face.includes(pin)) face.push(pin)
+    const face = profile.bare ? [] : [...(props.configTools ?? [])]
+    for (const id of sessionSelection(props.statePath)) if (!face.includes(id)) face.push(id)
     for (const id of composedWithTools()) if (!face.includes(id)) face.push(id)
     return face
   })
@@ -2315,7 +2313,6 @@ export function App(props: AppProps) {
     target: Workspace,
   ): Promise<{
     with?: string[]
-    pin?: string[]
     prompt?: string[]
     execEnv?: string
     workspace?: string
@@ -2325,16 +2322,25 @@ export function App(props: AppProps) {
     const where = execEnv(props.statePath)
     const profile = envProfile(where)
     const withRefs: string[] = []
-    const pins: string[] = [...profile.pins]
     const missing: string[] = []
-    for (const id of profile.with) {
-      const member = await sessionMemberOnce(target, id)
+    for (const spec of profile.with) {
+      const member = await sessionMemberOnce(target, spec)
       if (!member) {
-        missing.push(id)
+        missing.push(parseWithRef(spec)?.id ?? spec)
         continue
       }
-      withRefs.push(formatWithRef({ id: member.id, version: member.version }))
-      for (const pin of member.pins) if (!pins.includes(pin)) pins.push(pin)
+      // The version and the selection ride on ONE member entry: that is the
+      // only shape the kernel takes, so nothing here has to keep two lists in
+      // step.
+      withRefs.push(
+        formatWithRef({
+          id: member.id,
+          version: member.version,
+          ...(member.tools.length > 0
+            ? { tools: member.tools.map((id) => splitToolId(id)?.tool ?? id) }
+            : {}),
+        }),
+      )
     }
     // The renderers: resolved by the same machinery, composed by none of it —
     // each writes a file and the FILE is what the session gets
@@ -2382,7 +2388,6 @@ export function App(props: AppProps) {
     const password = freshSshPassword(where)
     return {
       ...(withRefs.length > 0 ? { with: withRefs } : {}),
-      ...(pins.length > 0 ? { pin: pins } : {}),
       ...(prompts.length > 0 ? { prompt: prompts } : {}),
       ...(where.length > 0 ? { execEnv: where } : {}),
       ...(workspace.length > 0 ? { workspace } : {}),
@@ -2990,9 +2995,9 @@ export function App(props: AppProps) {
     }
     let m: RenderedAgent
     try {
-      // The package renders the definition and checks that the packages its
-      // pins name can be brought in — one implementation of both, and the same
-      // one the model reaches through the `agent` tool.
+      // The package renders the definition and checks that the members it
+      // names can be brought in — one implementation of both, and the same one
+      // the model reaches through the `agent` tool.
       m = await renderAgent(where, pkg, entry.name)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
@@ -3010,17 +3015,15 @@ export function App(props: AppProps) {
         // installed, so `/ext` gains nothing and no `ext prune` can take this
         // session's own identity text away from its resume.
         prompt: [m.prompt],
-        // Only the `agent` package rides as `--with`, and only for a persona
-        // that names somebody to pass work to: everything else is a leaf, and a
-        // delegated session that cannot delegate simply does not carry the tool.
-        // The persona's OWN pins bring their packages in by themselves — that
-        // implication is the kernel's, not a list assembled here.
-        //
-        // No pin goes with that `--with`: the `agent` tool is `surface: "auto"`,
-        // so membership already is its tool face, and a pin naming it would be
-        // refused (`PinToolNotPinnable`).
-        ...(m.agents.length > 0 ? { with: [formatWithRef(pkg)] } : {}),
-        ...(m.pins.length > 0 ? { pin: m.pins } : {}),
+        // The persona's OWN members ride through verbatim. The `agent` package
+        // joins them only for a persona that names somebody to pass work to:
+        // everything else is a leaf, and a delegated session that cannot
+        // delegate simply does not carry the tool. No selection beside it —
+        // the `agent` tool is `surface: "auto"`, so membership already is its
+        // tool face.
+        ...(m.agents.length > 0 || m.with.length > 0
+          ? { with: [...(m.agents.length > 0 ? [formatWithRef(pkg)] : []), ...m.with] }
+          : {}),
         ...(m.max_steps > 0 ? { maxSteps: m.max_steps } : {}),
       })
       agentOf.set(child.id, m)
@@ -4505,7 +4508,7 @@ export function App(props: AppProps) {
               void openEnvPicker()
             },
           },
-          { label: "packages and pins", value: `tools ${builtin_tools}+${faceSize()}`, command: "/ext", open: () => openOverlay("ext") },
+          { label: "packages and tools", value: `tools ${builtin_tools}+${faceSize()}`, command: "/ext", open: () => openOverlay("ext") },
         ]}
       />
     ),

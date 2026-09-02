@@ -34,7 +34,7 @@ import { createPluginHost, type PluginHost } from "../src/plugins/host.ts"
 import { sessionKind } from "../src/ui/overlays/SessionsView.tsx"
 import { parseExtNote, wrapExtNote } from "../src/extnote.ts"
 import { rememberModel } from "../src/state/tui_state.ts"
-import { bundledDraftPath, pinsOf } from "../src/extensions.ts"
+import { bundledDraftPath, selectableToolsOf } from "../src/extensions.ts"
 import { readContributions } from "../src/nulya/files.ts"
 import {
   extBuild,
@@ -385,30 +385,26 @@ const first_plan = [
  * advance that a question will come up, and `/ask` is the command it declares
  * to bring itself into the session that needs it.
  *
- * What NEITHER of them says is `apply: "auto"` — the one field that
- * would put a package in every session on this machine — so `/ext`'s Enter on
- * either is a pointer move and nothing else. Asserted against the real frozen
- * manifests rather than described.
+ * Neither can put itself in a session — no manifest field says reach — so
+ * `/ext`'s Enter on either is a pointer move and nothing else. Asserted against
+ * the real frozen manifests rather than described.
  */
-test.skipIf(!has_zig)("plan is a mode and ask is a capability, and neither asks to be in every session", async () => {
+test.skipIf(!has_zig)("plan is a mode and ask is a capability, and neither selects a tool", async () => {
   const plan = await readContributions(ws, "plan", plan_version)
   const ask = await readContributions(ws, "ask", ask_version)
 
   expect(plan.systemPrompts.length).toBeGreaterThan(0)
-  expect(plan.apply).toBe("manual")
   // Its two model tools are `surface: "auto"`: they arrive with the membership
-  // `/plan` creates, and a pin naming one would be refused outright — so the
-  // switch writes none.
+  // `/plan` creates, so the switch selects none.
   expect(plan.autoTools).toEqual(["propose", "todo"])
-  expect(pinsOf(plan)).toEqual([])
+  expect(selectableToolsOf(plan)).toEqual([])
 
   expect(ask.systemPrompts).toEqual([])
-  expect(ask.apply).toBe("manual")
   // Same shape, one tool: `/ask` composes the package and the tool comes with
-  // it. Nothing to pin, and nothing standing — which is why `ask` is reached by
-  // typing its name rather than by a checkbox.
+  // it. Nothing to select — which is why `ask` is reached by typing its name
+  // rather than by a checkbox.
   expect(ask.autoTools).toEqual(["ask"])
-  expect(pinsOf(ask)).toEqual([])
+  expect(selectableToolsOf(ask)).toEqual([])
   expect(ask.commands.map((c) => c.name)).toEqual(["ask"])
 })
 

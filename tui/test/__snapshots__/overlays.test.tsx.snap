@@ -1,5 +1,29 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
+exports[`/ext shows the version line, the current pointer and the usage counts 1`] = `
+" extensions · 1 · tools 1+0/<max>
+ extensions  tools  usage
+
+ ▾ ● lint    0/1 tools  active    lint · script · active · tools 0/1 on the face · current v-<hash>
+                                  root .nulya/extensions
+                                  tools lint · skills — · prompts —
+
+                                  versions · 1
+                                    v-<hash>  <built>  ✓ current  ▎ this session
+
+                                  usage
+                                    lint · 0 uses · —
+
+
+
+
+
+
+
+ Enter active/inactive · j/k move · h/l pane · Esc close · ? keys
+"
+`;
+
 exports[`/sessions lists the store and opens the highlighted session 1`] = `
 " sessions · 3   s-<id>
 
@@ -21,29 +45,5 @@ exports[`/sessions lists the store and opens the highlighted session 1`] = `
 
 
  j/k move · Enter go there · t new tab · Esc close · 1 empty session not listed · ? keys
-"
-`;
-
-exports[`/ext shows the version line, the current pointer and the usage counts 1`] = `
-" extensions · 1 · tools 1+0/<max>
- extensions  tools  usage
-
- ▾ ● lint    0/1 tools  active    lint · script · active · tools 0/1 pinned · current v-<hash>
-                                  root .nulya/extensions
-                                  tools lint · skills — · prompts —
-
-                                  versions · 1
-                                    v-<hash>  <built>  ✓ current  ▎ this session
-
-                                  usage
-                                    lint · 0 uses · —
-
-
-
-
-
-
-
- Enter active/inactive · j/k move · h/l pane · Esc close · ? keys
 "
 `;

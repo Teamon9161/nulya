@@ -4,7 +4,7 @@ import { lifted, onClick } from "../../ui/rows.ts"
 import { Fact } from "../../ui/Fact.tsx"
 import { displayWidth, fit } from "../../ui/columns.ts"
 import { useFolds } from "../../state/folds.ts"
-import { builtin_tools } from "../../pins.ts"
+import { builtin_tools } from "../../face.ts"
 import type { Contributions } from "../../nulya/files.ts"
 import type { SessionHeader } from "../../nulya/ledger.ts"
 

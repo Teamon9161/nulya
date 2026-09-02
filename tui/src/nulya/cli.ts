@@ -177,26 +177,22 @@ export interface NewSessionOptions {
   model?: string
   parent?: { session: string; seq: number }
   /**
-   * `--with <id>[@<version>]`, repeatable: bring a BUILT extension version into
-   * this session's composition without activating it. Membership
-   * only — skills land in the catalog, system prompts in the system blocks —
-   * so this is how a mode or the evolution package is put in front of a model
-   * for one session and no other.
+   * `--with <id>[@<version>][:<tool>,…]`, repeatable: bring a BUILT extension
+   * version into this session's composition without activating it. A bare id is
+   * membership only — skills land in the catalog, system prompts in the system
+   * blocks — which is how a mode is put in front of a model for one session and
+   * no other; the part after `:` names the `surface:"manual"` tools this session
+   * also puts on the model's face. Unioned with the config's `[extensions] with`
+   * by the kernel, and a union only adds, so this can never take a configured
+   * member away.
    */
   with?: readonly string[]
   /**
-   * `--pin ext:<id>/<tool>`, repeatable: put an extension tool on THIS session's
-   * native tool face. Unioned with `registry.pinned_native_tools` by the kernel
-   * — a union only adds, so this can never take a configured pin
-   * away. The TUI's own pin panel writes these from `tui-state.json`.
-   */
-  pin?: readonly string[]
-  /**
    * `--bare`: compose from these flags alone, ignoring the config's standing
-   * `[extensions] with` and `registry.pinned_native_tools`. What a
-   * delegated sub-agent session gets, whose whole capability list is its own
-   * definition — `extensions/agent`'s `render` returns it, so the TUI passes
-   * through whatever that says rather than deciding here.
+   * `[extensions] with`. What a delegated sub-agent session gets, whose whole
+   * capability list is its own definition — `extensions/agent`'s `render`
+   * returns it, so the TUI passes through whatever that says rather than
+   * deciding here.
    */
   bare?: boolean
   /**
@@ -249,7 +245,6 @@ export async function sessionNew(
   if (options.workspace) args.push("--workspace", options.workspace)
   if (options.sshPassword) args.push("--ssh-password-stdin")
   for (const ref of options.with ?? []) args.push("--with", ref)
-  for (const pin of options.pin ?? []) args.push("--pin", pin)
   for (const file of options.prompt ?? []) args.push("--prompt", file)
   const result = await run(ws, args, env, options.sshPassword)
   const id = result.stdout.trim()
@@ -312,22 +307,17 @@ export interface ModelView {
   vision: boolean
 }
 
-/**
- * The merged `[registry]`: the tool face this workspace opens a session with.
- * Effective values, not layers — the projection deliberately does not say which
- * config file contributed a pin, so a panel that needs to know reads the user
- * file itself (`pins.ts`), which is the one file it may write.
- */
+/** The merged `[registry]`: the ceiling on this workspace's tool face. */
 export interface RegistryView {
   max_tools: number
-  pinned_native_tools: string[]
 }
 
 /**
- * The merged `[extensions]`, projected for the same reason `[registry]` is:
- * which packages are a member of every session opened here is
- * not something a front end should read three config files to learn — and one
- * of those layers may hold an inline `api_key`.
+ * The merged `[extensions]`: which packages are a member of every session
+ * opened here, and which of their tools each one selects. Effective values, not
+ * layers — the projection does not say which config file contributed an entry,
+ * so a panel that needs to know reads the user file itself (`face.ts`), which is
+ * the one file it may write.
  *
  * `paths` is deliberately not in the projection: it names directories code may
  * come from, which `ext list` already answers by showing each root.
@@ -369,12 +359,11 @@ export async function configShow(ws: Workspace, env?: Record<string, string>): P
   return {
     registry: {
       max_tools: typeof registry.max_tools === "number" ? registry.max_tools : 8,
-      pinned_native_tools: Array.isArray(registry.pinned_native_tools) ? registry.pinned_native_tools : [],
     },
     // Absent means an older binary that did not project it, which reads the
     // same as "nothing joins every session here" — the safe direction: a
-    // package this front end fails to notice as standing is one it offers to
-    // add, never one it silently assumes is already there.
+    // package this front end fails to notice is one it offers to add, never one
+    // it silently assumes is already there.
     extensions: { with: Array.isArray(extensions.with) ? extensions.with : [] },
     paths: { system: paths.system ?? "", user: paths.user ?? "", project: paths.project ?? "" },
     active_profile: typeof record["active_profile"] === "string" ? record["active_profile"] : "",
@@ -919,32 +908,6 @@ export interface ExtStoreEntry {
   root: string
   /** An earlier root already has this id active, so this copy is never used. */
   shadowed: boolean
-  /**
-   * The `standing` word in the contribution marker: the kernel composes this id
-   * into every fresh session for as long as it has a `current`.
-   *
-   * This is the EFFECTIVE state, and it comes from the `current` record the
-   * activation wrote after verifying the manifest — not from re-reading `apply`
-   * out of some version's manifest, which is only what that one version
-   * DECLARES. The two can differ (a pointer written before the record existed,
-   * a version directory edited by hand), and when they do the kernel's record
-   * is the one describing the sessions people are actually going to get.
-   */
-  standing: boolean
-}
-
-/**
- * `standing` inside the `[tools skills prompt standing]` marker.
- *
- * The marker is a trailing field, not a fixed column — `[with]` and
- * `(shadowed)` can follow it — so this reads whichever bracketed field carries
- * the word rather than counting positions.
- */
-function standingMarker(fields: readonly string[]): boolean {
-  return fields.some(
-    (field) =>
-      field.startsWith("[") && field.endsWith("]") && field.slice(1, -1).split(" ").includes("standing"),
-  )
 }
 
 /**
@@ -976,7 +939,6 @@ export async function extList(ws: Workspace): Promise<ExtStoreEntry[]> {
       // `[tools skills prompt]` and possibly `[with]`, so position would be the
       // wrong test.
       shadowed: fields.includes("(shadowed)"),
-      standing: standingMarker(fields),
     })
   }
   return entries

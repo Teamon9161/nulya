@@ -26,7 +26,7 @@ import { BrowseContext, createBrowseStore } from "../src/state/browse.ts"
 import { createSessionState, type TranscriptItem } from "../src/state/session.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { sessionAppend, sessionNew, sessionStep } from "../src/nulya/cli.ts"
-import { sessionPins } from "../src/state/tui_state.ts"
+import { sessionSelection } from "../src/state/tui_state.ts"
 import { unsafe_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 import type { SessionTab } from "../src/state/tabs.ts"
 
@@ -242,7 +242,7 @@ test("/ext: clicking a pane name goes to it, clicking [x] pins the tool", async 
     const line = (await settle(setup, 2)).split("\n")[strip]!
     await setup.mockMouse.click(line.indexOf("tools") + 2, strip)
     await until(() => setup.captureCharFrame().includes("[ ] ext:lint/lint"), 10_000)
-    expect(sessionPins(state)).not.toContain("ext:lint/lint")
+    expect(sessionSelection(state)).not.toContain("ext:lint/lint")
 
     // The checkbox is its own target: clicking it is Space, and nothing else on
     // the row does that.
@@ -251,12 +251,12 @@ test("/ext: clicking a pane name goes to it, clicking [x] pins the tool", async 
     expect(row).toBeGreaterThanOrEqual(0)
     await setup.mockMouse.click(pane[row]!.indexOf("[") + 1, row)
     await until(() => setup.captureCharFrame().includes("[x] ext:lint/lint"), 10_000)
-    expect(sessionPins(state)).toContain("ext:lint/lint")
+    expect(sessionSelection(state)).toContain("ext:lint/lint")
 
     // And again to take it off, so the click is a toggle and not a one-way door.
     await setup.mockMouse.click(pane[row]!.indexOf("[") + 1, row)
     await until(() => setup.captureCharFrame().includes("[ ] ext:lint/lint"), 10_000)
-    expect(sessionPins(state)).not.toContain("ext:lint/lint")
+    expect(sessionSelection(state)).not.toContain("ext:lint/lint")
   } finally {
     setup.renderer.destroy()
   }

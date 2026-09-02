@@ -37,7 +37,7 @@ function def(over: Partial<AgentEntry> & { name: string }): AgentEntry {
     max_steps: 0,
     max_exchanges: 0,
     agents: [],
-    pins: [],
+    with: [],
     warnings: [],
     ...over,
   }

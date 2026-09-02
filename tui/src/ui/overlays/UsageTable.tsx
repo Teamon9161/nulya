@@ -3,8 +3,8 @@
  * counts.
  *
  * Nothing here decides anything. A tool reaches the model's tool face only
- * because somebody wrote a pin — the operator in `registry.pinned_native_tools`,
- * or an evolution session with `session new --pin` — and
+ * because somebody composed its package with the tool named — the operator in
+ * `[extensions] with`, or an evolution session with `session new --with` — and
  * these counts are evidence for that judgement, never a queue for it. So the
  * table sorts by uses and says as much.
  *
@@ -17,7 +17,7 @@ import { useStyle } from "../../render/theme.ts"
 import { columnWidth, fit, squeeze, wrapWords } from "../columns.ts"
 import type { ToolUsage } from "../../nulya/files.ts"
 
-const caption = "tool usage · .nulya/tool-usage.jsonl · evidence for a pin, not a queue"
+const caption = "tool usage · .nulya/tool-usage.jsonl · evidence for a decision, not a queue"
 
 /**
  * The numerals line up, the words after them line up too.

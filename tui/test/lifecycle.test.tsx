@@ -19,7 +19,7 @@ import { createSessionState } from "../src/state/session.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { readHeader, sessionExists } from "../src/nulya/files.ts"
 import { sessionList, sessionNew } from "../src/nulya/cli.ts"
-import { loadTuiState, rememberSessionPins } from "../src/state/tui_state.ts"
+import { loadTuiState, rememberSessionSelection } from "../src/state/tui_state.ts"
 import { unsafe_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
 const style = createStyle(unsafe_settings, {})
@@ -196,7 +196,7 @@ test("the first message creates exactly one session, carrying the pins as they s
     await settle(setup, 4)
     // A pin written AFTER the screen opened — what `/ext` does. The old eager
     // `session new` would have missed it by a whole session.
-    rememberSessionPins(["ext:lint/lint"], statePath)
+    rememberSessionSelection(["ext:lint/lint"], statePath)
 
     await setup.mockInput.typeText("probe")
     setup.mockInput.pressEnter()
