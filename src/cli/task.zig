@@ -22,6 +22,7 @@ const environment = @import("../environment.zig");
 const journal = @import("../journals/journal.zig");
 const launch = @import("../launch.zig");
 const ledger = @import("../ledger.zig");
+const lease = @import("../lease.zig");
 const remote = @import("../environment/remote/mod.zig");
 const Tree = @import("../environment/tree.zig").Tree;
 const task_remote = @import("task_remote.zig");
@@ -41,9 +42,6 @@ const printErr = common.printErr;
 // ── The task directory's five files ─────────────────────────────────────────
 
 pub const status_file = "status.json";
-/// The supervisor's lease, held for its whole life. Its being FREE while the
-/// status still says `running` is the only evidence that a supervisor died.
-pub const lock_file = ".lock";
 /// The kill marker, read at the supervisor's poll and before it spawns.
 pub const kill_file = "kill";
 /// Where this task's result should be delivered, when it is not the session
@@ -244,49 +242,8 @@ fn readStatus(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !?std.json.
         return error.CorruptTaskStatus;
 }
 
-/// Is a supervisor alive on this task? Asked by OPENING the lease file, never by
-/// creating it: a probe that created `.lock` could, in the instant before it
-/// closed again, make the real supervisor's own non-blocking acquire fail. A
-/// missing lease file therefore means "no supervisor has started yet", which is
-/// exactly what it means.
-///
-/// `base` is the directory `dir` is relative to: `std.Io.Dir.cwd()` for every
-/// reader on this machine (`projectState`, below), and a remote agent's
-/// already-open workspace handle for `cli/remote.zig`'s `serveTaskPoll` — one
-/// implementation of "is anyone holding this lease" for both.
-pub fn leaseHeldIn(base: std.Io.Dir, io: std.Io, alloc: std.mem.Allocator, dir: []const u8) !bool {
-    const path = try std.fs.path.join(alloc, &.{ dir, lock_file });
-    defer alloc.free(path);
-    // Reject a corrupt directory before asking Windows to open it with file
-    // locking flags. Zig's threaded Windows backend treats that combination's
-    // INVALID_PARAMETER as an internal panic rather than a catchable I/O error.
-    const before = base.statFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => |e| return e,
-    };
-    if (before.kind != .file) return error.InvalidLeaseFile;
-    var f = base.openFile(io, path, .{
-        .lock = .exclusive,
-        .lock_nonblocking = true,
-    }) catch |err| switch (err) {
-        error.WouldBlock => return true,
-        // No lease file at all IS "nobody holds it". Every other failure —
-        // permission denied, the lease being a directory, any other I/O fault
-        // — propagates instead: an unreadable lease is not the same claim as an
-        // unheld one, and callers decide what an unanswerable lease means.
-        error.FileNotFound => return false,
-        else => |e| return e,
-    };
-    defer f.close(io);
-    // POSIX permits opening and flocking a directory while Windows commonly
-    // rejects it during open, so check the kind explicitly rather than let OS
-    // behaviour decide whether a corrupt `.lock` reads as an unheld lease.
-    if ((try f.stat(io)).kind != .file) return error.InvalidLeaseFile;
-    return false;
-}
-
 fn leaseHeld(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
-    return leaseHeldIn(std.Io.Dir.cwd(), io, alloc, dir);
+    return lease.taskHeld(std.Io.Dir.cwd(), io, alloc, dir);
 }
 
 fn projectState(alloc: std.mem.Allocator, io: std.Io, dir: []const u8, s: ?Status) !Projected {
@@ -366,23 +323,12 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 
     const cwd = std.Io.Dir.cwd();
 
-    // ① The lease. Non-blocking: a second supervisor on the same directory is
-    // a bug in whoever spawned it, not something to queue behind.
-    const lock_path = try std.fs.path.join(alloc, &.{ dir, lock_file });
-    defer alloc.free(lock_path);
-    var lease = cwd.createFile(io, lock_path, .{
-        .truncate = false,
-        .read = true,
-        .lock = .exclusive,
-        .lock_nonblocking = true,
-    }) catch |err| switch (err) {
-        error.WouldBlock => {
-            try printErrFmt(alloc, io, "another supervisor already owns '{s}'\n", .{dir});
-            return 1;
-        },
-        else => return err,
+    // ① The lease.
+    var held = (try lease.taskSupervisor(alloc, io, cwd, dir)) orelse {
+        try printErrFmt(alloc, io, "another supervisor already owns '{s}'\n", .{dir});
+        return 1;
     };
-    defer lease.close(io);
+    defer held.close(io);
 
     const started_at = try journal.rfc3339Now(alloc, io);
     defer alloc.free(started_at);
@@ -418,7 +364,7 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         var cfg = try config.load(alloc, io, &cfg_host);
         defer cfg.deinit();
         // No session ref: a supervisor runs one command, it never starts tasks.
-        var lenv = try launch.localEnvironment(alloc, io, &cfg, null, &.{});
+        var lenv = try launch.localEnvironment(alloc, io, &cfg, null, &.{}, common.stderr_diag);
         defer lenv.deinit();
 
         const outcome = try runWatched(alloc, io, &lenv, .{
@@ -1027,7 +973,7 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         .session_path = spath,
         .tasks_dir = tasks_dir,
         // No store roots: a task supervisor runs a COMMAND, never an extension.
-    }, hdr.value.environment, hdr.value.remote_workspace, &.{}, null) catch |err| switch (err) {
+    }, hdr.value.environment, hdr.value.remote_workspace, &.{}, null, common.stderr_diag) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return 1;
@@ -1058,11 +1004,11 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // true as ONE act under the lease prune settles its own "is anything alive
     // under here" question below: either it sees the task and refuses, or this
     // re-check finds the session gone.
-    var lease = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
+    var held = lease.sessionDeposits(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
         try printErrFmt(alloc, io, "task run failed: cannot open the inbox of '{s}'\n", .{session_id});
         return 1;
     };
-    defer lease.close(io);
+    defer held.close(io);
     // Under the lease, because waiting for it is a moment in which the session
     // can have been pruned.
     std.Io.Dir.cwd().access(io, spath, .{}) catch {
@@ -1688,7 +1634,7 @@ fn taskRetarget(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     // Written without the destination's lease, the pointer can land on a
     // session another process is removing at that moment, and the task then
     // finishes into a session that does not exist.
-    var pair = try ledger.acquireDepositPair(arena, io, cwd, current_path, to_path, .block);
+    var pair = try lease.depositPair(arena, io, cwd, current_path, to_path, .block);
     defer pair.close(io);
 
     // Under the leases, so it stays true for as long as this command needs it.
@@ -1827,14 +1773,7 @@ test "lost is a projection: a running status whose lease nobody holds" {
     try std.testing.expectEqual(Projected.lost, try projectState(alloc, io, dir, running));
 
     // Hold it, and the same status reads as what it says.
-    const lock_path = try std.fs.path.join(alloc, &.{ dir, lock_file });
-    defer alloc.free(lock_path);
-    var held = try std.Io.Dir.cwd().createFile(io, lock_path, .{
-        .truncate = false,
-        .read = true,
-        .lock = .exclusive,
-        .lock_nonblocking = true,
-    });
+    var held = (try lease.taskSupervisor(alloc, io, std.Io.Dir.cwd(), dir)).?;
     try std.testing.expectEqual(Projected.running, try projectState(alloc, io, dir, running));
     held.close(io);
 
@@ -1860,10 +1799,10 @@ test "a real fault reading the lease propagates — it is not the same claim as 
     };
     // `.lock` is a DIRECTORY here: a corrupt lease, not "nobody holds it".
     // POSIX may open and flock a directory while Windows rejects it during
-    // open, so `leaseHeldIn` verifies the opened object is a regular file. The
-    // property under test is "an error propagates instead of a value", not
+    // open, so `lease.taskHeld` verifies the opened object is a regular file.
+    // The property under test is "an error propagates instead of a value", not
     // which error name it has — the exact one is platform-dependent.
-    const lock_path = try std.fs.path.join(alloc, &.{ dir, lock_file });
+    const lock_path = try std.fs.path.join(alloc, &.{ dir, lease.task_lock_name });
     defer alloc.free(lock_path);
     try std.Io.Dir.cwd().createDirPath(io, lock_path);
 

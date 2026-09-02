@@ -62,7 +62,8 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | 文件 | 职责 | 最容易写错的那条 |
 |---|---|---|
 | `main.zig` `cli.zig` | 入口与 dispatch | 一个动词族一个 `cli/<verb>.zig`；共用件在 `cli/common.zig`（stdout 只放数据，拒绝与警告一律 stderr） |
-| `ledger.zig` | 4 种事件、deep-copy 所有权、durable 文件（typed header + `seq` JSONL）、跨进程 inbox、carry fork 的读半边（`readCarry`） | 唯一写口是 `append`；一文件 = 一 generation = 一缓存域 = 一个模型身份；单写者由 `<id>.lock` 独家强制；投递 id 就是 exactly-once 键；`.deposit.lock` + `<id>.lock` 两把一起才是 session 的 **lifetime 冻结**（`SessionLeases`）——投递、起后台任务、prune 在它们下面串行 |
+| `ledger.zig` | 4 种事件、deep-copy 所有权、durable 文件（typed header + `seq` JSONL）、跨进程 inbox、carry fork 的读半边（`readCarry`） | 唯一写口是 `append`；一文件 = 一 generation = 一缓存域 = 一个模型身份；单写者由 `<id>.lock` 独家强制；投递 id 就是 exactly-once 键；`.deposit.lock` + `<id>.lock` 两把一起才是 session 的 **lifetime 冻结**（`lease.SessionLeases`）——投递、起后台任务、prune 在它们下面串行 |
+| `lease.zig` | 全系统的锁与标记：取锁函数 + 模块头那张表（文件名 / 谁拿 / 阻不阻塞 / 全局顺序） | 表是契约，新增一把锁先加一行；`extensions/agent` 与远端那几把只登记不搬（包 import 不了内核） |
 | `prompt.zig` | `Ledger → PromptIR` 纯投影 | 一个事件一个 turn（没有例外），turn 不拆散；`usage` / `stop_reason` / `origin` 在类型里**没有字段**，所以不可能被投影 |
 | `loop.zig` | 一次 step：freeze → collect → 串行执行 batch → 一条 tool_results | 取消与截断都要补齐整批（marker），ledger 永远处于合法状态 |
 | `session.zig` | ledger 生命周期 + step 边界（补残尾 → 消费 cancel → 排干 inbox）+ 预算 + usage 记账 | 排干在补残尾之后、模型跑之前，所以排干的事件永远不落在 tool batch 中间 |
@@ -77,7 +78,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `config.zig` + `default.toml` | `default → system → user → project` 合并 | project 层只能收窄；`[extensions] with` 是唯一的 extension 键，project 层也读（只能在 store 已有的包里挑） |
 | `extension/manifest.zig` | `nulya.extension/v2` schema | 三层听众：内核强制 / driver 声明 / 前端声明。manifest 是 schema 唯一真相，不问 binary |
 | `extension/protocol.zig` `invoke.zig` | 唯一那种 wire（stdin 参数 JSON、env、stdout 即结果、退出码即 ok） | stderr 就是失败消息，所以包必须独占它 |
-| `extension/store.zig` `site.zig` `integrity.zig` | 版本目录（一台机器一个 store）+ 两层 `current` 指针 | 字节只有一处，指针有两层且 workspace 压 user；`current` 授 reach，`.sealed` 证明资格 |
+| `extension/store.zig` `site.zig` `integrity.zig` | 版本目录（一台机器一个 store）+ 两层 `current` 指针 + `Diag`（error 装不下的那句话的唯一出口） | 字节只有一处，指针有两层且 workspace 压 user；`current` 授 reach，`.sealed` 证明资格；内核不选 `Diag` 的目的地，缺省不发一个字（写 stderr 的 sink 是 `cli/common.stderr_diag`） |
 | `extension/build/` | 冻结 snapshot → 编译或直接冻结 → seal | version = hash(snapshot + compiler + target)，后两项只对 compiled 非空 |
 | `extension/exec.zig` `tools.zig` `skills.zig` `notes.zig` | 执行身份解析 / tool binding / skill catalog / 能力宣告 note | 哪个文件、哪个 entry、seal 对不对，由**持有字节的那台机器**答 |
 | `skill.zig` | `SkillSetSnapshot` + 渐进披露文本 | Agent Skills 兼容（`SKILL.md` frontmatter） |

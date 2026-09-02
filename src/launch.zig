@@ -16,6 +16,7 @@ const config = @import("config.zig");
 const ledger = @import("ledger.zig");
 const emit = @import("emit.zig");
 const environment = @import("environment.zig");
+const ext_site = @import("extension/site.zig");
 const remote = @import("environment/remote/mod.zig");
 const build_options = @import("config_options");
 
@@ -274,12 +275,14 @@ pub fn localEnvironment(
     cfg: *const config.Config,
     session: ?environment.SessionRef,
     ext_store: []const u8,
+    diag: ext_site.Diag,
 ) !environment.LocalEnvironment {
     if (cfg.environment.backend != .local) return error.UnsupportedEnvironmentBackend;
     return environment.LocalEnvironment.init(alloc, io, .{
         .dialect = cfg.environment.shell.toLocalOption(),
         .session = session,
         .extension_store = ext_store,
+        .diag = diag,
     });
 }
 
@@ -406,6 +409,7 @@ pub fn sessionEnvironment(
     workspace: []const u8,
     ext_store: []const u8,
     ssh_password: ?[]const u8,
+    diag: ext_site.Diag,
 ) !SessionEnvironment {
     const spec = environment.normalizeExecSpec(exec);
     if (remote.isSpec(spec)) {
@@ -427,7 +431,7 @@ pub fn sessionEnvironment(
         };
     }
     if (spec.len != 0) return error.InvalidExecTarget;
-    return .{ .local = try localEnvironment(alloc, io, cfg, session, ext_store) };
+    return .{ .local = try localEnvironment(alloc, io, cfg, session, ext_store, diag) };
 }
 
 /// `<NULYA_HOME | ~/.nulya>/store` — the ONE place built extension versions
@@ -671,13 +675,13 @@ test "only the local environment backend runs; sandbox is refused, not silently 
     defer cfg.deinit();
 
     // The default backend builds an environment as usual…
-    var local = try localEnvironment(alloc, std.testing.io, &cfg, null, &.{});
+    var local = try localEnvironment(alloc, std.testing.io, &cfg, null, &.{}, .{});
     local.deinit();
 
     // …and a backend this build cannot honour fails rather than running the
     // tools locally under a config that asked for isolation.
     cfg.environment.backend = .sandbox;
-    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, &.{}));
+    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, &.{}, .{}));
 }
 
 test "an exec target is refused before anything is built, and the refusals differ" {

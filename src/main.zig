@@ -40,6 +40,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("emit.zig");
     _ = @import("ledger.zig");
+    _ = @import("lease.zig");
     _ = @import("tool.zig");
     _ = @import("journals/journal.zig");
     _ = @import("journals/tool_stats.zig");

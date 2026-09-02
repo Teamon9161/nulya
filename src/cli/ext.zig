@@ -825,7 +825,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // against this very store (`extension/exec.zig`). One resolution
     // implementation, so a tool called through the CLI and the same tool on the
     // model's face cannot drift on which file "this version" means.
-    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_store = view.site.store_path });
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_store = view.site.store_path, .diag = common.stderr_diag });
     defer lenv.deinit();
 
     // `ext run` applies NO timeout by default: the manifest's own `timeout_ms`

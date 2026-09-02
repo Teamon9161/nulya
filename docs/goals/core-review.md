@@ -252,3 +252,35 @@ vtable 后面这道缝。
 
 - **2026-09-02 · 小刀 3**（`session events --follow`）：留下 flag（TUI observer 模式靠它），补上出口——session 文件被 prune 后 `dump` 读到 `FileNotFound` 即 flush、stderr 一句、exit 0；此前是 error 上浮 exit 1。这是三个选项里最小的一个：删 flag 要改 TUI observer，`--until <seq>` 是没人要的第二个出口。
 
+
+- **2026-09-03 · 中刀 F**（`35164e1` 锁集中 · 本 commit `Diag`）：两把独立的刀，各一个 commit。
+  ① `src/lease.zig` 成了全系统锁与标记的唯一落点：模块头一张表（文件名 / 谁拿 / 阻不阻塞 / 全局顺序），
+  取锁函数全在它下面——writer / deposit / session pair / deposit pair（原 `ledger.zig`）、
+  task supervisor 与 `taskHeld`（原 `cli/task.zig` 的 `leaseHeldIn`）、store 的 `<id>/.lock`、
+  journal 的 `<file>.lock`。`extensions/agent` 的三把（`.runner.lock` / `inbox/.writer.lock` /
+  `record.jsonl.lock`）与 `interrupt` 标记只登记不搬（包 import 不了内核），远端那一路本来就是
+  经通道去拿**对面机器自己**那把 task 租约，所以也只是表里一行。
+  三处契约没点名的连带决定：**(a)** `siblingPath` 跟着搬进 `lease.zig`——`.lock` / `.inbox` /
+  `.cancel` 三个 per-session 名字都由它拼，留在 `ledger.zig` 会让 `lease.zig` 反过来 import
+  `ledger.zig`（现在 `lease.zig` 只 import `std`）；**(b)** `leaseOrRefuse` 与
+  `acquireDepositLease` 是同一件事的两个名字（前者只把 `WouldBlock` 翻成 `DepositInFlight`），
+  合成 `sessionDeposits` 一个，于是没有任何调用方还看得见裸 `WouldBlock`；
+  **(c)** `journal.zig` 模块头里"第三条 journal 是 `trust.zig`"是 Lane B 删干净之后剩的悬空指针，
+  顺手删掉。`store.lease` 这类调用方可见的名字语义一字未改。
+  ② `Diag` 取代内核里的三处 stderr。形状与 `StepObserver` 同（`{ptr, report(ptr, io, line)}`），
+  住在 `extension/site.zig`——三句话都是"这台机器的 extension 字节怎么了"，而 `Site` 正是
+  那三处唯一都经过的对象，于是 `site.report(alloc, fmt, args)` 是三个调用点共同的出口，
+  `composition.zig` 与 `extension/site.zig` 里的 `std.Io.File.stderr()` 与三条
+  `if (builtin.is_test) return` 全部删除（`composition.zig` 的 `builtin` import 随之无人用，也删）。
+  两处偏离：**(a)** 契约说的是 `{ptr, report(ptr, line)}`，实现把 `io` 放在**报告时**传
+  （`report(ptr, io, line)`）——报告点手里本来就有 `site.io`，而这样 sink 可以是**无状态常量**
+  （`cli/common.stderr_diag`），`Site` 被按值拷贝或移动时不会留下一个悬空的 `ptr`；
+  **(b)** `LocalOptions.diag` 之外还给 `launch.localEnvironment` / `launch.sessionEnvironment`
+  各加了一个末位参数——那两个函数是 CLI 拿环境的唯一门，不穿过去 `ext run` 与 step 里的
+  extension 调用就拿不到 sink。`initFrozen` 按契约收一个显式参数，fresh 路走
+  `composition.Options.diag`；resume 路由 `AgentSession.Options.registry.diag` 带进来
+  （那条路只读这一个字段，`registry` 的注释写明了）。
+  验收：`zig build test` 590/590 · `zig build e2e` 172 pass 1 skip
+  （单独重跑 `e2e-core` 64 pass 1 skip、`e2e-remote` 29 pass）。断言这三句话的 e2e
+  （`ext_cli.zig` 的 broken `current`、`remote.zig` 的"没有对面机器的 build"）一字未改仍绿。
+  `tui/` 本刀未触及。

@@ -16,6 +16,7 @@ const journal = @import("../journals/journal.zig");
 const outcome = @import("../journals/outcome.zig");
 const config = @import("../config.zig");
 const ledger = @import("../ledger.zig");
+const lease = @import("../lease.zig");
 const prompt = @import("../prompt.zig");
 const session = @import("../session.zig");
 const loop = @import("../loop.zig");
@@ -533,7 +534,7 @@ pub fn createSession(
     const ext_store = try launch.storePath(alloc, &host);
     defer alloc.free(ext_store);
 
-    var lenv = launch.localEnvironment(alloc, io, &cfg, null, ext_store) catch |err| switch (err) {
+    var lenv = launch.localEnvironment(alloc, io, &cfg, null, ext_store, common.stderr_diag) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return null;
@@ -570,6 +571,7 @@ pub fn createSession(
         },
         .extension_store = ext_store,
         .registry = .{
+            .diag = common.stderr_diag,
             .max_tools = cfg.registry.max_tools,
             .with = with,
             .prompts = prompts,
@@ -727,11 +729,11 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     // minted from what is already waiting, so two racing appends could
     // otherwise take the same queue position; and `session prune` may not take
     // the session away between the check below and the deposit.
-    var lease = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
+    var held = lease.sessionDeposits(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
         try printErr(io, "session append failed: cannot open this session's inbox\n");
         return 1;
     };
-    defer lease.close(io);
+    defer held.close(io);
     // Under the lease, because waiting for it is a moment in which the session
     // can have been pruned.
     if (!sessionExists(io, spath)) {
@@ -878,11 +880,11 @@ fn sessionNote(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     }
     // Held across "does this session still exist" and the deposit, and across
     // minting the delivery name from what is already queued.
-    var lease = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
+    var held = lease.sessionDeposits(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
         try printErr(io, "session note failed: cannot open this session's inbox\n");
         return 1;
     };
-    defer lease.close(io);
+    defer held.close(io);
     if (!sessionExists(io, spath)) {
         try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
         return 1;
@@ -964,7 +966,7 @@ fn sessionPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     // Asking first and locking after leaves exactly the window where both
     // commands report success and the session is gone from under a running
     // supervisor.
-    var leases = ledger.acquireSessionLeases(alloc, io, std.Io.Dir.cwd(), spath) catch |err| switch (err) {
+    var leases = lease.sessionLifetime(alloc, io, std.Io.Dir.cwd(), spath) catch |err| switch (err) {
         error.DepositInFlight => {
             try printErrFmt(alloc, io, "session prune refused: something is writing into '{s}' right now\n", .{session_id});
             return 1;
@@ -1314,7 +1316,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var lenv = launch.sessionEnvironment(alloc, io, &cfg, .{
         .session_path = spath,
         .tasks_dir = tasks_dir,
-    }, hdr.value.environment, hdr.value.remote_workspace, ext_store, ssh_password) catch |err| switch (err) {
+    }, hdr.value.environment, hdr.value.remote_workspace, ext_store, ssh_password, common.stderr_diag) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             return stepFail(alloc, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
         },
@@ -1400,6 +1402,9 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
             .gate = if (gate) |g| g.gate() else null,
         },
         .extension_store = ext_store,
+        // A resumed session rebuilds its composition from the header; the only
+        // part of these options that path reads is where a repair line goes.
+        .registry = .{ .diag = common.stderr_diag },
     }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath }) catch |err| switch (err) {
         error.LegacyModelRebind => return stepFail(alloc, stream, legacy_rebind_refusal, .{ id, id }),
         else => return stepFail(alloc, stream, "session open failed: {s}", .{@errorName(err)}),

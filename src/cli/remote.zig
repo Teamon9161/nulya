@@ -25,6 +25,7 @@ const integrity = @import("../extension/integrity.zig");
 const ext_manifest = @import("../extension/manifest.zig");
 const ext_store = @import("../extension/store.zig");
 const launch = @import("../launch.zig");
+const lease = @import("../lease.zig");
 const common = @import("common.zig");
 /// The task layout and the supervisor's own flags, borrowed rather than
 /// re-derived: `cli/task.zig` owns what a task's directory is called and what
@@ -258,7 +259,7 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // host never names a directory on this machine.
     const ext_store_path = try launch.storePath(alloc, &host);
     defer alloc.free(ext_store_path);
-    var lenv = try launch.localEnvironment(alloc, io, &cfg, null, ext_store_path);
+    var lenv = try launch.localEnvironment(alloc, io, &cfg, null, ext_store_path, common.stderr_diag);
     defer lenv.deinit();
 
     const read_buf = try alloc.alloc(u8, protocol.max_header_bytes);
@@ -653,7 +654,7 @@ fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
     const cleaned = try emit.utf8Lossy(a, raw_report);
     const report = if (cleaned) |c| c.text else raw_report;
 
-    // Same probe `task list` uses locally (`leaseHeldIn`), just pointed at this
+    // Same probe `task list` uses locally (`lease.taskHeld`), just pointed at this
     // agent's already-open workspace handle instead of `std.Io.Dir.cwd()` — one
     // implementation of "is anyone holding this lease" for both machines.
     //
@@ -669,7 +670,7 @@ fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
     const lease_held: ?bool = if (status.len == 0)
         null
     else
-        task_cli.leaseHeldIn(ws, agent.io, agent.alloc, paths.dir) catch |err| {
+        lease.taskHeld(ws, agent.io, agent.alloc, paths.dir) catch |err| {
             try agent.refuseFmt("could not read {s}'s lease here: {s}", .{ req.task, @errorName(err) });
             return;
         };
@@ -797,11 +798,11 @@ fn serveStoreStat(agent: *Agent, req: protocol.Request) !void {
     const staging_rel = try std.fmt.allocPrint(agent.alloc, "{s}{c}.push-{s}", .{ id, std.fs.path.sep, version });
     errdefer agent.alloc.free(staging_rel);
 
-    var lease = ext_store.Store.init(agent.io, root).lease(agent.alloc, req.id) catch {
+    var store_lease = ext_store.Store.init(agent.io, root).lease(agent.alloc, req.id) catch {
         try agent.refuse("could not take the writer lease for that extension here");
         return;
     };
-    errdefer lease.close(agent.io);
+    errdefer store_lease.close(agent.io);
 
     // A leftover staging tree from a channel that died mid-push is cleared
     // rather than resumed: partial bytes from an earlier attempt would either
@@ -809,7 +810,7 @@ fn serveStoreStat(agent: *Agent, req: protocol.Request) !void {
     root.deleteTree(agent.io, staging_rel) catch {};
     try root.createDirPath(agent.io, staging_rel);
 
-    agent.push = .{ .root = root, .id = id, .version = version, .staging_rel = staging_rel, .lease = lease };
+    agent.push = .{ .root = root, .id = id, .version = version, .staging_rel = staging_rel, .lease = store_lease };
     keep_root = true;
     try agent.reply(.{ .ok = true, .held = false }, "", "");
 }

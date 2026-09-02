@@ -25,7 +25,7 @@ pub const StoreView = struct {
         const resolved = try storeAndWith(alloc, io);
         defer alloc.free(resolved.store);
         errdefer launch.freeStringList(alloc, resolved.with);
-        const site = try site_mod.Site.open(alloc, io, cwd, resolved.store);
+        const site = try site_mod.Site.open(alloc, io, cwd, resolved.store, stderr_diag);
         return .{ .site = site, .with = resolved.with };
     }
 
@@ -34,6 +34,15 @@ pub const StoreView = struct {
         launch.freeStringList(alloc, self.with);
     }
 };
+
+/// Where the kernel's repair lines go on this side of the seam: stderr, so
+/// `session step --stream` keeps stdout pure JSON. Stateless, so a `Site` may be
+/// copied and moved freely once it holds one.
+pub const stderr_diag: site_mod.Diag = .{ .reportFn = writeDiagLine };
+
+fn writeDiagLine(_: ?*anyopaque, io: std.Io, line: []const u8) void {
+    std.Io.File.stderr().writeStreamingAll(io, line) catch {};
+}
 
 /// The two things one config load answers: where this machine's store is, and
 /// the standing member ids (`[extensions] with`). Caller owns both.

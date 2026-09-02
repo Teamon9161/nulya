@@ -270,7 +270,7 @@ pub fn readRemoteRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: task.
     row.status = status;
     // The far lease answer rides the SAME `task-poll` round
     // (`TaskSnapshot.lease_held`, filled by that machine's own
-    // `leaseHeldIn`): a done status wins outright, a free lease on a
+    // `lease.taskHeld`): a done status wins outright, a free lease on a
     // not-done status is `lost`, and a held or unknown (older peer, no such
     // column) lease reports `running` — not knowing is not grounds to claim
     // the task died.

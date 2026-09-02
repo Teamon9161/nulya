@@ -15,7 +15,6 @@
 //! pieces have a single lifetime and `deinit` is one release.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const registry = @import("registry.zig");
 const ledger = @import("ledger.zig");
 const prompt = @import("prompt.zig");
@@ -128,6 +127,10 @@ pub const Options = struct {
     /// Which machine's binaries will serve this session's extension calls, when
     /// that is not this one. Null for an ordinary local session.
     exec_target: ?ExecTargetProbe = null,
+    /// Where a repair line goes — what an error code cannot carry: which
+    /// package, which version, and the verb that fixes it. Reports nothing by
+    /// default, which is what a unit test wants.
+    diag: site_mod.Diag = .{},
 };
 
 /// How the shell layer answers "which build target do this session's extension
@@ -182,8 +185,8 @@ pub const CompositionError = error{
     /// no `current` at all, or the named version is not in this machine's store.
     WithVersionNotFound,
     /// A member named WITHOUT a version has a `current`, and it points at a
-    /// version whose seal, manifest or package is unusable. Named by a stderr
-    /// line before the error leaves `resolveCurrent`.
+    /// version whose seal, manifest or package is unusable. The `id@version`
+    /// reaches the caller's `Diag` before the error leaves `resolveCurrent`.
     ActiveExtensionBroken,
 };
 
@@ -220,7 +223,7 @@ pub const SessionComposition = struct {
 
         // No store on this machine needs no special case: a named member fails
         // as `WithVersionNotFound` on the ordinary path.
-        var site = try site_mod.Site.open(alloc, io, cwd, ext_store);
+        var site = try site_mod.Site.open(alloc, io, cwd, ext_store, opts.diag);
         defer site.deinit();
 
         return build(alloc, io, &site, .{ .fresh = opts });
@@ -237,8 +240,9 @@ pub const SessionComposition = struct {
         cwd: []const u8,
         ext_store: []const u8,
         frozen: ledger.FrozenComposition,
+        diag: site_mod.Diag,
     ) !SessionComposition {
-        var site = try site_mod.Site.open(alloc, io, cwd, ext_store);
+        var site = try site_mod.Site.open(alloc, io, cwd, ext_store, diag);
         defer site.deinit();
 
         return build(alloc, io, &site, .{ .frozen = frozen });
@@ -367,7 +371,15 @@ fn freshExecVersions(
         // `gpa` for the search's scratch, the arena only for the answer: the
         // composition arena lives as long as the session.
         const found = (try site.resolveForTarget(gpa, r.id, r.version, target.?)) orelse {
-            try reportMissingExecVersion(site.io, gpa, r.id, r.version, target.?);
+            // What `error.ExecVersionNotFound` cannot carry: which package,
+            // which target, and the two commands that produce and deliver the
+            // missing build.
+            site.report(
+                gpa,
+                "extension {s}@{s} has no build for {s}, which is where this session's tools run; " ++
+                    "run 'nulya ext build <path to {s}> --target {s}' and then 'nulya ext push {s}@<that version> --env <this session's --env>'\n",
+                .{ r.id, r.version, target.?, r.id, target.?, r.id },
+            );
             return error.ExecVersionNotFound;
         };
         defer gpa.free(found);
@@ -393,27 +405,6 @@ fn frozenExecVersions(
         }
     }
     return out;
-}
-
-/// The line that carries what `error.ExecVersionNotFound` cannot: which package,
-/// which target, and the two commands that produce and deliver the missing
-/// build. On stderr, so stdout stays pure JSON.
-fn reportMissingExecVersion(
-    io: std.Io,
-    alloc: std.mem.Allocator,
-    id: []const u8,
-    version: []const u8,
-    target: []const u8,
-) !void {
-    if (builtin.is_test) return;
-    const line = try std.fmt.allocPrint(
-        alloc,
-        "extension {s}@{s} has no build for {s}, which is where this session's tools run; " ++
-            "run 'nulya ext build <path to {s}> --target {s}' and then 'nulya ext push {s}@<that version> --env <this session's --env>'\n",
-        .{ id, version, target, id, target, id },
-    );
-    defer alloc.free(line);
-    try std.Io.File.stderr().writeStreamingAll(io, line);
 }
 
 /// Membership for a FRESH session: exactly what `Options.with` names, resolved
@@ -641,30 +632,6 @@ fn findToolSpec(m: manifest.Manifest, name: []const u8) ?manifest.ToolSpec {
 /// fault of the machine and propagates as itself.
 const isExtensionFault = store.isExtensionFault;
 
-/// The line that carries what `error.ActiveExtensionBroken` cannot: which
-/// version `<id>`'s `current` points at is unusable, why, and the two verbs that
-/// make the store consistent again. On stderr, so `session step --stream` keeps
-/// stdout pure JSON.
-fn reportBrokenActive(
-    io: std.Io,
-    alloc: std.mem.Allocator,
-    entry: site_mod.Site.ActiveEntry,
-    err: anyerror,
-) !void {
-    // Unit tests build broken actives on purpose and assert only the error
-    // code; this line names ids from their tmp stores, so in the test runner's
-    // stderr it would read as real advice about a workspace that is fine. The
-    // real binary (e2e included) always prints it.
-    if (builtin.is_test) return;
-    const line = try std.fmt.allocPrint(
-        alloc,
-        "extension {s}: current points at {s}, which is broken ({s}); run 'nulya ext activate {s} <older-version>', or name a good one with --with {s}@<version>\n",
-        .{ entry.id, entry.version, @errorName(err), entry.id, entry.id },
-    );
-    defer alloc.free(line);
-    try std.Io.File.stderr().writeStreamingAll(io, line);
-}
-
 /// Resolve the named members into the list: each enters at the named version or
 /// at its `current`. A repeated mention of one id KEEPS THE LAST — config's
 /// `[extensions] with` comes first and `--with` after it, so naming a version on
@@ -674,7 +641,7 @@ fn reportBrokenActive(
 /// store does not hold, fails the session; so does an id whose `current` points at something
 /// unusable. The two are different errors because they need different repairs:
 /// `WithVersionNotFound` means "never built here", `ActiveExtensionBroken`
-/// (named on stderr first) means "built, and the copy on disk is damaged".
+/// (named on the `Diag` first) means "built, and the copy on disk is damaged".
 ///
 /// Takes ownership of `base`; on any error it and everything built so far is
 /// released.
@@ -740,7 +707,14 @@ fn resolveCurrent(
         error.Canceled => error.Canceled,
         else => {
             if (!isExtensionFault(err)) return err;
-            try reportBrokenActive(site.io, alloc, entry, err);
+            // What `error.ActiveExtensionBroken` cannot carry: which version
+            // `<id>`'s `current` points at is unusable, why, and the two verbs
+            // that make the store consistent again.
+            site.report(
+                alloc,
+                "extension {s}: current points at {s}, which is broken ({s}); run 'nulya ext activate {s} <older-version>', or name a good one with --with {s}@<version>\n",
+                .{ entry.id, entry.version, @errorName(err), entry.id, entry.id },
+            );
             return error.ActiveExtensionBroken;
         },
     };
@@ -1261,7 +1235,7 @@ test "prompt position partitions the extension band into early, normal and late,
         .{ .id = "a", .version = va },
         .{ .id = "z", .version = vz },
     } };
-    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen);
+    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen, .{});
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(comp.system_prompts.blocks.len, resumed.system_prompts.blocks.len);
     for (comp.system_prompts.blocks, resumed.system_prompts.blocks) |a_block, b_block| {
@@ -1327,7 +1301,7 @@ test "a header's inline prompts rebuild the identical blocks with no store to co
     // A store root that does not exist: an inline prompt is bytes in the header,
     // so nothing about resuming it can depend on an extension version still
     // being on disk (which is what a store reference would have cost).
-    var comp = try SessionComposition.initFrozen(alloc, io, cwd, "nulya-absent-root", frozen);
+    var comp = try SessionComposition.initFrozen(alloc, io, cwd, "nulya-absent-root", frozen, .{});
     defer comp.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 2), comp.system_prompts.blocks.len);
@@ -1547,7 +1521,7 @@ test "initFrozen rebuilds a composition from a header and ignores later activati
         .native_tools = &.{"ext:web.search/web_search"},
     };
 
-    var comp = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen);
+    var comp = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen, .{});
     defer comp.deinit(alloc);
     const t = comp.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
@@ -1557,7 +1531,7 @@ test "initFrozen rebuilds a composition from a header and ignores later activati
     // Activate v2 live; a fresh initFrozen on the SAME header still rebuilds v1 —
     // resume is bound to the header, not to `current`.
     try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
-    var comp2 = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen);
+    var comp2 = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen, .{});
     defer comp2.deinit(alloc);
     try std.testing.expectEqualStrings(v1, comp2.extension_tool_bindings[0].version);
 }
@@ -1570,7 +1544,7 @@ test "initFrozen with no active extensions yields the builtin only" {
     const cwd = try tmpPath(alloc, io, tmp.dir);
     defer alloc.free(cwd);
 
-    var comp = try SessionComposition.initFrozen(alloc, io, cwd, one_store, .{});
+    var comp = try SessionComposition.initFrozen(alloc, io, cwd, one_store, .{}, .{});
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
     try std.testing.expectEqual(registry.builtin_count, comp.tools.tools.len);
@@ -1690,7 +1664,7 @@ test "a broken version under the workspace pointer fails the session rather than
     const user_v = try writeToolExtension(alloc, io, store_dir, "web.search", "web_search", "user");
     defer alloc.free(user_v);
 
-    var site = try site_mod.Site.open(alloc, io, cwd, "store");
+    var site = try site_mod.Site.open(alloc, io, cwd, "store", .{});
     defer site.deinit();
     try site.activate(alloc, .user, "web.search", user_v);
     try site.activate(alloc, .workspace, "web.search", ws_v);
@@ -1853,7 +1827,7 @@ test "frozen resume accepts header native tools regardless of current surface" {
         .active = &.{.{ .id = "pkg", .version = v1 }},
         .native_tools = &.{"ext:pkg/call"},
     };
-    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen);
+    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen, .{});
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), resumed.extension_tool_bindings.len);
     try std.testing.expect(resumed.tools.lookup("call") != null);
@@ -1904,7 +1878,7 @@ test "frozen resume uses header native tools only, not fresh surface expansion" 
         .active = &.{.{ .id = "pkg", .version = v1 }},
         .native_tools = &.{},
     };
-    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen);
+    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen, .{});
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), resumed.extension_tool_bindings.len);
     try std.testing.expect(resumed.tools.lookup("call") == null);

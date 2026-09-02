@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const ledger = @import("ledger.zig");
+const lease = @import("lease.zig");
 const loop = @import("loop.zig");
 const registry = @import("registry.zig");
 const provider = @import("provider.zig");
@@ -48,14 +49,14 @@ pub const DurableRef = struct {
 /// consumes it in `prepareStep` and reports that step as `.canceled` without
 /// calling the model. Requesting twice is one request.
 pub fn requestCancel(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir, session_path: []const u8) !void {
-    const marker = try ledger.siblingPath(alloc, session_path, ".cancel");
+    const marker = try lease.siblingPath(alloc, session_path, ".cancel");
     defer alloc.free(marker);
     try workspace.writeFile(io, .{ .sub_path = marker, .data = "" });
 }
 
 /// If a cancel marker exists for the session, delete it and return true.
 fn consumeCancel(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir, session_path: []const u8) !bool {
-    const marker = try ledger.siblingPath(alloc, session_path, ".cancel");
+    const marker = try lease.siblingPath(alloc, session_path, ".cancel");
     defer alloc.free(marker);
     workspace.deleteFile(io, marker) catch |err| switch (err) {
         error.FileNotFound => return false,
@@ -85,8 +86,11 @@ pub const AgentSession = struct {
         /// the honest default: a session that composes no member never needs
         /// one, and a machine without a home has none.
         extension_store: []const u8 = "",
-        /// Native tool selection and budget, resolved from config at the
-        /// session-setup boundary so this module stays config-agnostic.
+        /// What the composition is built from — native tool selection, budget,
+        /// and where a repair line goes — resolved from config at the
+        /// session-setup boundary so this module stays config-agnostic. A
+        /// resumed session rebuilds its composition from the header, so only
+        /// the `diag` of this is read on that path.
         registry: composition.Options = .{},
     };
 
@@ -205,7 +209,7 @@ pub const AgentSession = struct {
         var l = try ledger.openDurable(alloc, io, d.workspace, d.session_path);
         errdefer l.deinit();
         const hdr = l.header().?;
-        var comp = try composition.SessionComposition.initFrozen(alloc, io, tool_ctx.cwd, opts.extension_store, hdr.composition);
+        var comp = try composition.SessionComposition.initFrozen(alloc, io, tool_ctx.cwd, opts.extension_store, hdr.composition, opts.registry.diag);
         errdefer comp.deinit(alloc);
 
         const owned_path = try alloc.dupe(u8, d.session_path);
