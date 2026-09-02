@@ -19,6 +19,7 @@ const ext_exec = @import("extension/exec.zig");
 const protocol = @import("extension/protocol.zig");
 const process_tree = @import("environment/tree.zig");
 const testkit = @import("extension/testkit.zig");
+const ext_store = @import("extension/store.zig");
 const Tree = process_tree.Tree;
 const waitBounded = process_tree.waitBounded;
 
@@ -333,7 +334,7 @@ pub const LocalOptions = struct {
     /// specs resolve against the workspace the CALL names, which is the far
     /// machine's workspace on a remote agent. Empty means this environment runs
     /// no extensions and refuses if asked.
-    extension_roots: []const []const u8 = &.{},
+    extension_store: []const u8 = "",
 };
 
 /// How many `t<N>` slots one session may hand out. High enough that no real
@@ -394,7 +395,7 @@ pub const LocalEnvironment = struct {
             tasks_dir = try alloc.dupe(u8, s.tasks_dir);
         }
 
-        var resolver = try ext_exec.Resolver.init(alloc, io, opts.extension_roots);
+        var resolver = try ext_exec.Resolver.init(alloc, io, opts.extension_store);
         errdefer resolver.deinit();
 
         return .{
@@ -619,7 +620,7 @@ pub const LocalEnvironment = struct {
         // entry variant for THIS OS, the interpreter its frozen manifest names,
         // and the version checked against its own seal (`extension/exec.zig`).
         // The caller only ever named `(id, version, tool)`.
-        const entry = try self.resolver.resolve(req.cwd, req.id, req.version);
+        const entry = try self.resolver.resolve(req.id, req.version);
 
         // Oneshot: spawn, feed one request, read one response, exit. Capture
         // stderr too: when an AI-authored extension crashes before it can write
@@ -1187,9 +1188,9 @@ test "a named version is resolved and spawned here, and both its streams are cap
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const store_rel = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
-    try tmp.dir.createDirPath(io, store_rel);
-    var root = try tmp.dir.openDir(io, store_rel, .{ .iterate = true });
+    var root_real: [std.fs.max_path_bytes]u8 = undefined;
+    const root_path = root_real[0..try tmp.dir.realPath(io, &root_real)];
+    var root = try ext_store.openOrCreateRoot(io, root_path, "store");
     defer root.close(io);
 
     // A real frozen SCRIPT version, because that is what the request now names:
@@ -1209,18 +1210,15 @@ test "a named version is resolved and spawned here, and both its streams are cap
     });
     defer alloc.free(version);
 
-    var root_real: [std.fs.max_path_bytes]u8 = undefined;
-    const root_path = root_real[0..try tmp.dir.realPath(io, &root_real)];
-
-    var lenv = try LocalEnvironment.init(alloc, io, .{ .extension_roots = &.{store_rel} });
+    const store_path = try std.fs.path.join(alloc, &.{ root_path, "store" });
+    defer alloc.free(store_path);
+    var lenv = try LocalEnvironment.init(alloc, io, .{ .extension_store = store_path });
     defer lenv.deinit();
 
     const outcome = try lenv.environment().runExtension(alloc, .{
         .id = "noisy",
         .version = version,
         .tool = "t",
-        // Also where the relative store root is resolved from: each side reads
-        // "the workspace store" as its own.
         .cwd = root_path,
         .request_json = "{}",
         .max_output_bytes = 1024,

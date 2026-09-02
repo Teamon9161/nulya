@@ -1,13 +1,13 @@
 //! `nulya ext …` — the extension lifecycle as a CLI: scaffold, build into an
-//! immutable version, point `current` at one, run one, and read what the store
-//! roots hold. The model reaches all of it through `shell`; none of it is a
+//! immutable version, point a `current` at one, run one, and read what this
+//! machine holds. The model reaches all of it through `shell`; none of it is a
 //! model-facing tool.
 
 const std = @import("std");
 const environment = @import("../environment.zig");
 const build_ext = @import("../extension/build/build_ext.zig");
 const store = @import("../extension/store.zig");
-const roots_mod = @import("../extension/roots.zig");
+const site_mod = @import("../extension/site.zig");
 const invoke = @import("../extension/invoke.zig");
 const manifest = @import("../extension/manifest.zig");
 const target_mod = @import("../extension/target.zig");
@@ -16,7 +16,6 @@ const notes = @import("../extension/notes.zig");
 // `tool` is a common local name below (a tool NAME), hence the distinct import.
 const tool_mod = @import("../tool.zig");
 const tool_stats = @import("../journals/tool_stats.zig");
-const trust = @import("../journals/trust.zig");
 const launch = @import("../launch.zig");
 const bundled = @import("../bundled.zig");
 const ext_seed = @import("ext_seed.zig");
@@ -27,11 +26,10 @@ const ZigExe = cli_toolchain.ZigExe;
 const resolveZig = cli_toolchain.resolveZig;
 const noteUnpinnedZig = cli_toolchain.noteUnpinnedZig;
 const common = @import("common.zig");
-const RootSearch = common.RootSearch;
+const StoreView = common.StoreView;
 const flagValue = common.flagValue;
-const writeRootSpec = common.writeRootSpec;
+const draftRootSpec = common.draftRootSpec;
 const takeUserFlag = common.takeUserFlag;
-const targetRootSpec = common.targetRootSpec;
 const envSessionId = common.envSessionId;
 const cwdRealPath = common.cwdRealPath;
 const withRef = common.withRef;
@@ -57,7 +55,7 @@ pub fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "prune")) return extPrune(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return extList(alloc, io);
     if (std.mem.eql(u8, sub, "inspect")) return extInspect(alloc, io, rest);
-    if (std.mem.eql(u8, sub, "trust")) return extTrust(alloc, io);
+    if (std.mem.eql(u8, sub, "migrate")) return extMigrate(alloc, io, rest);
     if (std.mem.eql(u8, sub, "api")) return extApi(alloc, io, rest);
 
     try printErrFmt(alloc, io, "unknown `ext` subcommand '{s}'; run `nulya help`\n", .{sub});
@@ -87,10 +85,10 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const id = positional.items[0];
     const tool = if (positional.items.len >= 2) positional.items[1] else id;
 
-    // The draft goes into the chosen store root (`--user` = the user-level one),
-    // and everything below is written through that root's handle, so an absolute
-    // user root needs no absolute sub-paths.
-    const root_spec = (try writeRootSpec(alloc, flags.user)) orelse {
+    // The draft goes into the workspace, or beside the versions in the store
+    // under `--user`; everything below is written through that directory's
+    // handle, so an absolute store path needs no absolute sub-paths.
+    const root_spec = (try draftRootSpec(alloc, flags.user)) orelse {
         try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
         return 1;
     };
@@ -170,31 +168,17 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    var search = try RootSearch.open(alloc, io, cwd_path);
-    defer search.deinit(alloc);
-    const dest_spec = (try buildDestRoot(alloc, io, &search, ext_dir, flags.user)) orelse {
-        try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
-        return 1;
-    };
+    // Bytes have exactly one home on a machine, so `--user` says nothing here
+    // and is simply the flag `init` / `seed` / `sync` share.
+    const dest_spec = (try common.storePath(alloc));
     defer alloc.free(dest_spec);
-
-    // Was the workspace store empty BEFORE this build? If so, and if this build
-    // fills it, the store was born here (`recordBirthTrust`). Asked now because
-    // after the build the answer is always "occupied".
-    const workspace_store_was_empty = blk: {
-        const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse break :blk true;
-        alloc.free(occupied);
-        break :blk false;
-    };
+    if (dest_spec.len == 0) {
+        try printErr(io, "no home directory, so there is nowhere to build into (set NULYA_HOME or HOME)\n");
+        return 1;
+    }
 
     var dest_root = try store.openOrCreateRoot(io, cwd_path, dest_spec);
     defer dest_root.close(io);
-
-    // The other roots this machine searches, in that order: a version is
-    // content addressed, so one of them already holding these exact bytes makes
-    // this build a copy rather than a compile.
-    var donors = try donorRoots(alloc, &search, dest_spec);
-    defer donors.deinit(alloc);
 
     // A script extension needs no toolchain; only a compiled one does. Resolve
     // zig best-effort and let the build decide — it reports ZigVersionUnreadable
@@ -204,8 +188,7 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     var zig = build_ext.Zig.init(if (zig_exe) |z| z.path else "");
     defer zig.deinit(alloc);
 
-    var result = build_ext.buildExtensionReusing(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, &zig, .{
-        .donors = donors.dirs.items,
+    var result = build_ext.buildExtensionFor(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, &zig, .{
         .target = cross,
     }) catch |err| switch (err) {
         // Only a compiled package has a binary, so only a compiled package has
@@ -263,13 +246,12 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         try printOut(alloc, io, "build FAILED for {s}:\n{s}\n", .{ ext_dir, result.stderr });
         return 1;
     }
-    const state = try buildState(alloc, result, donors.specs.items);
-    defer alloc.free(state);
-    try printOut(alloc, io, "{s}: {s} ({s}, in {s})\n", .{ ext_dir, result.version, state, dest_spec });
-
-    if (workspace_store_was_empty and std.mem.eql(u8, dest_spec, store.workspace_root_rel)) {
-        try recordBirthTrust(alloc, io, cwd_path);
-    }
+    try printOut(alloc, io, "{s}: {s} ({s}, in {s})\n", .{
+        ext_dir,
+        result.version,
+        if (result.already_built) "already built" else "built",
+        dest_spec,
+    });
     return 0;
 }
 
@@ -284,97 +266,6 @@ fn isManifestFault(err: anyerror) bool {
         if (err == @field(anyerror, candidate.name)) return true;
     }
     return false;
-}
-
-/// Trust a workspace store this build just BROUGHT INTO EXISTENCE.
-///
-/// The gate on `.nulya/extensions` distinguishes "born on this machine" from
-/// "arrived with a checkout", and the only thing that tells them apart is where
-/// the store came from: the moment a local `ext build` puts the first version
-/// into an empty (or absent) workspace store, that store is by construction
-/// local. A store that ALREADY held something is deliberately not trusted by
-/// this path — that is the case a person has to look at, through
-/// `nulya ext trust`.
-///
-/// Best-effort in one direction only: a machine with no home has nowhere to
-/// record trust, and the gate explains itself at `session new` anyway. Real I/O
-/// faults propagate.
-fn recordBirthTrust(alloc: std.mem.Allocator, io: std.Io, cwd_path: []const u8) !void {
-    const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse return;
-    defer alloc.free(occupied);
-    var host = try environment.hostEnvironMap(alloc);
-    defer host.deinit();
-    const home = (try launch.userHomeDir(alloc, &host)) orelse return;
-    defer alloc.free(home);
-    if (try trust.isTrusted(alloc, io, home, occupied)) return;
-    try trust.append(alloc, io, home, occupied);
-}
-
-/// Which store root a build lands in: `--user` forces the user store; otherwise
-/// a draft already inside one of the search roots builds into THAT root, and a
-/// draft anywhere else (one kept in git, say) builds into the workspace store.
-/// Caller owns the result; null means `--user` with no home.
-fn buildDestRoot(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    search: *const RootSearch,
-    ext_dir: []const u8,
-    user: bool,
-) !?[]u8 {
-    if (user) return writeRootSpec(alloc, true);
-
-    var draft = std.Io.Dir.cwd().openDir(io, ext_dir, .{}) catch
-        return try alloc.dupe(u8, store.workspace_root_rel); // let the build report it
-    defer draft.close(io);
-    var draft_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const draft_real = draft_buf[0..try draft.realPath(io, &draft_buf)];
-
-    for (search.roots.entries) |entry| {
-        if (isInside(entry.real, draft_real)) return try alloc.dupe(u8, entry.spec);
-    }
-    return try alloc.dupe(u8, store.workspace_root_rel);
-}
-
-/// The roots a build may take a copy FROM: every searched root except the one it
-/// is building into, in search order. The handles belong to `search`; only the
-/// two parallel lists are owned here.
-const DonorRoots = struct {
-    dirs: std.ArrayList(std.Io.Dir),
-    specs: std.ArrayList([]const u8),
-
-    fn deinit(self: *DonorRoots, alloc: std.mem.Allocator) void {
-        self.dirs.deinit(alloc);
-        self.specs.deinit(alloc);
-    }
-};
-
-fn donorRoots(alloc: std.mem.Allocator, search: *const RootSearch, dest_spec: []const u8) !DonorRoots {
-    var out: DonorRoots = .{ .dirs = .empty, .specs = .empty };
-    errdefer out.deinit(alloc);
-    for (search.roots.entries) |entry| {
-        if (std.mem.eql(u8, entry.spec, dest_spec)) continue;
-        try out.dirs.append(alloc, entry.dir);
-        try out.specs.append(alloc, entry.spec);
-    }
-    return out;
-}
-
-/// The parenthesised state in a build line: what happened, and — when the
-/// version came from another root rather than a compiler — which root supplied
-/// it. Caller owns the result.
-fn buildState(alloc: std.mem.Allocator, result: build_ext.BuildResult, donor_specs: []const []const u8) ![]u8 {
-    if (result.copied_from) |i| {
-        return std.fmt.allocPrint(alloc, "built, copied from {s}", .{donor_specs[i]});
-    }
-    return alloc.dupe(u8, if (result.already_built) "already built" else "built");
-}
-
-/// Whether `path` sits under directory `dir` (both already resolved to real
-/// absolute paths).
-fn isInside(dir: []const u8, path: []const u8) bool {
-    if (path.len <= dir.len) return false;
-    if (!std.mem.eql(u8, path[0..dir.len], dir)) return false;
-    return path[dir.len] == std.fs.path.sep or path[dir.len] == '/';
 }
 
 /// Errors that are a fault in the DRAFT rather than in this machine: the
@@ -407,13 +298,12 @@ fn isDraftFault(err: anyerror) bool {
     };
 }
 
-/// `nulya ext sync [--user] [--activate] [--dry-run]` — build every draft a
-/// store root holds.
+/// `nulya ext sync [--user] [--activate] [--dry-run]` — build every draft in
+/// one place: this workspace's `.nulya/extensions`, or the store itself under
+/// `--user`. Either way the versions land in the store.
 ///
-/// A draft lives at `<root>/<id>/` with its frozen versions beside it, so
-/// putting source there and running this once IS the installation. On a machine
-/// with no toolchain it still works for anything another root already holds,
-/// because a build adopts such a copy rather than compiling.
+/// A draft is `<dir>/<id>/extension.json`, so putting source there and running
+/// this once IS the installation.
 ///
 /// One draft failing never stops the others: stopping at the first bad manifest
 /// would hide every id after it. Building is mechanical, so it is the default;
@@ -451,7 +341,7 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         if ((try ext_seed.extSeed(alloc, io, seed_args.items)) != 0) seed_failed = true;
     }
 
-    const root_spec = (try writeRootSpec(alloc, flags.user)) orelse {
+    const root_spec = (try draftRootSpec(alloc, flags.user)) orelse {
         try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
         return 1;
     };
@@ -459,14 +349,6 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-
-    // Asked before anything is built, because after a successful sync the answer
-    // is always "occupied" — the same birth-trust question `ext build` asks.
-    const workspace_store_was_empty = blk: {
-        const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse break :blk true;
-        alloc.free(occupied);
-        break :blk false;
-    };
 
     var root_dir = store.openRoot(io, cwd_path, root_spec) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {
@@ -487,10 +369,9 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         return 0;
     }
 
-    var search = try RootSearch.open(alloc, io, cwd_path);
-    defer search.deinit(alloc);
-    var donors = try donorRoots(alloc, &search, root_spec);
-    defer donors.deinit(alloc);
+    var view = try StoreView.open(alloc, io, cwd_path);
+    defer view.deinit(alloc);
+    const dest_root = try view.site.ensureStore();
 
     const zig_exe: ?ZigExe = resolveZig(alloc, io) catch null;
     defer if (zig_exe) |z| z.deinit(alloc);
@@ -507,14 +388,12 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var already: usize = 0;
     var failed: usize = 0;
     for (drafts) |draft| {
-        // The draft is inside this root, so the root is both the tree the build
-        // reads from and the store it writes into — no absolute sub-path
-        // anywhere, which is what makes an absolute user root work the same as
-        // `.nulya/…`.
+        // Two directories now: the tree the draft is read from, and the one
+        // store it is frozen into.
         var result = (if (dry_run)
-            build_ext.planExtension(alloc, io, root_dir, draft, root_dir, &zig, donors.dirs.items)
+            build_ext.planExtension(alloc, io, root_dir, draft, dest_root.root, &zig)
         else
-            build_ext.buildExtensionReusing(alloc, io, root_dir, draft, root_dir, &zig, .{ .donors = donors.dirs.items })) catch |err| switch (err) {
+            build_ext.buildExtension(alloc, io, root_dir, draft, dest_root.root, &zig)) catch |err| switch (err) {
             error.ZigVersionUnreadable => {
                 failed += 1;
                 // Two different walls behind one word: no compiler at all, or
@@ -557,16 +436,7 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         var line: std.Io.Writer.Allocating = .init(alloc);
         defer line.deinit();
         try line.writer.print("{s}: {s} {s}", .{ result.id, result.version, state });
-        if (result.copied_from) |i| {
-            // A plan can only report where the copy would come from; a real sync
-            // has already taken it.
-            if (dry_run) {
-                try line.writer.print(" (available from {s})", .{donors.specs.items[i]});
-            } else {
-                try line.writer.print(" (copied from {s})", .{donors.specs.items[i]});
-            }
-        }
-        try appendActivation(alloc, io, &line.writer, root_dir, result, .{ .activate = activate, .dry_run = dry_run, .user = flags.user });
+        try appendActivation(alloc, io, &line.writer, &view.site, result, .{ .activate = activate, .dry_run = dry_run, .user = flags.user });
         try line.writer.writeByte('\n');
         try printRaw(io, line.written());
     }
@@ -578,9 +448,6 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         failed,
     });
 
-    if (!dry_run and produced != 0 and workspace_store_was_empty and std.mem.eql(u8, root_spec, store.workspace_root_rel)) {
-        try recordBirthTrust(alloc, io, cwd_path);
-    }
     return if (failed != 0 or seed_failed) 1 else 0;
 }
 
@@ -598,12 +465,15 @@ fn appendActivation(
     alloc: std.mem.Allocator,
     io: std.Io,
     out: *std.Io.Writer,
-    root_dir: std.Io.Dir,
+    site: *site_mod.Site,
     result: build_ext.BuildResult,
     mode: SyncMode,
 ) !void {
-    const st = store.Store.init(io, root_dir);
-    const current = try st.activeVersion(alloc, result.id);
+    const layer = common.activateLayer(site, result.id, mode.user);
+    const current = blk: {
+        const p = (try site.activePointer(alloc, result.id)) orelse break :blk null;
+        break :blk p.version;
+    };
     defer if (current) |c| alloc.free(c);
 
     if (current) |c| {
@@ -614,34 +484,34 @@ fn appendActivation(
         return out.print(" (current stays {s})", .{current.?});
     }
     try warnUserScope(alloc, io, result.id, result.version, mode.user);
-    try st.activate(alloc, result.id, result.version);
-    depositSessionNote(alloc, io, root_dir, result.id, result.version) catch {};
-    try out.writeAll(" -> current");
+    try site.activate(alloc, layer, result.id, result.version);
+    depositSessionNote(alloc, io, site.store().?.root, result.id, result.version) catch {};
+    try out.print(" -> current ({s})", .{layer.label()});
 }
 
-/// `nulya ext prune [--user] [<id>] [--dry-run]` — drop the version directories
-/// a store root keeps that `current` does not name.
+/// `nulya ext prune [<id>] [--dry-run]` — drop the version directories the
+/// store keeps that no `current` here names.
 ///
-/// Deliberately narrow: only `current` is safe to keep by rule, so an id whose
-/// `current` is missing keeps EVERYTHING — with no pointer there is nothing to
-/// preserve it BY, and guessing (newest? biggest?) would delete the one
-/// somebody meant to roll back to.
+/// Deliberately narrow: only a pointer is safe to keep by rule, so an id with
+/// no pointer at all keeps EVERYTHING — with nothing naming a version there is
+/// nothing to preserve it BY, and guessing (newest? biggest?) would delete the
+/// one somebody meant to roll back to.
 ///
-/// The cost is printed rather than assumed: a session frozen on a deleted
-/// version can no longer resume, and the way back is the draft — building the
-/// same source yields the same version id.
+/// "Here" is this workspace's pointer plus the store's own. Another workspace's
+/// pointer is not visible from this one, which is the same cost the printed
+/// note already names: a session frozen on a deleted version can no longer
+/// resume, and the way back is the draft — building the same source yields the
+/// same version id.
 fn extPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    const flags = try takeUserFlag(alloc, args);
-    defer alloc.free(flags.rest);
     var dry_run = false;
     var only_id: ?[]const u8 = null;
-    for (flags.rest) |a| {
+    for (args) |a| {
         if (std.mem.eql(u8, a, "--dry-run")) {
             dry_run = true;
         } else if (only_id == null and !std.mem.startsWith(u8, a, "-")) {
             only_id = a;
         } else {
-            try printErr(io, "usage: nulya ext prune [--user] [<id>] [--dry-run]\n");
+            try printErr(io, "usage: nulya ext prune [<id>] [--dry-run]\n");
             return 1;
         }
     }
@@ -653,30 +523,22 @@ fn extPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         }
     }
 
-    const root_spec = (try writeRootSpec(alloc, flags.user)) orelse {
-        try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
-        return 1;
-    };
-    defer alloc.free(root_spec);
-
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    var root_dir = store.openRoot(io, cwd_path, root_spec) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => {
-            try printOut(alloc, io, "nothing to prune in {s}\n", .{root_spec});
-            return 0;
-        },
-        else => return err,
+    var view = try StoreView.open(alloc, io, cwd_path);
+    defer view.deinit(alloc);
+    const st = view.site.store() orelse {
+        try printOut(alloc, io, "nothing to prune: this machine has no extension store\n", .{});
+        return 0;
     };
-    defer root_dir.close(io);
+    const root_spec = view.site.store_path;
+    const root_dir = st.root;
 
     const ids = try pruneTargets(alloc, io, root_dir, only_id);
     defer {
         for (ids) |i| alloc.free(i);
         alloc.free(ids);
     }
-
-    const st = store.Store.init(io, root_dir);
     var removed: usize = 0;
     var kept: usize = 0;
     var bytes_freed: u64 = 0;
@@ -697,21 +559,32 @@ fn extPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         var held: ?std.Io.File = if (dry_run) null else try st.lease(alloc, id);
         defer if (held) |*h| h.close(io);
 
-        const current = try st.activeVersion(alloc, id);
+        // Whatever any pointer HERE names is kept: the store's own, and this
+        // workspace's when it has one.
+        const current = blk: {
+            const p = (try view.site.activePointer(alloc, id)) orelse break :blk null;
+            break :blk p.version;
+        };
         defer if (current) |c| alloc.free(c);
+        const store_current = try st.activeVersion(alloc, id);
+        defer if (store_current) |c| alloc.free(c);
         const versions = try st.listVersions(alloc, id);
         defer {
             for (versions) |v| alloc.free(v);
             alloc.free(versions);
         }
         if (versions.len == 0) continue;
-        if (current == null) {
+        if (current == null and store_current == null) {
             kept += versions.len;
             try printOut(alloc, io, "{s}: no current — nothing pruned (a deactivated id keeps every version; delete by hand if you mean it)\n", .{id});
             continue;
         }
         for (versions) |v| {
-            if (std.mem.eql(u8, v, current.?)) {
+            if (current != null and std.mem.eql(u8, v, current.?)) {
+                kept += 1;
+                continue;
+            }
+            if (store_current != null and std.mem.eql(u8, v, store_current.?)) {
                 kept += 1;
                 continue;
             }
@@ -888,19 +761,19 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var cwd_real: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_real);
 
-    // Whichever root holds the version — the first active copy of the id, or
-    // the first copy of the named version. One shared lookup (`Roots.Resolved`)
-    // does search order, integrity validation and the frozen manifest, so this
-    // path cannot drift from session composition. That frozen manifest is the
-    // runtime truth: the source tree's may already have changed while `current`
-    // still points at an older immutable version.
-    var search = try RootSearch.open(alloc, io, cwd_path);
-    defer search.deinit(alloc);
-    const resolved: roots_mod.Roots.Resolved = if (with_ref.version) |v|
-        search.roots.resolveVersion(alloc, id, v, .sealed) catch |err| switch (err) {
+    // The version in effect for the id, or exactly the one named. One shared
+    // lookup (`Site.Resolved`) does the pointer layers, integrity validation
+    // and the frozen manifest, so this path cannot drift from session
+    // composition. That frozen manifest is the runtime truth: the source tree's
+    // may already have changed while `current` still points at an older
+    // immutable version.
+    var view = try StoreView.open(alloc, io, cwd_path);
+    defer view.deinit(alloc);
+    const resolved: site_mod.Site.Resolved = if (with_ref.version) |v|
+        view.site.resolveVersion(alloc, id, v, .sealed) catch |err| switch (err) {
             error.Canceled => return err,
             error.VersionNotFound => {
-                try printOut(alloc, io, "no store root holds {s}@{s}; see `nulya ext list`\n", .{ id, v });
+                try printOut(alloc, io, "this machine does not hold {s}@{s}; see `nulya ext list`\n", .{ id, v });
                 return 1;
             },
             else => {
@@ -909,9 +782,9 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             },
         }
     else
-        (search.roots.resolveActive(alloc, id, .sealed) catch |err| switch (err) {
+        (view.site.resolveActive(alloc, id, .sealed) catch |err| switch (err) {
             error.Canceled => return err,
-            // `current` names a version this root cannot serve. Name the fault;
+            // `current` names a version this store cannot serve. Name the fault;
             // `nulya ext list` names the version it points at.
             else => {
                 try printOut(alloc, io, "active version of '{s}' failed integrity validation ({s}); see `nulya ext list`\n", .{ id, @errorName(err) });
@@ -949,10 +822,10 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 
     // This command hands the environment the same thing a session's tool
     // binding does — `(id, version, tool)` — and the environment resolves it
-    // against these very roots (`extension/exec.zig`). One resolution
+    // against this very store (`extension/exec.zig`). One resolution
     // implementation, so a tool called through the CLI and the same tool on the
     // model's face cannot drift on which file "this version" means.
-    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_roots = search.specs });
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_store = view.site.store_path });
     defer lenv.deinit();
 
     // `ext run` applies NO timeout by default: the manifest's own `timeout_ms`
@@ -1092,50 +965,38 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    const target = (try targetRootSpec(alloc, io, cwd_path, id, version, flags.user)) orelse {
-        try printOut(alloc, io, "no store root holds {s}@{s} (or no home for --user); see `nulya ext list`\n", .{ id, version });
-        return 1;
-    };
-    defer alloc.free(target);
-    var ext_root = try store.openOrCreateRoot(io, cwd_path, target);
-    defer ext_root.close(io);
-    const st = store.Store.init(io, ext_root);
-    try warnUserScope(alloc, io, id, version, flags.user);
-    st.activate(alloc, id, version) catch |err| {
-        try printOut(alloc, io, "activate failed: {s} ({s}@{s} in {s})\n", .{ @errorName(err), id, version, target });
-        if (err == error.VersionNotFound) {
-            // The version exists, just not in the root whose copy is in effect
-            // — say so, or "but I built it" is the next question.
-            var search = try RootSearch.open(alloc, io, cwd_path);
-            defer search.deinit(alloc);
-            if (search.roots.firstWithVersion(alloc, id, version, .structural)) |i| {
-                try printOut(alloc, io, "note: {s}@{s} is built in {s}, which {s} shadows; activate a version built in {s}, or `--user` to act on the user store\n", .{ id, version, search.roots.entries[i].spec, target, target });
-            }
+    var view = try StoreView.open(alloc, io, cwd_path);
+    defer view.deinit(alloc);
+    const layer = common.activateLayer(&view.site, id, flags.user);
+
+    try warnUserScope(alloc, io, id, version, layer == .user);
+    view.site.activate(alloc, layer, id, version) catch |err| {
+        try printOut(alloc, io, "activate failed: {s} ({s}@{s})\n", .{ @errorName(err), id, version });
+        if (err == error.NoExtensionStore) {
+            try printErr(io, "this machine has no home directory, so it has no extension store (set NULYA_HOME or HOME)\n");
         }
         return 1;
     };
 
-    // What is IN EFFECT now (`Roots.firstActive`) — not merely what this root's
-    // `current` says, since an earlier root's active copy still wins. Only a
-    // version actually in effect is announced to a live session, by depositing
-    // a capability note into its inbox for the next step boundary. Best-effort:
-    // a failed deposit never fails the activation the model just performed.
-    var search = try RootSearch.open(alloc, io, cwd_path);
-    defer search.deinit(alloc);
-    const effective = try search.roots.firstActive(alloc, id);
+    // Only a version actually IN EFFECT is announced to a live session, by
+    // depositing a capability note into its inbox for the next step boundary.
+    // A user-layer activate under a workspace pointer is not in effect.
+    // Best-effort: a failed deposit never fails the activation the model just
+    // performed.
+    const effective = try view.site.activePointer(alloc, id);
     defer if (effective) |e| alloc.free(e.version);
-    const shadowed_by: ?roots_mod.Roots.ActiveVersion = blk: {
+    const covered_by: ?site_mod.Site.Pointer = blk: {
         const e = effective orelse break :blk null;
-        if (std.mem.eql(u8, e.version, version) and std.mem.eql(u8, search.roots.entries[e.root].spec, target)) break :blk null;
+        if (e.layer == layer) break :blk null;
         break :blk e;
     };
-    if (shadowed_by == null) depositSessionNote(alloc, io, ext_root, id, version) catch {};
+    if (covered_by == null) depositSessionNote(alloc, io, view.site.store().?.root, id, version) catch {};
 
-    try printOut(alloc, io, "{s}: current -> {s} in {s}\n", .{ id, version, target });
-    if (shadowed_by) |s| {
-        try printOut(alloc, io, "note: not in effect — {s}@{s} in {s} shadows it\n", .{ id, s.version, search.roots.entries[s.root].spec });
+    try printOut(alloc, io, "{s}: current -> {s} ({s})\n", .{ id, version, layer.label() });
+    if (covered_by) |c| {
+        try printOut(alloc, io, "note: not in effect — the {s} pointer names {s}@{s}\n", .{ c.layer.label(), id, c.version });
     } else {
-        try noteMembership(alloc, io, &search.roots, id, version);
+        try noteMembership(alloc, io, &view.site, id, version);
     }
     return 0;
 }
@@ -1154,14 +1015,14 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 fn noteMembership(
     alloc: std.mem.Allocator,
     io: std.Io,
-    roots: *const roots_mod.Roots,
+    site: *const site_mod.Site,
     id: []const u8,
     version: []const u8,
 ) !void {
     // `.structural`: this reads what a version DECLARES. The bytes about to
     // run are checked where they run, and the activation just above verified
     // this version's seal.
-    const resolved = roots.resolveVersion(alloc, id, version, .structural) catch return;
+    const resolved = site.resolveVersion(alloc, id, version, .structural) catch return;
     defer resolved.deinit(alloc);
 
     var spec: std.Io.Writer.Allocating = .init(alloc);
@@ -1182,10 +1043,10 @@ fn noteMembership(
 }
 
 /// Say, on stderr, when a model running inside a session reaches OUT of that
-/// session's workspace: `--user` moves `current` in the user store, so `<id>`
-/// means this version for every workspace on this machine. Not refused — what
-/// is not allowed is doing it INVISIBLY. Silent outside `--user`, and silent
-/// when no session is running.
+/// session's workspace: a user-layer `current` means `<id>` is this version for
+/// every workspace on this machine that has no pointer of its own. Not refused
+/// — what is not allowed is doing it INVISIBLY. Silent for a workspace-layer
+/// move, and silent when no session is running.
 ///
 /// No manifest is read here: a package joins a session only when somebody names
 /// it, so this move changes WHICH VERSION those sessions get and nothing about
@@ -1203,7 +1064,7 @@ fn warnUserScope(
 
     const line = try std.fmt.allocPrint(
         alloc,
-        "note: activating {s}@{s} in the user store from inside session {s}: {s} now means this version for every workspace on this machine\n",
+        "note: activating {s}@{s} in the user layer from inside session {s}: {s} now means this version for every workspace on this machine\n",
         .{ id, version, sid, id },
     );
     defer alloc.free(line);
@@ -1232,34 +1093,30 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     const id = flags.rest[0];
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    const target = (try targetRootSpec(alloc, io, cwd_path, id, null, flags.user)) orelse {
-        try printOut(alloc, io, "extension '{s}' has no active version in any store root\n", .{id});
+    var view = try StoreView.open(alloc, io, cwd_path);
+    defer view.deinit(alloc);
+    const layer = (try common.deactivateLayer(alloc, &view.site, id, flags.user)) orelse {
+        try printOut(alloc, io, "extension '{s}' has no active version here\n", .{id});
         return 1;
     };
-    defer alloc.free(target);
-    var ext_root = try store.openOrCreateRoot(io, cwd_path, target);
-    defer ext_root.close(io);
-    try store.Store.init(io, ext_root).deactivate(alloc, id);
-    try printOut(alloc, io, "{s}: deactivated\n", .{id});
+    try view.site.deactivate(alloc, layer, id);
+    try printOut(alloc, io, "{s}: deactivated ({s})\n", .{ id, layer.label() });
 
-    // Deactivating the copy in effect can UNSHADOW one in a later root — say
-    // so, or "why is it still in my session?" is the next question.
-    var search = try RootSearch.open(alloc, io, cwd_path);
-    defer search.deinit(alloc);
-    if (try search.roots.firstActive(alloc, id)) |still| {
+    // Dropping the workspace pointer can reveal the store's — say so, or "why
+    // is it still in my session?" is the next question.
+    if (try view.site.activePointer(alloc, id)) |still| {
         defer alloc.free(still.version);
-        try printOut(alloc, io, "note: {s}@{s} in {s} is now the active copy\n", .{ id, still.version, search.roots.entries[still.root].spec });
+        try printOut(alloc, io, "note: the {s} pointer names {s}@{s}, which is now in effect\n", .{ still.layer.label(), id, still.version });
     }
     return 0;
 }
 
-/// Every extension directory in every root, in search order, with the root it
-/// came from. The second column is exactly what `current` points at: which
-/// version `<id>` means when somebody names it without one. An id whose
-/// `current` an earlier root also sets is marked `(shadowed)` — only the first
-/// is ever used (`Roots.firstActive`). A directory with no `current` says
-/// `(no current)` for its root alone — unless it holds no built version either,
-/// in which case it is a bare writer lease, not an extension, and is skipped.
+/// Every extension this machine holds, sorted by id. The second column is what
+/// `current` points at — which version `<id>` means when somebody names it
+/// without one — and the third is WHICH LAYER said so, `workspace` or `user`.
+/// A directory with no pointer says `(no current)` and `-`, unless it holds no
+/// built version either, in which case it is a bare writer lease or a draft
+/// nobody has built and is skipped.
 ///
 /// Two more markers answer "will a session have this?".
 /// `[tools skills prompt]` is what the version CONTRIBUTES, from its frozen
@@ -1269,56 +1126,46 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 /// Unreadable manifest -> no contribution marker, never a failed listing.
 fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
-    defer search.deinit(alloc);
+    var view = try StoreView.open(alloc, io, try cwdRealPath(io, &cwd_buf));
+    defer view.deinit(alloc);
 
-    var seen_active: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (seen_active.items) |s| alloc.free(s);
-        seen_active.deinit(alloc);
-    }
+    const active = try view.site.listActive(alloc);
+    defer site_mod.Site.freeActive(alloc, active);
 
     var printed: usize = 0;
-    for (search.roots.entries, 0..) |entry, root_index| {
-        var it = entry.dir.iterate();
+    for (active) |entry| {
+        const contributes = try contributionMarker(alloc, &view.site, entry);
+        defer alloc.free(contributes);
+        printed += 1;
+        try printOut(alloc, io, "{s}\t{s}\t{s}{s}{s}\n", .{
+            entry.id,
+            entry.version,
+            entry.layer.label(),
+            contributes,
+            if (sliceHasString(view.with, entry.id)) "\t[with]" else "",
+        });
+    }
+
+    // Ids the store holds versions for with no pointer anywhere: `--with
+    // <id>@<version>` and `ext run <id>@<version>` still reach those, so a
+    // listing that hid them would be lying about what is here. A directory with
+    // no version at all is where `<id>/.lock` lives — a typo's leftovers, not
+    // an extension.
+    if (view.site.store()) |st| {
+        var it = st.root.iterate();
         while (try it.next(io)) |dir_entry| {
             if (dir_entry.kind != .directory) continue;
-            const st = store.Store.init(io, entry.dir);
-            const active = (st.activeVersion(alloc, dir_entry.name) catch |err| switch (err) {
-                error.InvalidId => continue,
-                else => return err,
-            });
-            defer if (active) |a| alloc.free(a);
-            // A directory with neither an active pointer nor a built version is
-            // not an extension — it is where `<id>/.lock` lives, and both
-            // `ext build` and `ext activate` take that lease before validating
-            // anything, so a typo leaves an empty shell behind. A directory
-            // holding versions is real whether or not one is active, and so is
-            // one with a `current` pointer whose versions are gone: that one is
-            // broken, and saying so beats hiding it.
-            if (active == null) {
-                const versions = try st.listVersions(alloc, dir_entry.name);
-                defer {
-                    for (versions) |v| alloc.free(v);
-                    alloc.free(versions);
-                }
-                if (versions.len == 0) continue;
+            if (hasActiveId(active, dir_entry.name)) continue;
+            const versions = st.listVersions(alloc, dir_entry.name) catch continue;
+            defer {
+                for (versions) |v| alloc.free(v);
+                alloc.free(versions);
             }
-            const shadowed = active != null and sliceHasString(seen_active.items, dir_entry.name);
-            if (active != null and !shadowed) try seen_active.append(alloc, try alloc.dupe(u8, dir_entry.name));
-            const contributes = if (active) |a|
-                try contributionMarker(alloc, &search.roots, .{ .id = dir_entry.name, .root = root_index, .version = a })
-            else
-                try alloc.dupe(u8, "");
-            defer alloc.free(contributes);
+            if (versions.len == 0) continue;
             printed += 1;
-            try printOut(alloc, io, "{s}\t{s}\t{s}{s}{s}{s}\n", .{
+            try printOut(alloc, io, "{s}\t(no current)\t-{s}\n", .{
                 dir_entry.name,
-                if (active) |a| a else "(no current)",
-                entry.spec,
-                contributes,
-                if (sliceHasString(search.with, dir_entry.name)) "\t[with]" else "",
-                if (shadowed) "\t(shadowed)" else "",
+                if (sliceHasString(view.with, dir_entry.name)) "\t[with]" else "",
             });
         }
     }
@@ -1329,12 +1176,12 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
 /// `\t[tools skills prompt]` for what this frozen version contributes. Empty
 /// string when the version contributes nothing nameable or cannot be read.
 /// Caller owns the result.
-fn contributionMarker(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, entry: roots_mod.Roots.ActiveEntry) ![]u8 {
+fn contributionMarker(alloc: std.mem.Allocator, site: *const site_mod.Site, entry: site_mod.Site.ActiveEntry) ![]u8 {
     // `.structural`: this column reports what a version DECLARES. Re-digesting
     // every megabyte of built binary to print `[tools]` costs most of a second
     // in a store with a few compiled extensions, and a front end runs this
     // constantly. What is about to run is checked where it runs.
-    const resolved = roots.resolveEntry(alloc, entry, .structural) catch return alloc.dupe(u8, "");
+    const resolved = site.resolveEntry(alloc, entry, .structural) catch return alloc.dupe(u8, "");
     defer resolved.deinit(alloc);
     const m = resolved.manifest;
     if (m.tools.len == 0 and m.skills.len == 0 and m.system_prompts.len == 0) return alloc.dupe(u8, "");
@@ -1364,113 +1211,19 @@ fn sliceHasString(list: []const []const u8, needle: []const u8) bool {
     return false;
 }
 
-/// `nulya ext trust` — say, once and explicitly, that this workspace's
-/// extension store may take part in sessions.
-///
-/// What gets recorded is the STORE, not a hash of what is in it: an agent that
-/// builds and activates its own tools would otherwise invalidate the record
-/// every loop. It is a judgement about origin, so the inventory is printed
-/// BEFORE the record is written, and `ext list` / `ext inspect` are never
-/// gated.
-///
-/// There is no `untrust`: withdrawing means deleting the line from
-/// `~/.nulya/trusted-stores.jsonl` by hand.
-fn extTrust(alloc: std.mem.Allocator, io: std.Io) !u8 {
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_path = try cwdRealPath(io, &cwd_buf);
-
-    const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse {
-        try printOut(alloc, io, "nothing to trust: {s} holds no extensions\n", .{store.workspace_root_rel});
-        return 0;
-    };
-    defer alloc.free(occupied);
-
-    var host = try environment.hostEnvironMap(alloc);
-    defer host.deinit();
-    const home = (try launch.userHomeDir(alloc, &host)) orelse {
-        try printErr(io, "no home directory to record trust in (set NULYA_HOME or HOME)\n");
-        return 1;
-    };
-    defer alloc.free(home);
-
-    if (try trust.isTrusted(alloc, io, home, occupied)) {
-        try printOut(alloc, io, "already trusted: {s}\n", .{occupied});
-        return 0;
-    }
-
-    try printOut(alloc, io, "trusting {s}, which holds:\n", .{occupied});
-    try printStoreInventory(alloc, io, cwd_path, false);
-    try trust.append(alloc, io, home, occupied);
-    try printOut(alloc, io, "recorded in {s}{c}{s}\n", .{ home, std.fs.path.sep, trust.journal_name });
-    return 0;
-}
-
-/// The stderr block a session prints when it refuses an untrusted workspace
-/// store. It names the store, shows what composing it would bring in, and
-/// points at the two read-only verbs plus `ext trust`. The caller adds its own
-/// one-line verdict.
-///
-/// Best-effort about the inventory: a store this machine cannot fully read is
-/// still refused, and a half-listed refusal beats a failed one.
-pub fn printUntrustedStoreRefusal(alloc: std.mem.Allocator, io: std.Io, cwd_path: []const u8) !void {
-    const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse return;
-    defer alloc.free(occupied);
-    try printErrFmt(alloc, io, "the extension store {s} came with this checkout and is not trusted on this machine; it holds:\n", .{occupied});
-    printStoreInventory(alloc, io, cwd_path, true) catch {};
-    try printErr(io, "review it (`nulya ext list`, `nulya ext inspect <id>`), then `nulya ext trust` to allow it — or delete the store\n");
-}
-
-/// One indented line per extension the WORKSPACE store holds: `<id>@<version>`
-/// with the contribution marker `ext list` uses, then the ids that hold built
-/// versions without activating one, since `--with` and `ext run <id>@<version>`
-/// reach those too. Written to stderr when `to_err`, else stdout.
-fn printStoreInventory(alloc: std.mem.Allocator, io: std.Io, cwd_path: []const u8, to_err: bool) !void {
-    var roots = try roots_mod.Roots.open(alloc, io, cwd_path, &.{store.workspace_root_rel});
-    defer roots.deinit();
-    if (roots.entries.len == 0) return;
-
-    const active = try roots.listActive(alloc);
-    defer roots_mod.Roots.freeActive(alloc, active);
-    for (active) |entry| {
-        const contributes = try contributionMarker(alloc, &roots, entry);
-        defer alloc.free(contributes);
-        try printLine(alloc, io, to_err, "  {s}@{s}{s}\n", .{ entry.id, entry.version, contributes });
-    }
-
-    // Built but not active: not in composition by discovery, still nameable.
-    const st = store.Store.init(io, roots.entries[0].dir);
-    var it = roots.entries[0].dir.iterate();
-    while (try it.next(io)) |dir_entry| {
-        if (dir_entry.kind != .directory) continue;
-        if (hasActiveId(active, dir_entry.name)) continue;
-        const versions = st.listVersions(alloc, dir_entry.name) catch continue;
-        defer {
-            for (versions) |v| alloc.free(v);
-            alloc.free(versions);
-        }
-        if (versions.len == 0) continue;
-        try printLine(alloc, io, to_err, "  {s} ({d} built version(s), none active)\n", .{ dir_entry.name, versions.len });
-    }
-}
-
-fn hasActiveId(active: []const roots_mod.Roots.ActiveEntry, id: []const u8) bool {
+fn hasActiveId(active: []const site_mod.Site.ActiveEntry, id: []const u8) bool {
     for (active) |e| {
         if (std.mem.eql(u8, e.id, id)) return true;
     }
     return false;
 }
 
-fn printLine(alloc: std.mem.Allocator, io: std.Io, to_err: bool, comptime fmt: []const u8, args: anytype) !void {
-    if (to_err) return printErrFmt(alloc, io, fmt, args);
-    return printOut(alloc, io, fmt, args);
-}
-
-/// `<id>` prints the manifest of the version IN EFFECT (`Roots.firstActive`),
-/// with NO draft fallback. No active version is a named refusal.
-/// `<id>@<version>` prints the FROZEN manifest of that exact built version,
-/// from the first root holding it — the shape a session header records for
-/// every member, so a question ABOUT A RUNNING SESSION reads the manifest that
-/// session composed with rather than whatever `current` points at today.
+/// `<id>` prints the manifest of the version IN EFFECT, with NO draft
+/// fallback. No active version is a named refusal.
+/// `<id>@<version>` prints the FROZEN manifest of that exact built version —
+/// the shape a session header records for every member, so a question ABOUT A
+/// RUNNING SESSION reads the manifest that session composed with rather than
+/// whatever `current` points at today.
 /// `<path>` — a directory holding `extension.json` — prints THAT draft, unbuilt
 /// and unfrozen: what `ext build` would freeze next, spelled the way
 /// `ext build <path>` takes it.
@@ -1501,39 +1254,44 @@ fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     }
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
-    defer search.deinit(alloc);
+    var view = try StoreView.open(alloc, io, try cwdRealPath(io, &cwd_buf));
+    defer view.deinit(alloc);
+    const st = view.site.store();
 
     const ref = withRef(arg);
     if (ref.version) |v| {
-        // A malformed version is simply a version no root holds — inspect is a
-        // projection, so it answers rather than faults.
-        for (search.roots.entries, 0..) |entry, i| {
-            const manifest_rel = search.roots.store(i).versionManifestPath(alloc, ref.id, v) catch break;
-            defer alloc.free(manifest_rel);
-            const bytes = entry.dir.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch continue;
+        // A malformed version is simply a version this machine does not hold —
+        // inspect is a projection, so it answers rather than faults.
+        if (try frozenManifestBytes(alloc, io, st, ref.id, v)) |bytes| {
             defer alloc.free(bytes);
             try printOut(alloc, io, "{s}\n", .{bytes});
             return 0;
         }
-        try printOut(alloc, io, "no store root holds {s}@{s}; see `nulya ext list`\n", .{ ref.id, v });
+        try printOut(alloc, io, "this machine does not hold {s}@{s}; see `nulya ext list`\n", .{ ref.id, v });
         return 1;
     }
 
     // Bare id: the version IN EFFECT, never a draft — the `<path>` form above
     // was tried and ruled out before we got here.
-    if (try search.roots.firstActive(alloc, ref.id)) |active| {
+    if (try view.site.activePointer(alloc, ref.id)) |active| {
         defer alloc.free(active.version);
-        const manifest_rel = try search.roots.store(active.root).versionManifestPath(alloc, ref.id, active.version);
-        defer alloc.free(manifest_rel);
-        if (search.roots.entries[active.root].dir.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20))) |bytes| {
+        if (try frozenManifestBytes(alloc, io, st, ref.id, active.version)) |bytes| {
             defer alloc.free(bytes);
             try printOut(alloc, io, "{s}\n", .{bytes});
             return 0;
-        } else |_| {}
+        }
     }
     try printErrFmt(alloc, io, "no active version of '{s}'; see `nulya ext list`\n", .{ref.id});
     return 1;
+}
+
+/// The frozen `extension.json` of one built version, verbatim, or null when the
+/// store does not hold it. Caller owns the bytes.
+fn frozenManifestBytes(alloc: std.mem.Allocator, io: std.Io, st: ?store.Store, id: []const u8, version: []const u8) !?[]u8 {
+    const s = st orelse return null;
+    const manifest_rel = s.versionManifestPath(alloc, id, version) catch return null;
+    defer alloc.free(manifest_rel);
+    return s.root.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch null;
 }
 
 /// Whether an `ext inspect` argument names a PATH rather than an
@@ -1558,6 +1316,162 @@ fn draftManifestAtPath(alloc: std.mem.Allocator, io: std.Io, arg: []const u8) !?
         else => return null,
     };
     return bytes;
+}
+
+/// `nulya ext migrate [--dry-run]` — move version directories written under the
+/// OLD layout into the one store, once.
+///
+/// The old layout kept `versions/` in every searched root: this workspace's
+/// `.nulya/extensions/<id>/versions/`, and the user root
+/// `<NULYA_HOME | ~/.nulya>/extensions/<id>/versions/`. Both move here, and
+/// the two `current` files follow the layer they already meant: the user root's
+/// becomes the store's, the workspace's stays where it is.
+///
+/// A version already in the store is left alone rather than overwritten —
+/// content addressing says the bytes are the same, and the old copy is what is
+/// removed. Idempotent: running it twice finds nothing the second time.
+fn extMigrate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    var dry_run = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--dry-run")) {
+            dry_run = true;
+        } else {
+            try printErr(io, "usage: nulya ext migrate [--dry-run]\n");
+            return 1;
+        }
+    }
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+    const store_path = try common.storePath(alloc);
+    defer alloc.free(store_path);
+    if (store_path.len == 0) {
+        try printErr(io, "no home directory, so there is no store to migrate into (set NULYA_HOME or HOME)\n");
+        return 1;
+    }
+
+    var host = try environment.hostEnvironMap(alloc);
+    defer host.deinit();
+    const home = (try launch.userHomeDir(alloc, &host)).?; // a store path implies a home
+    defer alloc.free(home);
+    const old_user_root = try std.fs.path.join(alloc, &.{ home, "extensions" });
+    defer alloc.free(old_user_root);
+
+    var dest = try store.openOrCreateRoot(io, cwd_path, store_path);
+    defer dest.close(io);
+
+    var moved: usize = 0;
+    var pointers: usize = 0;
+    // The user root first: its `current` files become the store's, so a
+    // workspace pointer written afterwards still wins.
+    moved += try migrateRoot(alloc, io, cwd_path, old_user_root, dest, dest, dry_run, &pointers);
+    moved += try migrateRoot(alloc, io, cwd_path, site_mod.workspace_rel, dest, null, dry_run, &pointers);
+
+    if (moved == 0 and pointers == 0) {
+        try printOut(alloc, io, "nothing to migrate: no version directories outside {s}\n", .{store_path});
+        return 0;
+    }
+    try printOut(alloc, io, "{d} version(s) {s} into {s}, {d} pointer(s) {s}\n", .{
+        moved,
+        if (dry_run) "would move" else "moved",
+        store_path,
+        pointers,
+        if (dry_run) "would move" else "moved",
+    });
+    return 0;
+}
+
+/// Move every `<id>/versions/<v>` under `root_spec` into `dest`, and — when
+/// `pointer_dest` is given — that root's `<id>/current` too. Returns how many
+/// version directories were taken; `pointers` counts the pointers.
+///
+/// A rename is tried first and a copy is the fallback: the old user root and
+/// the store are usually on one filesystem, and the workspace is usually not.
+fn migrateRoot(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    cwd_path: []const u8,
+    root_spec: []const u8,
+    dest: std.Io.Dir,
+    pointer_dest: ?std.Io.Dir,
+    dry_run: bool,
+    pointers: *usize,
+) !usize {
+    var root = store.openRoot(io, cwd_path, root_spec) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return 0,
+        else => return err,
+    };
+    defer root.close(io);
+    // The store itself is never its own donor: `ext migrate` inside the home
+    // directory would otherwise try to move a tree onto itself.
+    {
+        var a_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var b_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const a = a_buf[0..try root.realPath(io, &a_buf)];
+        const b = b_buf[0..try dest.realPath(io, &b_buf)];
+        if (std.mem.eql(u8, a, b)) return 0;
+    }
+
+    var count: usize = 0;
+    var it = root.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        if (!manifest.isValidId(entry.name)) continue;
+        const src_st = store.Store.init(io, root);
+        const versions = src_st.listVersions(alloc, entry.name) catch continue;
+        defer {
+            for (versions) |v| alloc.free(v);
+            alloc.free(versions);
+        }
+        for (versions) |v| {
+            const rel = try std.fs.path.join(alloc, &.{ entry.name, "versions", v });
+            defer alloc.free(rel);
+            count += 1;
+            try printOut(alloc, io, "{s}@{s}: {s} {s} -> the store\n", .{ entry.name, v, if (dry_run) "would move from" else "moved from", root_spec });
+            if (dry_run) continue;
+            if (dest.access(io, rel, .{})) |_| {
+                // Same version id, therefore the same bytes: keep the store's.
+                root.deleteTree(io, rel) catch {};
+                continue;
+            } else |_| {}
+            try dest.createDirPath(io, std.fs.path.dirname(rel).?);
+            if (root.rename(rel, dest, rel, io)) |_| continue else |_| {}
+            try copyVersionTree(alloc, io, root, dest, rel);
+            root.deleteTree(io, rel) catch {};
+        }
+        // The now-empty `versions/` goes with them; a draft beside it stays
+        // exactly where it is.
+        if (!dry_run) {
+            const versions_rel = try std.fs.path.join(alloc, &.{ entry.name, "versions" });
+            defer alloc.free(versions_rel);
+            root.deleteDir(io, versions_rel) catch {};
+        }
+        const pd = pointer_dest orelse continue;
+        const current = try src_st.activeVersion(alloc, entry.name) orelse continue;
+        defer alloc.free(current);
+        pointers.* += 1;
+        try printOut(alloc, io, "{s}: current -> {s} moves to the store\n", .{ entry.name, current });
+        if (dry_run) continue;
+        try store.Store.init(io, pd).activate(alloc, entry.name, current);
+        try src_st.deactivate(alloc, entry.name);
+    }
+    return count;
+}
+
+fn copyVersionTree(alloc: std.mem.Allocator, io: std.Io, src_root: std.Io.Dir, dest_root: std.Io.Dir, rel: []const u8) !void {
+    var src = try src_root.openDir(io, rel, .{ .iterate = true });
+    defer src.close(io);
+    try dest_root.createDirPath(io, rel);
+    var dest = try dest_root.openDir(io, rel, .{});
+    defer dest.close(io);
+    var walker = try src.walk(alloc);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| switch (entry.kind) {
+        .directory => try dest.createDirPath(io, entry.path),
+        // Permissions come from the source, so a frozen binary stays executable.
+        .file => try src.copyFile(entry.path, dest, entry.path, io, .{ .make_path = true }),
+        else => {},
+    };
 }
 
 /// `ext api` is a curated `nulya src`: the wire-protocol topic prints the REAL
@@ -1663,9 +1577,12 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  wherever it applies, kills the whole process tree and returns whatever was
             \\  captured.
             \\
-            \\  A workspace store (.nulya/extensions) that arrived with a checkout takes
-            \\  part in no session until `nulya ext trust` records it once on this
-            \\  machine. A store this machine built into is trusted by birth.
+            \\  Built versions live in ONE place per machine,
+            \\  <NULYA_HOME | ~/.nulya>/store/<id>/versions/<v>/, whoever built them. A
+            \\  workspace holds drafts and, optionally, its own `current` pointer under
+            \\  .nulya/extensions/<id>/ — never versions, so a checkout can carry source
+            \\  and never bytes that would run. A workspace pointer wins over the store's;
+            \\  with neither, the id is not activated here.
             \\
         );
         return 0;
@@ -1702,17 +1619,16 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  # A mode you want everywhere: put its id in `[extensions] with` — that list
             \\  # is every session's standing membership in this workspace.
             \\
-            \\  # Every workspace on this machine, and the one-time trust of a store.
-            \\  nulya ext build extensions/guide --user
+            \\  # Every workspace on this machine: activate in the user layer.
+            \\  nulya ext build extensions/guide
             \\  nulya ext activate --user guide v-<hash>
-            \\  nulya ext trust                               # a .nulya/extensions that came with a checkout
             \\
-            \\  # A whole store root at once: put the source in <root>/<id>/, then one verb.
-            \\  cp -r some.tool ~/.nulya/extensions/           # or write it there in the first place
-            \\  nulya ext sync --user --activate               # builds every draft there; a version another root
-            \\                                                # already holds is copied, not compiled
+            \\  # A whole directory of drafts at once: put the source in <dir>/<id>/,
+            \\  # then one verb. Either directory builds INTO the one store.
+            \\  cp -r some.tool ~/.nulya/store/                # or .nulya/extensions/ for this workspace only
+            \\  nulya ext sync --user --activate               # builds every draft beside the versions
             \\  nulya ext sync --dry-run                       # what it would do, touching nothing
-            \\  nulya ext prune --user                         # drop versions `current` does not name; the draft
+            \\  nulya ext prune                                # drop versions no `current` here names; the draft
             \\                                                # can always rebuild the same version id
             \\
             \\  # A slash command, a narrowed policy, and a front-end module — all just

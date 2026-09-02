@@ -16,7 +16,6 @@ const prompt = @import("prompt.zig");
 const composition = @import("composition.zig");
 const tool = @import("tool.zig");
 const tool_stats = @import("journals/tool_stats.zig");
-const store = @import("extension/store.zig");
 
 /// The most kernel steps one `run` may take, whatever the caller asks for. A
 /// driver can lower the budget per call, never raise it.
@@ -72,7 +71,7 @@ pub const AgentSession = struct {
     model: provider.Model,
     step_ctx: loop.StepContext,
     model_options: provider.Options,
-    extension_roots: []const []const u8,
+    extension_store: []const u8,
     /// Set for durable sessions: the session file's location, used to drain the
     /// cross-process inbox each step.
     durable: ?DurableRef = null,
@@ -82,9 +81,10 @@ pub const AgentSession = struct {
         model: provider.Model,
         step_ctx: loop.StepContext,
         model_options: provider.Options = .{},
-        /// Store roots to search, in order. The default is the workspace root
-        /// alone; a CLI adds the user root and any trusted `extensions.paths`.
-        extension_roots: []const []const u8 = &.{store.workspace_root_rel},
+        /// This machine's one extension store, as an absolute path. Empty is
+        /// the honest default: a session that composes no member never needs
+        /// one, and a machine without a home has none.
+        extension_store: []const u8 = "",
         /// Native tool selection and budget, resolved from config at the
         /// session-setup boundary so this module stays config-agnostic.
         registry: composition.Options = .{},
@@ -126,7 +126,7 @@ pub const AgentSession = struct {
 
     pub fn init(alloc: std.mem.Allocator, opts: Options) !AgentSession {
         const tool_ctx = opts.step_ctx.tool_context;
-        const comp = try composition.SessionComposition.init(alloc, tool_ctx.environment.io, tool_ctx.cwd, opts.extension_roots, opts.registry);
+        const comp = try composition.SessionComposition.init(alloc, tool_ctx.environment.io, tool_ctx.cwd, opts.extension_store, opts.registry);
         errdefer comp.deinit(alloc);
 
         return .{
@@ -136,14 +136,14 @@ pub const AgentSession = struct {
             .model = opts.model,
             .step_ctx = opts.step_ctx,
             .model_options = opts.model_options,
-            .extension_roots = opts.extension_roots,
+            .extension_store = opts.extension_store,
         };
     }
 
     pub fn createDurable(alloc: std.mem.Allocator, opts: Options, d: CreateDurableOptions) !AgentSession {
         const tool_ctx = opts.step_ctx.tool_context;
         const io = tool_ctx.environment.io;
-        var comp = try composition.SessionComposition.init(alloc, io, tool_ctx.cwd, opts.extension_roots, opts.registry);
+        var comp = try composition.SessionComposition.init(alloc, io, tool_ctx.cwd, opts.extension_store, opts.registry);
         errdefer comp.deinit(alloc);
 
         // Freeze the resolved composition into the header, so any process
@@ -194,7 +194,7 @@ pub const AgentSession = struct {
             .model = opts.model,
             .step_ctx = opts.step_ctx,
             .model_options = opts.model_options,
-            .extension_roots = opts.extension_roots,
+            .extension_store = opts.extension_store,
             .durable = .{ .workspace = d.workspace, .session_path = owned_path },
         };
     }
@@ -205,7 +205,7 @@ pub const AgentSession = struct {
         var l = try ledger.openDurable(alloc, io, d.workspace, d.session_path);
         errdefer l.deinit();
         const hdr = l.header().?;
-        var comp = try composition.SessionComposition.initFrozen(alloc, io, tool_ctx.cwd, opts.extension_roots, hdr.composition);
+        var comp = try composition.SessionComposition.initFrozen(alloc, io, tool_ctx.cwd, opts.extension_store, hdr.composition);
         errdefer comp.deinit(alloc);
 
         const owned_path = try alloc.dupe(u8, d.session_path);
@@ -218,7 +218,7 @@ pub const AgentSession = struct {
             .model = opts.model,
             .step_ctx = opts.step_ctx,
             .model_options = opts.model_options,
-            .extension_roots = opts.extension_roots,
+            .extension_store = opts.extension_store,
             .durable = .{ .workspace = d.workspace, .session_path = owned_path },
         };
     }
@@ -641,7 +641,7 @@ test "a canceled step accumulates its usage and the session runs the next step" 
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
-        .extension_roots = &.{"nulya-absent-extensions-root"},
+        .extension_store = "nulya-absent-extensions-store",
     };
     defer sess.l.deinit();
 
@@ -747,7 +747,7 @@ test "a cancel during prepareStep reconciliation reports canceled with zero usag
             .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
-        .extension_roots = &.{"nulya-absent-extensions-root"},
+        .extension_store = "nulya-absent-extensions-store",
     }, .{
         .workspace = tmp.dir,
         .session_path = ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "s.jsonl",
@@ -840,7 +840,7 @@ test "a durable session persists across create, close, and reopen" {
             .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
-        .extension_roots = &.{store.workspace_root_rel},
+        .extension_store = "nulya-absent-extensions-store",
     };
 
     // Process A: create, take one turn, then close.
@@ -931,7 +931,7 @@ test "a cancel marker is consumed at the step boundary: no model call, then the 
             .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
-        .extension_roots = &.{"nulya-absent-extensions-root"},
+        .extension_store = "nulya-absent-extensions-store",
     }, .{ .workspace = tmp.dir, .session_path = session_path, .session_id = "s" });
     defer sess.deinit();
     try sess.appendUser("go");
@@ -1021,7 +1021,7 @@ test "run clamps any requested budget to the kernel ceiling" {
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
-        .extension_roots = &.{"nulya-absent-extensions-root"},
+        .extension_store = "nulya-absent-extensions-store",
     };
     defer sess.l.deinit();
     try sess.appendUser("go");
@@ -1116,7 +1116,7 @@ test "completed step records stable ids and the frozen version behind each, neve
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
-        .extension_roots = &.{"nulya-absent-extensions-root"},
+        .extension_store = "nulya-absent-extensions-store",
     };
     defer sess.l.deinit();
 
@@ -1219,7 +1219,7 @@ test "a durable session's usage rows name the session, so outcomes can be joined
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
-        .extension_roots = &.{"nulya-absent-extensions-root"},
+        .extension_store = "nulya-absent-extensions-store",
         // The id the journal records is the session FILE's stem, exactly as
         // `session outcome <id>` spells it.
         .durable = .{ .workspace = tmp.dir, .session_path = session_path },
@@ -1319,7 +1319,7 @@ test "a canceled step records no tool usage stats" {
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
-        .extension_roots = &.{"nulya-absent-extensions-root"},
+        .extension_store = "nulya-absent-extensions-store",
     };
     defer sess.l.deinit();
 
@@ -1400,7 +1400,7 @@ test "a reply cut by max_tokens before it wrote any call stops the run, unlike o
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
-        .extension_roots = &.{"nulya-absent-extensions-root"},
+        .extension_store = "nulya-absent-extensions-store",
     };
     defer sess.l.deinit();
 
@@ -1464,7 +1464,7 @@ test "a truncated tail refuses to step in the next process until a message arriv
                 .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
                 .scratch_dir = "/tmp",
             },
-            .extension_roots = &.{"nulya-absent-extensions-root"},
+            .extension_store = "nulya-absent-extensions-store",
         }, .{ .workspace = tmp.dir, .session_path = session_path, .session_id = "s" });
         defer sess.deinit();
         try sess.appendUser("go");
@@ -1506,7 +1506,7 @@ test "a truncated tail refuses to step in the next process until a message arriv
             .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
-        .extension_roots = &.{"nulya-absent-extensions-root"},
+        .extension_store = "nulya-absent-extensions-store",
     }, .{ .workspace = tmp.dir, .session_path = session_path });
     defer sess.deinit();
 
@@ -1599,7 +1599,7 @@ test "a truncated turn's unexecuted calls are not recorded as tool usage" {
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
-        .extension_roots = &.{"nulya-absent-extensions-root"},
+        .extension_store = "nulya-absent-extensions-store",
     };
     defer sess.l.deinit();
 

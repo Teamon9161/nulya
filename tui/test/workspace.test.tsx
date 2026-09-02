@@ -489,8 +489,8 @@ test("the checkout question is the same bargain on screen as on the terminal", a
   // The words and the keys are the plan's, so the two askings cannot drift
   // into offering different bargains — the dialog only re-presents them.
   expect(promptLines(ask).some((line) => line.includes("lint · builds"))).toBe(true)
-  expect(promptLines(ask).some((line) => line.includes("  t  "))).toBe(false)
-  expect(choiceHint(ask)).toContain("t trust")
+  expect(promptLines(ask).some((line) => line.includes("  i  "))).toBe(false)
+  expect(choiceHint(ask)).toContain("i build")
   // …and the bare terminal's echo prompt is not a line in a dialog.
   expect(promptLines(ask).some((line) => line.includes("›"))).toBe(false)
 
@@ -499,7 +499,7 @@ test("the checkout question is the same bargain on screen as on the terminal", a
     const frame = await settle(setup, 4)
     expect(frame).toContain("thing")
     expect(frame).toContain("lint · builds")
-    expect(frame).toContain("t trust")
+    expect(frame).toContain("i build")
     expect(frameLines(frame).every((line) => displayWidth(line) <= 80)).toBe(true)
   } finally {
     setup.renderer.destroy()

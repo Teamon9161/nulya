@@ -8,7 +8,7 @@ const std = @import("std");
 const skill = @import("../skill.zig");
 const manifest = @import("manifest.zig");
 const store = @import("store.zig");
-const roots_mod = @import("roots.zig");
+const site_mod = @import("site.zig");
 const integrity = @import("integrity.zig");
 
 pub const max_skill_md_bytes: usize = 2 * 1024 * 1024;
@@ -103,17 +103,17 @@ pub fn validateSnapshot(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot
     }
 }
 
-/// Every skill of every active extension, across the store roots in search
-/// order (first root holding an id wins, `Roots.listActive`).
+/// Every skill of every extension a pointer names here, the workspace layer
+/// winning (`Site.listActive`).
 pub fn listActive(
     alloc: std.mem.Allocator,
-    roots: *const roots_mod.Roots,
+    site: *const site_mod.Site,
 ) !skill.SkillSetSnapshot {
     var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
     errdefer skill.deinitDescriptorArrayList(alloc, &descriptors);
 
-    const active = try roots.listActive(alloc);
-    defer roots_mod.Roots.freeActive(alloc, active);
+    const active = try site.listActive(alloc);
+    defer site_mod.Site.freeActive(alloc, active);
 
     for (active) |entry| {
         // Skip broken extensions, but let host cancellation propagate rather than
@@ -122,32 +122,31 @@ pub fn listActive(
         // `.structural`: a catalog only has to name what a complete version
         // declares — nothing here runs, and the paths that do ask `.sealed`
         // themselves.
-        const r = roots.resolveEntry(alloc, entry, .structural) catch |err| switch (err) {
+        const r = site.resolveEntry(alloc, entry, .structural) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
         };
         defer r.deinit(alloc);
-        try appendFromManifest(alloc, roots.io, roots.entries[r.root].dir, &descriptors, r.id, r.version, r.manifest);
+        try appendFromManifest(alloc, site.io, site.store().?.root, &descriptors, r.id, r.version, r.manifest);
     }
     skill.sortDescriptors(descriptors.items);
     return .{ .skills = try descriptors.toOwnedSlice(alloc) };
 }
 
-/// Load a full SKILL.md body from a frozen skill ref, from whichever store root holds
-/// that frozen version (content-addressed, so any root's copy is the same
-/// bytes). This deliberately validates and reads the NAMED version; it never
+/// Load a full SKILL.md body from a frozen skill ref, out of this machine's
+/// store. This deliberately validates and reads the NAMED version; it never
 /// follows the extension's `current`.
-pub fn loadFrozenAcross(
+pub fn loadFrozenInStore(
     alloc: std.mem.Allocator,
-    roots: *const roots_mod.Roots,
+    site: *const site_mod.Site,
     frozen_ref: []const u8,
 ) ![]u8 {
-    const parsed = try parseRef(frozen_ref); // malformed: fail before touching a root
+    const parsed = try parseRef(frozen_ref); // malformed: fail before touching the store
     // `.sealed`: a loaded SKILL.md body goes straight into the model's context,
     // so this is a read that CONSUMES the frozen bytes, not one that lists them.
-    const r = try roots.resolveVersion(alloc, parsed.extension_id, parsed.version, .sealed);
+    const r = try site.resolveVersion(alloc, parsed.extension_id, parsed.version, .sealed);
     defer r.deinit(alloc);
-    return readSkillBody(alloc, roots.io, roots.entries[r.root].dir, parsed, r.manifest);
+    return readSkillBody(alloc, site.io, site.store().?.root, parsed, r.manifest);
 }
 
 pub fn loadFrozen(

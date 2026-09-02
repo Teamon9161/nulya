@@ -203,7 +203,6 @@ backend = "local"
 shell = "auto"
 
 [extensions]
-paths = []
 # The members of every session opened here, each "<id>[@<version>][:<tool>,…]".
 # The part after ":" names the tools that take a slot on the model's face beyond
 # the package's own `surface: auto` default; ":none" means a member with nothing

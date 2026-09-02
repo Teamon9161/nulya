@@ -11,7 +11,8 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 import { parseHeaderLine, type SessionHeader } from "./ledger.ts"
-import { extList } from "./cli.ts"
+import { extList, type PointerLayer } from "./cli.ts"
+import { userConfigDir } from "../state/settings.ts"
 import type { Workspace } from "./bin.ts"
 
 export const sessions_dir = ".nulya/sessions"
@@ -41,40 +42,21 @@ export async function readHeader(ws: Workspace, id: string): Promise<SessionHead
 export const extensions_dir = ".nulya/extensions"
 
 /**
- * The store roots, in the kernel's search order, as directories on this disk.
- *
- * Order and membership are `store.Roots` — workspace, then user, then whatever
- * `extensions.paths` adds — and the kernel already prints them,
- * one per `ext list` line. Reading them off that output is how the TUI avoids
- * a second implementation of "where do extensions live", which would drift the
- * moment a config layer moved.
+ * The one place built version bytes live on this machine:
+ * `<NULYA_HOME | ~/.nulya>/store`. A workspace holds drafts and a `current`
+ * pointer of its own, never versions — so reading a frozen manifest or a
+ * package directory is always this directory.
  */
-export async function storeRoots(ws: Workspace): Promise<string[]> {
-  try {
-    return rootsOf(ws, await extList(ws))
-  } catch {
-    // No binary, no store, a build too old to list roots: the workspace root is
-    // where extensions have always been, and it is still the first one searched.
-    return rootsOf(ws, [])
-  }
+export function storePath(env: Record<string, string | undefined> = process.env): string {
+  return join(userConfigDir(env), "store")
 }
 
 /**
- * The same roots, from a listing somebody already has.
- *
- * `ext list` is a subprocess, and a caller holding its answer should not spawn a
- * second one to learn what it already read (`/ext` opens by listing and then
- * needs the roots to find the ids that are only source).
+ * Where drafts live: the workspace's `.nulya/extensions`, and the store's own
+ * directory (what `ext init --user` / `ext seed --user` write into).
  */
-export function rootsOf(ws: Workspace, listed: readonly { root: string }[]): string[] {
-  const roots: string[] = []
-  for (const entry of listed) {
-    const dir = isAbsolute(entry.root) ? entry.root : join(ws.dir, entry.root)
-    if (!roots.includes(dir)) roots.push(dir)
-  }
-  const workspace = join(ws.dir, extensions_dir)
-  if (!roots.includes(workspace)) roots.unshift(workspace)
-  return roots
+export function draftDirs(ws: Workspace, env: Record<string, string | undefined> = process.env): string[] {
+  return [join(ws.dir, extensions_dir), storePath(env)]
 }
 
 /**
@@ -187,18 +169,16 @@ export interface PackagePolicy {
 }
 
 /**
- * Read `<id>/versions/<version>/extension.json` from the first root that holds
- * it. The version is the one the session FROZE (header `composition.active`),
- * not whatever `current` points at now — a mid-session `activate` moves
- * `current` and must not change what this session says it is running (DESIGN
- * §7.5). Which root the bytes come from does not matter: a version id is a hash
- * of its own contents, so two roots holding one version hold the same thing.
+ * Read `<id>/versions/<version>/extension.json` from the store. The version is
+ * the one the session FROZE (header `composition.active`), not whatever
+ * `current` points at now — a mid-session `activate` moves `current` and must
+ * not change what this session says it is running.
  */
 export async function readContributions(
-  ws: Workspace,
+  _ws: Workspace,
   id: string,
   version: string,
-  roots?: readonly string[],
+  store?: string,
 ): Promise<Contributions> {
   const empty: Contributions = {
     id,
@@ -215,41 +195,31 @@ export async function readContributions(
     panelTools: [],
     ui: null,
   }
-  const search = roots ?? (await storeRoots(ws))
-  for (const root of search) {
-    const path = join(root, id, "versions", version, "extension.json")
-    if (!existsSync(path)) continue
-    try {
-      const value = JSON.parse(await Bun.file(path).text()) as Record<string, unknown>
-      return { id, version, ...contributionsOf(value) }
-    } catch {
-      // A store this build cannot parse is not a reason to refuse to draw the
-      // session; the header alone already names the frozen versions.
-      return empty
-    }
+  const path = join(store ?? storePath(), id, "versions", version, "extension.json")
+  if (!existsSync(path)) return empty
+  try {
+    const value = JSON.parse(await Bun.file(path).text()) as Record<string, unknown>
+    return { id, version, ...contributionsOf(value) }
+  } catch {
+    // A store this build cannot parse is not a reason to refuse to draw the
+    // session; the header alone already names the frozen versions.
+    return empty
   }
-  return empty
 }
 
 /**
  * Where a frozen version's PACKAGE files are on this disk — the directory the
  * kernel copies the sealed snapshot into (`integrity.package_dir`), which is
  * what a `contributes.ui.entry` / `system_prompts` path is relative to. Null
- * when no root holds that version.
- *
- * The first root that has it wins, as everywhere: a version id is a hash of
- * its own contents, so two roots holding one version hold the same bytes.
+ * when the store does not hold that version.
  */
 export function packageDirOf(
-  roots: readonly string[],
+  store: string,
   id: string,
   version: string,
 ): string | null {
-  for (const root of roots) {
-    const dir = join(root, id, "versions", version, "package")
-    if (existsSync(dir)) return dir
-  }
-  return null
+  const dir = join(store, id, "versions", version, "package")
+  return existsSync(dir) ? dir : null
 }
 
 function contributionsOf(
@@ -410,9 +380,8 @@ export async function readActiveContributions(
   active: readonly { id: string; version: string }[],
 ): Promise<Contributions[]> {
   if (active.length === 0) return []
-  // One root lookup for the whole composition, not one per member.
-  const roots = await storeRoots(ws)
-  return Promise.all(active.map((entry) => readContributions(ws, entry.id, entry.version, roots)))
+  const store = storePath()
+  return Promise.all(active.map((entry) => readContributions(ws, entry.id, entry.version, store)))
 }
 
 // --- the writer lease -------------------------------------------------------
@@ -594,10 +563,8 @@ export interface ExtensionEntry {
    */
   commands: PackageCommand[]
   ui: PackageUi | null
-  /** Which store root holds this copy. */
-  root: string
-  /** An earlier root has the same id active: this copy is never the one that runs. */
-  shadowed: boolean
+  /** Which pointer layer names the current version, or null when none does. */
+  layer: PointerLayer | null
 }
 
 function readManifest(path: string): Record<string, unknown> | null {
@@ -667,23 +634,19 @@ function manifestFacts(manifest: Record<string, unknown> | null): Pick<
 }
 
 /**
- * Every extension directory in every store root: id, `current`, the immutable
- * version line, and what the current version contributes. Versions are
- * content-addressed and never disappear (physics #5), so the timeline is the
- * extension's history.
+ * Every extension this machine holds: id, `current`, which pointer layer named
+ * it, the immutable version line, and what the current version contributes.
+ * Versions are content-addressed and never disappear (physics #5), so the
+ * timeline is the extension's history.
  *
- * The set of directories and the shadowing come from `ext list` — root order is
- * kernel policy and "first active holder wins" is its consequence — and the
- * detail of each one is read from the root the kernel named. An id can appear
- * twice (a user-level copy behind a workspace one); the second is marked
- * `shadowed`, because a stale copy that is silently omitted is exactly how it
- * becomes a mystery.
+ * The ids and the layer come from `ext list`; the detail of each one is read
+ * from the store, which is where every version's bytes are.
  */
 export async function listExtensions(ws: Workspace): Promise<ExtensionEntry[]> {
   const out: ExtensionEntry[] = []
+  const store = storePath()
   for (const entry of await extList(ws)) {
-    const root = isAbsolute(entry.root) ? entry.root : join(ws.dir, entry.root)
-    const home = join(root, entry.id)
+    const home = join(store, entry.id)
     const versions: ExtensionVersion[] = []
     const versionsDir = join(home, "versions")
     if (existsSync(versionsDir)) {
@@ -706,26 +669,24 @@ export async function listExtensions(ws: Workspace): Promise<ExtensionEntry[]> {
     const manifest =
       (entry.current ? readManifest(join(versionsDir, entry.current, "extension.json")) : null) ??
       (newest ? readManifest(join(versionsDir, newest, "extension.json")) : null) ??
-      readManifest(join(home, "extension.json"))
+      readManifest(join(home, "extension.json")) ??
+      readManifest(join(ws.dir, extensions_dir, entry.id, "extension.json"))
     out.push({
       id: entry.id,
       current: entry.current,
       versions,
-      root: entry.root,
-      shadowed: entry.shadowed,
+      layer: entry.layer,
       ...manifestFacts(manifest),
     })
   }
-  // Alphabetical for the eye; the sort is stable, so a shadowed copy still sits
-  // under the root that wins it.
   return out.sort((a, b) => a.id.localeCompare(b.id))
 }
 
 /**
  * The ids that exist only as SOURCE.
  *
- * `ext list` lists what a root holds — a directory with a built version — so a
- * draft that has never built is not in it. That is right for the kernel and
+ * `ext list` lists what this machine holds — a built version, a pointer, or
+ * both — so a draft that has never built is not in it. That is right for the kernel and
  * wrong for a panel: `std` sitting in the user store, unbuildable on a machine
  * with no usable zig, was invisible in `/ext` and the only trace was a status
  * line saying `3 failed` as it scrolled past.
@@ -737,25 +698,19 @@ export async function listExtensions(ws: Workspace): Promise<ExtensionEntry[]> {
 export async function draftEntries(
   ws: Workspace,
   ids: readonly string[],
-  /** The roots, when the caller already listed them (`rootsOf`): one fewer `ext list`. */
-  known?: readonly string[],
 ): Promise<ExtensionEntry[]> {
   if (ids.length === 0) return []
-  const roots = known ?? (await storeRoots(ws))
-  const workspace = join(ws.dir, extensions_dir)
   const out: ExtensionEntry[] = []
   for (const id of ids) {
-    for (const root of roots) {
-      const manifest = readManifest(join(root, id, "extension.json"))
+    for (const dir of draftDirs(ws)) {
+      const manifest = readManifest(join(dir, id, "extension.json"))
       if (!manifest) continue
       out.push({
         id,
         current: null,
         versions: [],
-        // The same spec `ext list` prints, so two rows of one table do not name
-        // the same directory two different ways.
-        root: root === workspace ? extensions_dir : root,
-        shadowed: false,
+        // Nothing points at it yet, so no layer claims it either.
+        layer: null,
         ...manifestFacts(manifest),
       })
       break

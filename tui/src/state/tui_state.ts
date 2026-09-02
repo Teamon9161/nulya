@@ -40,7 +40,7 @@ export interface TuiState {
    * Workspace extension stores the trust question has already been put for, by
    * absolute path. "Only ask once" is the whole point of remembering: a person
    * who said "not now" to a checkout should not be asked again every time they
-   * open it — they can still run `nulya ext trust` whenever they mean to.
+   * open it — there is nothing to trust: a checkout carries only source.
    */
   asked_stores?: string[]
   /**

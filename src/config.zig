@@ -131,7 +131,6 @@ pub const Environment = struct {
 };
 
 pub const Extensions = struct {
-    paths: []const []const u8 = &.{},
     /// The members of every session opened in this workspace — skills into the
     /// catalog, system prompts into the system blocks, tools reachable through
     /// the CLI, and the tools the entry selects on the model's tool face. The
@@ -245,7 +244,6 @@ const RawEnvironment = struct {
 };
 
 const RawExtensions = struct {
-    paths: ?[]const []const u8 = null,
     with: ?[]const []const u8 = null,
 };
 
@@ -333,7 +331,6 @@ fn mergeTrusted(cfg: *Config, raw: RawConfig) !void {
     }
 
     if (raw.extensions) |extensions| {
-        if (extensions.paths) |paths| cfg.extensions.paths = try dupeStringList(arena, paths);
         if (extensions.with) |with| cfg.extensions.with = try dupeStringList(arena, with);
     }
 }
@@ -362,20 +359,14 @@ fn mergeProject(cfg: *Config, raw: RawConfig) !void {
         }
     }
 
-    // `extensions.with` IS read here: it can only name a package this machine
-    // already holds and already trusts (the workspace-store gate stands in front
-    // of it), so a checkout cannot use it to introduce code — only to select
-    // among what is here. A project-level house-style prompt is exactly the use,
-    // and it lasts as long as the checkout is open.
+    // `extensions.with` IS read here: a member names a version this machine
+    // already built into its one store, so a checkout cannot use it to
+    // introduce code — only to select among what is here. A project-level
+    // house-style prompt is exactly the use, and it lasts as long as the
+    // checkout is open.
     if (raw.extensions) |extensions| {
         if (extensions.with) |with| cfg.extensions.with = try dupeStringList(arena, with);
     }
-
-    // `extensions.paths` is deliberately NOT read here, and that is the
-    // difference. A store root decides which DIRECTORIES on this machine get to
-    // supply `current` versions — i.e. which code a session may run — so a
-    // checkout adding one would widen authority, the exact thing the project
-    // layer may never do. Trusted layers (system / user) still set it.
 }
 
 fn upsertProfile(cfg: *Config, raw: RawProviderProfile) !void {
@@ -708,25 +699,6 @@ test "a config file naming the retired 'remote' backend fails to load, rather th
         \\backend = "remote"
         },
     }));
-}
-
-test "project layer cannot add an extension store root" {
-    var cfg = try loadFromLayers(std.testing.allocator, &.{
-        .{ .source =
-        \\[extensions]
-        \\paths = ["/opt/trusted/extensions"]
-        },
-        .{ .project = true, .source =
-        \\[extensions]
-        \\paths = ["/opt/trusted/extensions", "./vendored-extensions"]
-        },
-    });
-    defer cfg.deinit();
-
-    // A root is "which code may run on this machine": the trusted list stands,
-    // and the checkout's addition is ignored rather than merged.
-    try std.testing.expectEqual(@as(usize, 1), cfg.extensions.paths.len);
-    try std.testing.expectEqualStrings("/opt/trusted/extensions", cfg.extensions.paths[0]);
 }
 
 test "project layer cannot inject provider secret routing" {

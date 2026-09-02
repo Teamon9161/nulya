@@ -37,7 +37,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 **内核**：durable ledger（一文件 = 一 generation；header 冻结 composition + 模型身份 + inline prompts，其后是 `seq` JSONL；单写者由 `<id>.lock` 排他 advisory 锁强制，别的进程经 inbox 投递、写者在 step 边界排干、按 `origin` 去重做到 exactly-once）→ PromptIR 纯投影 → 一次 step（批量 tool call、串行执行、**一条** tool_results 回传、可取消、每个 call 可过 gate）。四种事件：`user_text` / `assistant` / `tool_results` / `note`（从 step 之外到达的机器事实，`source` 开放词表），每一条都是一个 turn。换模型 / 换工具 / 换 system prompt 只有一个原语：`session new --parent <id>:<seq> --carry`，带着历史开一个新文件（父文件一个字节不变）。
 
-**工具面**：唯一 builtin 是 `shell`（前台带超时、`background:true` 起活得过 step 进程的任务）。其余能力都是 extension——内容寻址的不可变版本 + `current` 指针，`activate` 只移指针、一场都不组合。上模型面只有一条路：成为这一场的成员，并由那一行的工具选择决定带哪些 tool（`auto` 随成员上，`manual` 要点名，`internal` 永不上）。
+**工具面**：唯一 builtin 是 `shell`（前台带超时、`background:true` 起活得过 step 进程的任务）。其余能力都是 extension——内容寻址的不可变版本 + `current` 指针，`activate` 只移指针、一场都不组合。版本字节一台机器只有一处（`<NULYA_HOME | ~/.nulya>/store`），workspace 里只有 draft 与一个可选的 `current`（压过 store 那份）。上模型面只有一条路：成为这一场的成员，并由那一行的工具选择决定带哪些 tool（`auto` 随成员上，`manual` 要点名，`internal` 永不上）。
 
 **自带扩展**（顶层 `extensions/`，十个，随二进制分发，`ext seed` 落盘）：`std`（六个文件 tool）· `agent`（委派；五种 runner：nulya / codex / claude / pi / `ext:<id>` 外置）· `compact`（fork 压缩）· `handoff` · `plan` · `ask` · `ground`（开场把「这一场在哪」写成 per-session prompt）· `coding`（工作纪律）· `evolution` · `guide`（自描述 skill）。
 
@@ -45,9 +45,9 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 **执行环境**：`--env local | remote:{wsl,ssh,exec}`。`remote:` 那族把整个工作区搬到别的机器——shell、extension（`ext build --target` + `ext push` 送过去）、spill、后台任务都在那边跑，报告被取回来翻成 inbox 事件。远端那个常驻进程就是 `nulya remote serve`，同一个二进制。曾经有一根只搬 `shell` 命令的轴（`wsl[:distro]`，更早还有 `ssh:<dest>`）已退役：老 header 里冻着它们 resume 时响亮拒绝并指路对应的 `remote:` 拼法。
 
-**Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|note|step|events|cancel|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *` · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step --stream` 是行协议，`--gate` 是每个 tool call 的一票否决。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
+**Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|note|step|events|cancel|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *`（含一次性的 `ext migrate`） · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step --stream` 是行协议，`--gate` 是每个 tool call 的一票否决。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
 
-**三条 journal**（append-only，持 `<file>.lock` 写、读端忽略残尾）：`tool-usage`（证据——耗时与场外调用，session 内的调用计数已经能从 ledger 派生，内核零读者）· `session-outcomes`（评判，没有行 = unknown ≠ failure）· `trusted-stores`（授权，user 层）。
+**两条 journal**（append-only，持 `<file>.lock` 写、读端忽略残尾）：`tool-usage`（证据——耗时与场外调用，session 内的调用计数已经能从 ledger 派生，内核零读者）· `session-outcomes`（评判，没有行 = unknown ≠ failure）。
 
 细节看 [docs/DESIGN.md](docs/DESIGN.md)，TUI 看 [docs/tui.md](docs/tui.md)，每个功能的契约与实施日志在 `docs/goals/`。里程碑流水归档在 [docs/history/2026-08-changelog.md](docs/history/2026-08-changelog.md)——**不必读**。
 
@@ -74,18 +74,18 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `environment.zig` + `environment/tree.zig` | `runShell` / `runExtension` / `startShellTask` / `putWorkspaceFile`；进程树与有界等待 | 超时与取消杀**整棵**进程树，否则孙进程攥着管道写端让 drain 等不到 EOF；子进程 env 过 secret denylist |
 | `environment/remote/` | 帧协议 + `nulya remote serve` 的另一半 | 随对面持有的东西一起长的一律走**负载**不走 JSON 头 |
 | `provider.zig` `providers/` | `Model` vtable + `TurnCollector`；四个 provider（`openai`/`anthropic`/`codex` 共用 wire 底座，`scripted.zig` 是离线替身），`launch.ScriptedProvider` 是它的重导出 | provider 只能优化序列化，不能破坏 turn 前缀不变量；`reasoning` 原样交回同一 provider |
-| `config.zig` + `default.toml` | `default → system → user → project` 合并 | project 层只能收窄；`[extensions] paths` 只认 trusted 层，`with` project 层也读 |
+| `config.zig` + `default.toml` | `default → system → user → project` 合并 | project 层只能收窄；`[extensions] with` 是唯一的 extension 键，project 层也读（只能在 store 已有的包里挑） |
 | `extension/manifest.zig` | `nulya.extension/v2` schema | 三层听众：内核强制 / driver 声明 / 前端声明。manifest 是 schema 唯一真相，不问 binary |
 | `extension/protocol.zig` `invoke.zig` | 唯一那种 wire（stdin 参数 JSON、env、stdout 即结果、退出码即 ok） | stderr 就是失败消息，所以包必须独占它 |
-| `extension/store.zig` `roots.zig` `integrity.zig` | 版本目录 + `current` 记录 + 有序 root 搜索 | 首个 active 持有者胜；`current` 记录授 reach，`.sealed` 证明资格 |
-| `extension/build/` | 冻结 snapshot → 编译或直接冻结 → seal；跨 root 复用 | version = hash(snapshot + compiler + target)，后两项只对 compiled 非空 |
+| `extension/store.zig` `site.zig` `integrity.zig` | 版本目录（一台机器一个 store）+ 两层 `current` 指针 | 字节只有一处，指针有两层且 workspace 压 user；`current` 授 reach，`.sealed` 证明资格 |
+| `extension/build/` | 冻结 snapshot → 编译或直接冻结 → seal | version = hash(snapshot + compiler + target)，后两项只对 compiled 非空 |
 | `extension/exec.zig` `tools.zig` `skills.zig` `notes.zig` | 执行身份解析 / tool binding / skill catalog / 能力宣告 note | 哪个文件、哪个 entry、seal 对不对，由**持有字节的那台机器**答 |
 | `skill.zig` | `SkillSetSnapshot` + 渐进披露文本 | Agent Skills 兼容（`SKILL.md` frontmatter） |
-| `journals/journal.zig` | 三条 journal 共用的文件层与时钟 | append 持锁并修残尾，读端不拿锁且忽略残尾；文件不存在 = 还没有事实 |
-| `journals/{tool_stats,outcome,trust}.zig` | 证据 / 评判 / 授权 | 都只加可选列、不升 `v`；没有行 = unknown ≠ failure |
+| `journals/journal.zig` | 两条 journal 共用的文件层与时钟 | append 持锁并修残尾，读端不拿锁且忽略残尾；文件不存在 = 还没有事实 |
+| `journals/{tool_stats,outcome}.zig` | 证据 / 评判 | 都只加可选列、不升 `v`；没有行 = unknown ≠ failure |
 | `cli/task.zig` | 后台任务的 supervisor 与读者面（全部动词、`Row` 投影、本机读法） | supervisor 顺序承重：拿租约 → status → spawn → **deposit 后**才写 done。`status.json` 是真相，`starting`/`lost`/`unreachable` 只活在投影里 |
 | `cli/task_remote.zig` | 任务在别的机器上时的那一半：`Far` 连接收集器 + 把远端 poll 答案投成 `Row` | `readRow` 只在已经知道任务是远端的（`Far.isRemote`）才落进这个文件；本机路径与全部动词仍在 `cli/task.zig` |
-| `launch.zig` | session 启动共享件：模型解析、credential 顺序、scratch 路径、workspace store 的 trust gate | 门只在这一层返回 error，内核不知道 trust 存在 |
+| `launch.zig` | session 启动共享件：模型解析、credential 顺序、scratch 路径、这台机器的 store 路径 | 壳层算好路径再交下来，内核不读 config |
 | `source.zig` `bundled.zig` | `nulya src` / `ext seed` 的数据（build.zig `@embedFile`） | 剥 test 块的是**投影**不是存储；靠 zig-fmt 第 0 列 `}` 不变量 |
 
 ## 构建与测试
@@ -95,7 +95,7 @@ zig build test      # 单元测试（每个模块同文件的 test 块，由 mai
 zig build e2e       # 全套 e2e = 下面五组。POSIX 并行（一个 run artifact 一个进程）；Windows 串行——
                     #   Zig 0.16 spawn 无 handle allowlist，并发的兄弟测试进程互相继承 stdout 写端，
                     #   先完成的组等 EOF 超过 60s watchdog（build.zig 有注释；单组仍是迭代快路）
-zig build e2e-ext   #   tests/e2e_ext.zig   extension 生命周期：build / store roots / wire / 自造
+zig build e2e-ext   #   tests/e2e_ext.zig   extension 生命周期：build / store 与指针层 / wire / 自造
 zig build e2e-core  #   tests/e2e_core.zig  内核面：durable ledger、`session *`、gate、vision、后台任务
 zig build e2e-agent #   tests/e2e_agent.zig 委派：`extensions/agent` 与它的五种 runner（离线 fake）
 zig build e2e-std   #   tests/e2e_std.zig   自带 `std` 扩展的六个 tool

@@ -1,11 +1,11 @@
-//! `nulya skill list|load`: the skill catalog contributed by the extensions
-//! active across the store roots, and the frozen `SKILL.md` behind a frozen
-//! ref. Both are shell-level reads; neither is a model-facing tool.
+//! `nulya skill list|load`: the skill catalog contributed by the extensions a
+//! pointer names here, and the frozen `SKILL.md` behind a frozen ref. Both are
+//! shell-level reads; neither is a model-facing tool.
 
 const std = @import("std");
 const ext_skills = @import("../extension/skills.zig");
 const common = @import("common.zig");
-const RootSearch = common.RootSearch;
+const StoreView = common.StoreView;
 const cwdRealPath = common.cwdRealPath;
 const printOut = common.printOut;
 const printErr = common.printErr;
@@ -20,10 +20,10 @@ pub fn dispatchSkill(alloc: std.mem.Allocator, io: std.Io, args: []const []const
 
 fn skillList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
-    defer search.deinit(alloc);
+    var view = try StoreView.open(alloc, io, try cwdRealPath(io, &cwd_buf));
+    defer view.deinit(alloc);
 
-    const skills = try ext_skills.listActive(alloc, &search.roots);
+    const skills = try ext_skills.listActive(alloc, &view.site);
     defer skills.deinit(alloc);
     if (skills.skills.len == 0) {
         try printOut(alloc, io, "no skills\n", .{});
@@ -41,9 +41,9 @@ fn skillLoad(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8
         return 1;
     }
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
-    defer search.deinit(alloc);
-    const body = ext_skills.loadFrozenAcross(alloc, &search.roots, args[0]) catch |err| {
+    var view = try StoreView.open(alloc, io, try cwdRealPath(io, &cwd_buf));
+    defer view.deinit(alloc);
+    const body = ext_skills.loadFrozenInStore(alloc, &view.site, args[0]) catch |err| {
         try printOut(alloc, io, "skill load failed: {s}\n", .{@errorName(err)});
         return 1;
     };

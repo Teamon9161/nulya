@@ -41,7 +41,7 @@ import {
   promptText,
   std_tools,
   summarize,
-  syncRoot,
+  draftRoot,
   type CheckoutAction,
 } from "../src/extensions.ts"
 import { planProjectAgents } from "../src/agents.ts"
@@ -146,9 +146,8 @@ test("--activate reports the three answers a pointer can have: moved, already th
 
 test("the line parse reads every shape the kernel prints, and ignores what is not a draft line", () => {
   expect(parseSyncLine("guide: v-abc123 built")).toMatchObject({ state: "built", activation: null })
-  expect(parseSyncLine("compact: v-abc123 built (copied from /home/x/.nulya/extensions) -> current")).toMatchObject({
+  expect(parseSyncLine("compact: v-abc123 built -> current (workspace)")).toMatchObject({
     state: "built",
-    copiedFrom: "/home/x/.nulya/extensions",
     activation: "activated",
   })
   expect(parseSyncLine("m: v-a1 already built (current stays v-b2)")).toMatchObject({
@@ -156,10 +155,7 @@ test("the line parse reads every shape the kernel prints, and ignores what is no
     activation: "kept",
     detail: "v-b2",
   })
-  expect(parseSyncLine("m: v-a1 not built (available from .nulya/extensions)")).toMatchObject({
-    state: "not built",
-    copiedFrom: ".nulya/extensions",
-  })
+  expect(parseSyncLine("m: v-a1 not built")).toMatchObject({ state: "not built" })
   expect(parseSyncLine("demo: needs zig (compiled draft; set NULYA_ZIG or use the embedded toolchain)")?.state).toBe(
     "needs zig",
   )
@@ -174,22 +170,20 @@ function report(lines: string[]): SyncReport {
   return parseSyncReport(lines.join("\n"))
 }
 
-function inventoryOf(lines: string[], holds: string[] = []) {
-  return { drafts: report(lines), holds }
+function inventoryOf(lines: string[]) {
+  return { drafts: report(lines) }
 }
 
-test("a project store is asked about once, and only when it holds something", () => {
+test("a checkout's drafts are asked about once, and only when there are any", () => {
   const store = "/repo/.nulya/extensions"
   const drafts = inventoryOf(["a.mode: v-a1 not built", "b.mode: v-b1 already built"])
 
   // Nothing there: no question, nothing to install.
-  expect(planProjectStore(store, inventoryOf([]), false, []).kind).toBe("none")
-  // Trusted already: build it, no question.
-  expect(planProjectStore(store, drafts, true, []).kind).toBe("ready")
-  // Untrusted: ask — once. Declining is remembered, not repeated.
-  const ask = planProjectStore(store, drafts, false, [])
+  expect(planProjectStore(store, inventoryOf([]), []).kind).toBe("none")
+  // Drafts: ask — once. Declining is remembered, not repeated.
+  const ask = planProjectStore(store, drafts, [])
   expect(ask.kind).toBe("ask")
-  expect(planProjectStore(store, drafts, false, [store]).kind).toBe("none")
+  expect(planProjectStore(store, drafts, [store]).kind).toBe("none")
 
   if (ask.kind !== "ask") throw new Error("unreachable")
   const text = promptText(ask)
@@ -197,29 +191,15 @@ test("a project store is asked about once, and only when it holds something", ()
   expect(text).toContain("a.mode")
   // The three keys are one per line, like the packages above them, and the
   // text ends on the answer line itself: the key is typed after the `›`.
-  expect(text).toContain("\n  t  trust + build + activate\n  s  build only\n  n  not now\n› ")
+  expect(text).toContain("\n  i  build + activate\n  s  build only\n  n  not now\n› ")
   expect(text.endsWith("› ")).toBe(true)
   expect(describeDrafts(drafts)[0]).toContain("not built")
 })
 
-test("a checkout that ships BUILT versions and no source is the case the question exists for", () => {
-  const store = "/repo/.nulya/extensions"
-  const shipped = inventoryOf([], ["compact", "handoff"])
-  const ask = planProjectStore(store, shipped, false, [])
-  expect(ask.kind).toBe("ask")
-  if (ask.kind !== "ask") throw new Error("unreachable")
-  // Named, because a person deciding whether to trust a store has to see what
-  // is in it — and these have no draft line to appear on.
-  expect(ask.drafts.join(" ")).toContain("compact")
-  expect(ask.drafts.join(" ")).toContain("already built here")
-  // Trusted, it is simply usable; nothing needs building.
-  expect(planProjectStore(store, shipped, true, []).kind).toBe("ready")
-})
-
 test("the three keys map to what actually runs, and anything else installs nothing", () => {
-  expect(actionFor(answerFor("t")!)).toEqual({ trust: true, sync: true, activate: true })
-  expect(actionFor(answerFor("s")!)).toEqual({ trust: false, sync: true, activate: false })
-  expect(actionFor(answerFor("n")!)).toEqual({ trust: false, sync: false, activate: false })
+  expect(actionFor(answerFor("i")!)).toEqual({ sync: true, activate: true })
+  expect(actionFor(answerFor("s")!)).toEqual({ sync: true, activate: false })
+  expect(actionFor(answerFor("n")!)).toEqual({ sync: false, activate: false })
   // Esc and Enter are "not now": a person who did not choose has not consented.
   expect(answerFor("escape")).toBe("skip")
   expect(answerFor("return")).toBe("skip")
@@ -349,7 +329,7 @@ test("the binary's bundled drafts seed into a store — dry-run counts them, a s
 
     // An edited draft is somebody's: seeding names it and leaves it, and only
     // `--force` puts the binary's own source back.
-    const manifest = join(home, "extensions", "guide", "extension.json")
+    const manifest = join(home, "store", "guide", "extension.json")
     const shipped = readFileSync(manifest, "utf8")
     writeFileSync(manifest, `${shipped}\n`)
     const edited = await extSeed(ws, { user: true, ids: ["guide"], env })
@@ -369,7 +349,6 @@ test("bundled ask, handoff, and plan expose member-scoped tools without writing 
   try {
     await extSeed(store, { ids: ["ask", "handoff", "plan"] })
     const built = await extSync(store, { activate: true })
-    const root = syncRoot(store, false)
     const askLine = built.lines.find((entry) => entry.id === "ask")!
     const handoffLine = built.lines.find((entry) => entry.id === "handoff")!
     const planLine = built.lines.find((entry) => entry.id === "plan")!
@@ -380,9 +359,9 @@ test("bundled ask, handoff, and plan expose member-scoped tools without writing 
     expect(handoffLine.version).toBeTruthy()
     expect(planLine.version).toBeTruthy()
 
-    const ask = (await builtContributions(store, root, "ask", askLine.version!))!
-    const handoff = (await builtContributions(store, root, "handoff", handoffLine.version!))!
-    const plan = (await builtContributions(store, root, "plan", planLine.version!))!
+    const ask = (await builtContributions(store, "ask", askLine.version!))!
+    const handoff = (await builtContributions(store, "handoff", handoffLine.version!))!
+    const plan = (await builtContributions(store, "plan", planLine.version!))!
     expect(ask.autoTools).toEqual(["ask"])
     expect(handoff.autoTools).toEqual(["handoff"])
     expect(plan.autoTools).toEqual(["propose", "todo"])
@@ -436,7 +415,7 @@ test("only the bundled ids that arrived this run are activated", async () => {
 test("a bundled mode that arrives is activated too, and the pointer really moves", async () => {
   const store = tempWorkspace()
   try {
-    const root = syncRoot(store, false)
+    const root = draftRoot(store, false)
     writeDraft(store.dir, "mode.pkg", "a mode")
     writeFileSync(
       join(root, "mode.pkg", "extension.json"),
@@ -476,7 +455,7 @@ test("a bundled mode that arrives is activated too, and the pointer really moves
 test("a first install is activated and its manual tools selected", async () => {
   const store = tempWorkspace()
   try {
-    const root = syncRoot(store, false)
+    const root = draftRoot(store, false)
     const dir = join(root, "kong")
     mkdirSync(join(dir, "skills", "demo"), { recursive: true })
     writeFileSync(
@@ -500,7 +479,6 @@ test("a first install is activated and its manual tools selected", async () => {
     const { outcome, built: what } = await activateUnattended(store, {
       id: "kong",
       version: line.version!,
-      root,
       user: false,
     })
     expect(outcome).toBe("activated")
@@ -529,7 +507,7 @@ test("a package that is merely rebuilt gets no selection written for it", async 
   const store = tempWorkspace()
   try {
     const statePath = join(store.dir, "rebuild-state.json")
-    const root = syncRoot(store, false)
+    const root = draftRoot(store, false)
     const dir = join(root, "kit")
     mkdirSync(join(dir, "src"), { recursive: true })
     const manifest = (body: string) => ({
@@ -551,7 +529,7 @@ test("a package that is merely rebuilt gets no selection written for it", async 
     const second = await extSync(store)
     const v2 = second.lines.find((entry) => entry.id === "kit")!.version!
     expect(v2).not.toBe(v1)
-    const { built: what } = await activateUnattended(store, { id: "kit", version: v2, root, user: false })
+    const { built: what } = await activateUnattended(store, { id: "kit", version: v2, user: false })
     // The caller is what decides this is not an install — `kit` already had a
     // `current` — so nothing is handed to `adoptInstalled` and nothing is written.
     expect(await adoptInstalled(store, [], statePath)).toEqual([])
@@ -574,7 +552,7 @@ test("a package that is merely rebuilt gets no selection written for it", async 
 test("a candidate whose manifest cannot be read is held, and current does not move", async () => {
   const store = tempWorkspace()
   try {
-    const root = syncRoot(store, false)
+    const root = draftRoot(store, false)
     const dir = join(root, "house.rule")
     mkdirSync(join(dir, "skills", "demo"), { recursive: true })
     writeFileSync(
@@ -589,7 +567,6 @@ test("a candidate whose manifest cannot be read is held, and current does not mo
     const held = await activateUnattended(store, {
       id: "house.rule",
       version: "v-nothingbuiltthis",
-      root,
       user: false,
     })
     expect(held.built).toBeNull()
@@ -619,7 +596,7 @@ test("an arrived id that is new is installed; an arrived id that already had a c
   // it spawns resolve that from `NULYA_HOME`.
   process.env["NULYA_HOME"] = home
   try {
-    const root = syncRoot(store, true)
+    const root = draftRoot(store, true)
     const draft = (id: string, apply: "auto" | "manual") => {
       mkdirSync(join(root, id, "skills", "demo"), { recursive: true })
       writeFileSync(
@@ -694,20 +671,18 @@ test("a slash command exists exactly when the manifest declares it; wearCommand 
  */
 test("planCheckout: neither, one, or both — and one merged question replaces two stacked ones", () => {
   const store = "/repo/.nulya/extensions"
-  const drafts = { drafts: report(["a.mode: v-a1 not built"]), holds: [] as string[] }
+  const drafts = { drafts: report(["a.mode: v-a1 not built"]) }
   const dir = "/repo/.nulya/agents"
 
-  const storeReady = planProjectStore(store, drafts, true, [])
-  const storeAsk = planProjectStore(store, drafts, false, [])
-  const storeNone = planProjectStore(store, inventoryOf([]), false, [])
+  const storeAsk = planProjectStore(store, drafts, [])
+  const storeNone = planProjectStore(store, inventoryOf([]), [])
   const agentsReady = planProjectAgents(dir, ["explore.md"], true, [], (a, b) => a === b)
   const agentsAsk = planProjectAgents(dir, ["explore.md"], false, [], (a, b) => a === b)
   const agentsNone = planProjectAgents(dir, [], false, [], (a, b) => a === b)
 
   // Neither side has anything to ask: silence, whatever "ready" either one is.
   expect(planCheckout(storeNone, agentsNone).kind).toBe("none")
-  expect(planCheckout(storeReady, agentsReady).kind).toBe("none")
-  expect(planCheckout(storeReady, agentsNone).kind).toBe("none")
+  expect(planCheckout(storeNone, agentsReady).kind).toBe("none")
 
   // Only the store needs a look: today's question, byte for byte — same text
   // `promptText` would produce, same three keys, `apply` behaving exactly like
@@ -716,9 +691,9 @@ test("planCheckout: neither, one, or both — and one merged question replaces t
   const onlyStore = planCheckout(storeAsk, agentsReady)
   if (onlyStore.kind !== "ask") throw new Error("unreachable")
   expect(onlyStore.text).toBe(promptText(storeAsk))
-  expect(onlyStore.choices.map(([key]) => key)).toEqual(["t", "s", "n"])
-  expect(onlyStore.apply("t")).toEqual({ store: { trust: true, sync: true, activate: true }, agentsTrust: false })
-  expect(onlyStore.apply("n")).toEqual({ store: { trust: false, sync: false, activate: false }, agentsTrust: false })
+  expect(onlyStore.choices.map(([key]) => key)).toEqual(["i", "s", "n"])
+  expect(onlyStore.apply("i")).toEqual({ store: { sync: true, activate: true }, agentsTrust: false })
+  expect(onlyStore.apply("n")).toEqual({ store: { sync: false, activate: false }, agentsTrust: false })
   expect(onlyStore.apply("q")).toBeNull()
 
   // Only the agents side needs a look: two keys, not three — there is nothing
@@ -728,8 +703,8 @@ test("planCheckout: neither, one, or both — and one merged question replaces t
   expect(onlyAgents.choices.map(([key]) => key)).toEqual(["t", "n"])
   expect(onlyAgents.text).toContain(dir)
   expect(onlyAgents.text).toContain("explore.md")
-  expect(onlyAgents.apply("t")).toEqual({ store: { trust: false, sync: false, activate: false }, agentsTrust: true })
-  expect(onlyAgents.apply("n")).toEqual({ store: { trust: false, sync: false, activate: false }, agentsTrust: false })
+  expect(onlyAgents.apply("t")).toEqual({ store: { sync: false, activate: false }, agentsTrust: true })
+  expect(onlyAgents.apply("n")).toEqual({ store: { sync: false, activate: false }, agentsTrust: false })
   expect(onlyAgents.apply("s")).toBeNull() // not one of this question's two keys
 
   // Both need a look: one paragraph naming both, three answers that now speak
@@ -740,13 +715,13 @@ test("planCheckout: neither, one, or both — and one merged question replaces t
   expect(both.text).toContain("a.mode")
   expect(both.text).toContain(dir)
   expect(both.text).toContain("explore.md")
-  expect(both.choices.map(([key]) => key)).toEqual(["t", "s", "n"])
-  // t: trust and install everything, on both sides.
-  expect(both.apply("t")).toEqual({ store: { trust: true, sync: true, activate: true }, agentsTrust: true })
-  // s: build the extensions only, and trust neither side.
-  expect(both.apply("s")).toEqual({ store: { trust: false, sync: true, activate: false }, agentsTrust: false })
+  expect(both.choices.map(([key]) => key)).toEqual(["i", "s", "n"])
+  // i: install the extensions and trust the definitions, on both sides.
+  expect(both.apply("i")).toEqual({ store: { sync: true, activate: true }, agentsTrust: true })
+  // s: build the extensions only, and trust nothing.
+  expect(both.apply("s")).toEqual({ store: { sync: true, activate: false }, agentsTrust: false })
   // n: leave both alone.
-  expect(both.apply("n")).toEqual({ store: { trust: false, sync: false, activate: false }, agentsTrust: false })
+  expect(both.apply("n")).toEqual({ store: { sync: false, activate: false }, agentsTrust: false })
   expect(both.apply("q")).toBeNull()
 })
 
@@ -757,17 +732,17 @@ test("planCheckout: neither, one, or both — and one merged question replaces t
  * not be told its (nonexistent) agents question was declined.
  */
 test("checkoutFollowUp: the two 'left alone' sentences, each only for a side that was actually asked", () => {
-  const nothing: CheckoutAction = { store: { trust: false, sync: false, activate: false }, agentsTrust: false }
-  const both: CheckoutAction = { store: { trust: true, sync: true, activate: true }, agentsTrust: true }
+  const nothing: CheckoutAction = { store: { sync: false, activate: false }, agentsTrust: false }
+  const both: CheckoutAction = { store: { sync: true, activate: true }, agentsTrust: true }
 
   // Store-only question, declined: its own sentence, and nothing about agents
   // (which this question never mentioned).
-  expect(checkoutFollowUp(nothing, true, false)).toEqual(["left alone · `nulya ext trust` whenever you mean to"])
+  expect(checkoutFollowUp(nothing, true, false)).toEqual(["left alone · /ext builds them whenever you mean to"])
   // Agents-only question, declined.
   expect(checkoutFollowUp(nothing, false, true)).toEqual(["left alone · /agent still lists them, and starts none"])
   // The merged question, "n": both sentences, because both were actually asked.
   expect(checkoutFollowUp(nothing, true, true)).toEqual([
-    "left alone · `nulya ext trust` whenever you mean to",
+    "left alone · /ext builds them whenever you mean to",
     "left alone · /agent still lists them, and starts none",
   ])
   // Everything trusted and installed: nothing left to say.
@@ -778,14 +753,14 @@ test("checkoutFollowUp: the two 'left alone' sentences, each only for a side tha
   expect(checkoutFollowUp(nothing, false, false)).toEqual([])
 })
 
-test("what a built version contributes is read from the root that sync wrote it to, and null when absent", async () => {
+test("what a built version contributes is read from the store, and null when absent", async () => {
   const store = tempWorkspace()
   try {
-    const root = syncRoot(store, false)
+    const root = draftRoot(store, false)
     expect(root).toBe(join(store.dir, ".nulya", "extensions"))
     // Nothing built: the honest answer is "don't know", and every reader of
     // this has to keep it distinguishable from "contributes nothing".
-    expect(await builtContributions(store, root, "ghost", "v-nope")).toBeNull()
+    expect(await builtContributions(store, "ghost", "v-nope")).toBeNull()
 
     writeDraft(store.dir, "mode.pkg", "a mode")
     const manifest = join(root, "mode.pkg", "extension.json")
@@ -803,7 +778,7 @@ test("what a built version contributes is read from the root that sync wrote it 
     const line = built.lines.find((entry) => entry.id === "mode.pkg")!
     expect(line.version).toMatch(/^v-/)
 
-    const what = await builtContributions(store, root, "mode.pkg", line.version!)
+    const what = await builtContributions(store, "mode.pkg", line.version!)
     expect(what?.systemPrompts).toEqual(["prompts/identity.md"])
   } finally {
     store.cleanup()
@@ -887,7 +862,7 @@ test("the std pin list is the frozen manifest's, with the literal only as a cold
     )
     const built = await extSync(store)
     const line = built.lines.find((entry) => entry.id === "std")!
-    const what = (await builtContributions(store, root, "std", line.version!))!
+    const what = (await builtContributions(store, "std", line.version!))!
     expect(what.manualTools).toEqual(["read", "edit", "demolish"])
     expect(what.internalTools).toEqual(["reindex"])
     expect(what.autoTools).toEqual(["watch"])
@@ -895,7 +870,7 @@ test("the std pin list is the frozen manifest's, with the literal only as a cold
     expect(selectableToolsOf(what)).toEqual(["ext:std/read", "ext:std/edit", "ext:std/demolish"])
 
     // The literal is still the answer when no manifest can be read at all.
-    expect(await builtContributions(store, root, "std", "v-nosuchversion")).toBeNull()
+    expect(await builtContributions(store, "std", "v-nosuchversion")).toBeNull()
     expect(std_tools).toContain("ext:std/edit")
   } finally {
     store.cleanup()

@@ -224,7 +224,7 @@ describe("the slow loop", () => {
     // `--with` is membership in one composition, not a store pointer (physics #5).
     const listed = (await extList(ws)).find((entry) => entry.id === "reviewer")!
     expect(listed.current).toBeNull()
-    expect(listed.shadowed).toBe(false)
+    expect(listed.layer).toBeNull()
 
     const id = await sessionNew(ws, { profile: "scripted", with: [`reviewer@${version}`] })
     const entry = (await sessionList(ws)).find((row) => row.id === id)!

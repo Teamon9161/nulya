@@ -44,7 +44,6 @@ test {
     _ = @import("journals/journal.zig");
     _ = @import("journals/tool_stats.zig");
     _ = @import("journals/outcome.zig");
-    _ = @import("journals/trust.zig");
     _ = @import("registry.zig");
     _ = @import("skill.zig");
     _ = @import("composition.zig");
@@ -68,7 +67,7 @@ test {
     _ = @import("extension/manifest.zig");
     _ = @import("extension/skills.zig");
     _ = @import("extension/store.zig");
-    _ = @import("extension/roots.zig");
+    _ = @import("extension/site.zig");
     _ = @import("extension/build/build_ext.zig");
     _ = @import("session.zig");
     _ = @import("launch.zig");

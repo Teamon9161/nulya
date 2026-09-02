@@ -18,6 +18,7 @@ const launch = support.launch;
 const ledger = support.ledger;
 const manifest_mod = support.manifest;
 const session = support.session;
+const site_mod = support.site;
 const store = support.store;
 const target_mod = support.target;
 const templates = support.templates;
@@ -76,7 +77,7 @@ test "a cross build is another version of the same package, and it says which ma
         return error.ExtensionBuildFailed;
     }
 
-    var there = try build_ext.buildExtensionReusing(alloc, io, ws, "draft", ws, &zig, .{ .target = cross_target });
+    var there = try build_ext.buildExtensionFor(alloc, io, ws, "draft", ws, &zig, .{ .target = cross_target });
     defer there.deinit(alloc);
     if (!there.compile_ok) {
         std.debug.print("cross build failed:\n{s}\n", .{there.stderr});
@@ -110,7 +111,7 @@ test "a cross build is another version of the same package, and it says which ma
 
     // Reproducible: the same cross build again is the same id and no compile.
     // (Nothing here ever RUNS the artifact — it is for another machine.)
-    var again = try build_ext.buildExtensionReusing(alloc, io, ws, "draft", ws, &zig, .{ .target = cross_target });
+    var again = try build_ext.buildExtensionFor(alloc, io, ws, "draft", ws, &zig, .{ .target = cross_target });
     defer again.deinit(alloc);
     try std.testing.expect(again.already_built);
     try std.testing.expectEqualStrings(there.version, again.version);
@@ -171,7 +172,7 @@ test "a build that names this host's own target is the same build as one that na
     defer alloc.free(version_rel);
     try ws.deleteTree(io, version_rel);
 
-    var named = try build_ext.buildExtensionReusing(alloc, io, ws, "draft", ws, &zig, .{ .target = here_target });
+    var named = try build_ext.buildExtensionFor(alloc, io, ws, "draft", ws, &zig, .{ .target = here_target });
     defer named.deinit(alloc);
     if (!named.compile_ok) {
         std.debug.print("named build failed:\n{s}\n", .{named.stderr});
@@ -297,7 +298,9 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     // The seam is handed an IDENTITY; finding the file that version means, and
     // checking it against its own seal, is the environment's job — the same one
     // it does on a remote agent.
-    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_roots = support.workspace_store_roots });
+    const store_abs = try support.absIn(alloc, io, ws, ".nulya/extensions");
+    defer alloc.free(store_abs);
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_store = store_abs });
     defer lenv.deinit();
 
     const invocation = try lenv.environment().runExtension(alloc, .{
@@ -343,6 +346,9 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
     const ws_real_len = try ws.realPath(io, &ws_real);
     const ws_path = ws_real[0..ws_real_len];
 
+    const store_abs = try support.storePath(alloc, io, ws);
+    defer alloc.free(store_abs);
+
     // v1 of a real extension whose output identifies its version.
     const src_v1 = try greetSource(alloc, "greeting-v1");
     defer alloc.free(src_v1);
@@ -364,7 +370,7 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
         defer tool_stats.freeEvents(alloc, events);
         try std.testing.expect(events.len != 0);
 
-        var uncomposed = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{});
+        var uncomposed = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{});
         defer uncomposed.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), uncomposed.tools.tools.len);
         try std.testing.expect(uncomposed.tools.lookup("web_search") == null);
@@ -372,14 +378,14 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
 
     // --- Session B: the selection puts it on the tool face, and freezes it. ---
     const with_search: []const composition.WithRef = &.{.{ .id = "web.search", .tools = .{ .named = &.{"web_search"} } }};
-    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .with = with_search });
+    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{ .with = with_search });
     defer comp_b.deinit(alloc);
 
     // The selected tool is native and model-facing, and calling it through the
     // ToolExecutor actually spawns the frozen v1 binary.
     const tool_b = comp_b.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     {
-        const result = try callNative(alloc, io, tool_b, ws_path);
+        const result = try callNative(alloc, io, tool_b, ws_path, store_abs);
         defer alloc.free(result.output);
         try std.testing.expect(result.ok);
         try std.testing.expect(std.mem.indexOf(u8, result.output, "greeting-v1") != null);
@@ -395,7 +401,7 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
     // 1. Session B's native binding stays frozen on v1 — mid-session activation
     //    never moves an already-exposed tool.
     {
-        const result = try callNative(alloc, io, tool_b, ws_path);
+        const result = try callNative(alloc, io, tool_b, ws_path, store_abs);
         defer alloc.free(result.output);
         try std.testing.expect(std.mem.indexOf(u8, result.output, "greeting-v1") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.output, "greeting-v2") == null);
@@ -410,11 +416,11 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
     }
 
     // 3. A fresh session with the same member freezes on v2.
-    var comp_c = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .with = with_search });
+    var comp_c = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{ .with = with_search });
     defer comp_c.deinit(alloc);
     const tool_c = comp_c.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     {
-        const result = try callNative(alloc, io, tool_c, ws_path);
+        const result = try callNative(alloc, io, tool_c, ws_path, store_abs);
         defer alloc.free(result.output);
         try std.testing.expect(std.mem.indexOf(u8, result.output, "greeting-v2") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.output, "greeting-v1") == null);
@@ -592,7 +598,7 @@ test "cli ext run failures before invocation write no usage stats" {
 
     // Corrupted frozen version (invalid seal): integrity validation fails
     // before any invocation.
-    const seal_rel = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "demo", "versions", version, integrity.seal_file });
+    const seal_rel = try std.fs.path.join(alloc, &.{ support.store_rel, "demo", "versions", version, integrity.seal_file });
     defer alloc.free(seal_rel);
     try ws.writeFile(io, .{ .sub_path = seal_rel, .data = "{}" });
     const run_corrupt = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", "demo", "greet", "{}" });
@@ -605,16 +611,19 @@ test "cli ext run failures before invocation write no usage stats" {
     }
 }
 
-/// Scaffold a pure-skill (data kind) extension in `root_rel` and build it there
-/// — no toolchain involved. Returns the built version id; caller frees.
+/// Scaffold a pure-skill (data kind) extension draft in `draft_rel` and build
+/// it into `store_rel` — no toolchain involved. Returns the built version id;
+/// caller frees.
 fn buildSkillExtensionIn(
     alloc: std.mem.Allocator,
     io: std.Io,
     ws: std.Io.Dir,
-    root_rel: []const u8,
+    draft_rel: []const u8,
+    store_rel: []const u8,
     id: []const u8,
     body: []const u8,
 ) ![]u8 {
+    const root_rel = draft_rel;
     const skill_dir = try std.fs.path.join(alloc, &.{ root_rel, id, "skills", id });
     defer alloc.free(skill_dir);
     try ws.createDirPath(io, skill_dir);
@@ -635,7 +644,8 @@ fn buildSkillExtensionIn(
 
     const draft = try std.fs.path.join(alloc, &.{ root_rel, id });
     defer alloc.free(draft);
-    var dest = try ws.openDir(io, root_rel, .{});
+    try ws.createDirPath(io, store_rel);
+    var dest = try ws.openDir(io, store_rel, .{});
     defer dest.close(io);
     var zig = build_ext.Zig.init("zig-unused-for-data");
     defer zig.deinit(alloc);
@@ -645,7 +655,7 @@ fn buildSkillExtensionIn(
     return alloc.dupe(u8, result.version);
 }
 
-test "extension store: a member named by a workspace session resolves in root order — a workspace copy shadows a user-root one of the same id, and a frozen version resolves from whichever root holds it" {
+test "extension store: bytes live in one store, and a workspace pointer decides which version a member means" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -655,81 +665,72 @@ test "extension store: a member named by a workspace session resolves in root or
     var ws_real: [std.fs.max_path_bytes]u8 = undefined;
     const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
 
-    // A user-level store (what `NULYA_HOME` relocates) and the workspace one.
-    const user_root_rel = "home" ++ std.fs.path.sep_str ++ "extensions";
-    const user_only = try buildSkillExtensionIn(alloc, io, ws, user_root_rel, "user-wide", "from the user root");
+    // The ONE store, and two drafts of `shared` whose bodies differ — so two
+    // version ids of one id, both in that store.
+    const store_rel = "home" ++ std.fs.path.sep_str ++ "store";
+    const user_only = try buildSkillExtensionIn(alloc, io, ws, store_rel, store_rel, "user-wide", "from the store");
     defer alloc.free(user_only);
-    const user_shared = try buildSkillExtensionIn(alloc, io, ws, user_root_rel, "shared", "user copy");
+    const user_shared = try buildSkillExtensionIn(alloc, io, ws, store_rel, store_rel, "shared", "user copy");
     defer alloc.free(user_shared);
-    const ws_shared = try buildSkillExtensionIn(alloc, io, ws, ".nulya/extensions", "shared", "workspace copy");
+    const ws_shared = try buildSkillExtensionIn(alloc, io, ws, ".nulya/extensions", store_rel, "shared", "workspace copy");
     defer alloc.free(ws_shared);
     try std.testing.expect(!std.mem.eql(u8, user_shared, ws_shared));
 
-    {
-        var user_root = try ws.openDir(io, user_root_rel, .{});
-        defer user_root.close(io);
-        const st = store.Store.init(io, user_root);
-        try st.activate(alloc, "user-wide", user_only);
-        try st.activate(alloc, "shared", user_shared);
-        var ws_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
-        defer ws_root.close(io);
-        try store.Store.init(io, ws_root).activate(alloc, "shared", ws_shared);
-    }
-
-    const user_root_abs = try std.fs.path.join(alloc, &.{ ws_path, user_root_rel });
-    defer alloc.free(user_root_abs);
-    const roots: []const []const u8 = &.{ ".nulya/extensions", user_root_abs };
+    var site = try site_mod.Site.open(alloc, io, ws_path, store_rel);
+    defer site.deinit();
+    try site.activate(alloc, .user, "user-wide", user_only);
+    try site.activate(alloc, .user, "shared", user_shared);
+    try site.activate(alloc, .workspace, "shared", ws_shared);
 
     // A session that NAMES both gets both (the store's contents reach nobody on
     // their own): the user-wide extension's skill is in the catalog, and
-    // `shared` resolves to the workspace copy — first root wins, so a workspace
-    // version shadows a user-wide one of the same id.
+    // `shared` resolves to the version the WORKSPACE pointer names.
     const named: []const composition.WithRef = &.{ .{ .id = "user-wide" }, .{ .id = "shared" } };
-    var comp = try composition.SessionComposition.init(alloc, io, ws_path, roots, .{ .with = named });
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, store_rel, .{ .with = named });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), comp.extensions.len);
     var saw_user_wide = false;
     var shared_version: []const u8 = "";
-    for (comp.extensions) |p| {
-        if (std.mem.eql(u8, p.id, "user-wide")) saw_user_wide = true;
-        if (std.mem.eql(u8, p.id, "shared")) shared_version = p.version;
+    for (comp.extensions) |pkg| {
+        if (std.mem.eql(u8, pkg.id, "user-wide")) saw_user_wide = true;
+        if (std.mem.eql(u8, pkg.id, "shared")) shared_version = pkg.version;
     }
     try std.testing.expect(saw_user_wide);
     try std.testing.expectEqualStrings(ws_shared, shared_version);
 
     var saw_user_skill = false;
-    for (comp.skills.skills) |s| {
-        if (std.mem.eql(u8, s.name, "user-wide")) saw_user_skill = true;
+    for (comp.skills.skills) |sk| {
+        if (std.mem.eql(u8, sk.name, "user-wide")) saw_user_skill = true;
     }
     try std.testing.expect(saw_user_skill);
 
-    // Resume: a frozen version is found in whichever root holds it. Freeze the
-    // USER root's `shared` version — the one the workspace shadows — and the
-    // composition still rebuilds it, because versions are content-addressed and
-    // the search order only decides where a version is found.
+    // Resume names versions, never pointers: freezing the version the workspace
+    // pointer does NOT name rebuilds it all the same.
     const frozen: ledger.FrozenComposition = .{
         .active = &.{
             .{ .id = "user-wide", .version = user_only },
             .{ .id = "shared", .version = user_shared },
         },
     };
-    var resumed = try composition.SessionComposition.initFrozen(alloc, io, ws_path, roots, frozen);
+    var resumed = try composition.SessionComposition.initFrozen(alloc, io, ws_path, store_rel, frozen);
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), resumed.extensions.len);
-    for (resumed.extensions) |p| {
-        if (std.mem.eql(u8, p.id, "shared")) try std.testing.expectEqualStrings(user_shared, p.version);
+    for (resumed.extensions) |pkg| {
+        if (std.mem.eql(u8, pkg.id, "shared")) try std.testing.expectEqualStrings(user_shared, pkg.version);
     }
 
-    // Without the user root in the search order, only the workspace copy exists —
-    // and naming the user-only id there is a refusal, not a silent absence.
-    try std.testing.expectError(error.WithVersionNotFound, composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .with = named }));
-    var workspace_only = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .with = &.{.{ .id = "shared" }} });
-    defer workspace_only.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 1), workspace_only.extensions.len);
-    try std.testing.expectEqualStrings("shared", workspace_only.extensions[0].id);
+    // Dropping the workspace pointer reveals the store's, for the same member.
+    try site.deactivate(alloc, .workspace, "shared");
+    var after = try composition.SessionComposition.init(alloc, io, ws_path, store_rel, .{ .with = &.{.{ .id = "shared" }} });
+    defer after.deinit(alloc);
+    try std.testing.expectEqualStrings(user_shared, after.extensions[0].version);
+
+    // A machine with no store holds nothing, and naming a member is a refusal
+    // rather than a silent absence.
+    try std.testing.expectError(error.WithVersionNotFound, composition.SessionComposition.init(alloc, io, ws_path, "nowhere", .{ .with = named }));
 }
 
-test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run, with shadowing marked" {
+test "cli: the store is one place and the pointer layer is a column — ext list / skill list / activate / deactivate all read it" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -748,37 +749,37 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
     defer alloc.free(home_abs);
     const env: []const EnvPair = &.{.{ .key = "NULYA_HOME", .value = home_abs }};
 
-    const user_root_rel = "home" ++ std.fs.path.sep_str ++ "extensions";
-    const user_only = try buildSkillExtensionIn(alloc, io, ws, user_root_rel, "user-wide", "from the user root");
+    const store_rel = "home" ++ std.fs.path.sep_str ++ "store";
+    const user_only = try buildSkillExtensionIn(alloc, io, ws, store_rel, store_rel, "user-wide", "from the store");
     defer alloc.free(user_only);
-    const user_shared = try buildSkillExtensionIn(alloc, io, ws, user_root_rel, "shared", "user copy");
+    const user_shared = try buildSkillExtensionIn(alloc, io, ws, store_rel, store_rel, "shared", "user copy");
     defer alloc.free(user_shared);
-    const ws_shared = try buildSkillExtensionIn(alloc, io, ws, ".nulya/extensions", "shared", "workspace copy");
+    const ws_shared = try buildSkillExtensionIn(alloc, io, ws, ".nulya/extensions", store_rel, "shared", "workspace copy");
     defer alloc.free(ws_shared);
     {
-        var user_root = try ws.openDir(io, user_root_rel, .{});
-        defer user_root.close(io);
-        try store.Store.init(io, user_root).activate(alloc, "user-wide", user_only);
-        try store.Store.init(io, user_root).activate(alloc, "shared", user_shared);
-        var ws_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
-        defer ws_root.close(io);
-        try store.Store.init(io, ws_root).activate(alloc, "shared", ws_shared);
+        var site = try site_mod.Site.open(alloc, io, ws_path, store_rel);
+        defer site.deinit();
+        try site.activate(alloc, .user, "user-wide", user_only);
+        try site.activate(alloc, .user, "shared", user_shared);
+        try site.activate(alloc, .workspace, "shared", ws_shared);
     }
 
-    // `ext list` shows every root, and says which copy is shadowed.
+    // `ext list` names the version in effect and the LAYER that said so.
     {
         const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, env);
         defer alloc.free(list.stdout);
         try std.testing.expectEqual(@as(u8, 0), list.code);
         try std.testing.expect(std.mem.indexOf(u8, list.stdout, "user-wide") != null);
         try std.testing.expect(std.mem.indexOf(u8, list.stdout, ws_shared) != null);
-        try std.testing.expect(std.mem.indexOf(u8, list.stdout, user_shared) != null);
-        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "(shadowed)") != null);
+        // The store pointer is covered, so its version is not the one listed.
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, user_shared) == null);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "workspace") != null);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "user") != null);
     }
 
-    // `skill list` reaches into the user root, and `skill load` reads the frozen
-    // SKILL.md from whichever root holds that version — including the shadowed
-    // user copy, which is named by a frozen skill ref rather than by id.
+    // `skill list` sees what is in effect; `skill load` reads the frozen
+    // SKILL.md of any version the store holds — including the covered one,
+    // which is named by a frozen skill ref rather than by id.
     {
         const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "skill", "list" }, env);
         defer alloc.free(list.stdout);
@@ -793,8 +794,8 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
         try std.testing.expect(std.mem.indexOf(u8, load.stdout, "user copy") != null);
     }
 
-    // Without NULYA_HOME pointing here, the user root is simply not in the
-    // search order — the same command sees only the workspace store.
+    // Point `NULYA_HOME` elsewhere and there is no store at all: the same
+    // command holds nothing.
     {
         const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, &.{.{ .key = "NULYA_HOME", .value = ws_path }});
         defer alloc.free(list.stdout);
@@ -802,39 +803,26 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
         try std.testing.expect(std.mem.indexOf(u8, list.stdout, "user-wide") == null);
     }
 
-    // `ext activate` acts on the root whose copy is IN EFFECT. The user copy's
-    // version is not built there, so activating it without `--user` fails
-    // (with a pointer to where it is) instead of flipping a `current` that no
-    // session would see; `--user` does flip it, and says it is not in effect.
+    // `--user` moves the store's pointer, and says it is not in effect while
+    // the workspace pointer covers it.
     {
-        const shadowed = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "activate", "shared", user_shared }, env);
-        defer alloc.free(shadowed.stdout);
-        try std.testing.expectEqual(@as(u8, 1), shadowed.code);
-        try std.testing.expect(std.mem.indexOf(u8, shadowed.stdout, "activate failed") != null);
-        try std.testing.expect(std.mem.indexOf(u8, shadowed.stdout, "--user") != null);
-
-        const forced = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "activate", "--user", "shared", user_shared }, env);
-        defer alloc.free(forced.stdout);
-        try std.testing.expectEqual(@as(u8, 0), forced.code);
-        try std.testing.expect(std.mem.indexOf(u8, forced.stdout, "not in effect") != null);
-        try std.testing.expect(std.mem.indexOf(u8, forced.stdout, ws_shared) != null); // "…shadows it"
+        const covered = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "activate", "--user", "shared", user_shared }, env);
+        defer alloc.free(covered.stdout);
+        try std.testing.expectEqual(@as(u8, 0), covered.code);
+        try std.testing.expect(std.mem.indexOf(u8, covered.stdout, "not in effect") != null);
+        try std.testing.expect(std.mem.indexOf(u8, covered.stdout, ws_shared) != null);
     }
 
-    // Shadowing is by ACTIVE copy. `ext deactivate shared` (no --user) acts on
-    // the copy in effect — the workspace's — and says which copy takes over;
-    // afterwards nothing is shadowed and the user copy is what `skill list`
-    // resolves, even though the workspace still has a `shared/` directory.
+    // `ext deactivate shared` (no --user) drops the pointer IN EFFECT — the
+    // workspace's — and says which one takes over. Afterwards the store's
+    // version is what `skill list` resolves, even though the workspace still
+    // has a `shared/` draft directory.
     {
         const off = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "deactivate", "shared" }, env);
         defer alloc.free(off.stdout);
         try std.testing.expectEqual(@as(u8, 0), off.code);
         try std.testing.expect(std.mem.indexOf(u8, off.stdout, "shared: deactivated") != null);
-        try std.testing.expect(std.mem.indexOf(u8, off.stdout, user_shared) != null); // "…is now the active copy"
-
-        const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, env);
-        defer alloc.free(list.stdout);
-        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "(shadowed)") == null);
-        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "(no current)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, off.stdout, user_shared) != null);
 
         const skills = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "skill", "list" }, env);
         defer alloc.free(skills.stdout);
@@ -885,7 +873,7 @@ test "cli: activating into the user store from inside a session says so on stder
             .{ .key = "NULYA_SESSION_ID", .value = "s-probe" },
         });
         defer alloc.free(stderr);
-        const expected = try std.fmt.allocPrint(alloc, "note: activating prompts.demo@{s} in the user store from inside session s-probe: prompts.demo now means this version for every workspace on this machine", .{version});
+        const expected = try std.fmt.allocPrint(alloc, "note: activating prompts.demo@{s} in the user layer from inside session s-probe: prompts.demo now means this version for every workspace on this machine", .{version});
         defer alloc.free(expected);
         try std.testing.expect(std.mem.indexOf(u8, stderr, expected) != null);
         // What it does NOT say any more, because it is no longer true: activating
@@ -898,7 +886,7 @@ test "cli: activating into the user store from inside a session says so on stder
     {
         const stderr = try runCliStderr(alloc, io, ws, &.{ exe_abs, "ext", "activate", "--user", "prompts.demo", version }, &.{home_env});
         defer alloc.free(stderr);
-        try std.testing.expect(std.mem.indexOf(u8, stderr, "in the user store from inside session") == null);
+        try std.testing.expect(std.mem.indexOf(u8, stderr, "in the user layer from inside session") == null);
     }
 
     // And the listing marks the package as one that contributes a system prompt.
@@ -988,7 +976,7 @@ test "cli: a system prompt's declared position orders the extension band, and a 
         .{ .id = "z.head" },
         .{ .id = "a.tail" },
     };
-    var fresh = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .with = named });
+    var fresh = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{ .with = named });
     defer fresh.deinit(alloc);
 
     const expected = [_][]const u8{ "HEAD\n", "BODY\n", "TAIL\n" };
@@ -1017,6 +1005,7 @@ test "cli: a system prompt's declared position orders the extension band, and a 
             .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
+        .extension_store = support.store_rel,
     }, .{ .workspace = ws, .session_path = spath });
     defer resumed.deinit();
 
@@ -1025,211 +1014,6 @@ test "cli: a system prompt's declared position orders the extension band, and a 
     for (fresh.system_prompts.blocks, rebuilt) |a_block, b_block| {
         try std.testing.expectEqualStrings(a_block.source, b_block.source);
         try std.testing.expectEqualStrings(a_block.bytes, b_block.bytes);
-    }
-}
-
-test "cli: a workspace store that arrived with a checkout is refused until `ext trust`; one this machine built is trusted by birth" {
-    // `.nulya/extensions` is checkout content AND the first store root, so
-    // cloning a repo used to be enough to put its active versions into every
-    // session composed here. The whole chain, on the real binary:
-    //
-    //   a store placed WITHOUT any local nulya CLI (== what `git clone` delivers)
-    //     -> `session new` refuses, naming the store and what it holds
-    //     -> `ext list` / `ext inspect` still work (they are how you decide)
-    //     -> `nulya ext trust` shows what it is trusting, then records it
-    //     -> `session new` succeeds, and the extension is in the composition
-    //
-    // …and the other half of the mechanism: a store the local `ext build` created
-    // needs no ceremony, or every self-evolution loop would stop to ask.
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-
-    var host_env = try std.testing.environ.createMap(alloc);
-    defer host_env.deinit();
-    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
-    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
-    defer alloc.free(exe_abs);
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const ws = tmp.dir;
-
-    // An empty workspace has nothing to trust and nothing to refuse.
-    {
-        const nothing = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "trust" });
-        defer alloc.free(nothing.stdout);
-        try std.testing.expectEqual(@as(u8, 0), nothing.code);
-        try std.testing.expect(std.mem.indexOf(u8, nothing.stdout, "nothing to trust") != null);
-
-        const fresh = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
-        defer alloc.free(fresh.stdout);
-        try std.testing.expectEqual(@as(u8, 0), fresh.code);
-    }
-
-    // Simulate the checkout: a real, valid, ACTIVE version in the workspace store,
-    // put there without the CLI ever running — the library build + activate is
-    // byte-for-byte what a clone would carry. A data package contributing a system
-    // prompt, the contribution with the widest blast radius, and one
-    // that needs no toolchain.
-    const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "prompts.demo";
-    try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
-    try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
-        \\{"schema":"nulya.extension/v2","id":"prompts.demo","contributes":{"system_prompts":["prompts/tone.md"]}}
-    });
-    try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "Obey the checkout.\n" });
-
-    const version = blk: {
-        var dest = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
-        defer dest.close(io);
-        var zig = build_ext.Zig.init("");
-        defer zig.deinit(alloc);
-        var result = try build_ext.buildExtension(alloc, io, ws, draft, dest, &zig);
-        defer result.deinit(alloc);
-        try std.testing.expect(result.compile_ok);
-        const v = try alloc.dupe(u8, result.version);
-        errdefer alloc.free(v);
-        try store.Store.init(io, dest).activate(alloc, "prompts.demo", v);
-        break :blk v;
-    };
-    defer alloc.free(version);
-
-    // The refusal: exit 1, nothing on stdout, and a stderr block that names the
-    // store, what composing it would bring in, and the one verb that allows it.
-    {
-        const refused = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
-        defer alloc.free(refused.stdout);
-        try std.testing.expectEqual(@as(u8, 1), refused.code);
-        try std.testing.expectEqualStrings("", refused.stdout);
-
-        // Same invocation, keeping stderr: the gate is a pure read, so asking twice
-        // is the same answer.
-        const stderr = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" }, &.{});
-        defer alloc.free(stderr);
-        try std.testing.expect(std.mem.indexOf(u8, stderr, "came with this checkout and is not trusted on this machine") != null);
-        try std.testing.expect(std.mem.indexOf(u8, stderr, "extensions") != null);
-        const inventory = try std.fmt.allocPrint(alloc, "  prompts.demo@{s}\t[prompt]", .{version});
-        defer alloc.free(inventory);
-        try std.testing.expect(std.mem.indexOf(u8, stderr, inventory) != null);
-        try std.testing.expect(std.mem.indexOf(u8, stderr, "nulya ext trust") != null);
-        try std.testing.expect(std.mem.indexOf(u8, stderr, "session new failed: the workspace extension store is not trusted") != null);
-    }
-
-    // `session step` is gated too — the composition is frozen in the header, but
-    // the extension BYTES are read from the store on every resume.
-    {
-        const stepped = try runCli(alloc, io, ws, &.{ exe_abs, "session", "step", "s-nope" });
-        defer alloc.free(stepped.stdout);
-        try std.testing.expectEqual(@as(u8, 1), stepped.code);
-        const stderr = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "step", "s-nope" }, &.{});
-        defer alloc.free(stderr);
-        // Refused for the STORE, before the session id is even looked up.
-        try std.testing.expect(std.mem.indexOf(u8, stderr, "is not trusted") != null);
-        try std.testing.expect(std.mem.indexOf(u8, stderr, "no such session") == null);
-    }
-
-    // The read-only projections are NOT gated: they are the review tools, and
-    // gating them would mean deciding whether to trust a store while blindfolded.
-    {
-        const list = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "list" });
-        defer alloc.free(list.stdout);
-        try std.testing.expectEqual(@as(u8, 0), list.code);
-        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "prompts.demo") != null);
-
-        const inspect = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "inspect", "prompts.demo" });
-        defer alloc.free(inspect.stdout);
-        try std.testing.expectEqual(@as(u8, 0), inspect.code);
-        try std.testing.expect(std.mem.indexOf(u8, inspect.stdout, "system_prompts") != null);
-    }
-
-    // Trusting prints the inventory FIRST — the record is about origin, so the one
-    // honest way to make it is to have looked.
-    {
-        const trusted = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "trust" });
-        defer alloc.free(trusted.stdout);
-        try std.testing.expectEqual(@as(u8, 0), trusted.code);
-        try std.testing.expect(std.mem.indexOf(u8, trusted.stdout, "trusting ") != null);
-        const inventory = try std.fmt.allocPrint(alloc, "  prompts.demo@{s}\t[prompt]", .{version});
-        defer alloc.free(inventory);
-        try std.testing.expect(std.mem.indexOf(u8, trusted.stdout, inventory) != null);
-        try std.testing.expect(std.mem.indexOf(u8, trusted.stdout, "trusted-stores.jsonl") != null);
-
-        // Recorded in the USER layer (here, the test's isolated NULYA_HOME) — a
-        // project-layer record would let a checkout sign for itself.
-        const home = try support.testHome(alloc, io, ws);
-        defer alloc.free(home);
-        var home_dir = try std.Io.Dir.openDirAbsolute(io, home, .{});
-        defer home_dir.close(io);
-        const journal = try home_dir.readFileAlloc(io, "trusted-stores.jsonl", alloc, .unlimited);
-        defer alloc.free(journal);
-        try std.testing.expect(std.mem.indexOf(u8, journal, "\"v\":1") != null);
-        try std.testing.expect(std.mem.indexOf(u8, journal, "extensions") != null);
-
-        // Idempotent: trusting again says so and adds nothing.
-        const again = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "trust" });
-        defer alloc.free(again.stdout);
-        try std.testing.expectEqual(@as(u8, 0), again.code);
-        try std.testing.expect(std.mem.indexOf(u8, again.stdout, "already trusted") != null);
-        const journal2 = try home_dir.readFileAlloc(io, "trusted-stores.jsonl", alloc, .unlimited);
-        defer alloc.free(journal2);
-        try std.testing.expectEqualStrings(journal, journal2);
-    }
-
-    // And now sessions start again. The gate is about the STORE — whether this
-    // root may supply versions at all — so it is what stood between the checkout
-    // and every session here, named or not. Composing the package is still a
-    // second, separate decision: a plain session has no member…
-    {
-        const ok = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
-        defer alloc.free(ok.stdout);
-        try std.testing.expectEqual(@as(u8, 0), ok.code);
-        const id = std.mem.trim(u8, ok.stdout, " \r\n");
-        const header = try support.readSessionFile(alloc, io, ws, id);
-        defer alloc.free(header);
-        try std.testing.expect(std.mem.indexOf(u8, header, "prompts.demo") == null);
-    }
-    // …and naming it now works, at the version the trusted store holds.
-    {
-        const ok = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "prompts.demo" });
-        defer alloc.free(ok.stdout);
-        try std.testing.expectEqual(@as(u8, 0), ok.code);
-        const id = std.mem.trim(u8, ok.stdout, " \r\n");
-        const header = try support.readSessionFile(alloc, io, ws, id);
-        defer alloc.free(header);
-        try std.testing.expect(std.mem.indexOf(u8, header, "prompts.demo") != null);
-        try std.testing.expect(std.mem.indexOf(u8, header, version) != null);
-    }
-
-    // The other half: a store the LOCAL `ext build` brings into existence is
-    // trusted by birth. A second workspace, its own isolated home, no `ext trust`.
-    {
-        var tmp2 = std.testing.tmpDir(.{});
-        defer tmp2.cleanup();
-        const ws2 = tmp2.dir;
-        try ws2.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
-        try ws2.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
-            \\{"schema":"nulya.extension/v2","id":"prompts.demo","contributes":{"system_prompts":["prompts/tone.md"]}}
-        });
-        try ws2.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "Built here.\n" });
-
-        // A draft alone holds nothing a session can compose, so it gates nothing.
-        const before = try runCli(alloc, io, ws2, &.{ exe_abs, "session", "new", "--profile", "scripted" });
-        defer alloc.free(before.stdout);
-        try std.testing.expectEqual(@as(u8, 0), before.code);
-
-        const built = try runCli(alloc, io, ws2, &.{ exe_abs, "ext", "build", draft });
-        defer alloc.free(built.stdout);
-        try std.testing.expectEqual(@as(u8, 0), built.code);
-        const v2 = try extractVersion(alloc, built.stdout);
-        defer alloc.free(v2);
-        const activated = try runCli(alloc, io, ws2, &.{ exe_abs, "ext", "activate", "prompts.demo", v2 });
-        defer alloc.free(activated.stdout);
-        try std.testing.expectEqual(@as(u8, 0), activated.code);
-
-        // No prompt anywhere in between: the loop that builds and activates its own
-        // capability is the harness working.
-        const after = try runCli(alloc, io, ws2, &.{ exe_abs, "session", "new", "--profile", "scripted" });
-        defer alloc.free(after.stdout);
-        try std.testing.expectEqual(@as(u8, 0), after.code);
     }
 }
 
@@ -1269,7 +1053,7 @@ test "cli: a build that fails to compile leaves no ghost extension in ext list" 
 
     // The lease directory really is on disk — this is not a test of a case that
     // cannot happen.
-    var store_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+    var store_root = try support.openStore(alloc, io, ws);
     defer store_root.close(io);
     try store_root.access(io, "broken.tool" ++ std.fs.path.sep_str ++ ".lock", .{});
 
@@ -1323,7 +1107,7 @@ test "bundled evolution: ext build extensions/evolution is data kind and needs n
     try std.testing.expectEqual(@as(u8, 0), built.code);
     const version = try extractVersion(alloc, built.stdout);
     defer alloc.free(version);
-    const in_store = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "evolution", "versions", version, "extension.json" });
+    const in_store = try std.fs.path.join(alloc, &.{ support.store_rel, "evolution", "versions", version, "extension.json" });
     defer alloc.free(in_store);
     try ws.access(io, in_store, .{});
     // The repo copy is untouched: no orphan `versions/` next to the source.
@@ -1366,6 +1150,7 @@ test "bundled evolution: ext build extensions/evolution is data kind and needs n
             .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
+        .extension_store = support.store_rel,
     }, .{ .workspace = ws, .session_path = spath });
     defer sess.deinit();
 
@@ -1975,7 +1760,7 @@ test "bundled ground: render answers a context file carrying this directory's ow
 
 // ── M5f: `session list` (read-only projection of .nulya/sessions) ───────────
 
-test "cli ext build: a draft outside any store lands in the workspace store under its manifest id; --user lands in the user store; a draft inside a store lands in that store; in-store builds are byte-identical to before" {
+test "cli ext build: every draft lands in the ONE store under its manifest id, wherever the draft itself lives" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1994,8 +1779,8 @@ test "cli ext build: a draft outside any store lands in the workspace store unde
     defer alloc.free(home_abs);
     const env: []const EnvPair = &.{.{ .key = "NULYA_HOME", .value = home_abs }};
 
-    // A draft kept in the repo, outside every store root — the shape the bundled
-    // evolution extension has.
+    // A draft kept in the repo, outside any nulya directory — the shape the
+    // bundled extensions have.
     try writeSkillDraft(alloc, io, ws, "modes" ++ std.fs.path.sep_str ++ "outside", "outside.mode", "kept in git");
 
     const built = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", "modes/outside" }, env);
@@ -2004,145 +1789,44 @@ test "cli ext build: a draft outside any store lands in the workspace store unde
     const version = try extractVersion(alloc, built.stdout);
     defer alloc.free(version);
 
-    // It landed in the WORKSPACE store under the manifest id — so `activate`
-    // finds it — and not next to the draft.
-    const in_store = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "outside.mode", "versions", version, "extension.json" });
+    // It landed in the STORE under the manifest id — so `activate` finds it —
+    // and neither next to the draft nor in the workspace.
+    const in_store = try std.fs.path.join(alloc, &.{ "home", "store", "outside.mode", "versions", version, "extension.json" });
     defer alloc.free(in_store);
     try ws.access(io, in_store, .{});
     try std.testing.expectError(error.FileNotFound, ws.access(io, "modes" ++ std.fs.path.sep_str ++ "outside" ++ std.fs.path.sep_str ++ "versions", .{}));
+    try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "outside.mode" ++ std.fs.path.sep_str ++ "versions", .{}));
     {
         const activated = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "activate", "outside.mode", version }, env);
         defer alloc.free(activated.stdout);
         try std.testing.expectEqual(@as(u8, 0), activated.code);
     }
 
-    // `--user` puts the same draft's version in the user store instead.
-    {
-        const user_built = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", "modes/outside", "--user" }, env);
-        defer alloc.free(user_built.stdout);
-        try std.testing.expectEqual(@as(u8, 0), user_built.code);
-        const user_path = try std.fs.path.join(alloc, &.{ "home", "extensions", "outside.mode", "versions", version, "extension.json" });
-        defer alloc.free(user_path);
-        try ws.access(io, user_path, .{});
-        // Data kind: the version id is a pure snapshot hash, so both stores hold
-        // the same version — which is exactly why either copy may serve it.
-        const user_version = try extractVersion(alloc, user_built.stdout);
-        defer alloc.free(user_version);
-        try std.testing.expectEqualStrings(version, user_version);
-    }
-
-    // A draft that already lives in a store root builds into THAT root — the
-    // pre-M5d behavior, byte for byte: `.nulya/extensions/<id>/versions/<v>`.
-    try writeSkillDraft(alloc, io, ws, ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "inside.mode", "inside.mode", "already in the store");
+    // A draft that lives in the workspace goes to the same store, and the
+    // workspace keeps only the draft.
+    try writeSkillDraft(alloc, io, ws, ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "inside.mode", "inside.mode", "drafted in the workspace");
     {
         const inside = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", ".nulya/extensions/inside.mode" }, env);
         defer alloc.free(inside.stdout);
         try std.testing.expectEqual(@as(u8, 0), inside.code);
         const inside_version = try extractVersion(alloc, inside.stdout);
         defer alloc.free(inside_version);
-        const path = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "inside.mode", "versions", inside_version, "extension.json" });
+        const path = try std.fs.path.join(alloc, &.{ "home", "store", "inside.mode", "versions", inside_version, "extension.json" });
         defer alloc.free(path);
         try ws.access(io, path, .{});
+        try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "inside.mode" ++ std.fs.path.sep_str ++ "versions", .{}));
     }
 
-    // And a draft inside the USER root builds into the user root, without --user.
-    try writeSkillDraft(alloc, io, ws, "home" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "user.mode", "user.mode", "lives in the user store");
+    // Building the same bytes again is a no-op that says so.
     {
-        const user_side = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", "home/extensions/user.mode" }, env);
-        defer alloc.free(user_side.stdout);
-        try std.testing.expectEqual(@as(u8, 0), user_side.code);
-        const v = try extractVersion(alloc, user_side.stdout);
-        defer alloc.free(v);
-        const path = try std.fs.path.join(alloc, &.{ "home", "extensions", "user.mode", "versions", v, "extension.json" });
-        defer alloc.free(path);
-        try ws.access(io, path, .{});
-        const not_in_workspace = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "user.mode" });
-        defer alloc.free(not_in_workspace);
-        try std.testing.expectError(error.FileNotFound, ws.access(io, not_in_workspace, .{}));
+        const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", "modes/outside" }, env);
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 0), again.code);
+        try std.testing.expect(std.mem.indexOf(u8, again.stdout, "already built") != null);
     }
 }
 
-test "cli ext build: a compiled version another store root already holds is copied in rather than compiled — byte for byte, with no toolchain on this machine at all" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-
-    var host_env = try std.testing.environ.createMap(alloc);
-    defer host_env.deinit();
-    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
-    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
-    defer alloc.free(exe_abs);
-    const repo = host_env.get("NULYA_REPO") orelse return error.SkipZigTest;
-    const draft = try std.fs.path.join(alloc, &.{ repo, "extensions", "compact" });
-    defer alloc.free(draft);
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const ws = tmp.dir;
-    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
-    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
-    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
-    defer alloc.free(home_abs);
-
-    // The user store already carries a built `compact` — the ordinary case after
-    // `ext build --user` once, or after another workspace built it.
-    const user_root = "home" ++ std.fs.path.sep_str ++ "extensions";
-    const version = try support.stageBundledIn(alloc, io, ws, user_root, "compact");
-    defer alloc.free(version);
-
-    // Now build the same draft here, with NULYA_ZIG naming something that is not
-    // a compiler: `compact` is a COMPILED extension, so this build can only
-    // succeed by adopting the copy the user root holds.
-    const built = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", draft }, &.{
-        .{ .key = "NULYA_HOME", .value = home_abs },
-        .{ .key = "NULYA_ZIG", .value = "definitely-not-a-compiler" },
-    });
-    defer alloc.free(built.stdout);
-    try std.testing.expectEqual(@as(u8, 0), built.code);
-    try std.testing.expect(std.mem.indexOf(u8, built.stdout, "copied from") != null);
-    const copied_version = try extractVersion(alloc, built.stdout);
-    defer alloc.free(copied_version);
-    try std.testing.expectEqualStrings(version, copied_version);
-
-    // Same version id, same bytes: the copy IS the version, so everything that
-    // validates a frozen version — activate, `--with`, a pinned tool — accepts it.
-    {
-        const rel = try std.fs.path.join(alloc, &.{ "compact", "versions", version });
-        defer alloc.free(rel);
-        const user_version_rel = try std.fs.path.join(alloc, &.{ user_root, rel });
-        defer alloc.free(user_version_rel);
-        const ws_version_rel = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", rel });
-        defer alloc.free(ws_version_rel);
-        var from_user = try ws.openDir(io, user_version_rel, .{ .iterate = true });
-        defer from_user.close(io);
-        var in_workspace = try ws.openDir(io, ws_version_rel, .{ .iterate = true });
-        defer in_workspace.close(io);
-        try support.expectSameTree(alloc, io, from_user, in_workspace);
-    }
-
-    // A second build finds it in the destination root and says so — the copy did
-    // not invent a version that only half exists.
-    const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", draft }, &.{
-        .{ .key = "NULYA_HOME", .value = home_abs },
-        .{ .key = "NULYA_ZIG", .value = "definitely-not-a-compiler" },
-    });
-    defer alloc.free(again.stdout);
-    try std.testing.expectEqual(@as(u8, 0), again.code);
-    try std.testing.expect(std.mem.indexOf(u8, again.stdout, "already built") != null);
-
-    // And the adopted version really runs: activate it and call its tool with no
-    // arguments, which the frozen binary refuses by protocol rather than by
-    // failing to start.
-    {
-        const activated = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "activate", "compact", version }, "NULYA_HOME", home_abs);
-        defer alloc.free(activated.stdout);
-        try std.testing.expectEqual(@as(u8, 0), activated.code);
-        const ran = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "run", "compact", "compact", "{}" }, "NULYA_HOME", home_abs);
-        defer alloc.free(ran.stdout);
-        try std.testing.expect(ran.stdout.len != 0);
-    }
-}
-
-test "cli ext sync: every draft in a root is built in one pass — data, script and a compiled one adopted from the user store — a broken manifest fails alone, and --dry-run writes nothing" {
+test "cli ext migrate: versions written under the old per-root layout move into the store, and a session frozen on one resumes" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -2159,13 +1843,120 @@ test "cli ext sync: every draft in a root is built in one pass — data, script 
     const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
     const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
     defer alloc.free(home_abs);
-    // No toolchain at all for the whole test: the compiled draft below can only
-    // be installed by adopting the copy the user store carries.
+    const env: []const EnvPair = &.{.{ .key = "NULYA_HOME", .value = home_abs }};
+
+    // The OLD layout: versions beside the drafts, in the workspace root and in
+    // `<home>/extensions`, each with a `current` of its own.
+    const old_user_root = "home" ++ std.fs.path.sep_str ++ "extensions";
+    const user_version = try buildSkillExtensionIn(alloc, io, ws, old_user_root, old_user_root, "old-user", "in the old user root");
+    defer alloc.free(user_version);
+    const ws_version = try buildSkillExtensionIn(alloc, io, ws, ".nulya/extensions", ".nulya/extensions", "old-workspace", "in the old workspace root");
+    defer alloc.free(ws_version);
+    {
+        var old_user = try ws.openDir(io, old_user_root, .{});
+        defer old_user.close(io);
+        try store.Store.init(io, old_user).activate(alloc, "old-user", user_version);
+        var old_ws = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+        defer old_ws.close(io);
+        try store.Store.init(io, old_ws).activate(alloc, "old-workspace", ws_version);
+    }
+
+    // Before the migration this binary holds neither: the store is empty.
+    {
+        const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, env);
+        defer alloc.free(list.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "old-user") == null);
+    }
+
+    {
+        const plan = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "migrate", "--dry-run" }, env);
+        defer alloc.free(plan.stdout);
+        try std.testing.expectEqual(@as(u8, 0), plan.code);
+        try std.testing.expect(std.mem.indexOf(u8, plan.stdout, "old-user") != null);
+        try std.testing.expect(std.mem.indexOf(u8, plan.stdout, "old-workspace") != null);
+        // A plan writes nothing.
+        const moved = try std.fs.path.join(alloc, &.{ "home", "store", "old-user" });
+        defer alloc.free(moved);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, moved, .{}));
+    }
+
+    const migrated = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "migrate" }, env);
+    defer alloc.free(migrated.stdout);
+    try std.testing.expectEqual(@as(u8, 0), migrated.code);
+
+    // Both versions are in the store now, and neither old `versions/` remains.
+    for ([_][2][]const u8{ .{ "old-user", user_version }, .{ "old-workspace", ws_version } }) |pair| {
+        const path = try std.fs.path.join(alloc, &.{ "home", "store", pair[0], "versions", pair[1], "extension.json" });
+        defer alloc.free(path);
+        try ws.access(io, path, .{});
+    }
+    {
+        const gone = try std.fs.path.join(alloc, &.{ old_user_root, "old-user", "versions" });
+        defer alloc.free(gone);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, gone, .{}));
+    }
+
+    // The user root's pointer moved WITH the bytes; the workspace's stayed put.
+    {
+        const store_pointer = try std.fs.path.join(alloc, &.{ "home", "store", "old-user", "current" });
+        defer alloc.free(store_pointer);
+        try ws.access(io, store_pointer, .{});
+        const ws_pointer = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "old-workspace", "current" });
+        defer alloc.free(ws_pointer);
+        try ws.access(io, ws_pointer, .{});
+    }
+
+    // And both are in effect again, in the layer that named them.
+    {
+        const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, env);
+        defer alloc.free(list.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, user_version) != null);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, ws_version) != null);
+    }
+
+    // A session frozen on a migrated version resumes: a header records
+    // `(id, version)` and no location, so the store having it is the whole
+    // requirement.
+    const created = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "old-workspace" }, env);
+    defer alloc.free(created.stdout);
+    try std.testing.expectEqual(@as(u8, 0), created.code);
+    const sid = std.mem.trim(u8, created.stdout, " \r\n");
+    const events = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "events", sid }, env);
+    defer alloc.free(events.stdout);
+    try std.testing.expectEqual(@as(u8, 0), events.code);
+
+    // Running it again finds nothing left to move.
+    const twice = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "migrate" }, env);
+    defer alloc.free(twice.stdout);
+    try std.testing.expectEqual(@as(u8, 0), twice.code);
+    try std.testing.expect(std.mem.indexOf(u8, twice.stdout, "nothing to migrate") != null);
+}
+
+test "cli ext sync: every draft in a directory is built into the store in one pass — data, script and a compiled one already there — a broken manifest fails alone, and --dry-run writes nothing" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    defer alloc.free(home_abs);
+    // No toolchain at all for the whole test: the compiled draft below is
+    // installable only because the store already holds that exact version.
     const env: []const EnvPair = &.{
         .{ .key = "NULYA_HOME", .value = home_abs },
         .{ .key = "NULYA_ZIG", .value = "definitely-not-a-compiler" },
     };
     const ws_store = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
+    const store_rel = "home" ++ std.fs.path.sep_str ++ "store";
 
     // Four drafts dropped into the workspace store, which is all "installing an
     // extension" is meant to take.
@@ -2175,7 +1966,11 @@ test "cli ext sync: every draft in a root is built in one pass — data, script 
     try ws.createDirPath(io, ws_store ++ std.fs.path.sep_str ++ "bad");
     try ws.writeFile(io, .{ .sub_path = ws_store ++ std.fs.path.sep_str ++ "bad" ++ std.fs.path.sep_str ++ "extension.json", .data = "{not json" });
 
-    const staged = try support.stageBundledIn(alloc, io, ws, "home" ++ std.fs.path.sep_str ++ "extensions", "compact");
+    const staged = blk: {
+        var dest = try store.openOrCreateRoot(io, ws_path, store_rel);
+        defer dest.close(io);
+        break :blk try support.stageBundledIn(alloc, io, dest, "compact");
+    };
     defer alloc.free(staged);
 
     // A plan first: it says what each draft is and what would happen, and leaves
@@ -2186,17 +1981,16 @@ test "cli ext sync: every draft in a root is built in one pass — data, script 
         try std.testing.expectEqual(@as(u8, 1), dry.code); // the broken manifest
         try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "not built") != null);
         try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "bad: failed") != null);
-        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "3 not built, 0 already built, 1 failed") != null);
-        // The compiled one is not "would build" — it is available for the taking.
-        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "available from") != null);
-        const versions_rel = ws_store ++ std.fs.path.sep_str ++ "data.mode" ++ std.fs.path.sep_str ++ "versions";
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "2 not built, 1 already built, 1 failed") != null);
+        const versions_rel = try std.fs.path.join(alloc, &.{ store_rel, "data.mode", "versions" });
+        defer alloc.free(versions_rel);
         try std.testing.expectError(error.FileNotFound, ws.access(io, versions_rel, .{}));
     }
 
     const first = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "sync" }, env);
     defer alloc.free(first.stdout);
     try std.testing.expectEqual(@as(u8, 1), first.code);
-    for ([_][]const u8{ "data.mode", "my.helper", "compact", "copied from", "bad: failed", "3 built, 0 already built, 1 failed" }) |needle| {
+    for ([_][]const u8{ "data.mode", "my.helper", "compact", "bad: failed", "2 built, 1 already built, 1 failed" }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, first.stdout, needle) != null) catch |err| {
             std.debug.print("`ext sync` never said '{s}':\n{s}\n", .{ needle, first.stdout });
             return err;
@@ -2268,7 +2062,7 @@ test "cli ext sync: every draft in a root is built in one pass — data, script 
     }
 }
 
-test "cli ext sync: a compiled draft with no toolchain and nowhere to copy from says it needs zig, alone, and writes no version" {
+test "cli ext sync: a compiled draft with no toolchain and no version in the store says it needs zig, alone, and writes no version" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -2294,7 +2088,7 @@ test "cli ext sync: a compiled draft with no toolchain and nowhere to copy from 
     try std.testing.expect(std.mem.indexOf(u8, synced.stdout, "NULYA_ZIG") != null);
     // The script draft beside it is unaffected: one draft's problem is its own.
     try std.testing.expect(std.mem.indexOf(u8, synced.stdout, "1 built, 0 already built, 1 failed") != null);
-    const compact_versions = ws_store ++ std.fs.path.sep_str ++ "compact" ++ std.fs.path.sep_str ++ "versions";
+    const compact_versions = support.home_subdir ++ std.fs.path.sep_str ++ "store" ++ std.fs.path.sep_str ++ "compact" ++ std.fs.path.sep_str ++ "versions";
     try std.testing.expectError(error.FileNotFound, ws.access(io, compact_versions, .{}));
 }
 
@@ -2312,6 +2106,7 @@ test "cli ext prune: every version but `current` goes, an id without one keeps a
     defer tmp.cleanup();
     const ws = tmp.dir;
     const ws_store = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
+    const test_store = support.home_subdir ++ std.fs.path.sep_str ++ "store";
     const draft = ws_store ++ std.fs.path.sep_str ++ "data.mode";
 
     // Three versions of one id, `current` on the middle one; and a second id with
@@ -2345,7 +2140,7 @@ test "cli ext prune: every version but `current` goes, an id without one keeps a
         try std.testing.expectEqual(@as(u8, 0), dry.code);
         try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "would be removed") != null);
         for (versions) |v| {
-            const rel = try std.fs.path.join(alloc, &.{ draft, "versions", v });
+            const rel = try std.fs.path.join(alloc, &.{ test_store, "data.mode", "versions", v });
             defer alloc.free(rel);
             try ws.access(io, rel, .{});
         }
@@ -2359,7 +2154,7 @@ test "cli ext prune: every version but `current` goes, an id without one keeps a
     try std.testing.expect(std.mem.indexOf(u8, pruned.stdout, "loose.mode: no current") != null);
 
     for (versions, 0..) |v, i| {
-        const rel = try std.fs.path.join(alloc, &.{ ws_store, "data.mode", "versions", v });
+        const rel = try std.fs.path.join(alloc, &.{ test_store, "data.mode", "versions", v });
         defer alloc.free(rel);
         if (i == 1) {
             try ws.access(io, rel, .{}); // current survives
@@ -2387,9 +2182,8 @@ test "cli ext prune: every version but `current` goes, an id without one keeps a
     }
 }
 
-/// The version `current` names for `id` in a store root under `ws` — the file's
-/// first field; the rest of the line is what activation recorded about `apply`
-/// (`store.Active`). Caller owns it.
+/// The version `current` names for `id` in one pointer layer under `ws` — the
+/// file's first field. Caller owns it.
 fn readActive(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, root_rel: []const u8, id: []const u8) ![]u8 {
     const rel = try std.fs.path.join(alloc, &.{ root_rel, id, "current" });
     defer alloc.free(rel);
@@ -2512,7 +2306,7 @@ fn scaffoldAndBuildScript(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, 
     defer alloc.free(script_rel);
     try ws.writeFile(io, .{ .sub_path = script_rel, .data = body });
 
-    var dest = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+    var dest = try support.openStore(alloc, io, ws);
     defer dest.close(io);
     var zig = build_ext.Zig.init("zig-unused-for-scripts");
     defer zig.deinit(alloc);
@@ -2557,11 +2351,7 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> pinn
         try std.testing.expectEqual(@as(u8, 0), pinned.code);
         try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "hello from a Nulya script extension") != null);
     }
-    {
-        var ext_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
-        defer ext_root.close(io);
-        try store.Store.init(io, ext_root).activate(alloc, "greeter", version);
-    }
+    try support.activateInStore(alloc, io, ws, "greeter", version);
 
     // run: a real CLI invocation drives the frozen script through its interpreter
     // and records usage.
@@ -2574,7 +2364,7 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> pinn
 
     // A session that selects the script tool exposes it natively, and its
     // ToolExecutor runs the frozen script (via its interpreter) end to end.
-    var comp = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{
         .with = &.{.{ .id = "greeter", .tools = .{ .named = &.{"greet"} } }},
     });
     defer comp.deinit(alloc);
@@ -2585,7 +2375,9 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> pinn
     // string, since the resolution now happens where the spawn does.
     try std.testing.expectEqualStrings(version, comp.extension_tool_bindings[0].version);
 
-    const result = try callNative(alloc, io, greet, ws_path);
+    const store_abs = try support.storePath(alloc, io, ws);
+    defer alloc.free(store_abs);
+    const result = try callNative(alloc, io, greet, ws_path, store_abs);
     defer alloc.free(result.output);
     try std.testing.expect(result.ok);
     try std.testing.expect(std.mem.indexOf(u8, result.output, "hello from a Nulya script extension") != null);
@@ -2640,7 +2432,7 @@ test "manifest surface: the frozen version keeps what the draft declared, and an
 
     // The version's own manifest — the bytes a session freezes and every reader
     // (a driver's pin policy, `ext inspect`) sees — carries the declaration.
-    const frozen_rel = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "faces", "versions", version, "extension.json" });
+    const frozen_rel = try std.fs.path.join(alloc, &.{ support.store_rel, "faces", "versions", version, "extension.json" });
     defer alloc.free(frozen_rel);
     const frozen_bytes = try ws.readFileAlloc(io, frozen_rel, alloc, .limited(1 << 20));
     defer alloc.free(frozen_bytes);
@@ -2659,12 +2451,8 @@ test "manifest surface: the frozen version keeps what the draft declared, and an
     // member puts the `auto` one on the face, and nothing reaches `internal`.
     var ws_real: [std.fs.max_path_bytes]u8 = undefined;
     const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
-    {
-        var ext_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
-        defer ext_root.close(io);
-        try store.Store.init(io, ext_root).activate(alloc, "faces", version);
-    }
-    var comp = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{
+    try support.activateInStore(alloc, io, ws, "faces", version);
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{
         .with = &.{.{ .id = "faces", .tools = .{ .named = &.{"pinny"} } }},
     });
     defer comp.deinit(alloc);
@@ -2672,7 +2460,7 @@ test "manifest surface: the frozen version keeps what the draft declared, and an
     try std.testing.expect(comp.tools.lookup("ask") != null);
     try std.testing.expect(comp.tools.lookup("quiet") != null);
     try std.testing.expect(comp.tools.lookup("drive") == null);
-    try std.testing.expectError(error.WithToolNotDeclared, composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{
+    try std.testing.expectError(error.WithToolNotDeclared, composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{
         .with = &.{.{ .id = "faces", .tools = .{ .named = &.{"drive"} } }},
     }));
 
@@ -2715,7 +2503,7 @@ test "script extension: version id excludes compiler identity and is stable acro
     // exactly "compiler identity is not in the version hash".
     const windows = @import("builtin").os.tag == .windows;
     const ext_dir = if (windows) ".nulya\\extensions\\greeter" else ".nulya/extensions/greeter";
-    var dest = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+    var dest = try support.openStore(alloc, io, ws);
     defer dest.close(io);
     var zig = build_ext.Zig.init("a-completely-different-zig");
     defer zig.deinit(alloc);
@@ -2936,6 +2724,7 @@ test "bundled plan and ask: propose, todo and ask record without writing anythin
                 .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
                 .scratch_dir = ".nulya/scratch",
             },
+            .extension_store = support.store_rel,
         }, .{ .workspace = ws, .session_path = spath });
         defer sess.deinit();
 
@@ -2957,7 +2746,7 @@ test "bundled plan and ask: propose, todo and ask record without writing anythin
             if (!std.mem.eql(u8, member.id, "plan")) continue;
             const rel = try std.fmt.allocPrint(
                 alloc,
-                ".nulya/extensions/{s}/versions/{s}/extension.json",
+                support.store_rel ++ "/{s}/versions/{s}/extension.json",
                 .{ member.id, member.version },
             );
             defer alloc.free(rel);

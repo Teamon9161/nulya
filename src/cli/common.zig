@@ -1,63 +1,65 @@
 //! Plumbing every `nulya` verb file shares: stdout/stderr writing, argv
-//! scanning, the workspace cwd, and the ordered store-root search each `ext` /
-//! `skill` / `session` command opens. Nothing here decides anything about a
-//! verb — a helper lands here exactly when two verb files need it.
+//! scanning, the workspace cwd, and the store-plus-pointer-layers view each
+//! `ext` / `skill` / `session` command opens. Nothing here decides anything
+//! about a verb — a helper lands here exactly when two verb files need it.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const store = @import("../extension/store.zig");
-const roots_mod = @import("../extension/roots.zig");
+const site_mod = @import("../extension/site.zig");
 const config = @import("../config.zig");
 const composition = @import("../composition.zig");
 const launch = @import("../launch.zig");
 const environment = @import("../environment.zig");
 
-/// The ordered store roots this invocation searches, opened once. An extension
-/// may live in the workspace store, the user's `~/.nulya/extensions`, or a
-/// trusted `extensions.paths` entry; the first root holding an ACTIVE version
-/// of an id wins.
-pub const RootSearch = struct {
-    specs: []const []const u8,
+/// This invocation's view of the machine: the one store, the workspace's
+/// pointer layer, and the standing member list, all opened once.
+pub const StoreView = struct {
+    site: site_mod.Site,
     /// The merged config's `[extensions] with` — the ids that are a member of
-    /// every session opened here. Owned alongside `specs`, and read from the
-    /// same config load: the roots say where an id's code may come from, this
-    /// says whether a session gets it.
+    /// every session opened here. Read from the same config load as the store
+    /// path: the store says where an id's code lives, this says whether a
+    /// session gets it.
     with: []const []const u8,
-    roots: roots_mod.Roots,
 
-    pub fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) !RootSearch {
-        const resolved = try rootSpecs(alloc, io);
-        errdefer launch.freeExtensionRoots(alloc, resolved.specs);
-        errdefer launch.freeExtensionRoots(alloc, resolved.with);
-        const roots = try roots_mod.Roots.open(alloc, io, cwd, resolved.specs);
-        return .{ .specs = resolved.specs, .with = resolved.with, .roots = roots };
+    pub fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) !StoreView {
+        const resolved = try storeAndWith(alloc, io);
+        defer alloc.free(resolved.store);
+        errdefer launch.freeStringList(alloc, resolved.with);
+        const site = try site_mod.Site.open(alloc, io, cwd, resolved.store);
+        return .{ .site = site, .with = resolved.with };
     }
 
-    pub fn deinit(self: *RootSearch, alloc: std.mem.Allocator) void {
-        self.roots.deinit();
-        launch.freeExtensionRoots(alloc, self.specs);
-        launch.freeExtensionRoots(alloc, self.with);
+    pub fn deinit(self: *StoreView, alloc: std.mem.Allocator) void {
+        self.site.deinit();
+        launch.freeStringList(alloc, self.with);
     }
 };
 
-/// The two lists one config load answers: the ordered root specs, and the
-/// standing member ids (`[extensions] with`). Caller owns both
-/// (`launch.freeExtensionRoots`).
-pub fn rootSpecs(alloc: std.mem.Allocator, io: std.Io) !struct {
-    specs: []const []const u8,
+/// The two things one config load answers: where this machine's store is, and
+/// the standing member ids (`[extensions] with`). Caller owns both.
+pub fn storeAndWith(alloc: std.mem.Allocator, io: std.Io) !struct {
+    store: []const u8,
     with: []const []const u8,
 } {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
-    const specs = try launch.extensionRoots(alloc, &host, &cfg);
-    errdefer launch.freeExtensionRoots(alloc, specs);
-    return .{ .specs = specs, .with = try dupeOwnedList(alloc, cfg.extensions.with) };
+    const path = try launch.storePath(alloc, &host);
+    errdefer alloc.free(path);
+    return .{ .store = path, .with = try dupeOwnedList(alloc, cfg.extensions.with) };
+}
+
+/// This machine's store path alone, for a caller with no `with` question.
+/// Caller owns it; empty means the machine has no home directory.
+pub fn storePath(alloc: std.mem.Allocator) ![]u8 {
+    var host = try environment.hostEnvironMap(alloc);
+    defer host.deinit();
+    return launch.storePath(alloc, &host);
 }
 
 /// Copy a config-arena string list into caller-owned memory — the config dies
-/// with the load, and `RootSearch` outlives it.
+/// with the load, and `StoreView` outlives it.
 fn dupeOwnedList(alloc: std.mem.Allocator, list: []const []const u8) ![]const []const u8 {
     const out = try alloc.alloc([]const u8, list.len);
     errdefer alloc.free(out);
@@ -67,14 +69,18 @@ fn dupeOwnedList(alloc: std.mem.Allocator, list: []const []const u8) ![]const []
     return out;
 }
 
-/// Where a write-side command puts things: the user store under `--user`, else
-/// the workspace store. Null means `--user` on a machine with no home. Caller
-/// owns the result.
-pub fn writeRootSpec(alloc: std.mem.Allocator, user: bool) !?[]u8 {
-    if (!user) return try alloc.dupe(u8, store.workspace_root_rel);
-    var host = try environment.hostEnvironMap(alloc);
-    defer host.deinit();
-    return launch.userExtensionsRoot(alloc, &host);
+/// Where a draft-side command writes: the store under `--user` — where a draft
+/// installed for the whole machine lives beside its versions — else this
+/// workspace's `.nulya/extensions`. Null means `--user` on a machine with no
+/// home. Caller owns the result.
+pub fn draftRootSpec(alloc: std.mem.Allocator, user: bool) !?[]u8 {
+    if (!user) return try alloc.dupe(u8, site_mod.workspace_rel);
+    const path = try storePath(alloc);
+    if (path.len == 0) {
+        alloc.free(path);
+        return null;
+    }
+    return path;
 }
 
 /// Split `args` into `(has --user, everything else)` — the one flag every
@@ -89,29 +95,24 @@ pub fn takeUserFlag(alloc: std.mem.Allocator, args: []const []const u8) !struct 
     return .{ .user = user, .rest = try rest.toOwnedSlice(alloc) };
 }
 
-/// The root spec an `activate` / `deactivate` acts on. `--user` names the user
-/// store outright. Otherwise the root whose copy of `id` is IN EFFECT
-/// (`Roots.firstActive`), so the operation lands on what a session would use;
-/// an activate anywhere else would succeed and change nothing. Only when no
-/// root has an active copy does `version` pick the first root holding it built.
-/// Null means there is nowhere to act (and, for `--user`, no home directory).
-/// Caller owns it.
-pub fn targetRootSpec(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    cwd_path: []const u8,
-    id: []const u8,
-    version: ?[]const u8,
-    user: bool,
-) !?[]u8 {
-    if (user) return writeRootSpec(alloc, true);
-    var search = try RootSearch.open(alloc, io, cwd_path);
-    defer search.deinit(alloc);
-    const index = if (try search.roots.firstActive(alloc, id)) |active| blk: {
-        alloc.free(active.version);
-        break :blk active.root;
-    } else search.roots.firstWithVersion(alloc, id, version orelse return null, .structural) orelse return null;
-    return try alloc.dupe(u8, search.roots.entries[index].spec);
+/// Which pointer layer an `ext activate` writes: `--user` says the store's own
+/// `current` outright; otherwise the workspace layer when this workspace
+/// already has a `<id>/` — a draft, a pointer, or both — and the store layer
+/// when it does not. One rule, so "where did my activate land" has one answer
+/// a person can predict from what is on disk.
+pub fn activateLayer(site: *const site_mod.Site, id: []const u8, user: bool) site_mod.Layer {
+    if (user) return .user;
+    return if (site.workspaceHas(id)) .workspace else .user;
+}
+
+/// Which pointer layer an `ext deactivate` drops: `--user` the store's own,
+/// otherwise the layer whose pointer is IN EFFECT — dropping any other would
+/// succeed and change nothing.
+pub fn deactivateLayer(alloc: std.mem.Allocator, site: *const site_mod.Site, id: []const u8, user: bool) !?site_mod.Layer {
+    if (user) return .user;
+    const active = (try site.activePointer(alloc, id)) orelse return null;
+    defer alloc.free(active.version);
+    return active.layer;
 }
 
 /// The id of the session this process is running INSIDE, or null when it is
@@ -226,18 +227,18 @@ pub fn writeInto(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_dir:
 
 pub const ext_usage =
     \\  nulya ext init [--zig] [--user] <id> [tool]       scaffold a draft: a script by default, --zig for a compiled one
-    \\  nulya ext build <path> [--user] [--target <arch>-<os>]   freeze a draft into an immutable version, print its id; --target builds it for another machine, which is another version
-    \\  nulya ext push <id>@<ver> --env remote:…          copy that version into that machine's user store, which re-checks the seal before it counts
-    \\  nulya ext sync [--user] [--activate] [--seed] [--dry-run]  build every draft in that root; --seed writes this binary's own drafts first
-    \\  nulya ext seed [--user] [<id>…] [--force] [--dry-run]  write the drafts this binary ships into that root; sync builds them
+    \\  nulya ext build <path> [--target <arch>-<os>]     freeze a draft into an immutable version in the store, print its id; --target builds it for another machine, which is another version
+    \\  nulya ext push <id>@<ver> --env remote:…          copy that version into that machine's store, which re-checks the seal before it counts
+    \\  nulya ext sync [--user] [--activate] [--seed] [--dry-run]  build every draft there into the store; --seed writes this binary's own drafts first
+    \\  nulya ext seed [--user] [<id>…] [--force] [--dry-run]  write the drafts this binary ships there; sync builds them
     \\  nulya ext run <id>[@<ver>] <tool> [<json> | --arg k=v …] [--timeout-ms N]   run the version in effect, or exactly that one; no timeout unless asked
-    \\  nulya ext activate [--user] <id> <ver>            point `current` at a version; activating an older one is the rollback
-    \\  nulya ext deactivate [--user] <id>                drop `current`; the versions stay, and members naming no version stop resolving
-    \\  nulya ext prune [--user] [<id>] [--dry-run]       delete the versions `current` does not name
+    \\  nulya ext activate [--user] <id> <ver>            point a `current` at a version; activating an older one is the rollback
+    \\  nulya ext deactivate [--user] <id>                drop that `current`; the versions stay, and members naming no version stop resolving
+    \\  nulya ext prune [<id>] [--dry-run]                delete the versions no `current` here names
+    \\  nulya ext migrate [--dry-run]                     move versions written under the old per-root layout into the store, once
     \\  nulya ext list | inspect <id>[@<ver>] | <path>     every extension, or one manifest: the version in effect, an exact one, or a draft named by path
-    \\  nulya ext trust                                   allow this workspace's store once, if it came with a checkout
     \\  nulya ext api [protocol|manifest|examples]        the tool wire protocol, what a manifest may say, worked commands
-    \\  --user acts on the user store, which every workspace on this machine sees
+    \\  versions live in <NULYA_HOME | ~/.nulya>/store; a workspace holds drafts and a `current` of its own, which wins; --user means the store's layer
     \\
 ;
 
@@ -333,7 +334,7 @@ pub fn usage(io: std.Io) !u8 {
         \\  nulya demo                                        one fixed-prompt session, end to end, to see it work
         \\
         \\a fuller reference ships with the nulya repo, as an extension you install once:
-        \\  nulya ext build extensions/guide --user     then     nulya ext activate --user guide <version>
+        \\  nulya ext build extensions/guide     then     nulya ext activate --user guide <version>
         \\
     );
     return 0;

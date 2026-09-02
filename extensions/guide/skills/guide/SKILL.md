@@ -53,9 +53,9 @@ help` in PowerShell. Below, `nulya` means whichever of the two applies.
   (`~/.nulya/config.toml`), project (`.nulya/config.toml`). `nulya config show`
   prints the exact paths, so that is where to write.
 - The project layer may only narrow: select an already-defined profile, lower
-  `max_tools`, set the member list, tighten the environment backend. Defining a profile,
-  editing the model catalog or adding extension paths is ignored there — a
-  checkout cannot re-route requests or redefine what a model id means.
+  `max_tools`, set the member list, tighten the environment backend. Defining a profile
+  or editing the model catalog is ignored there — a checkout cannot re-route
+  requests or redefine what a model id means.
 - Two tables describe models. `[[provider.profiles]]` says how to reach a
   provider (kind, base URL, which env var holds the key) and which ids it
   serves; `[[models]]` says what an id is (label, effort dial, context window).
@@ -64,9 +64,8 @@ help` in PowerShell. Below, `nulya` means whichever of the two applies.
   tools take a slot on the model's tool face. Each selected tool costs a slot of
   `max_tools` and carries its name, description and schema in every future
   session's prompt. Name a workspace-local package in the **project** file: a
-  member no store root can resolve makes every `session new` under that layer
-  refuse to start, so a user-layer entry for a package built in one workspace
-  breaks every other workspace on the machine. `nulya config show` prints the
+  member the store cannot resolve makes every `session new` under that layer
+  refuse to start. `nulya config show` prints the
   merged list — that is how to see today's composition.
 - Config files can hold credentials. Read the key you need, never print a whole
   config into a transcript.
@@ -162,7 +161,7 @@ immediately; the natively exposed form changes only in the next session.
 Compile (Zig, a `bin/` entry) when the tool must parse JSON or behave
 identically under both shells. In a nulya checkout, `extensions/compact` and
 `extensions/handoff` are the worked examples, and `extensions/std` (read /
-write / append / edit / grep / glob as one package — build it `--user`,
+write / append / edit / grep / glob as one package — build it, then
 activate it, compose `std:<tool>,<tool>` with the ones you want — its six tools
 are `surface:"manual"` precisely so you assemble that face yourself) is the one to
 copy for a tool that returns text: whatever it prints reaches the model
@@ -172,31 +171,40 @@ Store and scope:
 
 - `nulya ext build <path>` freezes whatever directory you point at — the draft
   may live anywhere — and files the result under the store by its manifest id.
-- `--user` on `init` / `build` / `sync` / `prune` / `activate` /
-  `deactivate` uses the user store, which every workspace on this machine sees.
-  **A tool you want everywhere belongs there.**
-- **The least-effort install: put the source in `<root>/<id>/` and run `nulya ext
-  sync [--user]`.** It builds every draft in that root, one line each, and one
-  bad manifest does not stop the rest. Add `--activate` to point `current` at
+- **Built versions live in exactly one place per machine**:
+  `<NULYA_HOME | ~/.nulya>/store/<id>/versions/<v>/`, whoever built them. A
+  workspace holds drafts and, optionally, a `current` pointer of its own under
+  `.nulya/extensions/<id>/` — never versions. The workspace pointer wins over
+  the store's; with neither, the id is not activated here.
+- `--user` means the store's own directory: on `init` / `seed` / `sync` it says
+  where the DRAFT goes, on `activate` / `deactivate` which POINTER layer to
+  write. Without it, `activate` writes the workspace layer when this workspace
+  already has a `<id>/` directory and the store layer when it does not, and
+  `deactivate` drops whichever layer is in effect. `build` takes no `--user`:
+  there is one destination.
+- **The least-effort install: put the source in `.nulya/extensions/<id>/` (or in
+  the store for `--user`) and run `nulya ext sync [--user]`.** It builds every
+  draft there into the store, one line each, and one bad manifest does not stop
+  the rest. Add `--activate` to point `current` at
   what it just built (and at ids that have none) — it never moves a `current`
   that names something else, so going back to an older version survives. `--dry-run` says what it
   would do and writes nothing. Add `--seed` to bring in this binary's own
   bundled drafts (`extensions/{agent,ask,coding,compact,evolution,ground,guide,handoff,plan,std}`
   and any later ones) first — `nulya ext sync --seed --user` on a machine that
   has never seen this checkout writes and builds all of them in one call.
-- A build takes a copy instead of compiling when another root already holds that
-  exact version, which is what lets a machine with no toolchain install a
-  compiled tool the user store already carries.
-- `nulya ext prune [--user] [<id>]` deletes the versions `current` does not
-  name. The cost: a session frozen on a deleted version can no longer resume.
-  The way back: the draft is still there, and the same source rebuilds to the
-  same version id. An id with no `current` is left entirely alone.
-- Search order is workspace `.nulya/extensions`, then the user store, then
-  configured paths. The first root with an active copy of an id wins; `nulya ext
-  list` marks the losers `(shadowed)` and shows what each version contributes.
-- A workspace store that arrived with a checkout takes part in no session until
-  someone runs `nulya ext trust` once on this machine. Read it first — `ext
-  list` and `ext inspect` are never gated, which is the point.
+- A build writes nothing when the store already holds that exact version, which
+  is what lets a machine with no toolchain use a compiled tool that arrived by
+  `nulya ext push` or that another workspace built.
+- `nulya ext prune [<id>]` deletes the versions no `current` here names. The
+  cost: a session frozen on a deleted version can no longer resume. The way
+  back: the draft is still there, and the same source rebuilds to the same
+  version id. An id with no pointer at all is left entirely alone.
+- `nulya ext list` prints `id / version / layer`: which version the id means and
+  which pointer layer said so, plus what that version contributes.
+- `nulya ext migrate` is a one-time move for a machine written by an older
+  build, when versions still sat beside the drafts in `.nulya/extensions/` and
+  `~/.nulya/extensions/`. It carries them into the store and keeps each pointer
+  in the layer that already meant it.
 
 ## Skills, prompts, modes
 
@@ -306,11 +314,9 @@ Store and scope:
   `read` or `grep` reads the files `shell` sees rather than this machine's, so
   the two finally answer about the same repository. A tool whose package has not
   been pushed to that machine comes back as a failed call naming
-  `nulya ext push` — the session goes on. The workspace store over there is
-  gated over there: if that machine's workspace holds a `.nulya/extensions` that
-  arrived with a checkout and nobody has run `nulya ext trust` on THAT machine,
-  every extension call is refused with a sentence naming the store, so a checkout
-  cannot shadow a version you pushed. A background task (`shell` with
+  `nulya ext push` — the session goes on. A pushed version lands in THAT
+  machine's own store, which is the only place its version bytes live, so a
+  checkout over there cannot stand in front of what you pushed. A background task (`shell` with
   `background: true`, or `nulya task run`) runs over there too: its supervisor,
   its log and its status live in that workspace, so it keeps running when the
   channel closes, and its report still arrives here as the same note
@@ -511,4 +517,4 @@ reach for `journal` when a plain fact log is enough.
   and the journals beside them are append-only facts.
 - Keep working files under `.nulya/` unless the task is about the user's tree.
 - Run `nulya ext list` before building something: the capability may exist
-  already, possibly shadowed.
+  already, perhaps without a pointer.

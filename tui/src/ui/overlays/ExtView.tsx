@@ -20,18 +20,19 @@
  *    the next session: active = point `current` at a built version AND select
  *    every `surface:"manual"` tool it declares; inactive = take those
  *    back and clear `current`. Those are the only two things it writes.
- *    "Active" names what THIS store root points at, not whether the next
+ *    "Active" names what a `current` points at, not whether the next
  *    session actually carries it — a `manual` package still needs naming
  *    (`/with`, a declared command, `[extensions] with`) to reach one; only
  *    `standing` (`apply: "auto"`) answers that. The axes are still two: the
  *    TOOLS pane is where one tool is selected on its own,
  *    and the version line is where one specific build is pointed at.
  *
- * An extension id, a tool name and a store root are all as long as somebody
+ * An extension id and a tool name are both as long as somebody
  * chose to make them, so every cell here is cut to its column and every sentence
  * is broken at its ` · ` joints by us rather than the terminal (`ui/columns.ts`).
  */
 import { For, Index, Show, createEffect, createMemo, createSignal, on, onMount } from "solid-js"
+import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { useKeyboard } from "@opentui/solid"
 import { useScreen, useStyle } from "../../render/theme.ts"
@@ -39,10 +40,11 @@ import { columnWidth, fit, squeeze, wrapWords } from "../columns.ts"
 import { createHover, lifted, onClick, rowBackground, rowGutter, rowText } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import {
+  draftDirs,
   draftEntries,
   listExtensions,
   readToolUsage,
-  rootsOf,
+  storePath,
   type ExtensionEntry,
   type ToolUsage,
 } from "../../nulya/files.ts"
@@ -183,7 +185,7 @@ export function toolRows(
 ): ToolRow[] {
   const rows: ToolRow[] = []
   for (const entry of extensions) {
-    if (!entry.current || entry.shadowed) continue
+    if (!entry.current) continue
     for (const tool of entry.tools) {
       const id = toolId(entry.id, tool)
       const row = usage.find((u) => u.toolId === id)
@@ -560,7 +562,7 @@ export function ExtView(props: {
     setDrafts(plans)
     const held = listed()
     const unlisted = plans.filter((line) => !held.some((entry) => entry.id === line.id)).map((line) => line.id)
-    setSourceOnly(await draftEntries(props.ws, unlisted, rootsOf(props.ws, held)))
+    setSourceOnly(await draftEntries(props.ws, unlisted))
   }
 
   /**
@@ -646,8 +648,8 @@ export function ExtView(props: {
   const foldClick = onClick(toggleFold)
   const quota = createMemo(() => quotaLine(maxTools(), nextFace(sources()).length))
 
-  /** An extension takes part in the next session: an active version, not shadowed. */
-  const isActive = (entry: ExtensionEntry) => entry.current !== null && !entry.shadowed
+  /** An extension takes part in the next session: some layer points at a version. */
+  const isActive = (entry: ExtensionEntry) => entry.current !== null
   /** Just the ids out of a member list, which is what a row is keyed by. */
   const memberIds = (members: readonly string[]) => members.map((spec) => parseWithRef(spec)?.id ?? spec)
   /**
@@ -703,7 +705,7 @@ export function ExtView(props: {
    */
   const idCols = createMemo(() => {
     const list = extensions()
-    const [id, standing, on, draft, shadow] = squeeze(
+    const [id, standing, on, draft] = squeeze(
       [
         columnWidth(list.map((entry) => entry.id), 2, 24),
         columnWidth(list.map((entry) => standingCell(composedEverySession(entry))), 2, 10),
@@ -713,16 +715,15 @@ export function ExtView(props: {
           2,
           11,
         ),
-        columnWidth(list.map((entry) => (entry.shadowed ? "shadowed" : "")), 0, 9),
       ],
-      [8, 0, 0, 0, 0],
+      [8, 0, 0, 0],
       Math.max(16, Math.floor(inner() / 2)) - 2,
     )
-    return { id: id!, standing: standing!, on: on!, draft: draft!, shadow: shadow! }
+    return { id: id!, standing: standing!, on: on!, draft: draft! }
   })
-  /** The whole left pane: the cursor gutter, the switch, and the five columns. */
+  /** The whole left pane: the cursor gutter, the switch, and the four columns. */
   const idWidth = () =>
-    2 + switch_width + idCols().id + idCols().standing + idCols().on + idCols().draft + idCols().shadow
+    2 + switch_width + idCols().id + idCols().standing + idCols().on + idCols().draft
   /** What is left for the detail beside it, less its own two-column pad. */
   const detailWidth = () => Math.max(16, inner() - idWidth() - 2)
 
@@ -909,10 +910,6 @@ export function ExtView(props: {
     const entry = selected()
     if (!entry) return
     const ids = pinnable(entry)
-    if (entry.shadowed) {
-      setNotice(`${entry.id} is shadowed by an earlier root · that copy is the one that runs`)
-      return
-    }
     // A second Enter inside the first one's flight is the same decision pressed
     // twice, not two decisions.
     if (busy(entry.id)) {
@@ -1083,15 +1080,16 @@ export function ExtView(props: {
   /**
    * `b` — build the source sitting in this id's store directory.
    *
-   * `ext build <root>/<id>` lands in the root that holds the draft (the kernel
-   * picks the destination from the path), so this is the same command `ext sync`
-   * runs for that one id, and the refusal it prints is the kernel's own.
+   * `ext build <dir>/<id>` freezes the draft into the one store, so this is the
+   * same command `ext sync` runs for that one id, and the refusal it prints is
+   * the kernel's own.
    */
   const buildDraft = async () => {
     const entry = selected()
     if (!entry) return
-    if (!draftOf(entry.id)) {
-      setNotice(`${entry.id} has no source in ${entry.root} · nothing to build`)
+    const dir = draftDirs(props.ws).find((where) => existsSync(join(where, entry.id, "extension.json")))
+    if (!draftOf(entry.id) || !dir) {
+      setNotice(`${entry.id} has no source here · nothing to build`)
       return
     }
     if (busy(entry.id)) {
@@ -1101,7 +1099,7 @@ export function ExtView(props: {
     hold(entry.id)
     setNotice(`building ${entry.id}…`)
     try {
-      const version = await extBuild(props.ws, join(entry.root, entry.id))
+      const version = await extBuild(props.ws, join(dir, entry.id))
       release(entry.id)
       // A build is the one action that changes what a PLAN says, so this is one
       // of the two places the two dry-runs are worth their seconds again.
@@ -1144,7 +1142,7 @@ export function ExtView(props: {
     setNotice(`updating ${entry.id} to this build…`)
     try {
       await extSeed(props.ws, { user: true, ids: [entry.id], force: true })
-      const version = await extBuild(props.ws, join(entry.root, entry.id))
+      const version = await extBuild(props.ws, join(storePath(), entry.id))
       if (was_active) await extSetCurrent(props.ws, "activate", entry.id, version, { user: true })
       release(entry.id)
       await refresh()
@@ -1654,11 +1652,7 @@ export function ExtView(props: {
                         fg={rowText(
                           style,
                           tone(),
-                          entry().shadowed
-                            ? style.theme.dim
-                            : on() === "active" || here()
-                            ? style.theme.fg
-                            : style.theme.muted,
+                          on() === "active" || here() ? style.theme.fg : style.theme.muted,
                         )}
                       >
                         {fit(entry().id, idCols().id - 2)}
@@ -1687,14 +1681,6 @@ export function ExtView(props: {
                     <box width={idCols().draft} flexShrink={0}>
                       <text fg={rowText(style, tone(), draft() === "active" ? style.theme.dim : style.theme.warn)}>
                         {fit(draft(), idCols().draft - 2)}
-                      </text>
-                    </box>
-                    {/* An id an earlier root already has active: this copy never
-                        runs. Saying so is the whole point — a
-                        silently omitted duplicate is how it becomes a mystery. */}
-                    <box width={idCols().shadow} flexShrink={0}>
-                      <text fg={rowText(style, tone(), style.theme.warn)}>
-                        {entry().shadowed ? fit("shadowed", idCols().shadow) : ""}
                       </text>
                     </box>
                   </box>
@@ -1740,14 +1726,12 @@ export function ExtView(props: {
                   <For each={draftHelp(draftOf(entry.id), entry.current)}>
                     {(line) => <Lines text={line} width={detailWidth()} fg={style.theme.warn} />}
                   </For>
-                  {/* Which directory holds this copy: needed when two roots have
-                      the same id, and noise the rest of the time — so it is drawn
-                      in the quietest colour there is unless it is the reason this
-                      copy never runs. */}
+                  {/* Which `current` names this version — "this project" or
+                      "this machine" — in the quietest colour there is. */}
                   <Lines
-                    text={`root ${entry.root}${entry.shadowed ? " · shadowed by an earlier root · never runs" : ""}`}
+                    text={`pointer ${entry.layer ?? "none"}`}
                     width={detailWidth()}
-                    fg={entry.shadowed ? style.theme.warn : style.theme.faint}
+                    fg={style.theme.faint}
                   />
                   <Lines
                     text={`tools ${entry.tools.join(" ") || "—"} · skills ${

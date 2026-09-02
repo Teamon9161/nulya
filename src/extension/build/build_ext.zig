@@ -23,7 +23,7 @@ const package_dir = integrity.package_dir;
 const seal_file = integrity.seal_file;
 
 pub const BuildResult = struct {
-    /// The manifest's id — which `<id>/` under the store root this landed in.
+    /// The manifest's id — which `<id>/` under the store this landed in.
     /// The draft's directory name does not have to be it, and a caller that has
     /// to name what it just built (`activate`, a listing) needs the id the
     /// store actually used.
@@ -36,10 +36,6 @@ pub const BuildResult = struct {
     /// True when this exact version already existed — an immutable, reproducible
     /// no-op.
     already_built: bool,
-    /// Index into the caller's `donors` when this version was copied from another
-    /// store root rather than produced here. Null otherwise, so a caller that
-    /// passed no donors never has to look at it.
-    copied_from: ?usize = null,
     /// False when the compiler rejected the source; `stderr` then holds the
     /// diagnostics for the model to correct against.
     compile_ok: bool,
@@ -54,20 +50,12 @@ pub const BuildResult = struct {
 };
 
 /// Whether a call is allowed to WRITE. `plan` answers the same question every
-/// other way — which version this draft is, whether the destination root already
-/// has it, which other root could supply it — and then stops, so `ext sync
-/// --dry-run` and `ext sync` cannot disagree about what a build would do.
+/// other way — which version this draft is, whether the store already has it —
+/// and then stops, so `ext sync --dry-run` and `ext sync` cannot disagree about
+/// what a build would do.
 pub const Mode = enum { build, plan };
 
-/// The two things a build can be told beyond "this draft into that root".
-///
-/// A struct rather than two more positionals because they are unrelated
-/// questions asked by different callers: `ext sync` supplies donors and never a
-/// target, `ext build --target` the reverse.
 pub const Options = struct {
-    /// The other store roots this machine searches, in that order, as places
-    /// this version may already exist.
-    donors: []const std.Io.Dir = &.{},
     /// Build for another machine instead of this one. The two words go into
     /// the version id and the seal exactly as a host build's do, so a
     /// per-target build is simply another version of the same package —
@@ -162,15 +150,14 @@ pub fn buildExtension(
     dest_root: std.Io.Dir,
     zig: *Zig,
 ) !BuildResult {
-    return buildExtensionReusing(alloc, io, workspace, ext_dir_rel, dest_root, zig, .{});
+    return build(alloc, io, workspace, ext_dir_rel, dest_root, zig, .{}, .build);
 }
 
-/// What `buildExtensionReusing` WOULD do, without doing any of it: the same
-/// manifest, the same snapshot, the same searches, no writes. `already_built`
-/// then means "the destination root already holds it", `copied_from` "that donor
-/// could supply it", and neither set means "this would be produced here".
+/// What a build WOULD do, without doing any of it: the same manifest, the same
+/// snapshot, the same lookup, no writes. `already_built` then means "the store
+/// already holds it" and its absence means "this would be produced here".
 /// `error.ZigVersionUnreadable` still means what it means at build time — a
-/// compiled draft this machine can neither name nor adopt.
+/// compiled draft this machine cannot name a compiler for.
 pub fn planExtension(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -178,26 +165,14 @@ pub fn planExtension(
     ext_dir_rel: []const u8,
     dest_root: std.Io.Dir,
     zig: *Zig,
-    donors: []const std.Io.Dir,
 ) !BuildResult {
-    return build(alloc, io, workspace, ext_dir_rel, dest_root, zig, .{ .donors = donors }, .plan);
+    return build(alloc, io, workspace, ext_dir_rel, dest_root, zig, .{}, .plan);
 }
 
-/// `buildExtension`, plus what `Options` adds: the other store roots this
-/// machine searches — in that order — as places the version may already exist,
-/// and the target to build for.
-///
-/// A version is content-addressed, so a root that holds this exact package
-/// snapshot (same digest, same target and, when this machine can name its
-/// compiler, the same compiler identity) holds the bytes a local build would
-/// produce. Copying that tree in and validating it again is therefore the same
-/// version by construction — which lets a second workspace, or a machine with
-/// no toolchain at all, use a capability the user store already carries
-/// without spending a compile.
-///
-/// Which roots those are is the caller's decision; the destination root is
-/// searched first regardless, since a copy already there is `already_built`.
-pub fn buildExtensionReusing(
+/// `buildExtension` for another machine's target: the two words go into the
+/// version id and the seal exactly as a host build's do, so a per-target build
+/// is simply another version of the same package.
+pub fn buildExtensionFor(
     alloc: std.mem.Allocator,
     io: std.Io,
     workspace: std.Io.Dir,
@@ -284,25 +259,15 @@ fn build(
     errdefer if (entry_rel) |entry| alloc.free(entry);
 
     if (try findMatchingVersion(alloc, io, dest_root, m.id, package_digest, target, compiler)) |found| {
-        return sealed(alloc, m.id, found, entry_rel, true, null);
-    }
-    for (opts.donors, 0..) |donor, donor_index| {
-        const found = (try findMatchingVersion(alloc, io, donor, m.id, package_digest, target, compiler)) orelse continue;
-        errdefer alloc.free(found);
-        if (mode == .plan) return sealed(alloc, m.id, found, entry_rel, false, donor_index);
-        if (!try adoptVersionDir(alloc, io, donor, dest_root, m.id, found)) {
-            alloc.free(found);
-            continue;
-        }
-        return sealed(alloc, m.id, found, entry_rel, false, donor_index);
+        return sealed(alloc, m.id, found, entry_rel, true);
     }
 
-    // Nothing to adopt: this build has to produce the version itself, which for a
+    // Nothing already there: this build has to produce the version itself, which for a
     // compiled package is precisely where a toolchain stops being optional.
     const compiler_id = compiler orelse return error.ZigVersionUnreadable;
     const version = try integrity.versionId(alloc, snapshot_bytes, compiler_id, target);
     errdefer alloc.free(version);
-    if (mode == .plan) return sealed(alloc, m.id, version, entry_rel, false, null);
+    if (mode == .plan) return sealed(alloc, m.id, version, entry_rel, false);
 
     // Store layout, not draft layout: `<id>/versions/<v>` under the store root.
     const version_rel = try std.fs.path.join(alloc, &.{ m.id, "versions", version });
@@ -314,7 +279,7 @@ fn build(
     if (!compiled) {
         try integrity.freezeSnapshot(alloc, io, dest_root, version_rel, manifest_bytes, snapshot);
         try writeSeal(alloc, io, dest_root, version_rel, package_digest, compiler_id, target, null);
-        return sealed(alloc, m.id, version, entry_rel, false, null);
+        return sealed(alloc, m.id, version, entry_rel, false);
     }
 
     const entry = entry_rel.?;
@@ -380,7 +345,7 @@ fn build(
     defer alloc.free(binary_digest);
     try writeSeal(alloc, io, dest_root, version_rel, package_digest, compiler_id, target, binary_digest);
 
-    return sealed(alloc, m.id, version, entry_rel, false, null);
+    return sealed(alloc, m.id, version, entry_rel, false);
 }
 
 /// A successful result, taking ownership of `version` and `entry_rel`.
@@ -390,7 +355,6 @@ fn sealed(
     version: []u8,
     entry_rel: ?[]u8,
     already_built: bool,
-    copied_from: ?usize,
 ) !BuildResult {
     const owned_id = try alloc.dupe(u8, id);
     errdefer alloc.free(owned_id);
@@ -399,7 +363,6 @@ fn sealed(
         .version = version,
         .entry_rel = entry_rel,
         .already_built = already_built,
-        .copied_from = copied_from,
         .compile_ok = true,
         .stderr = try alloc.alloc(u8, 0),
     };
@@ -540,49 +503,6 @@ fn findMatchingVersion(
     compiler: ?[]const u8,
 ) !?[]u8 {
     return store.Store.init(io, root).findSealed(alloc, id, package_digest, target, compiler);
-}
-
-/// Copy `<id>/versions/<version>` from one store root into another, byte for
-/// byte, and validate the copy where it landed. False when the copy does not
-/// validate there (it is removed again, and the caller falls back to building) —
-/// a defensive answer, since a validated source and a plain file copy should not
-/// disagree.
-fn adoptVersionDir(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    src_root: std.Io.Dir,
-    dest_root: std.Io.Dir,
-    id: []const u8,
-    version: []const u8,
-) !bool {
-    const version_rel = try std.fs.path.join(alloc, &.{ id, "versions", version });
-    defer alloc.free(version_rel);
-
-    var src = try src_root.openDir(io, version_rel, .{ .iterate = true });
-    defer src.close(io);
-    dest_root.deleteTree(io, version_rel) catch {};
-    try dest_root.createDirPath(io, version_rel);
-    var dest = try dest_root.openDir(io, version_rel, .{});
-    defer dest.close(io);
-
-    var walker = try src.walk(alloc);
-    defer walker.deinit();
-    while (try walker.next(io)) |entry| switch (entry.kind) {
-        .directory => try dest.createDirPath(io, entry.path),
-        // Permissions come from the source, so a frozen binary stays executable.
-        .file => try src.copyFile(entry.path, dest, entry.path, io, .{ .make_path = true }),
-        else => {},
-    };
-
-    // `.sealed`: this is a WRITE of bytes that came from somewhere else. The one
-    // moment worth the full digest — it is what lets every later read of this
-    // copy be structural.
-    integrity.validateVersionDir(alloc, io, dest_root, version_rel, version, id, .sealed) catch |err| {
-        if (!store.isExtensionFault(err)) return err;
-        dest_root.deleteTree(io, version_rel) catch {};
-        return false;
-    };
-    return true;
 }
 
 fn writeSeal(
@@ -1021,7 +941,7 @@ test "naming a target for a package that has no binary is refused" {
 
     var zig = Zig.init("");
     defer zig.deinit(alloc);
-    try std.testing.expectError(error.TargetNotApplicable, buildExtensionReusing(
+    try std.testing.expectError(error.TargetNotApplicable, buildExtensionFor(
         alloc,
         io,
         tmp.dir,

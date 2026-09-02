@@ -199,7 +199,7 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
         // put its tool on the model's face.
         try std.testing.expect(std.mem.indexOf(u8, plain_header, "\"native_tools\":[]") != null);
 
-        var comp_plain = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{});
+        var comp_plain = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{});
         defer comp_plain.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), comp_plain.tools.tools.len);
         try std.testing.expect(comp_plain.tools.lookup("greet") == null);
@@ -288,13 +288,16 @@ fn assertGreetRunsFromHeader(
             .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
+        .extension_store = support.store_rel,
     }, .{ .workspace = ws, .session_path = spath });
     defer resumed.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), resumed.composition.tools.tools.len);
     const greet = resumed.composition.tools.lookup("greet") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("ext:demo/greet", greet.definition.id);
-    const result = try callNative(alloc, io, greet, ws_path);
+    const store_abs = try support.storePath(alloc, io, ws);
+    defer alloc.free(store_abs);
+    const result = try callNative(alloc, io, greet, ws_path, store_abs);
     defer alloc.free(result.output);
     try std.testing.expect(result.ok);
     try std.testing.expect(std.mem.indexOf(u8, result.output, "hello from a Nulya-built extension") != null);

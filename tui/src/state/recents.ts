@@ -6,9 +6,9 @@
  * reason it is a second file rather than a key in `tui-state.json`: this is a
  * fact ABOUT several workspaces, and `tui-state.json` is a workspace-layer
  * file in every other respect — a project's remembered pins, its sidebar, its
- * mode. The kernel made the same call for the same reason (`trusted-stores.jsonl`
- * is user-layer because a checkout must not be able to sign for itself);
- * here it is duller but structurally identical: a list of other
+ * mode. The kernel makes the same call for its user-layer files (the store
+ * lives under the home directory because a checkout must not be able to
+ * supply bytes to itself); here it is duller but structurally identical: a list of other
  * directories cannot live inside one of them.
  *
  * Written when a SESSION IS SUCCESSFULLY CREATED, never when a directory is

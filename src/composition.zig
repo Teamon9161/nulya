@@ -26,7 +26,7 @@ const ext_skills = @import("extension/skills.zig");
 const ext_tools = @import("extension/tools.zig");
 const manifest = @import("extension/manifest.zig");
 const store = @import("extension/store.zig");
-const roots_mod = @import("extension/roots.zig");
+const site_mod = @import("extension/site.zig");
 const integrity = @import("extension/integrity.zig");
 const testkit = @import("extension/testkit.zig");
 
@@ -179,7 +179,7 @@ pub const CompositionError = error{
     /// `native_tools` entry that no longer parses arrives here too.
     WithToolNotDeclared,
     /// An extension named for this session has no built version to use: either
-    /// no `current` at all, or the named version is in none of the store roots.
+    /// no `current` at all, or the named version is not in this machine's store.
     WithVersionNotFound,
     /// A member named WITHOUT a version has a `current`, and it points at a
     /// version whose seal, manifest or package is unusable. Named by a stderr
@@ -213,17 +213,17 @@ pub const SessionComposition = struct {
         alloc: std.mem.Allocator,
         io: std.Io,
         cwd: []const u8,
-        ext_roots: []const []const u8,
+        ext_store: []const u8,
         opts: Options,
     ) !SessionComposition {
         try validateBudget(opts);
 
-        // No store root existing anywhere needs no special case: a named member
-        // fails as `WithVersionNotFound` on the ordinary path.
-        var roots = try roots_mod.Roots.open(alloc, io, cwd, ext_roots);
-        defer roots.deinit();
+        // No store on this machine needs no special case: a named member fails
+        // as `WithVersionNotFound` on the ordinary path.
+        var site = try site_mod.Site.open(alloc, io, cwd, ext_store);
+        defer site.deinit();
 
-        return build(alloc, io, &roots, .{ .fresh = opts });
+        return build(alloc, io, &site, .{ .fresh = opts });
     }
 
     /// Rebuild the composition frozen into a session header: exactly the
@@ -235,13 +235,13 @@ pub const SessionComposition = struct {
         alloc: std.mem.Allocator,
         io: std.Io,
         cwd: []const u8,
-        ext_roots: []const []const u8,
+        ext_store: []const u8,
         frozen: ledger.FrozenComposition,
     ) !SessionComposition {
-        var roots = try roots_mod.Roots.open(alloc, io, cwd, ext_roots);
-        defer roots.deinit();
+        var site = try site_mod.Site.open(alloc, io, cwd, ext_store);
+        defer site.deinit();
 
-        return build(alloc, io, &roots, .{ .frozen = frozen });
+        return build(alloc, io, &site, .{ .frozen = frozen });
     }
 
     /// Release everything this composition owns. One arena release covers it
@@ -259,17 +259,17 @@ pub const SessionComposition = struct {
 /// or released whole on failure — which is why neither phase carries an unwind
 /// path of its own.
 ///
-/// `gpa` backs phase one's `Roots.Resolved` values (each holds a parsed manifest
+/// `gpa` backs phase one's `Site.Resolved` values (each holds a parsed manifest
 /// with its own arena), released explicitly whatever happens. Nothing in the
 /// finished composition points at them.
-fn build(gpa: std.mem.Allocator, io: std.Io, roots: *const roots_mod.Roots, request: Request) !SessionComposition {
+fn build(gpa: std.mem.Allocator, io: std.Io, site: *const site_mod.Site, request: Request) !SessionComposition {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
 
-    const resolved = try resolve(gpa, arena.allocator(), roots, request);
+    const resolved = try resolve(gpa, arena.allocator(), site, request);
     defer freeResolved(gpa, resolved.extensions);
 
-    var comp = try assemble(arena.allocator(), io, roots, resolved);
+    var comp = try assemble(arena.allocator(), io, site, resolved);
     comp.arena = arena; // moved in last: nothing holds an allocator into the local
     return comp;
 }
@@ -287,7 +287,7 @@ const Request = union(enum) {
 /// each one is here has been decided by the time this exists.
 const Resolved = struct {
     /// `gpa`-owned (each carries a parsed manifest), released by `build`.
-    extensions: []roots_mod.Roots.Resolved,
+    extensions: []site_mod.Site.Resolved,
     /// Index-aligned with `extensions` (arena-owned): which frozen version of
     /// each member actually serves a call, when that is not the member's own —
     /// see `FrozenExtension.exec_version`. Computed once, AFTER the members are
@@ -304,13 +304,13 @@ const Resolved = struct {
 /// differ only in how the list is obtained; both are STRICT, as is tool
 /// selection — an extension someone named or froze that cannot be composed
 /// fails the session rather than starting it quietly without a capability it was
-/// asked for. `roots` stays the caller's; `a` is the composition arena (the
+/// asked for. `site` stays the caller's; `a` is the composition arena (the
 /// bindings survive this phase), `gpa` backs the resolved manifests (they do
 /// not).
-fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod.Roots, request: Request) !Resolved {
+fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, site: *const site_mod.Site, request: Request) !Resolved {
     const extensions = switch (request) {
-        .fresh => |opts| try resolveFreshExtensions(gpa, roots, opts),
-        .frozen => |frozen| try resolveFrozenExtensions(gpa, roots, frozen.active),
+        .fresh => |opts| try resolveFreshExtensions(gpa, site, opts),
+        .frozen => |frozen| try resolveFrozenExtensions(gpa, site, frozen.active),
     };
     errdefer freeResolved(gpa, extensions);
     sortResolved(extensions);
@@ -320,7 +320,7 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod
     // machine), a resumed one reads it back from the header and re-derives
     // nothing.
     const exec_versions = switch (request) {
-        .fresh => |opts| try freshExecVersions(gpa, a, roots, extensions, opts.exec_target),
+        .fresh => |opts| try freshExecVersions(gpa, a, site, extensions, opts.exec_target),
         .frozen => |frozen| try frozenExecVersions(a, extensions, frozen.active),
     };
 
@@ -344,7 +344,7 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod
 ///
 /// Null everywhere when the session's tools run on this machine. Otherwise, for
 /// every `compiled` member, the sibling version built for that machine's target
-/// (`Roots.resolveForTarget`). `data` and `script` members stay null: their
+/// (`Site.resolveForTarget`). `data` and `script` members stay null: their
 /// identity does not depend on a target.
 ///
 /// The probe is asked lazily, so a remote session composing nothing compiled
@@ -352,8 +352,8 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod
 fn freshExecVersions(
     gpa: std.mem.Allocator,
     a: std.mem.Allocator,
-    roots: *const roots_mod.Roots,
-    extensions: []const roots_mod.Roots.Resolved,
+    site: *const site_mod.Site,
+    extensions: []const site_mod.Site.Resolved,
     probe: ?ExecTargetProbe,
 ) ![]const ?[]const u8 {
     const out = try a.alloc(?[]const u8, extensions.len);
@@ -366,8 +366,8 @@ fn freshExecVersions(
         if (target == null) target = try p.ask();
         // `gpa` for the search's scratch, the arena only for the answer: the
         // composition arena lives as long as the session.
-        const found = (try roots.resolveForTarget(gpa, r.id, r.root, r.version, target.?)) orelse {
-            try reportMissingExecVersion(roots.io, gpa, r.id, r.version, target.?);
+        const found = (try site.resolveForTarget(gpa, r.id, r.version, target.?)) orelse {
+            try reportMissingExecVersion(site.io, gpa, r.id, r.version, target.?);
             return error.ExecVersionNotFound;
         };
         defer gpa.free(found);
@@ -380,7 +380,7 @@ fn freshExecVersions(
 /// position: the members were just sorted and the header's order is its own.
 fn frozenExecVersions(
     a: std.mem.Allocator,
-    extensions: []const roots_mod.Roots.Resolved,
+    extensions: []const site_mod.Site.Resolved,
     active: []const ledger.ExtensionRef,
 ) ![]const ?[]const u8 {
     const out = try a.alloc(?[]const u8, extensions.len);
@@ -422,9 +422,9 @@ fn reportMissingExecVersion(
 /// The base is an ALLOCATED empty slice, not a stack array: `unionWith` hands
 /// the base back untouched when there is nothing to union, and that slice
 /// escapes as this function's result.
-fn resolveFreshExtensions(gpa: std.mem.Allocator, roots: *const roots_mod.Roots, opts: Options) ![]roots_mod.Roots.Resolved {
-    const base = try gpa.alloc(roots_mod.Roots.Resolved, 0);
-    return unionWith(gpa, roots, base, opts.with);
+fn resolveFreshExtensions(gpa: std.mem.Allocator, site: *const site_mod.Site, opts: Options) ![]site_mod.Site.Resolved {
+    const base = try gpa.alloc(site_mod.Site.Resolved, 0);
+    return unionWith(gpa, site, base, opts.with);
 }
 
 
@@ -440,8 +440,6 @@ fn copyInlinePrompts(a: std.mem.Allocator, prompts: []const ledger.InlinePrompt)
 /// Phase two: build the frozen session state — tool set, skill catalog, system
 /// blocks, member versions — out of what phase one decided and nothing else.
 /// Those questions have no representation left by the time anything reaches
-/// here. Each resolved extension names the root index it was found in, so search
-/// order is never re-derived.
 ///
 /// `a` is the composition arena, so everything built here already has the
 /// session's lifetime and needs no unwind path. The returned composition has no
@@ -449,7 +447,7 @@ fn copyInlinePrompts(a: std.mem.Allocator, prompts: []const ledger.InlinePrompt)
 fn assemble(
     a: std.mem.Allocator,
     io: std.Io,
-    roots: *const roots_mod.Roots,
+    site: *const site_mod.Site,
     resolved: Resolved,
 ) !SessionComposition {
     // The bindings arrived as one frozen slice, so their addresses are stable
@@ -458,7 +456,7 @@ fn assemble(
 
     var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
     for (resolved.extensions) |r| {
-        try ext_skills.appendFromManifest(a, io, roots.entries[r.root].dir, &descriptors, r.id, r.version, r.manifest);
+        try ext_skills.appendFromManifest(a, io, site.store().?.root, &descriptors, r.id, r.version, r.manifest);
     }
     skill.sortDescriptors(descriptors.items);
     const skills = skill.SkillSetSnapshot{ .skills = try descriptors.toOwnedSlice(a) };
@@ -469,7 +467,7 @@ fn assemble(
         .prompts = resolved.prompts,
         .tools = try snapshotFromBindings(a, bindings),
         .skills = skills,
-        .system_prompts = try buildSystemPrompts(a, io, roots, resolved.extensions, resolved.prompts, skills),
+        .system_prompts = try buildSystemPrompts(a, io, site, resolved.extensions, resolved.prompts, skills),
     };
 }
 
@@ -500,7 +498,7 @@ fn snapshotFromBindings(a: std.mem.Allocator, bindings: []ext_tools.Binding) !re
 /// named it.
 fn resolveFreshBindings(
     a: std.mem.Allocator,
-    resolved: []const roots_mod.Roots.Resolved,
+    resolved: []const site_mod.Site.Resolved,
     exec_versions: []const ?[]const u8,
     opts: Options,
 ) ![]ext_tools.Binding {
@@ -544,7 +542,7 @@ fn selectionFor(with: []const WithRef, id: []const u8) ToolSelection {
 fn appendBinding(
     a: std.mem.Allocator,
     out: *std.ArrayList(ext_tools.Binding),
-    r: roots_mod.Roots.Resolved,
+    r: site_mod.Site.Resolved,
     exec: ?[]const u8,
     spec: manifest.ToolSpec,
 ) !void {
@@ -558,7 +556,7 @@ fn appendBinding(
 /// re-expands a selection: the header already IS the whole native face.
 fn resolveFrozenBindings(
     a: std.mem.Allocator,
-    resolved: []const roots_mod.Roots.Resolved,
+    resolved: []const site_mod.Site.Resolved,
     exec_versions: []const ?[]const u8,
     frozen: []const []const u8,
 ) ![]ext_tools.Binding {
@@ -605,7 +603,7 @@ fn parseStableToolId(id: []const u8) CompositionError!StableToolId {
 /// OS is that machine's refusal rather than a guess made here.
 fn bindingForSpec(
     a: std.mem.Allocator,
-    r: roots_mod.Roots.Resolved,
+    r: site_mod.Site.Resolved,
     exec_version: ?[]const u8,
     spec: manifest.ToolSpec,
     id: []const u8,
@@ -624,7 +622,7 @@ fn bindingForSpec(
     }, r.id, exec_version orelse r.version, spec.timeout_ms);
 }
 
-fn findResolvedIndex(resolved: []const roots_mod.Roots.Resolved, id: []const u8) ?usize {
+fn findResolvedIndex(resolved: []const site_mod.Site.Resolved, id: []const u8) ?usize {
     for (resolved, 0..) |r, i| {
         if (std.mem.eql(u8, r.id, id)) return i;
     }
@@ -650,7 +648,7 @@ const isExtensionFault = store.isExtensionFault;
 fn reportBrokenActive(
     io: std.Io,
     alloc: std.mem.Allocator,
-    entry: roots_mod.Roots.ActiveEntry,
+    entry: site_mod.Site.ActiveEntry,
     err: anyerror,
 ) !void {
     // Unit tests build broken actives on purpose and assert only the error
@@ -672,8 +670,8 @@ fn reportBrokenActive(
 /// `[extensions] with` comes first and `--with` after it, so naming a version on
 /// the command line overrides the standing entry.
 ///
-/// The caller named these, so an id with no built version, or a version no root
-/// holds, fails the session; so does an id whose `current` points at something
+/// The caller named these, so an id with no built version, or a version the
+/// store does not hold, fails the session; so does an id whose `current` points at something
 /// unusable. The two are different errors because they need different repairs:
 /// `WithVersionNotFound` means "never built here", `ActiveExtensionBroken`
 /// (named on stderr first) means "built, and the copy on disk is damaged".
@@ -682,12 +680,12 @@ fn reportBrokenActive(
 /// released.
 fn unionWith(
     alloc: std.mem.Allocator,
-    roots: *const roots_mod.Roots,
-    base: []roots_mod.Roots.Resolved,
+    site: *const site_mod.Site,
+    base: []site_mod.Site.Resolved,
     with: []const WithRef,
-) ![]roots_mod.Roots.Resolved {
+) ![]site_mod.Site.Resolved {
     if (with.len == 0) return base;
-    var list: std.ArrayList(roots_mod.Roots.Resolved) = .{ .items = base, .capacity = base.len };
+    var list: std.ArrayList(site_mod.Site.Resolved) = .{ .items = base, .capacity = base.len };
     // Not `freeResolved(alloc, list.items)`: once `append` grows the list past
     // `base.len`, `list.items.len` no longer matches the allocation handed out
     // (`capacity` can be larger) and freeing the shorter slice is invalid.
@@ -700,12 +698,12 @@ fn unionWith(
 
     for (with) |ref| {
         const r = if (ref.version) |v|
-            roots.resolveVersion(alloc, ref.id, v, .sealed) catch |err| switch (err) {
+            site.resolveVersion(alloc, ref.id, v, .sealed) catch |err| switch (err) {
                 error.VersionNotFound => return error.WithVersionNotFound,
                 else => return err,
             }
         else
-            try resolveCurrent(alloc, roots, ref.id);
+            try resolveCurrent(alloc, site, ref.id);
         errdefer r.deinit(alloc);
 
         // Replace an entry for the same id rather than shadowing it: two
@@ -720,29 +718,29 @@ fn unionWith(
     return list.toOwnedSlice(alloc);
 }
 
-/// One member named WITHOUT a version: whatever its `current` points at, first
-/// root holding an active copy wins. Two refusals, because they need different
-/// repairs: no `current` anywhere is `WithVersionNotFound`, a `current` that
-/// resolves to a damaged version is `ActiveExtensionBroken` with the offending
-/// `id@version` named on stderr first (Zig errors carry no payload).
+/// One member named WITHOUT a version: whatever its `current` points at, the
+/// workspace pointer layer first. Two refusals, because they need different
+/// repairs: no `current` in either layer is `WithVersionNotFound`, a `current`
+/// that resolves to a damaged version is `ActiveExtensionBroken` with the
+/// offending `id@version` named on stderr first (Zig errors carry no payload).
 ///
-/// `firstActive` + `resolveEntry` rather than `resolveActive`: the version has
+/// `activePointer` + `resolveEntry` rather than `resolveActive`: the version has
 /// to survive the failure so the line can name it.
 fn resolveCurrent(
     alloc: std.mem.Allocator,
-    roots: *const roots_mod.Roots,
+    site: *const site_mod.Site,
     id: []const u8,
-) !roots_mod.Roots.Resolved {
-    const active = (try roots.firstActive(alloc, id)) orelse return error.WithVersionNotFound;
+) !site_mod.Site.Resolved {
+    const active = (try site.activePointer(alloc, id)) orelse return error.WithVersionNotFound;
     defer alloc.free(active.version);
-    const entry: roots_mod.Roots.ActiveEntry = .{ .id = id, .root = active.root, .version = active.version };
-    return roots.resolveEntry(alloc, entry, .sealed) catch |err| switch (err) {
+    const entry: site_mod.Site.ActiveEntry = .{ .id = id, .layer = active.layer, .version = active.version };
+    return site.resolveEntry(alloc, entry, .sealed) catch |err| switch (err) {
         // A host fault — cancellation, OOM, a real I/O failure — must propagate
         // as itself, never be reported as a broken extension.
         error.Canceled => error.Canceled,
         else => {
             if (!isExtensionFault(err)) return err;
-            try reportBrokenActive(roots.io, alloc, entry, err);
+            try reportBrokenActive(site.io, alloc, entry, err);
             return error.ActiveExtensionBroken;
         },
     };
@@ -751,15 +749,14 @@ fn resolveCurrent(
 /// Resolve exactly the frozen (id, version) pairs from a session header: this
 /// never scans `current`, and a frozen version that no longer validates is a
 /// hard error, because resume must reconstruct the same cache scope or not at
-/// all. A version is looked up in root order and taken
-/// from whichever root holds it — versions are content-addressed, so every
-/// root's copy is the same bytes and integrity is checked either way; the search
-/// order only decides where it is found, never what runs.
-fn resolveFrozenExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, active: []const ledger.ExtensionRef) ![]roots_mod.Roots.Resolved {
-    var resolved: std.ArrayList(roots_mod.Roots.Resolved) = .empty;
+/// all. A header records `(id, version)` and no location, which is why a
+/// session written under an older layout resumes as soon as the version is in
+/// the store.
+fn resolveFrozenExtensions(alloc: std.mem.Allocator, site: *const site_mod.Site, active: []const ledger.ExtensionRef) ![]site_mod.Site.Resolved {
+    var resolved: std.ArrayList(site_mod.Site.Resolved) = .empty;
     errdefer freeResolved(alloc, resolved.items);
     for (active) |ext| {
-        const r = try roots.resolveVersion(alloc, ext.id, ext.version, .sealed);
+        const r = try site.resolveVersion(alloc, ext.id, ext.version, .sealed);
         errdefer r.deinit(alloc);
         try resolved.append(alloc, r);
     }
@@ -768,7 +765,7 @@ fn resolveFrozenExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roo
 
 fn copyFrozenExtensions(
     a: std.mem.Allocator,
-    resolved: []const roots_mod.Roots.Resolved,
+    resolved: []const site_mod.Site.Resolved,
     exec_versions: []const ?[]const u8,
 ) ![]FrozenExtension {
     const out = try a.alloc(FrozenExtension, resolved.len);
@@ -789,8 +786,8 @@ fn copyFrozenExtensions(
 fn buildSystemPrompts(
     a: std.mem.Allocator,
     io: std.Io,
-    roots: *const roots_mod.Roots,
-    resolved: []const roots_mod.Roots.Resolved,
+    site: *const site_mod.Site,
+    resolved: []const site_mod.Site.Resolved,
     prompts: []const ledger.InlinePrompt,
     skills: skill.SkillSetSnapshot,
 ) !prompt.SystemPromptSnapshot {
@@ -809,7 +806,7 @@ fn buildSystemPrompts(
                 const source = try std.fmt.allocPrint(a, "ext:{s}@{s}/{s}", .{ r.id, r.version, spec.path });
                 const rel = try std.fs.path.join(a, &.{ r.id, "versions", r.version, integrity.package_dir, spec.path });
                 defer a.free(rel);
-                const bytes = try roots.entries[r.root].dir.readFileAlloc(io, rel, a, .limited(prompt.max_system_prompt_bytes));
+                const bytes = try site.store().?.root.readFileAlloc(io, rel, a, .limited(prompt.max_system_prompt_bytes));
                 try blocks.append(a, .{ .source = source, .bytes = bytes });
             }
         }
@@ -827,15 +824,15 @@ fn buildSystemPrompts(
     return .{ .blocks = try blocks.toOwnedSlice(a) };
 }
 
-fn sortResolved(resolved: []roots_mod.Roots.Resolved) void {
-    std.mem.sort(roots_mod.Roots.Resolved, resolved, {}, struct {
-        fn lessThan(_: void, a: roots_mod.Roots.Resolved, b: roots_mod.Roots.Resolved) bool {
+fn sortResolved(resolved: []site_mod.Site.Resolved) void {
+    std.mem.sort(site_mod.Site.Resolved, resolved, {}, struct {
+        fn lessThan(_: void, a: site_mod.Site.Resolved, b: site_mod.Site.Resolved) bool {
             return std.mem.lessThan(u8, a.id, b.id);
         }
     }.lessThan);
 }
 
-fn freeResolved(alloc: std.mem.Allocator, resolved: []const roots_mod.Roots.Resolved) void {
+fn freeResolved(alloc: std.mem.Allocator, resolved: []const site_mod.Site.Resolved) void {
     for (resolved) |r| r.deinit(alloc);
     alloc.free(resolved);
 }
@@ -904,9 +901,9 @@ test "kernelHash is stable across calls and moves when any kernel constant does"
     try std.testing.expect(!std.mem.eql(u8, base, shifted_hash));
 }
 
-/// Most tests below stand a single store root up in a tmp dir and pass it as
-/// the whole search order.
-const one_root: []const []const u8 = &.{"."};
+/// Most tests below stand the machine's one store up in the tmp dir itself,
+/// which puts its `current` files in the user pointer layer.
+const one_store = ".";
 
 fn tmpPath(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) ![]u8 {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -939,7 +936,7 @@ test "a member named without a version freezes whatever current pointed at when 
     // gets — and then the session's own copy of the answer is frozen.
     const with_finance: []const WithRef = &.{.{ .id = "finance" }};
     try testkit.activate(alloc, io, tmp.dir, "finance", v1);
-    var first = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with_finance });
+    var first = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_finance });
     defer first.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), first.extensions.len);
     try std.testing.expectEqualStrings(v1, first.extensions[0].version);
@@ -952,7 +949,7 @@ test "a member named without a version freezes whatever current pointed at when 
     try std.testing.expectEqualStrings(v1, first.extensions[0].version);
     try std.testing.expectEqualStrings("v1 skill", first.skills.skills[0].description);
 
-    var second = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with_finance });
+    var second = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_finance });
     defer second.deinit(alloc);
     try std.testing.expectEqualStrings(v2, second.extensions[0].version);
     try std.testing.expectEqualStrings("v2 skill", second.skills.skills[0].description);
@@ -975,7 +972,7 @@ test "pinned skill load survives current changes and absent draft source" {
     defer alloc.free(v2);
     try testkit.activate(alloc, io, tmp.dir, "finance", v1);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "finance" }} });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "finance" }} });
     defer comp.deinit(alloc);
     const ref = try alloc.dupe(u8, comp.skills.skills[0].ref);
     defer alloc.free(ref);
@@ -1003,7 +1000,7 @@ test "skill frontmatter name must match the skill directory" {
     defer alloc.free(version);
     try testkit.activate(alloc, io, tmp.dir, "finance", version);
 
-    try std.testing.expectError(error.SkillNameDoesNotMatchDirectory, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "finance" }} }));
+    try std.testing.expectError(error.SkillNameDoesNotMatchDirectory, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "finance" }} }));
 }
 
 test "duplicate skill names in one extension are rejected" {
@@ -1024,7 +1021,7 @@ test "duplicate skill names in one extension are rejected" {
     defer alloc.free(version);
     try testkit.activate(alloc, io, tmp.dir, "finance", version);
 
-    try std.testing.expectError(error.DuplicateSkillName, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "finance" }} }));
+    try std.testing.expectError(error.DuplicateSkillName, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "finance" }} }));
 }
 
 test "activating a package composes nothing: a member is one somebody NAMED, and activate only says which version that is" {
@@ -1055,7 +1052,7 @@ test "activating a package composes nothing: a member is one somebody NAMED, and
     // is no discovery pass, so the store's content cannot reach a session on its
     // own.
     {
-        var plain = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+        var plain = try SessionComposition.init(alloc, io, cwd, one_store, .{});
         defer plain.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 0), plain.extensions.len);
         try std.testing.expectEqual(@as(usize, 0), plain.skills.skills.len);
@@ -1064,7 +1061,7 @@ test "activating a package composes nothing: a member is one somebody NAMED, and
 
     // Naming one brings it in WHOLE, at the version `current` points at.
     {
-        var worn = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode" }} });
+        var worn = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode" }} });
         defer worn.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), worn.extensions.len);
         try std.testing.expectEqualStrings("mode", worn.extensions[0].id);
@@ -1075,7 +1072,7 @@ test "activating a package composes nothing: a member is one somebody NAMED, and
 
     // Naming both brings both, sorted by id.
     {
-        var both = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{ .{ .id = "policy" }, .{ .id = "mode" } } });
+        var both = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{ .{ .id = "policy" }, .{ .id = "mode" } } });
         defer both.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 2), both.extensions.len);
         try std.testing.expectEqualStrings("MODE", both.system_prompts.blocks[1].bytes);
@@ -1084,10 +1081,10 @@ test "activating a package composes nothing: a member is one somebody NAMED, and
 
     // Deactivating takes the BARE name away: `--with <id>` reads `current`.
     try testkit.deactivate(alloc, io, tmp.dir, "mode");
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode" }} }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode" }} }));
     // …while the exact version still composes: naming a build needs no pointer.
     {
-        var exact = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode", .version = mode_v }} });
+        var exact = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode", .version = mode_v }} });
         defer exact.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 2), exact.system_prompts.blocks.len);
     }
@@ -1111,13 +1108,13 @@ test "--with brings a built-but-inactive version into one session, overrides an 
 
     // Nothing is activated: a plain session sees only the kernel prompt…
     {
-        var plain = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+        var plain = try SessionComposition.init(alloc, io, cwd, one_store, .{});
         defer plain.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), plain.system_prompts.blocks.len);
     }
     // …while `--with mode@v2` composes that exact version into this session.
     {
-        var with = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode", .version = v2 }} });
+        var with = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode", .version = v2 }} });
         defer with.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 2), with.system_prompts.blocks.len);
         try std.testing.expectEqualStrings("V2", with.system_prompts.blocks[1].bytes);
@@ -1129,14 +1126,14 @@ test "--with brings a built-but-inactive version into one session, overrides an 
     // With v1 activated, a bare `--with mode` takes `current`…
     try testkit.activate(alloc, io, tmp.dir, "mode", v1);
     {
-        var current = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode" }} });
+        var current = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode" }} });
         defer current.deinit(alloc);
         try std.testing.expectEqualStrings("V1", current.system_prompts.blocks[1].bytes);
     }
     // …and naming a version OVERRIDES the active one for this session only: the
     // same id is replaced, never composed twice.
     {
-        var override = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{
+        var override = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{
             .{ .id = "mode", .version = v2 },
             .{ .id = "mode", .version = v1 },
             .{ .id = "mode", .version = v2 },
@@ -1148,9 +1145,9 @@ test "--with brings a built-but-inactive version into one session, overrides an 
     }
 
     // The caller named these, so an unknown id or version fails the session.
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "absent" }} }));
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode", .version = "v-000000000000000000000000" }} }));
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, &.{"nulya-absent-root"}, .{ .with = &.{.{ .id = "mode" }} }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "absent" }} }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode", .version = "v-000000000000000000000000" }} }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, "nulya-absent-root", .{ .with = &.{.{ .id = "mode" }} }));
 }
 
 test "--with of a resolvable extension followed by one that fails to resolve reports WithVersionNotFound regardless of order (regression: used to panic on an invalid free)" {
@@ -1171,14 +1168,14 @@ test "--with of a resolvable extension followed by one that fails to resolve rep
     // resolvable `--with` grows the list past it: the backing allocation ends up
     // bigger than `list.items`. A second `--with` that fails to resolve must
     // free the GROWN allocation, not the shorter `list.items` slice.
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{
         .{ .id = "good", .version = v_good },
         .{ .id = "bad", .version = "v-000000000000000000000000" },
     } }));
 
     // The reverse order never grows the list before failing; both are pinned
     // down side by side.
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{
         .{ .id = "bad", .version = "v-000000000000000000000000" },
         .{ .id = "good", .version = v_good },
     } }));
@@ -1210,7 +1207,7 @@ test "system prompt ordering is deterministic by pinned extension id and manifes
 
     // Named in the OPPOSITE order to the one the blocks come out in: the sort is
     // by member id, never by the order somebody wrote them.
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{ .{ .id = "b" }, .{ .id = "a" } } });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{ .{ .id = "b" }, .{ .id = "a" } } });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 4), comp.system_prompts.blocks.len);
     try std.testing.expectEqualStrings("kernel", comp.system_prompts.blocks[0].source);
@@ -1250,7 +1247,7 @@ test "prompt position partitions the extension band into early, normal and late,
 
     const expected = [_][]const u8{ "Z1", "A1", "Z2", "A2" };
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{ .{ .id = "a" }, .{ .id = "z" } } });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{ .{ .id = "a" }, .{ .id = "z" } } });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1 + expected.len), comp.system_prompts.blocks.len);
     try std.testing.expectEqualStrings("kernel", comp.system_prompts.blocks[0].source);
@@ -1264,7 +1261,7 @@ test "prompt position partitions the extension band into early, normal and late,
         .{ .id = "a", .version = va },
         .{ .id = "z", .version = vz },
     } };
-    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_root, frozen);
+    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen);
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(comp.system_prompts.blocks.len, resumed.system_prompts.blocks.len);
     for (comp.system_prompts.blocks, resumed.system_prompts.blocks) |a_block, b_block| {
@@ -1291,7 +1288,7 @@ test "inline prompts land after every member's block and before the skills catal
     defer alloc.free(v);
     try testkit.activate(alloc, io, tmp.dir, "b", v);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "b" }}, .prompts = &.{
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "b" }}, .prompts = &.{
         .{ .source = "agent-explore", .text = "FIRST" },
         .{ .source = "brief", .text = "SECOND" },
     } });
@@ -1330,7 +1327,7 @@ test "a header's inline prompts rebuild the identical blocks with no store to co
     // A store root that does not exist: an inline prompt is bytes in the header,
     // so nothing about resuming it can depend on an extension version still
     // being on disk (which is what a store reference would have cost).
-    var comp = try SessionComposition.initFrozen(alloc, io, cwd, &.{"nulya-absent-root"}, frozen);
+    var comp = try SessionComposition.initFrozen(alloc, io, cwd, "nulya-absent-root", frozen);
     defer comp.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 2), comp.system_prompts.blocks.len);
@@ -1505,7 +1502,7 @@ test "a selected extension tool is provider-visible and freezes to the compositi
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
     const with_search: []const WithRef = &.{.{ .id = "web.search", .tools = .{ .named = &.{"web_search"} } }};
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with_search });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_search });
     defer comp.deinit(alloc);
 
     // Provider-visible under its model-facing name, and the snapshot's Tool
@@ -1525,7 +1522,7 @@ test "a selected extension tool is provider-visible and freezes to the compositi
     try std.testing.expectEqualStrings(v1, comp.extension_tool_bindings[0].version);
 
     // A fresh session opened after the switch sees v2.
-    var comp2 = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with_search });
+    var comp2 = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_search });
     defer comp2.deinit(alloc);
     try std.testing.expectEqualStrings(v2, comp2.extension_tool_bindings[0].version);
 }
@@ -1550,7 +1547,7 @@ test "initFrozen rebuilds a composition from a header and ignores later activati
         .native_tools = &.{"ext:web.search/web_search"},
     };
 
-    var comp = try SessionComposition.initFrozen(alloc, io, cwd, one_root, frozen);
+    var comp = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen);
     defer comp.deinit(alloc);
     const t = comp.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
@@ -1560,7 +1557,7 @@ test "initFrozen rebuilds a composition from a header and ignores later activati
     // Activate v2 live; a fresh initFrozen on the SAME header still rebuilds v1 —
     // resume is bound to the header, not to `current`.
     try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
-    var comp2 = try SessionComposition.initFrozen(alloc, io, cwd, one_root, frozen);
+    var comp2 = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen);
     defer comp2.deinit(alloc);
     try std.testing.expectEqualStrings(v1, comp2.extension_tool_bindings[0].version);
 }
@@ -1573,7 +1570,7 @@ test "initFrozen with no active extensions yields the builtin only" {
     const cwd = try tmpPath(alloc, io, tmp.dir);
     defer alloc.free(cwd);
 
-    var comp = try SessionComposition.initFrozen(alloc, io, cwd, one_root, .{});
+    var comp = try SessionComposition.initFrozen(alloc, io, cwd, one_store, .{});
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
     try std.testing.expectEqual(registry.builtin_count, comp.tools.tools.len);
@@ -1594,7 +1591,7 @@ test "executor calls reach the composition-time frozen version" {
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
     const with_search: []const WithRef = &.{.{ .id = "web.search", .tools = .{ .named = &.{"web_search"} } }};
-    var session_a = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with_search });
+    var session_a = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_search });
     defer session_a.deinit(alloc);
     const tool_a = session_a.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     var env_a = FakeEnv{ .io = io };
@@ -1617,7 +1614,7 @@ test "executor calls reach the composition-time frozen version" {
     }
 
     // ...while a fresh session's executor reaches v2.
-    var session_b = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with_search });
+    var session_b = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_search });
     defer session_b.deinit(alloc);
     const tool_b = session_b.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     var env_b = FakeEnv{ .io = io };
@@ -1647,7 +1644,7 @@ test "a member named without a version whose current is corrupted fails the sess
 
     // A healthy store composes normally.
     {
-        var ok = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = named });
+        var ok = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = named });
         defer ok.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), ok.extensions.len);
     }
@@ -1660,11 +1657,11 @@ test "a member named without a version whose current is corrupted fails the sess
     // Somebody named this package, so the session fails rather than starting
     // without it — distinguishably from "never built here"
     // (`WithVersionNotFound`), with the offending `id@version` on stderr.
-    try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = named }));
+    try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = named }));
 
     // Not naming it at all composes fine.
     {
-        var unnamed = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+        var unnamed = try SessionComposition.init(alloc, io, cwd, one_store, .{});
         defer unnamed.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 0), unnamed.extensions.len);
     }
@@ -1674,10 +1671,10 @@ test "a member named without a version whose current is corrupted fails the sess
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
     try store.Store.init(io, root).deactivate(alloc, "web.search");
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = named }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = named }));
 }
 
-test "a broken workspace copy fails the session rather than hiding a good user-root one" {
+test "a broken version under the workspace pointer fails the session rather than falling back to the user one" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1685,35 +1682,32 @@ test "a broken workspace copy fails the session rather than hiding a good user-r
     const cwd = try tmpPath(alloc, io, tmp.dir);
     defer alloc.free(cwd);
 
-    try tmp.dir.createDirPath(io, "workspace");
-    try tmp.dir.createDirPath(io, "user");
-    var ws = try tmp.dir.openDir(io, "workspace", .{ .iterate = true });
-    defer ws.close(io);
-    var user = try tmp.dir.openDir(io, "user", .{ .iterate = true });
-    defer user.close(io);
-
-    const ws_v = try writeToolExtension(alloc, io, ws, "web.search", "web_search", "workspace");
+    // One store, two versions of one package; the pointers differ by layer.
+    var store_dir = try store.openOrCreateRoot(io, cwd, "store");
+    defer store_dir.close(io);
+    const ws_v = try writeToolExtension(alloc, io, store_dir, "web.search", "web_search", "workspace");
     defer alloc.free(ws_v);
-    const user_v = try writeToolExtension(alloc, io, user, "web.search", "web_search", "user");
+    const user_v = try writeToolExtension(alloc, io, store_dir, "web.search", "web_search", "user");
     defer alloc.free(user_v);
-    try testkit.activate(alloc, io, ws, "web.search", ws_v);
-    try testkit.activate(alloc, io, user, "web.search", user_v);
 
-    const two_roots: []const []const u8 = &.{ "workspace", "user" };
+    var site = try site_mod.Site.open(alloc, io, cwd, "store");
+    defer site.deinit();
+    try site.activate(alloc, .user, "web.search", user_v);
+    try site.activate(alloc, .workspace, "web.search", ws_v);
 
     const named: []const WithRef = &.{.{ .id = "web.search" }};
 
-    // Break the WORKSPACE copy: first-root-wins makes it the one a bare `--with
-    // web.search` composes. Skipping it would silently compose the user root's
-    // copy instead; failing says which copy to repair.
+    // Break the version the WORKSPACE pointer names — the one a bare `--with
+    // web.search` composes. Silently composing the user layer's instead would
+    // hide the damage; failing says which version to repair.
     const seal_sub = try std.fs.path.join(alloc, &.{ "web.search", "versions", ws_v, integrity.seal_file });
     defer alloc.free(seal_sub);
-    try ws.writeFile(io, .{ .sub_path = seal_sub, .data = "{}" });
-    try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, two_roots, .{ .with = named }));
+    try store_dir.writeFile(io, .{ .sub_path = seal_sub, .data = "{}" });
+    try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, "store", .{ .with = named }));
 
-    // Deactivate in the workspace and the user root's copy takes effect.
-    try store.Store.init(io, ws).deactivate(alloc, "web.search");
-    var comp = try SessionComposition.init(alloc, io, cwd, two_roots, .{ .with = named });
+    // Drop the workspace pointer and the user layer's version takes effect.
+    try site.deactivate(alloc, .workspace, "web.search");
+    var comp = try SessionComposition.init(alloc, io, cwd, "store", .{ .with = named });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), comp.extensions.len);
     try std.testing.expectEqualStrings(user_v, comp.extensions[0].version);
@@ -1734,7 +1728,7 @@ test "a member's manual tool is not natively visible without a selection" {
     // No selection: the extension is a member (composition freezes its
     // version), but its `surface: manual` tool is reachable only through the
     // CLI, never the model-facing set.
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "web.search" }} });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "web.search" }} });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
     try std.testing.expect(comp.tools.lookup("web_search") == null);
@@ -1760,7 +1754,7 @@ test "a bare member exposes surface-auto tools but not manual or internal ones" 
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "assistant", v1);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "assistant" }} });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "assistant" }} });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
     try std.testing.expect(comp.tools.lookup("ask") != null);
@@ -1787,7 +1781,7 @@ test "a member's auto tools join the face beside the ones its selection names" {
     try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
 
     // A selection ADDS to the package's own default; it does not replace it.
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{
         .with = &.{.{ .id = "pkg", .tools = .{ .named = &.{"call"} } }},
     });
     defer comp.deinit(alloc);
@@ -1797,7 +1791,7 @@ test "a member's auto tools join the face beside the ones its selection names" {
 
     // `:none` is how a member takes nothing at all onto the face — the
     // package's `auto` default included.
-    var quiet = try SessionComposition.init(alloc, io, cwd, one_root, .{
+    var quiet = try SessionComposition.init(alloc, io, cwd, one_store, .{
         .with = &.{.{ .id = "pkg", .tools = .none }},
     });
     defer quiet.deinit(alloc);
@@ -1822,16 +1816,16 @@ test "a selection reaches no internal tool and no tool the manifest never declar
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
 
-    try std.testing.expectError(error.WithToolNotDeclared, SessionComposition.init(alloc, io, cwd, one_root, .{
+    try std.testing.expectError(error.WithToolNotDeclared, SessionComposition.init(alloc, io, cwd, one_store, .{
         .with = &.{.{ .id = "pkg", .tools = .{ .named = &.{"internal_tool"} } }},
     }));
-    try std.testing.expectError(error.WithToolNotDeclared, SessionComposition.init(alloc, io, cwd, one_root, .{
+    try std.testing.expectError(error.WithToolNotDeclared, SessionComposition.init(alloc, io, cwd, one_store, .{
         .with = &.{.{ .id = "pkg", .tools = .{ .named = &.{"nope"} } }},
     }));
 
     // Naming a tool the package already surfaces is not an error, and does not
     // put it on the face twice.
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{
         .with = &.{.{ .id = "pkg", .tools = .{ .named = &.{"auto_tool"} } }},
     });
     defer comp.deinit(alloc);
@@ -1859,7 +1853,7 @@ test "frozen resume accepts header native tools regardless of current surface" {
         .active = &.{.{ .id = "pkg", .version = v1 }},
         .native_tools = &.{"ext:pkg/call"},
     };
-    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_root, frozen);
+    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen);
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), resumed.extension_tool_bindings.len);
     try std.testing.expect(resumed.tools.lookup("call") != null);
@@ -1883,7 +1877,7 @@ test "surface-auto tools count against the tool budget" {
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
 
-    try std.testing.expectError(error.ToolBudgetExceeded, SessionComposition.init(alloc, io, cwd, one_root, .{
+    try std.testing.expectError(error.ToolBudgetExceeded, SessionComposition.init(alloc, io, cwd, one_store, .{
         .with = &.{.{ .id = "pkg" }},
         .max_tools = registry.builtin_count + 1,
     }));
@@ -1910,7 +1904,7 @@ test "frozen resume uses header native tools only, not fresh surface expansion" 
         .active = &.{.{ .id = "pkg", .version = v1 }},
         .native_tools = &.{},
     };
-    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_root, frozen);
+    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen);
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), resumed.extension_tool_bindings.len);
     try std.testing.expect(resumed.tools.lookup("call") == null);
@@ -1935,7 +1929,7 @@ test "two selected tools sharing a model-facing name are rejected" {
         .{ .id = "a.pkg", .tools = .{ .named = &.{"search"} } },
         .{ .id = "b.pkg", .tools = .{ .named = &.{"search"} } },
     };
-    try std.testing.expectError(error.DuplicateToolName, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with }));
+    try std.testing.expectError(error.DuplicateToolName, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with }));
 }
 
 test "a selection naming the same tool twice still puts it on the face once" {
@@ -1950,7 +1944,7 @@ test "a selection naming the same tool twice still puts it on the face once" {
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{
         .with = &.{.{ .id = "web.search", .tools = .{ .named = &.{ "web_search", "web_search" } } }},
     });
     defer comp.deinit(alloc);
@@ -1970,12 +1964,12 @@ test "a member with no built version, and a selection with no slot left, are bot
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
     // A member nothing holds: named, so it fails the session.
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{
         .with = &.{.{ .id = "absent" }},
     }));
     // A resolvable selection with no slot left is refused too: a selected tool
     // never silently loses to the budget.
-    try std.testing.expectError(error.ToolBudgetExceeded, SessionComposition.init(alloc, io, cwd, one_root, .{
+    try std.testing.expectError(error.ToolBudgetExceeded, SessionComposition.init(alloc, io, cwd, one_store, .{
         .with = &.{.{ .id = "web.search", .tools = .{ .named = &.{"web_search"} } }},
         .max_tools = registry.builtin_count,
     }));
@@ -1995,7 +1989,7 @@ test "a member named at a version stays on it whatever current says" {
     defer alloc.free(v2);
     try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{
         .with = &.{.{ .id = "web.search", .version = v1, .tools = .{ .named = &.{"web_search"} } }},
     });
     defer comp.deinit(alloc);
@@ -2013,12 +2007,12 @@ test "a member with no store at all is a hard error, not a silent empty set" {
     defer alloc.free(cwd);
 
     // No extensions root exists at all.
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, &.{"nulya-absent-root"}, .{
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, "nulya-absent-root", .{
         .with = &.{.{ .id = "web.search" }},
     }));
 
     // With no members, an absent store yields a clean builtin-only composition.
-    var comp = try SessionComposition.init(alloc, io, cwd, &.{"nulya-absent-root"}, .{});
+    var comp = try SessionComposition.init(alloc, io, cwd, "nulya-absent-root", .{});
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
     try std.testing.expect(comp.tools.lookup("shell") != null);
@@ -2045,7 +2039,7 @@ test "members decide the face, not the final tool order" {
         .{ .id = "b.pkg", .tools = .{ .named = &.{"beta"} } },
         .{ .id = "a.pkg", .tools = .{ .named = &.{"alpha"} } },
     };
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with, .max_tools = 4 });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with, .max_tools = 4 });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), comp.extension_tool_bindings.len);
     try std.testing.expectEqual(@as(usize, 3), comp.tools.tools.len);
@@ -2069,7 +2063,7 @@ test "the tool set freezes at session creation; a changed selection only reaches
     try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
     try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
 
-    var first = try SessionComposition.init(alloc, io, cwd, one_root, .{
+    var first = try SessionComposition.init(alloc, io, cwd, one_store, .{
         .with = &.{.{ .id = "a.pkg", .tools = .{ .named = &.{"alpha"} } }},
         .max_tools = 3,
     });
@@ -2079,7 +2073,7 @@ test "the tool set freezes at session creation; a changed selection only reaches
 
     // A later session with a different member gets a different face and the
     // first composition is untouched: composition moves at a session boundary.
-    var second = try SessionComposition.init(alloc, io, cwd, one_root, .{
+    var second = try SessionComposition.init(alloc, io, cwd, one_store, .{
         .with = &.{.{ .id = "b.pkg", .tools = .{ .named = &.{"beta"} } }},
         .max_tools = 3,
     });

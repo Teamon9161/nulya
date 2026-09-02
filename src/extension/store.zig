@@ -5,10 +5,13 @@
 //! side and a `current` pointer selects the active one via atomic rename, so
 //! going back is just `activate` pointed at an older version.
 //!
-//! Layout under a store root (`.nulya/extensions`):
+//! Layout under the store (`<NULYA_HOME | ~/.nulya>/store`):
 //!   <id>/versions/v-<hash>/{extension.json, package/{src,skills}/..., bin/<entry>}
 //!   <id>/current  — plain text file naming one version: "v-<hash>".
 //!   <id>/.lock    — writer lease held by build / activate / deactivate.
+//!
+//! A `current` file also lives in the workspace pointer layer, which holds no
+//! versions; the pointer half of this file works on either directory.
 
 const std = @import("std");
 const manifest = @import("manifest.zig");
@@ -21,10 +24,6 @@ pub const version_prefix = integrity.version_prefix;
 /// `.structural` and a session freeze asking for `.sealed` are different
 /// questions, and a default would silently answer one with the other.
 pub const Level = integrity.Level;
-/// The workspace-level store root, relative to the workspace — the first root
-/// of every search (`Roots`) and the default for a session that names no
-/// others.
-pub const workspace_root_rel = ".nulya/extensions";
 const current_file = "current";
 const lock_file = ".lock";
 const versions_dir = "versions";
@@ -123,32 +122,36 @@ pub const Store = struct {
         return self.root.createFile(self.io, sub, .{ .truncate = false, .read = true, .lock = .exclusive });
     }
 
-    /// Point `current` at `version`. Refuses to activate a version that was
-    /// never fully built. The write is atomic (temp file + rename in the same
-    /// directory), so a crash mid-switch leaves the previous `current` intact.
+    /// Point THIS store's `current` at `version`, refusing one that was never
+    /// fully built.
     pub fn activate(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !void {
-        // Lease first, then validate: validating outside the lease could read
-        // a version another process is still building and report a spurious
-        // refusal where waiting for the build would have succeeded.
+        return self.activateInto(alloc, id, version, self.root);
+    }
+
+    /// The same, recording the choice in `pointer_root` instead — the workspace
+    /// pointer layer. The lease and the `.sealed` check always belong to the
+    /// store holding the bytes: leasing first means a version another process
+    /// is still building parks the caller rather than drawing a spurious
+    /// refusal.
+    pub fn activateInto(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, pointer_root: std.Io.Dir) !void {
         var held = try self.lease(alloc, id);
         defer held.close(self.io);
         var m = try self.readManifest(alloc, id, version, .sealed);
         defer m.deinit();
-
-        const tmp_sub = try std.fs.path.join(alloc, &.{ id, ".current.tmp" });
-        defer alloc.free(tmp_sub);
-        const final_sub = try std.fs.path.join(alloc, &.{ id, current_file });
-        defer alloc.free(final_sub);
-
-        const record = try std.fmt.allocPrint(alloc, "{s}\n", .{version});
-        defer alloc.free(record);
-        try self.root.writeFile(self.io, .{ .sub_path = tmp_sub, .data = record });
-        try self.root.rename(tmp_sub, self.root, final_sub, self.io);
+        return pointTo(self.io, alloc, pointer_root, id, version);
     }
 
+    /// Drop THIS store's `current` under its writer lease. The versions stay.
     pub fn deactivate(self: Store, alloc: std.mem.Allocator, id: []const u8) !void {
         var held = try self.lease(alloc, id);
         defer held.close(self.io);
+        return self.dropPointer(alloc, id);
+    }
+
+    /// Delete this directory's `current`, taking no lease — for a caller that
+    /// already holds the store's (`site.Site.deactivate`).
+    pub fn dropPointer(self: Store, alloc: std.mem.Allocator, id: []const u8) !void {
+        if (!manifest.isValidId(id)) return error.InvalidId;
         const sub = try std.fs.path.join(alloc, &.{ id, current_file });
         defer alloc.free(sub);
         self.root.deleteFile(self.io, sub) catch |err| switch (err) {
@@ -381,6 +384,22 @@ pub fn openRoot(io: std.Io, cwd: []const u8, ext_root_rel: []const u8) !std.Io.D
         try std.Io.Dir.cwd().openDir(io, cwd, .{});
     defer workspace.close(io);
     return workspace.openDir(io, ext_root_rel, .{ .iterate = true });
+}
+
+/// Write `<id>/current` in `root`, atomically: temp file plus a rename in the
+/// same directory, so a crash mid-switch leaves the previous pointer intact.
+/// Creates `<id>/` when the layer has never held this id.
+fn pointTo(io: std.Io, alloc: std.mem.Allocator, root: std.Io.Dir, id: []const u8, version: []const u8) !void {
+    try root.createDirPath(io, id);
+    const tmp_sub = try std.fs.path.join(alloc, &.{ id, ".current.tmp" });
+    defer alloc.free(tmp_sub);
+    const final_sub = try std.fs.path.join(alloc, &.{ id, current_file });
+    defer alloc.free(final_sub);
+
+    const record = try std.fmt.allocPrint(alloc, "{s}\n", .{version});
+    defer alloc.free(record);
+    try root.writeFile(io, .{ .sub_path = tmp_sub, .data = record });
+    try root.rename(tmp_sub, root, final_sub, io);
 }
 
 fn lessThanVersion(_: void, a: []const u8, b: []const u8) bool {

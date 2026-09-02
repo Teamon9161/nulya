@@ -1,5 +1,5 @@
 //! `nulya ext push <id>@<version> --env <spec>` — copy one immutable extension
-//! version into another machine's user store.
+//! version into another machine's store.
 //!
 //! Read a version this machine holds, write it where it is not yet, and let the
 //! destination validate the copy against its own seal before it becomes a
@@ -20,7 +20,7 @@ const remote = @import("../environment/remote/mod.zig");
 const launch = @import("../launch.zig");
 const common = @import("common.zig");
 
-const RootSearch = common.RootSearch;
+const StoreView = common.StoreView;
 const cwdRealPath = common.cwdRealPath;
 const flagValue = common.flagValue;
 const printErr = common.printErr;
@@ -74,17 +74,18 @@ pub fn extPush(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // store should not arrive dressed as a connection problem.
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    var search = try RootSearch.open(alloc, io, cwd_path);
-    defer search.deinit(alloc);
-    const resolved = search.roots.resolveVersion(alloc, ref.id, version, .sealed) catch |err| {
+    var view = try StoreView.open(alloc, io, cwd_path);
+    defer view.deinit(alloc);
+    const resolved = view.site.resolveVersion(alloc, ref.id, version, .sealed) catch |err| {
         try printErrFmt(alloc, io, "ext push: {s}@{s} is not usable here ({s}); `nulya ext build` it first\n", .{ ref.id, version, @errorName(err) });
         return 1;
     };
     defer resolved.deinit(alloc);
 
-    const version_rel = try search.roots.store(resolved.root).versionDir(alloc, ref.id, version);
+    const st = view.site.store().?; // resolving it proved the store is there
+    const version_rel = try st.versionDir(alloc, ref.id, version);
     defer alloc.free(version_rel);
-    var version_dir = try search.roots.entries[resolved.root].dir.openDir(io, version_rel, .{ .iterate = true });
+    var version_dir = try st.root.openDir(io, version_rel, .{ .iterate = true });
     defer version_dir.close(io);
 
     const launcher = remote.parseSpec(spec) catch {

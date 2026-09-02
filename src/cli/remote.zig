@@ -24,7 +24,6 @@ const protocol = @import("../environment/remote/protocol.zig");
 const integrity = @import("../extension/integrity.zig");
 const ext_manifest = @import("../extension/manifest.zig");
 const ext_store = @import("../extension/store.zig");
-const trust = @import("../journals/trust.zig");
 const launch = @import("../launch.zig");
 const common = @import("common.zig");
 /// The task layout and the supervisor's own flags, borrowed rather than
@@ -175,40 +174,13 @@ const Agent = struct {
     reader: std.Io.File.Reader,
     arena: std.heap.ArenaAllocator,
     lenv: *environment.LocalEnvironment,
-    /// THIS machine's environment, borrowed from `remoteServe`. Read for exactly
-    /// one question: which `<NULYA_HOME | ~/.nulya>` holds the trust journal that
-    /// answers for the workspace store here (`workspaceStoreRefusal`).
-    host: *const std.process.Environ.Map,
-    /// The workspace-store gate's answer, for the one `cwd` it was asked about.
-    gate: ?Gate = null,
     /// The one extension version currently being pushed into this machine's
-    /// user store, if any (`store-stat` opens it, `store-commit` closes it).
-    /// One, because the channel is one request at a time (protocol rule 1).
+    /// store, if any (`store-stat` opens it, `store-commit` closes it). One,
+    /// because the channel is one request at a time (protocol rule 1).
     push: ?StagedPush = null,
     /// Set when the host closed the channel: the loop stops, and whatever was
     /// running has already been killed.
     stop: bool = false,
-
-    /// One decided workspace, remembered for the life of this process.
-    ///
-    /// A channel serves one session and a session has one workspace, so this is
-    /// asked once. It lives no longer than the process, so a person who runs
-    /// `nulya ext trust` over here is answered by the NEXT connection and there
-    /// is no invalidation to get wrong.
-    const Gate = struct {
-        /// The `cwd` this answer is about, owned.
-        cwd: []u8,
-        /// Why that workspace may not be resolved through, owned — or null when
-        /// it may.
-        refusal: ?[]u8,
-    };
-
-    fn clearGate(self: *Agent) void {
-        const g = self.gate orelse return;
-        self.gate = null;
-        self.alloc.free(g.cwd);
-        if (g.refusal) |m| self.alloc.free(m);
-    }
 
     fn reply(self: *Agent, rep: protocol.Reply, first: []const u8, second: []const u8) !void {
         const line = try protocol.encodeReply(self.alloc, rep);
@@ -232,12 +204,11 @@ const Agent = struct {
     }
 };
 
-/// A version being copied into THIS machine's user store, one file per frame.
+/// A version being copied into THIS machine's store, one file per frame.
 ///
-/// Staged rather than written into `versions/<v>` directly, for the reason
-/// `build_ext.adoptVersionDir` copies-then-validates: a version directory that
-/// exists is one other processes will compose and run, so it may only appear
-/// once these bytes have been checked against their own seal HERE. A channel
+/// Staged rather than written into `versions/<v>` directly: a version directory
+/// that exists is one other processes will compose and run, so it may only
+/// appear once these bytes have been checked against their own seal HERE. A channel
 /// that dies mid-push leaves a staging directory (cleared by the next push of
 /// the same id) and nothing under `versions/`.
 ///
@@ -282,13 +253,12 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // The ordinary local environment of THIS machine. No session ref: an agent
     // runs commands, it does not own a ledger.
     //
-    // THIS machine's store roots, resolved the way every other nulya process on
-    // it resolves them: a version that arrived by `ext push` lands in the user
-    // store here, and a workspace over here may hold its own. The host never
-    // names a directory on this machine.
-    const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
-    defer launch.freeExtensionRoots(alloc, ext_roots);
-    var lenv = try launch.localEnvironment(alloc, io, &cfg, null, ext_roots);
+    // THIS machine's store, resolved the way every other nulya process on it
+    // resolves it: a version that arrived by `ext push` lands here, and the
+    // host never names a directory on this machine.
+    const ext_store_path = try launch.storePath(alloc, &host);
+    defer alloc.free(ext_store_path);
+    var lenv = try launch.localEnvironment(alloc, io, &cfg, null, ext_store_path);
     defer lenv.deinit();
 
     const read_buf = try alloc.alloc(u8, protocol.max_header_bytes);
@@ -300,10 +270,8 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         .reader = std.Io.File.stdin().readerStreaming(io, read_buf),
         .arena = .init(alloc),
         .lenv = &lenv,
-        .host = &host,
     };
     defer agent.arena.deinit();
-    defer agent.clearGate();
     // A channel that ends mid-push leaves no half-installed version and no held
     // lease — the staging tree goes with the connection that was filling it.
     defer closePush(&agent);
@@ -476,10 +444,6 @@ fn serveShell(agent: *Agent, req: protocol.Request, command: []const u8) !void {
 /// seal, and `extension/protocol.zig` derives `NULYA_TOOL` / `NULYA_ARG_<k>`
 /// from the arguments in the payload.
 ///
-/// The workspace-store trust gate is asked HERE too (`workspaceStoreRefusal`):
-/// the store that could shadow a pushed version is this machine's, so this
-/// machine's trust journal is the one that answers.
-///
 /// No presentation file: its reader is the front end, on the host.
 fn serveRunExtension(agent: *Agent, req: protocol.Request, arguments: []const u8) !void {
     if (req.id.len == 0 or req.version.len == 0 or req.tool.len == 0) {
@@ -487,10 +451,6 @@ fn serveRunExtension(agent: *Agent, req: protocol.Request, arguments: []const u8
         return;
     }
     const cwd = if (req.cwd.len != 0) req.cwd else ".";
-    if (try workspaceStoreRefusal(agent, cwd)) |message| {
-        try agent.refuse(message);
-        return;
-    }
     return serveRun(agent, .{ .extension = .{
         .id = req.id,
         .version = req.version,
@@ -500,76 +460,6 @@ fn serveRunExtension(agent: *Agent, req: protocol.Request, arguments: []const u8
         .max_output_bytes = if (req.max_output_bytes != 0) req.max_output_bytes else 1 << 20,
         .timeout_ms = req.timeout_ms,
     } });
-}
-
-/// The workspace-store trust gate, asked HERE, before this machine resolves
-/// anything through its own roots.
-///
-/// `.nulya/extensions` is checkout content AND the first store root over here
-/// exactly as on the host, so without this a store that arrived with a clone ON
-/// THIS MACHINE would shadow the very version `nulya ext push` delivered into
-/// this machine's user store. The machine holding the bytes is the only one
-/// that can answer for them.
-///
-/// The answer refuses ONE CALL, never the channel: the host turns it into an
-/// ordinary failed extension call, the model reads the sentence, and one
-/// `nulya ext trust` over here fixes it.
-///
-/// Only the workspace root is gated, exactly as on the host: the user store and
-/// `extensions.paths` are out of a checkout's reach, which is also why
-/// `ext push` lands in the user store.
-fn workspaceStoreRefusal(agent: *Agent, cwd: []const u8) !?[]const u8 {
-    if (agent.gate) |g| {
-        if (std.mem.eql(u8, g.cwd, cwd)) return g.refusal;
-        agent.clearGate();
-    }
-    const refusal = try decideWorkspaceStore(agent, cwd);
-    errdefer if (refusal) |m| agent.alloc.free(m);
-    agent.gate = .{ .cwd = try agent.alloc.dupe(u8, cwd), .refusal = refusal };
-    return refusal;
-}
-
-fn decideWorkspaceStore(agent: *Agent, cwd: []const u8) !?[]u8 {
-    const occupied = launch.occupiedWorkspaceStore(agent.alloc, agent.io, cwd) catch |err| {
-        if (err == error.OutOfMemory) return err;
-        // Whether that store holds anything is unanswerable here, so this side
-        // refuses rather than resolves: an unreadable store must not be quieter
-        // than an untrusted one.
-        return try std.fmt.allocPrint(
-            agent.alloc,
-            "could not read {s} on this machine ({s}), so no extension may be resolved through it",
-            .{ ext_store.workspace_root_rel, @errorName(err) },
-        );
-    };
-    // Absent, or holding nothing a session could compose or a CLI could run:
-    // there is nothing here to shadow anything with.
-    const path = occupied orelse return null;
-    defer agent.alloc.free(path);
-
-    // No home at all means there is nowhere a trust could have been recorded —
-    // the same honest refusal `ensureWorkspaceStoreTrusted` gives on the host.
-    if (try launch.userHomeDir(agent.alloc, agent.host)) |home| {
-        defer agent.alloc.free(home);
-        const trusted = trust.isTrusted(agent.alloc, agent.io, home, path) catch |err| {
-            if (err == error.OutOfMemory) return err;
-            // A corrupt journal answers neither question (`journals/trust.zig`),
-            // and the one thing it may not do is answer "trusted".
-            return try std.fmt.allocPrint(
-                agent.alloc,
-                "the trust journal in {s} on this machine could not be read ({s}), so {s} cannot be used here",
-                .{ home, @errorName(err), path },
-            );
-        };
-        if (trusted) return null;
-    }
-    return try std.fmt.allocPrint(
-        agent.alloc,
-        "the extension store {s} on this machine arrived with a checkout and is not trusted there, " ++
-            "so no extension may be resolved through it; on that machine review it " ++
-            "(`nulya ext list`, `nulya ext inspect <id>`) and run `nulya ext trust` in that workspace, " ++
-            "or delete the store",
-        .{path},
-    );
 }
 
 fn serveRun(agent: *Agent, request: @FieldType(RunTask, "req")) !void {
@@ -844,16 +734,14 @@ fn serveTaskKill(agent: *Agent, req: protocol.Request) !void {
 // ask `integrity.validateVersionDir` — the same function activation, `ext run`
 // and a donor copy ask — whether what arrived is that version.
 
-/// Where a pushed version lands: this machine's USER store.
-///
-/// Not the workspace store, and not a choice the host gets to make. The user
-/// store is the one root that is by definition this machine's own — the trust
-/// gate exists for the workspace root, which arrives with a checkout — and the
-/// host resolving a path over here would be the host modelling another
-/// machine's file system.
+/// Where a pushed version lands: this machine's store, which is the only place
+/// version bytes live here. Not a choice the host gets to make — the host
+/// resolving a path over here would be the host modelling another machine's
+/// file system.
 fn openUserStore(agent: *Agent) !?std.Io.Dir {
-    const spec = (try common.writeRootSpec(agent.alloc, true)) orelse return null;
+    const spec = try common.storePath(agent.alloc);
     defer agent.alloc.free(spec);
+    if (spec.len == 0) return null;
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = try common.cwdRealPath(agent.io, &cwd_buf);
     return try ext_store.openOrCreateRoot(agent.io, cwd, spec);
@@ -962,9 +850,9 @@ fn serveStoreCommit(agent: *Agent) !void {
     };
     defer closePush(agent);
 
-    // These bytes arrived over a channel, so this is `adoptVersionDir`'s
-    // moment at the same level: re-digest the package, prove it reproduces this
-    // very version id, prove the binary is the sealed one.
+    // These bytes arrived over a channel, so this is the moment to re-digest
+    // the package, prove it reproduces this very version id, and prove the
+    // binary is the sealed one.
     integrity.validateVersionDir(agent.alloc, agent.io, p.root, p.staging_rel, p.version, p.id, .sealed) catch |err| {
         try agent.refuseFmt("what arrived is not {s}@{s} ({s}); nothing was installed", .{ p.id, p.version, @errorName(err) });
         return;

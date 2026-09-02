@@ -42,12 +42,10 @@
  * plugin handled, an observed line delivered, `notice`, `state.set`, a panel
  * opening or closing, and a command finishing.
  */
-import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { createSignal, type Accessor } from "solid-js"
 import { extList, extRun, type StepLine, type StreamLine } from "../nulya/cli.ts"
-import { listExtensions, packageDirOf, readContributions, storeRoots, type Contributions } from "../nulya/files.ts"
-import { samePath, storeTrusted, workspaceStorePath } from "../extensions.ts"
+import { listExtensions, packageDirOf, readContributions, storePath, type Contributions } from "../nulya/files.ts"
 import { pluginState, rememberPluginState } from "../state/tui_state.ts"
 import { builtin_names } from "../commands.ts"
 import type { Workspace } from "../nulya/bin.ts"
@@ -76,9 +74,6 @@ import type {
  */
 export const plugin_api_version = 2
 export const supported_plugin_api_versions: ReadonlySet<number> = new Set([1, plugin_api_version])
-
-/** Where a workspace store root is spelled in `ext list` output. */
-const workspace_root_spec = ".nulya/extensions"
 
 /** One package this process has loaded, and what it is allowed to touch. */
 export interface LoadedPlugin {
@@ -271,10 +266,8 @@ export async function pluginCandidates(
 ): Promise<PluginCandidate[]> {
   const wanted: { id: string; version: string }[] = []
   try {
-    const trusted = storeTrusted(workspaceStorePath(ws), env)
     for (const entry of await listExtensions(ws)) {
-      if (entry.current === null || entry.shadowed) continue
-      if (entry.root === workspace_root_spec && !trusted) continue
+      if (entry.current === null) continue
       wanted.push({ id: entry.id, version: entry.current })
     }
   } catch {
@@ -287,14 +280,14 @@ export async function pluginCandidates(
     }
   }
   if (wanted.length === 0) return []
-  const roots = await storeRoots(ws)
+  const store = storePath(env)
   const out: PluginCandidate[] = []
   for (const one of wanted) {
-    const contributions = await readContributions(ws, one.id, one.version, roots)
+    const contributions = await readContributions(ws, one.id, one.version, store)
     // No entry for this front end is an ordinary answer, not a warning: the
     // manifest keys `ui` by host, and a package may ship modules for others.
     if (!contributions.ui) continue
-    const dir = packageDirOf(roots, one.id, one.version)
+    const dir = packageDirOf(store, one.id, one.version)
     if (dir === null) continue
     out.push({
       id: one.id,
@@ -522,21 +515,17 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
     if (id.length === 0 || (split > 0 && version.length === 0)) throw new Error(`invalid package ref '${ref}'`)
 
     if (version.length === 0) {
-      const effective = (await extList(seams.ws)).find((entry) => entry.id === id && !entry.shadowed)
+      const effective = (await extList(seams.ws)).find((entry) => entry.id === id)
       if (!effective || effective.current === null) {
         throw new Error(`${id} has no current version · build and activate it, then try again`)
       }
       version = effective.current
     }
 
-    const roots = await storeRoots(seams.ws)
-    const dir = packageDirOf(roots, id, version)
-    if (dir === null) throw new Error(`${id}@${version} is not built in an effective extension store`)
-    const selectedRoot = roots.find((root) => existsSync(join(root, id, "versions", version, "package")))
-    if (selectedRoot && samePath(selectedRoot, workspaceStorePath(seams.ws)) && !storeTrusted(selectedRoot, seams.env)) {
-      throw new Error(`${id}@${version} is in an untrusted workspace store · trust the store, then try again`)
-    }
-    const contributions = await readContributions(seams.ws, id, version, roots)
+    const store = storePath(seams.env)
+    const dir = packageDirOf(store, id, version)
+    if (dir === null) throw new Error(`${id}@${version} is not built in this machine's extension store`)
+    const contributions = await readContributions(seams.ws, id, version, store)
     if (!contributions.internalTools.includes(tool)) {
       throw new Error(`${id}@${version} cannot run '${tool}' here: its frozen manifest does not declare it internal`)
     }

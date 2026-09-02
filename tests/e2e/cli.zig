@@ -46,7 +46,7 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // make (compose a version in, put a tool on the tool face).
     for ([_][]const u8{
         "ext init",       "--zig",      "ext build",    "ext run",    "--arg",
-        "ext activate",   "--user",     "ext trust",    "ext api",    "ext sync",
+        "ext activate",   "--user",     "ext migrate",  "ext api",    "ext sync",
         "ext seed",       "ext prune",  "--dry-run",    "--activate", "session new",
         "--with",         "--parent",   "--carry",      "--prompt",   "session step",
         "--max-steps",    "--effort",   "--stream",     "--gate",     "session events",
@@ -117,11 +117,11 @@ test "cli ext api: manifest and examples carry no document citations and walk sc
     // Today's authority and today's manifest, not a version-stamped note: the
     // same authority as shell, the sanitized child environment, the two
     // variables that ARE passed, one field from each declaration tier, the
-    // enforced clock, the store gate.
+    // enforced clock, where the bytes live.
     for ([_][]const u8{
         "shell",     "NULYA_EXE", "NULYA_SESSION", "readonly",
         "commands",  "ui",        "timeout_ms",    "600",
-        "ext trust",
+        "/store/",
         // The one axis and the placement vocabulary in full — the screen has to
         // be readable without the docs.
         "[extensions] with", "auto", "manual", "internal",
@@ -145,7 +145,7 @@ test "cli ext api: manifest and examples carry no document citations and walk sc
     for ([_][]const u8{
         "ext init my.helper", "ext build",       "ext run",  "--arg",
         "ext activate",       "--with",          "--user",
-        "ext trust",          "session outcome", "ext sync", "ext prune",
+        "session outcome",    "ext sync",        "ext prune",
         // The default scaffold is a script, so the worked
         // path has to show what a script actually reads.
         "NULYA_ARG_",         "--zig",
@@ -199,6 +199,7 @@ test "kernel prompt: a fresh session's first system block names NULYA_EXE, nulya
             .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
+        .extension_store = support.store_rel,
     }, .{ .workspace = ws, .session_path = spath });
     defer sess.deinit();
 
@@ -271,6 +272,7 @@ test "bundled guide: ext build extensions/guide is data kind and needs no zig; s
             .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
+        .extension_store = support.store_rel,
     }, .{ .workspace = ws, .session_path = spath });
     defer sess.deinit();
 
