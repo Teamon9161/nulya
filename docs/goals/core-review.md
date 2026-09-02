@@ -221,3 +221,6 @@ vtable 后面这道缝。
   验收：`zig build test` 593/593 · `zig build e2e` 172 pass 3 skip ·
   `tui/` 下 `bun test` 769 pass 1 fail，那一条仍是 `/ext` 的 `r` 帮助行在本机 worktree
   长路径下折行（与 Lane C/D 记的是同一条）。`nulya help` 净减一行。
+
+- **2026-09-02 · 中刀 G**（`1c8aec3` 删 credentials.toml · `b3ca604` tool-usage journal 收窄）：两把独立的删法，各一个 commit。① 删 `launch.fileValue`/`fileValueAt`/`credentialFilePath`/`credentials_file`/`warned_credentials_mode` 与 `CredentialSource.file`，`credentialSource` 收成 config → env → (codex) login 两处；`session new` 的缺凭证提示、`config show` 的 `credential_source`（靠 `@tagName` 自动收窄，没有硬编码词表要改）、TUI 的联合类型、DESIGN §9.5 同步；e2e 的凭证测试从"写 credentials.toml"改成"设 env"，launch.zig 删文件路径单测、留一条更小的 config-beats-env 优先级单测。② tool-usage journal 该收到多窄，契约给了两个方案，选了较小的那个：`session.recordCompletedToolStats` 与它写的 `ok` 列原样保留——TUI `/ext` 的 usage 表要跨全部 session 聚合成功率，那是单个 ledger 文件答不出的问题，把它搬到 ledger 需要重写那张表的数据源；改成给 `session list --json` 加一列 `tools{calls, failures}`，直接数当前 session 文件里的 `tool_results[].ok`，不碰 journal。journal 现在的立足点缩到两件 ledger 说不出的事（`duration_ms`、`ext run` 场外调用的身份），单场调了几次、几次失败已经有 ledger 原生的答案；不升 `v`。DESIGN §3.3/§5.5/§14、CLAUDE.md「三条 journal」一句、docs/tui.md §2.1 同步；PLAN §3.5 未提及这两列的删减，未改。
+  验收：`zig build test` 593/593 · `zig build e2e` 172 pass 3 skip · `tui/` 下 `bun test` 769 pass 1 fail，同一条 `/ext` 的 `r` 帮助行长路径折行（与前几条 lane 记的是同一条，本刀之前就红）。
