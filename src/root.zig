@@ -5,13 +5,12 @@
 //!
 //! The e2e test binary is an out-of-tree module (Zig 0.16 forbids a single file
 //! living in two module graphs), so it reaches core code only through what is
-//! re-exported here — the e2e suite exercises exactly the surface a dependent
-//! gets. This file is NOT part of the shipped `nulya` binary; nothing in the
-//! binary's own module graph imports it.
+//! re-exported here — which means the e2e suite exercises exactly the surface a
+//! dependent gets. This file is NOT part of the shipped binary.
 //!
-//! Pre-release: the API moves when the kernel does. Keep it a thin re-export
-//! surface — add a line when a consumer genuinely needs a core module, never
-//! any logic.
+//! No stability promise yet: pre-release, the API moves when the kernel does.
+//! Keep it a thin re-export surface: add a line when a consumer genuinely needs
+//! a core module, never any logic.
 
 pub const build_ext = @import("extension/build/build_ext.zig");
 pub const composition = @import("composition.zig");

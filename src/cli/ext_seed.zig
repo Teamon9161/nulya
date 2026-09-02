@@ -8,10 +8,9 @@
 //! wrote — which answers "whose bytes are these". Either it still describes
 //! what is on disk (nobody touched it, so it may be refreshed to the newer
 //! bundled source) or it does not (someone edited it: left alone and named).
-//!
-//! The record is a fact about one directory, gone when the directory goes. The
-//! package snapshot a build freezes is manifest-driven, so `.seed` never enters
-//! a version and never moves a version id.
+//! The record is a fact about one directory, gone when the directory goes; the
+//! snapshot a build freezes is manifest-driven, so `.seed` never enters a
+//! version.
 
 const std = @import("std");
 const store = @import("../extension/store.zig");
@@ -26,19 +25,16 @@ const printOut = common.printOut;
 const printErrFmt = common.printErrFmt;
 const printErr = common.printErr;
 
-/// Where a draft records which binary wrote it. A dotfile beside `current` and
-/// `.lock`, in the same directory it describes.
+/// Where a draft records which binary wrote it: a dotfile beside `current` and
+/// `.lock`, in the directory it describes.
 pub const record_file = ".seed";
 
 /// The entries at the top of `<root>/<id>/` that are the STORE's, not the
-/// draft's: immutable versions, the activation pointer, the writer lease, and
-/// this record itself. Everything else under `<id>/` is draft source.
+/// draft's. Everything else under `<id>/` is draft source.
 const store_entries = [_][]const u8{ "versions", "current", ".lock", record_file };
 
-/// What one seeded draft says about itself (`<root>/<id>/.seed`).
-///
-/// `digest` is the whole point; `nulya` and `at` are provenance for the line a
-/// person reads. Nothing branches on them.
+/// What one seeded draft says about itself (`<root>/<id>/.seed`). `digest` is
+/// the whole point; `nulya` and `at` are provenance nothing branches on.
 pub const Record = struct {
     v: u32 = 1,
     digest: []const u8,
@@ -46,7 +42,6 @@ pub const Record = struct {
     at: []const u8 = "",
 };
 
-/// What this pass found a draft to be, before deciding anything.
 pub const State = enum {
     /// No draft: seeding writes one.
     absent,
@@ -55,17 +50,15 @@ pub const State = enum {
     /// The binary's own copy, untouched since it was written, from an older
     /// nulya. Safe to refresh.
     stale,
-    /// Somebody's: edited here, hand-copied, or seeded by a nulya from before
-    /// there were records. Left alone unless `--force` names it.
+    /// Somebody's: edited here, hand-copied, or seeded before there were
+    /// records. Left alone unless `--force` names it.
     theirs,
 };
 
 /// Compare what is on disk with what this binary ships, and with what the last
-/// seed said it wrote.
-///
-/// Both digests are computed the same way over the same shape (paths relative
-/// to the draft directory, sorted, with their bytes), so `disk == bundled` and
-/// `disk == record` are comparable statements.
+/// seed said it wrote. Both digests are computed the same way over the same
+/// shape (paths relative to the draft directory, sorted, with their bytes), so
+/// `disk == bundled` and `disk == record` are comparable statements.
 pub fn classify(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -97,8 +90,8 @@ pub fn bundledDigest(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
 }
 
 /// The digest of what is on disk under `<root>/<id>/`, or null when there is no
-/// draft there at all. Store-owned entries are skipped: a build that produced a
-/// version, an activation, or this record must not make a draft look edited.
+/// draft there at all. Store-owned entries are skipped: a build, an activation
+/// or this record must not make a draft look edited.
 pub fn draftDigest(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir, id: []const u8) !?[]u8 {
     const marker = try std.fs.path.join(alloc, &.{ id, "extension.json" });
     defer alloc.free(marker);
@@ -117,9 +110,7 @@ pub fn draftDigest(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir, i
 }
 
 /// Write the bundled files for `id` into the root, replacing whatever draft is
-/// there, and record what was written. Versions and `current` are untouched:
-/// this only ever rewrites source.
-///
+/// there, and record what was written. Versions and `current` are untouched.
 /// Takes the store's own `<id>/.lock`, so a seed cannot land in the middle of a
 /// `build` reading the same tree.
 pub fn writeDraft(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir, id: []const u8) !usize {
@@ -139,12 +130,11 @@ pub fn writeDraft(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir, id
     return count;
 }
 
-/// Record the tree that is on disk right now as this binary's own.
-///
-/// Called after writing a draft, and also when an existing draft turns out to
-/// be byte-identical to what this binary ships: that draft IS the binary's
-/// copy, so recording it lets the NEXT nulya refresh it without asking. It is
-/// the only catching-up available to a store seeded before records existed.
+/// Record the tree that is on disk right now as this binary's own. Called
+/// after writing a draft, and also when an existing draft turns out to be
+/// byte-identical to what this binary ships: recording it lets the NEXT nulya
+/// refresh it without asking, which is the only catching-up available to a
+/// store seeded before records existed.
 pub fn writeRecord(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir, id: []const u8) !void {
     const digest = (try draftDigest(alloc, io, root_dir, id)) orelse return;
     defer alloc.free(digest);
@@ -162,11 +152,9 @@ pub fn writeRecord(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir, i
 }
 
 /// The digest the last seed recorded, or null when there is no record, it is
-/// unreadable, or it speaks a version this binary does not know.
-///
-/// Unreadable is deliberately the same answer as missing: the record only ever
-/// grants permission to overwrite, so a failure to read one must land on
-/// "leave it alone".
+/// unreadable, or it speaks a version this binary does not know. Unreadable is
+/// deliberately the same answer as missing: the record only ever grants
+/// permission to overwrite, so failing to read one lands on "leave it alone".
 fn readRecord(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir, id: []const u8) !?[]u8 {
     const path = try std.fs.path.join(alloc, &.{ id, record_file });
     defer alloc.free(path);
@@ -285,10 +273,10 @@ fn removeDraftFiles(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir, 
 /// `nulya ext seed [--user] [<id>…] [--force] [--dry-run]`.
 ///
 /// Four outcomes, one line each, and the summary counts them: `seeded` (there
-/// was nothing), `updated` (this binary's own copy, moved forward), `up to date`
-/// (nothing to do), `left alone` (someone else's — named, with the way to
-/// replace it). `--force` turns the last into `replaced`; it is the only way a
-/// seed overwrites work that is not its own.
+/// was nothing), `updated` (this binary's own copy, moved forward), `up to
+/// date`, `left alone` (someone else's — named, with the way to replace it).
+/// `--force` turns the last into `replaced`; it is the only way a seed
+/// overwrites work that is not its own.
 pub fn extSeed(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const flags = try takeUserFlag(alloc, args);
     defer alloc.free(flags.rest);
@@ -327,8 +315,7 @@ pub fn extSeed(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     defer alloc.free(root_spec);
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    // A plan must not leave a mark, and creating the root directory IS one, so
-    // dry-run only opens what exists.
+    // A plan must not leave a mark, and creating the root directory IS one.
     var root_dir: ?std.Io.Dir = if (dry_run)
         store.openRoot(io, cwd_path, root_spec) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => null,
@@ -439,8 +426,7 @@ test "a draft seeded by this binary is recognised as its own, and an edit makes 
     try tmp.dir.writeFile(io, .{ .sub_path = manifest_rel, .data = edited });
     try std.testing.expectEqual(State.theirs, try classify(alloc, io, tmp.dir, id));
 
-    // …and a draft with no record at all is theirs too: that is every store
-    // seeded before records existed.
+    // …and a draft with no record at all is theirs too.
     const record_rel = try std.fs.path.join(alloc, &.{ id, record_file });
     defer alloc.free(record_rel);
     try tmp.dir.deleteFile(io, record_rel);
@@ -468,7 +454,7 @@ test "a draft the binary ships but a stale record describes is this binary's to 
     try writeRecord(alloc, io, tmp.dir, id);
     try std.testing.expectEqual(State.stale, try classify(alloc, io, tmp.dir, id));
 
-    // Seeding it again restores this binary's bytes and re-records them; a file
+    // Seeding again restores this binary's bytes and re-records them; a file
     // the newer draft does not have goes with it.
     const junk_rel = try std.fs.path.join(alloc, &.{ id, "left-over.txt" });
     defer alloc.free(junk_rel);

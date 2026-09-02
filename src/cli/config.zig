@@ -31,29 +31,30 @@ const ShowOptions = struct {
     as_json: bool,
     /// Ask each usable codex profile's endpoint for its live model catalogue
     /// and write it to the Codex CLI's cache before projecting. Set only by
-    /// `config refresh`, the one verb in this family that goes to the network.
+    /// `config refresh`, the one verb here that goes to the network.
     refresh: bool = false,
 };
 
-/// The projection a picker (or the agent, via shell) reads: the EFFECTIVE
-/// provider profiles after the whole config chain, each with whether its
-/// credential is usable right now, plus the model catalog. Never a secret —
-/// only the env var NAME and a boolean. It shows what `session new` would see.
+/// The projection a picker reads: the EFFECTIVE provider profiles after the
+/// whole config chain, each with whether its credential is usable right now,
+/// plus the model catalog. Never a secret — only the env var NAME and a
+/// boolean. It shows what `session new` would see.
 const ConfigView = struct {
-    /// Where the chain reads from, so a front end writes to the same place it
-    /// shows.
+    /// Where the chain reads from, so a front end writes where it shows.
     paths: Paths,
     active_profile: []const u8,
     profiles: []const ProfileView,
     models: []const config.ModelParams,
     /// The merged `[registry]` — the tool face this workspace opens a session
-    /// with. Effective values only, not which layer contributed them. Typed as
-    /// `config.Registry`, so the two names printed are the two keys to write
-    /// back.
+    /// with. Effective values only; typed as `config.Registry`, so the names
+    /// printed are the keys to write back.
     registry: config.Registry,
-    /// Which packages are a member of every session opened here. Projected so a
-    /// reader does not have to open the config files themselves, one of which
-    /// may hold an inline `api_key`.
+    /// Which packages are a member of every session opened here. Projected for
+    /// the same reason as the pins: a reader who cannot see it here goes and
+    /// reads the config files, one of which may hold an inline `api_key`.
+    ///
+    /// `extensions.paths` is deliberately not projected: it names directories
+    /// this machine will run code from.
     extensions: ExtensionsView,
 
     const ExtensionsView = struct {
@@ -74,9 +75,8 @@ const ConfigView = struct {
         /// Whether `session new --profile <name>` would freeze this provider
         /// (true) or fall back to scripted (false).
         credential: bool,
-        /// Where the credential comes from: `config` (the profile's own
-        /// api_key), `env` (api_key_env is set), `login` (codex auth file),
-        /// `builtin` (scripted), `none`.
+        /// `config` (the profile's own api_key), `env` (api_key_env is set),
+        /// `login` (codex auth file), `builtin` (scripted), `none`.
         credential_source: []const u8,
         /// The default model id and the selectable list (never empty for a
         /// real provider: at least the default).
@@ -85,9 +85,7 @@ const ConfigView = struct {
         effort: ?[]const u8,
         /// What THIS profile's own endpoint says about the ids in `models`,
         /// parallel to it (`catalog[i]` describes `models[i]`). Null — every
-        /// profile but codex — means "look the id up in the top-level `models`
-        /// catalog".
-        ///
+        /// profile but codex — means "look the id up in the top-level catalog".
         /// A ChatGPT subscription serves several of the same ids with a smaller
         /// window, an extra effort level and its own defaults, so only its own
         /// `codex.Catalog` describes what a session on it would get.
@@ -104,8 +102,7 @@ fn configShow(alloc: std.mem.Allocator, io: std.Io, opts: ShowOptions) !u8 {
     defer paths.deinit(alloc);
 
     // Before the projection, so what prints below is what was just fetched. A
-    // failed refresh still projects whatever is on disk, but decides the exit
-    // code.
+    // failed refresh still projects what is on disk, but decides the exit code.
     const refreshed = if (opts.refresh) try refreshCodexCatalogs(alloc, io, &cfg, &host) else true;
 
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -176,9 +173,6 @@ fn configShow(alloc: std.mem.Allocator, io: std.Io, opts: ShowOptions) !u8 {
 /// and the profile has not been told what it serves: today, a codex profile
 /// with no `models` list reads the Codex CLI's cache. An explicit `models` in
 /// any config layer wins — a discovered list never overrules a written one.
-///
-/// `io` and the environment are arguments rather than looked up here, so a test
-/// can point `CODEX_HOME` at a fixture and this stays the one code path.
 fn endpointCatalog(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -189,10 +183,8 @@ fn endpointCatalog(
     return codex.Catalog.load(alloc, io, env);
 }
 
-/// The catalogue as the two parallel lists the view carries, with the profile's
-/// default model first when it is one of them: `models[0]` is what a picker
-/// opens on, and it is what `ProviderProfile.defaultModel` would pick for a
-/// profile that names no `model`.
+/// The catalogue as the two parallel lists the view carries, the profile's
+/// default model first: `models[0]` is what a picker opens on.
 fn orderByDefault(
     a: std.mem.Allocator,
     params: []const config.ModelParams,
@@ -217,11 +209,10 @@ fn orderByDefault(
     return .{ .ids = ids, .params = ordered };
 }
 
-/// `nulya config refresh`: fetch today's catalogue for every codex profile whose
-/// subscription credential is present right now, and write it to the file the
-/// projection reads. Returns false when the refresh did not happen — a failure,
-/// or nothing to refresh at all — which the caller turns into exit 1; the
-/// projection is still printed either way.
+/// `nulya config refresh`: fetch today's catalogue for every codex profile
+/// whose subscription credential is present right now, and write it to the file
+/// the projection reads. False means it did not happen, which the caller turns
+/// into exit 1; the projection is still printed either way.
 fn refreshCodexCatalogs(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -260,8 +251,8 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
         }
         if (p.effort) |e| try w.print(" effort={s}", .{e});
         try w.print("\n      model: {s}", .{p.model});
-        // A profile with its own catalogue prints it in full below instead —
-        // those ids are NOT described by the shared catalog at the bottom.
+        // A profile with its own catalogue prints it in full below; those ids
+        // are NOT described by the shared catalog at the bottom.
         if (p.catalog == null and p.models.len > 1) {
             try w.writeAll("  [");
             for (p.models, 0..) |m, i| {
@@ -284,8 +275,7 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
     for (view.models) |m| try writeModelLine(w, m);
     // Under the exact key names a reader writes back into a config file.
     try w.print("\nregistry:\n  max_tools            {d}\n", .{view.registry.max_tools});
-    // An empty list prints as "(none)": that is an answer, a missing section is
-    // not.
+    // An empty list prints as "(none)": an answer, unlike a missing section.
     try w.writeAll("\nextensions:\n  with                 ");
     if (view.extensions.with.len == 0) {
         try w.writeAll("(none)");
@@ -298,13 +288,11 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
     try w.writeByte('\n');
 }
 
-/// One model's parameters, in the same columns wherever they come from — the
-/// shared `[[models]]` catalog or a profile's own endpoint.
+/// One model's parameters, in the same columns wherever they come from.
 fn writeModelLine(w: *std.Io.Writer, m: config.ModelParams) !void {
     try w.print("  {s: <22} {s: <18}", .{ m.id, m.label });
     if (m.context_window) |c| try w.print("  ctx {d: >7}", .{c});
-    // Only when true: absence of the word is absence of the claim, which is
-    // how the `--image` gate reads it.
+    // Only when true: absence of the word is absence of the claim.
     if (m.vision) try w.writeAll("  vision");
     if (m.efforts.len != 0) {
         try w.writeAll("  effort ");
@@ -337,7 +325,6 @@ test "config show projects profiles with credential availability and the catalog
     var env: std.process.Environ.Map = .init(alloc);
     defer env.deinit();
 
-    // Build the view the way configShow does, against a controlled env.
     const views = try alloc.alloc(ConfigView.ProfileView, profiles.len);
     defer alloc.free(views);
     for (profiles, 0..) |p, i| {
@@ -369,7 +356,6 @@ test "config show projects profiles with credential availability and the catalog
     try jw.write(view);
     const json = out.written();
 
-    // Round-trips through std.json as the TUI will read it.
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
     defer parsed.deinit();
     const root = parsed.value.object;
@@ -381,18 +367,14 @@ test "config show projects profiles with credential availability and the catalog
     try std.testing.expectEqualStrings("none", ps[0].object.get("credential_source").?.string);
     try std.testing.expectEqualStrings("DS_KEY_FOR_TEST", ps[0].object.get("api_key_env").?.string);
     try std.testing.expectEqual(@as(usize, 2), ps[0].object.get("models").?.array.items.len);
-    // Scripted is always runnable.
     try std.testing.expectEqual(true, ps[2].object.get("credential").?.bool);
     try std.testing.expectEqualStrings("builtin", ps[2].object.get("credential_source").?.string);
-    // An inline key IS a credential (source `config`) — but the key itself never
-    // appears; only the fact that the profile has one.
+    // An inline key IS a credential (source `config`) — the key never appears.
     try std.testing.expectEqual(true, ps[1].object.get("credential").?.bool);
     try std.testing.expectEqualStrings("config", ps[1].object.get("credential_source").?.string);
     try std.testing.expect(std.mem.indexOf(u8, json, "sk-secret-inline") == null);
     try std.testing.expect(ps[1].object.get("api_key") == null);
-    // The paths ride along so a front end writes where the kernel reads.
     try std.testing.expectEqualStrings("/home/me/.nulya/config.toml", root.get("paths").?.object.get("user").?.string);
-    // The catalog rides along, typed.
     const ms = root.get("models").?.array.items;
     try std.testing.expectEqualStrings("deepseek-v4-flash", ms[0].object.get("id").?.string);
     try std.testing.expectEqual(@as(usize, 4), ms[0].object.get("efforts").?.array.items.len);
@@ -403,26 +385,23 @@ test "config show projects profiles with credential availability and the catalog
     const projected_with = root.get("extensions").?.object.get("with").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), projected_with.len);
     try std.testing.expectEqualStrings("guide", projected_with[0].string);
-    // A member's tool selection rides along verbatim: the projection is what a
-    // reader writes back.
+    // A member's tool selection rides along verbatim.
     try std.testing.expectEqualStrings("std:read,grep", projected_with[1].string);
-    // `extensions.paths` is NOT projected.
     try std.testing.expect(root.get("extensions").?.object.get("paths") == null);
 
-    // The plain-text form mentions each profile and the model line.
     var text: std.Io.Writer.Allocating = .init(alloc);
     defer text.deinit();
     try writeConfigText(&text.writer, view);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "ds ") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "no key") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "effort off|low|high|max (default auto)") != null);
-    // Under the same key names the config file uses, so reading is enough to write.
+    // Under the config file's own key names, so reading is enough to write.
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "max_tools            6") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "with                 guide, std:read,grep") != null);
 }
 
 /// A models_cache.json the way the Codex CLI leaves one: the default model is
-/// NOT first, one model is hidden, and the window is a percentage of the raw one.
+/// NOT first, one model is hidden, and the window is a percentage of the raw.
 const codex_cache_fixture =
     \\{"fetched_at":"2026-07-15T10:42:23Z","client_version":"0.144.1","models":[
     \\ {"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list",
@@ -471,16 +450,14 @@ test "config show: a codex profile's model list and parameters come from the sub
     try std.testing.expectEqualStrings("xhigh", listed.params[1].efforts[3]);
     try std.testing.expectEqualStrings("low", listed.params[1].default_effort.?);
 
-    // An explicit `models` is a statement about what the profile serves; a
-    // discovered list never overrules a written one. Nor does any other kind of
-    // profile grow a catalogue.
+    // A discovered list never overrules an explicit `models`.
     var told: config.ProviderProfile = profile;
     told.models = &.{"gpt-5.5"};
     try std.testing.expect((try endpointCatalog(alloc, io, &env, told)) == null);
     try std.testing.expect((try endpointCatalog(alloc, io, &env, .{ .name = "openai", .kind = .openai })) == null);
 
-    // No cache on this machine: the profile still projects its default model,
-    // described by the shared `[[models]]` catalog (catalog stays null).
+    // No cache here: the profile still projects its default model, described by
+    // the shared `[[models]]` catalog (catalog stays null).
     var bare: std.process.Environ.Map = .init(alloc);
     defer bare.deinit();
     const empty_home = try std.fs.path.join(a, &.{ codex_home, "empty" });
@@ -489,7 +466,7 @@ test "config show: a codex profile's model list and parameters come from the sub
     try std.testing.expect((try endpointCatalog(alloc, io, &bare, profile)) == null);
 
     // The text form says where the list came from, and describes each id there
-    // rather than in the shared catalog at the bottom.
+    // rather than in the shared catalog.
     var text: std.Io.Writer.Allocating = .init(alloc);
     defer text.deinit();
     try writeConfigText(&text.writer, .{

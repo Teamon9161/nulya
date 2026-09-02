@@ -1,18 +1,13 @@
 //! `nulya remote …` — the two ends of the remote channel.
 //!
-//! `serve` is the FAR side: this same binary in a shell role, as
-//! `nulya task supervise` is. It reads frames on stdin, runs the commands they
-//! ask for through the ordinary `LocalEnvironment`, and writes the results back
-//! on stdout — which is why the remote side gets a real process-tree kill, a
-//! real secret denylist and a real wall-clock budget with no second
-//! implementation of any of them.
+//! `serve` is the FAR side: this same binary in a shell role. It reads frames
+//! on stdin, runs what they ask for through the ordinary `LocalEnvironment`,
+//! and writes results back on stdout — so the remote side gets a real
+//! process-tree kill, secret denylist and wall-clock budget with no second
+//! implementation. `check` and `ls` are the HOST side; `ls` is a protocol verb
+//! rather than a parsed `ls -1p` because a file name may contain a newline.
 //!
-//! `check` and `ls` are the HOST side: can I reach that machine, and what is on
-//! it. `ls` is a protocol verb rather than a parsed `ls -1p` because a file name
-//! may contain a newline and a browser needs the kind anyway.
-//!
-//! **stdout on the serving side is the channel.** Nothing here may print to it
-//! except frames; every diagnostic goes to stderr.
+//! **stdout on the serving side is the channel:** only frames go there.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -27,9 +22,6 @@ const ext_store = @import("../extension/store.zig");
 const launch = @import("../launch.zig");
 const lease = @import("../lease.zig");
 const common = @import("common.zig");
-/// The task layout and the supervisor's own flags, borrowed rather than
-/// re-derived: `cli/task.zig` owns what a task's directory is called and what
-/// files are in it, on whichever machine that directory happens to be.
 const task_cli = @import("task.zig");
 
 const flagValue = common.flagValue;
@@ -38,10 +30,8 @@ const printErrFmt = common.printErrFmt;
 const printOut = common.printOut;
 const printRaw = common.printRaw;
 
-/// How many directory entries one `list-dir` reply carries. The entries travel
-/// as PAYLOAD (protocol rule 6), so this is not about frame size — it keeps one
-/// answer a size a person or a browser can use. Truncation is SAID, never
-/// silent.
+/// How many directory entries one `list-dir` reply carries. They travel as
+/// PAYLOAD, so this is not about frame size. Truncation is SAID, never silent.
 const max_entries: usize = 1000;
 const remote_password_buffer_bytes = 4097;
 
@@ -58,8 +48,8 @@ pub fn dispatchRemote(alloc: std.mem.Allocator, io: std.Io, args: []const []cons
 
 // ── the host side ───────────────────────────────────────────────────────────
 
-/// Open a channel from a `--env` spec, or print why not. Shared by `check` and
-/// `ls` so the two cannot disagree about what a bad spec means.
+/// Open a channel from a `--env` spec, or print why not — one answer about a
+/// bad spec for both `check` and `ls`.
 fn open(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?remote.Channel {
     const spec = flagValue(args, "--env") orelse {
         try printErrFmt(alloc, io, "--env is required ({s})\n", .{remote.spec_syntax});
@@ -83,9 +73,8 @@ fn open(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?remote
         alloc.free(secret);
     };
     return remote.Channel.connectPassword(alloc, io, l, launch.version, .default, password) catch |err| {
-        // The transport already wrote its own diagnostic to this process's
-        // stderr (it inherits it), so this adds the one thing that is missing:
-        // which spec produced it, and in the version case what to do.
+        // The transport already wrote its own diagnostic to stderr; this adds
+        // which spec produced it.
         switch (err) {
             error.RemoteVersionMismatch => try printErrFmt(alloc, io, "{s}: the nulya there speaks a different remote protocol; install a matching build on that machine\n", .{spec}),
             error.RemoteSpecUnsupportedOnHost => try printErrFmt(alloc, io, "{s}: cannot be reached from this host (wsl needs Windows)\n", .{spec}),
@@ -118,8 +107,6 @@ fn remoteLs(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     var ch = (try open(alloc, io, args)) orelse return 1;
     defer ch.deinit();
 
-    // The first non-flag word, so `nulya remote ls --env X /srv/app` reads the
-    // way every other listing verb does. No path = the agent's own directory.
     var path: []const u8 = ".";
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -140,8 +127,7 @@ fn remoteLs(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         try printErrFmt(alloc, io, "{s}\n", .{rep.message});
         return 1;
     }
-    // The listing rode in as payload; it borrows the channel arena, which stays
-    // valid until the next round — and there is none, this verb asks once.
+    // The listing rode in as payload, borrowing the channel arena.
     const entries = protocol.parseEntries(ch.arena.allocator(), ch.last_payload) catch {
         try printErrFmt(alloc, io, "could not read the listing of '{s}'\n", .{path});
         return 1;
@@ -157,8 +143,7 @@ fn remoteLs(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
             try printOut(alloc, io, "{s}{s}\n", .{ e.name, if (e.dir) "/" else "" });
         }
     }
-    // A note on an answered request is not a refusal, so it goes to stderr and
-    // the exit code stays 0: the listing above is real, just not all of it.
+    // A note on an answered request is not a refusal: stderr, exit 0.
     if (rep.message.len != 0) try printErrFmt(alloc, io, "{s}\n", .{rep.message});
     return 0;
 }
@@ -166,8 +151,7 @@ fn remoteLs(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
 // ── the far side ────────────────────────────────────────────────────────────
 
 /// Everything one served channel needs. The reader is shared by the main loop
-/// and the mid-command control watch, which is safe precisely because of
-/// protocol rule 2: those two phases never overlap.
+/// and the mid-command control watch: those two phases never overlap.
 const Agent = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -175,9 +159,8 @@ const Agent = struct {
     reader: std.Io.File.Reader,
     arena: std.heap.ArenaAllocator,
     lenv: *environment.LocalEnvironment,
-    /// The one extension version currently being pushed into this machine's
-    /// store, if any (`store-stat` opens it, `store-commit` closes it). One,
-    /// because the channel is one request at a time (protocol rule 1).
+    /// The one version being pushed into this store: the channel is one
+    /// request at a time.
     push: ?StagedPush = null,
     /// Set when the host closed the channel: the loop stops, and whatever was
     /// running has already been killed.
@@ -196,8 +179,6 @@ const Agent = struct {
         try self.reply(.{ .ok = false, .message = message }, "", "");
     }
 
-    /// Refuse with a sentence that has a value in it. The message dies with the
-    /// frame, which is exactly how long it is needed.
     fn refuseFmt(self: *Agent, comptime fmt: []const u8, args: anytype) !void {
         const msg = try std.fmt.allocPrint(self.alloc, fmt, args);
         defer self.alloc.free(msg);
@@ -209,13 +190,9 @@ const Agent = struct {
 ///
 /// Staged rather than written into `versions/<v>` directly: a version directory
 /// that exists is one other processes will compose and run, so it may only
-/// appear once these bytes have been checked against their own seal HERE. A channel
-/// that dies mid-push leaves a staging directory (cleared by the next push of
-/// the same id) and nothing under `versions/`.
-///
-/// The id's writer lease is held for the whole sequence — the same lease a
-/// build or an activate of that id takes (`Store.lease`), so a push and a local
-/// build cannot interleave inside one `<id>/`.
+/// appear once these bytes have been checked against their own seal HERE. The
+/// id's writer lease is held for the whole sequence, so a push and a local
+/// build cannot interleave.
 const StagedPush = struct {
     root: std.Io.Dir,
     id: []u8,
@@ -231,8 +208,7 @@ const StagedPush = struct {
 };
 
 /// Abandon whatever push is open: remove the staging tree, release the lease.
-/// Called on commit, on a second `store-stat`, and when the channel ends — the
-/// three ways a push stops being the current one.
+/// Called on commit, on a second `store-stat`, and when the channel ends.
 fn closePush(agent: *Agent) void {
     var p = agent.push orelse return;
     agent.push = null;
@@ -252,11 +228,9 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     defer cfg.deinit();
 
     // The ordinary local environment of THIS machine. No session ref: an agent
-    // runs commands, it does not own a ledger.
-    //
-    // THIS machine's store, resolved the way every other nulya process on it
-    // resolves it: a version that arrived by `ext push` lands here, and the
-    // host never names a directory on this machine.
+    // runs commands, it does not own a ledger. Its store is resolved the way
+    // every other nulya process here does, so the host never names a directory
+    // over here.
     const ext_store_path = try launch.storePath(alloc, &host);
     defer alloc.free(ext_store_path);
     var lenv = try launch.localEnvironment(alloc, io, &cfg, null, ext_store_path, common.stderr_diag);
@@ -273,16 +247,14 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         .lenv = &lenv,
     };
     defer agent.arena.deinit();
-    // A channel that ends mid-push leaves no half-installed version and no held
-    // lease — the staging tree goes with the connection that was filling it.
+    // A channel that ends mid-push leaves no half-installed version, no lease.
     defer closePush(&agent);
 
     while (!agent.stop) {
         _ = agent.arena.reset(.retain_capacity);
         const line = (agent.reader.interface.takeDelimiter('\n') catch break) orelse break;
         const req = protocol.parseRequest(agent.arena.allocator(), line) catch {
-            // Not this protocol any more. Say so once and stop: there is no
-            // resynchronising a stream whose framing is unknown.
+            // Not this protocol any more: unknown framing cannot be resynced.
             try agent.refuse("frame not understood");
             break;
         };
@@ -290,7 +262,7 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         if (payload.len != 0) agent.reader.interface.readSliceAll(payload) catch break;
         serveOne(&agent, req, payload) catch |err| {
             // A write failure means the host is gone; anything else is this
-            // agent's own fault and is worth one line on stderr before exiting.
+            // agent's own fault and is worth one line on stderr.
             if (err != error.Canceled) std.debug.print("nulya remote serve: {s}\n", .{@errorName(err)});
             break;
         };
@@ -299,10 +271,8 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 }
 
 fn serveOne(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
-    // The session this belongs to is published to everything spawned from here.
     // Only the IDENTITY exists on this machine — the session file is on the
-    // host — which is why it is `NULYA_SESSION_ID` and not `NULYA_SESSION`.
-    // Idempotent: one channel serves one session.
+    // host — hence `NULYA_SESSION_ID` and not `NULYA_SESSION`.
     if (req.session.len != 0) {
         const known = agent.lenv.env.get("NULYA_SESSION_ID") orelse "";
         if (!std.mem.eql(u8, known, req.session)) try agent.lenv.env.put("NULYA_SESSION_ID", req.session);
@@ -311,9 +281,8 @@ fn serveOne(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
         .hello => try serveHello(agent, req),
         .run_shell => try serveShell(agent, req, payload),
         .list_dir => try serveListDir(agent, req),
-        // A cancel with nothing running: the command it was meant for already
-        // finished. Acknowledged rather than treated as an error — the race is
-        // legitimate and the host is about to close the channel anyway.
+        // A cancel with nothing running: the command already finished, and
+        // that race is legitimate rather than an error.
         .cancel => try agent.reply(.{ .ok = true }, "", ""),
         .put_file => try servePutFile(agent, req, payload),
         .store_stat => try serveStoreStat(agent, req),
@@ -329,10 +298,8 @@ fn serveOne(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
 
 fn serveHello(agent: *Agent, req: protocol.Request) !void {
     if (req.v != protocol.version) {
-        // Answer with OUR version rather than a refusal: the host's
-        // `checkHello` compares and produces the sentence, and a reply that
-        // carried no version would make "wrong version" and "broken agent"
-        // indistinguishable.
+        // Answer with OUR version rather than a refusal: a reply carrying no
+        // version would make "wrong version" and "broken agent" the same.
         try agent.reply(.{ .ok = true, .v = protocol.version, .nulya = launch.version }, "", "");
         return;
     }
@@ -353,11 +320,8 @@ fn serveHello(agent: *Agent, req: protocol.Request) !void {
 }
 
 /// Runs something while watching for a `cancel` frame, so a canceled step on
-/// the host actually ends the process HERE.
-///
-/// One task for both run verbs: a shell command and an extension call are the
-/// same thing to this side — a child of this machine's local environment, with
-/// the same tree kill, the same budget and the same capture.
+/// the host ends the process HERE. One task for both run verbs: a shell command
+/// and an extension call are the same thing to this side.
 const RunTask = struct {
     agent: *Agent,
     req: union(enum) {
@@ -366,8 +330,6 @@ const RunTask = struct {
     },
     out: ?anyerror!Captured = null,
 
-    /// The two outcome types are the same four fields; keeping one shape here
-    /// is what lets the reply below be written once.
     const Captured = struct {
         stdout: []u8,
         stderr: []u8,
@@ -382,8 +344,8 @@ const RunTask = struct {
 
     fn run(self: *RunTask) void {
         const result = self.round();
-        // Canceled leaves `out` null: the local runner has already killed the
-        // whole process tree on that path and there is no outcome to report.
+        // Canceled leaves `out` null: the tree is already killed and there is
+        // no outcome to report.
         if (result) |_| {} else |err| {
             if (err == error.Canceled) return;
         }
@@ -406,9 +368,9 @@ const RunTask = struct {
     }
 };
 
-/// Reads exactly one control frame while a command runs. Per protocol rule 2
-/// the host sends `cancel` or nothing, so cancelling this read when the command
-/// wins cannot have eaten a partial frame.
+/// Reads exactly one control frame while a command runs. The host sends
+/// `cancel` or nothing, so cancelling this read when the command wins cannot
+/// have eaten a partial frame.
 const ControlWatch = struct {
     agent: *Agent,
     eof: bool = false,
@@ -422,8 +384,7 @@ const ControlWatch = struct {
             return;
         };
         // Whatever it says, it means "stop": the only frame allowed here is
-        // `cancel`, and a host that broke the rule has desynchronised the
-        // channel, which is also a reason to stop.
+        // `cancel`, and a host that broke the rule desynchronised the channel.
         _ = line;
     }
 };
@@ -438,14 +399,10 @@ fn serveShell(agent: *Agent, req: protocol.Request, command: []const u8) !void {
 }
 
 /// Run one extension tool HERE, against this machine's workspace and store.
-///
 /// The frame named `(id, version, tool)`; everything else is decided on this
-/// side, by the same code a local session goes through: `extension/exec.zig`
-/// picks the entry variant for THIS OS and verifies the version against its own
-/// seal, and `extension/protocol.zig` derives `NULYA_TOOL` / `NULYA_ARG_<k>`
-/// from the arguments in the payload.
-///
-/// No presentation file: its reader is the front end, on the host.
+/// side by the same code a local session goes through — the entry variant for
+/// THIS OS, the seal check, and `NULYA_TOOL` / `NULYA_ARG_<k>` from the
+/// payload.
 fn serveRunExtension(agent: *Agent, req: protocol.Request, arguments: []const u8) !void {
     if (req.id.len == 0 or req.version.len == 0 or req.tool.len == 0) {
         try agent.refuse("run-extension needs an extension id, a version and a tool");
@@ -470,9 +427,8 @@ fn serveRun(agent: *Agent, request: @FieldType(RunTask, "req")) !void {
     const Race = union(enum) { command: void, control: void };
     var buf: [2]Race = undefined;
     var sel: std.Io.Select(Race) = .init(agent.io, &buf);
-    // Without two units of concurrency the command still runs; what is lost is
-    // only the mid-command cancel, and losing the command instead would be a
-    // worse trade. Same degradation `waitBounded` takes.
+    // Without two units of concurrency the command still runs; only the
+    // mid-command cancel is lost, and losing the command would be worse.
     sel.concurrent(.control, ControlWatch.run, .{&watch}) catch {
         RunTask.run(&task);
         return replyRun(agent, &task);
@@ -491,9 +447,8 @@ fn serveRun(agent: *Agent, request: @FieldType(RunTask, "req")) !void {
     if (task.out != null) return replyRun(agent, &task);
 
     // The control frame (or EOF) won: cancelling the command task made the
-    // local runner kill the whole tree. Answer so the channel stays well formed
-    // — no output, because the kill path has none to report and inventing one
-    // would be worse than saying there is none.
+    // local runner kill the whole tree. Answer so the channel stays well
+    // formed — no output, because the kill path has none.
     agent.stop = watch.eof;
     if (!watch.eof) try agent.reply(.{ .ok = true, .canceled = true, .exit_code = 1 }, "", "");
 }
@@ -517,15 +472,11 @@ fn replyRun(agent: *Agent, task: *RunTask) !void {
     }, outcome.stdout, outcome.stderr);
 }
 
-/// Write one file into this session's workspace on THIS machine.
-///
-/// The bytes go through `agent.lenv`'s `putWorkspaceFile` — the same function a
-/// local session's spill goes through, not a copy of it.
-///
-/// `path` is workspace-relative and `/`-spelled (it is the string the model
-/// will read in the footer); `cwd` is where that workspace is here. They are
-/// joined exactly once, and only in this direction — the host never learns a
-/// path on this machine.
+/// Write one file into this session's workspace on THIS machine, through
+/// `agent.lenv`'s `putWorkspaceFile` — the same function a local session's
+/// spill goes through. `path` is workspace-relative and `/`-spelled; `cwd` is
+/// where that workspace is here. They are joined exactly once, and only in this
+/// direction.
 fn servePutFile(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
     if (req.path.len == 0) {
         try agent.refuse("put-file needs a path");
@@ -550,25 +501,19 @@ fn servePutFile(agent: *Agent, req: protocol.Request, payload: []const u8) !void
 //
 // A remote session's background task is supervised HERE, by the same
 // `nulya task supervise` a local one is, with the log, the status and the lease
-// in the far — that is, this — workspace. The host keeps the NAME and the
-// delivery, because the ledger the report belongs in is over there.
-//
-// No path crosses: the frames name `<sid>/t<N>`, and each side turns that into a
-// directory with `task_cli.taskDirRel` against its own workspace.
+// in this workspace. The host keeps the NAME and the delivery, because the
+// ledger the report belongs in is over there. No path crosses: each side turns
+// `<sid>/t<N>` into a directory of its own.
 
-/// Where a task's files are on THIS machine, and the workspace they hang off.
-/// Null means the name is not a task name; the caller refuses.
+/// Where a task's files are on THIS machine. Null is not a task name at all.
 fn taskPaths(agent: *Agent, req: protocol.Request) !?struct { cwd: []const u8, dir: []u8 } {
     const dir = (try task_cli.taskDirRel(agent.alloc, req.task)) orelse return null;
     return .{ .cwd = if (req.cwd.len != 0) req.cwd else ".", .dir = dir };
 }
 
-/// Start a supervisor for one background task on this machine.
-///
-/// It is deliberately detached from this channel: a task outliving the
-/// connection that asked for it is the whole point of `background: true`, and
-/// the agent exiting must not take it with it (`environment.spawnSupervisor`
-/// gives it its own process group / no console, exactly as a host one gets).
+/// Start a supervisor for one background task here, deliberately detached from
+/// this channel: a task outliving the connection that asked for it is the whole
+/// point of `background: true`.
 fn serveStartTask(agent: *Agent, req: protocol.Request, command: []const u8) !void {
     if (command.len == 0) {
         try agent.refuse("start-task needs a command");
@@ -580,8 +525,6 @@ fn serveStartTask(agent: *Agent, req: protocol.Request, command: []const u8) !vo
     };
     defer agent.alloc.free(paths.dir);
 
-    // The one thing this machine has to know about itself to start one: which
-    // binary it is.
     const exe = agent.lenv.env.get("NULYA_EXE") orelse {
         try agent.refuse("the nulya here does not know its own path, so it cannot start a supervisor");
         return;
@@ -600,8 +543,8 @@ fn serveStartTask(agent: *Agent, req: protocol.Request, command: []const u8) !vo
     environment.spawnSupervisor(agent.alloc, agent.io, &agent.lenv.env, .{
         .exe = exe,
         .dir_rel = paths.dir,
-        // No session file on this machine — the report is left beside the log
-        // and the host collects it (`cli/task.zig`).
+        // No session file here — the report is left beside the log and the host
+        // collects it.
         .task_name = req.task,
         .cwd = paths.cwd,
         .timeout_ms = req.timeout_ms,
@@ -617,14 +560,10 @@ fn serveStartTask(agent: *Agent, req: protocol.Request, command: []const u8) !vo
 
 /// Everything the host needs to know about one task here, in one round: the
 /// status its supervisor wrote, the report it left if it has finished, and
-/// whether a supervisor still holds the lease (`cli/task.zig`'s `readRow` turns
-/// that into `lost` without a second question).
-///
-/// A directory with nothing in it is answered as nothing, not as a refusal: that
-/// is the same `starting` a local task with no status yet reports, and a
-/// supervisor that has not written its first line is exactly that. But a real
-/// I/O fault reading either file is refused rather than folded into that same
-/// silence — see `readTaskFile`.
+/// whether a supervisor still holds the lease. A directory with nothing in it
+/// is answered as nothing, not as a refusal — the same `starting` a local
+/// statusless task reports. But a real I/O fault reading either file is refused
+/// rather than folded into that silence.
 fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
     const paths = (try taskPaths(agent, req)) orelse {
         try agent.refuse("task-poll needs a task named <session>/t<N>");
@@ -647,26 +586,20 @@ fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
         try agent.refuseFmt("could not read {s}'s report here: {s}", .{ req.task, @errorName(err) });
         return;
     };
-    // The report is already valid UTF-8 when a supervisor writes it
-    // (`emit.utf8Lossy` runs over the log tail there); this makes that a
-    // checked fact rather than an assumption, since `std.json` writes invalid
-    // bytes as an array of numbers instead of a string.
+    // The report is already valid UTF-8 when a supervisor writes it; this makes
+    // it a checked fact, since `std.json` writes invalid bytes as numbers.
     const cleaned = try emit.utf8Lossy(a, raw_report);
     const report = if (cleaned) |c| c.text else raw_report;
 
-    // Same probe `task list` uses locally (`lease.taskHeld`), just pointed at this
-    // agent's already-open workspace handle instead of `std.Io.Dir.cwd()` — one
-    // implementation of "is anyone holding this lease" for both machines.
+    // Same probe `task list` uses locally, pointed at this agent's already-open
+    // workspace handle — one implementation for both machines.
     //
-    // ONLY once a status exists, and that guard is safety rather than thrift.
-    // The probe takes the lease itself, non-blocking, for the instant it is
-    // open; a supervisor whose own acquire lands in that instant is told
-    // "another supervisor already owns this" and EXITS, so the task silently
-    // never runs. A supervisor writes its first status only after it holds the
-    // lease, so requiring one closes that window. Null is honest meanwhile:
-    // `readRow` reads a statusless task as `starting`.
-    // A real fault reading `.lock` is refused rather than swallowed into "not
-    // held": `readRow` turns a refusal into `unreachable`, not `lost`.
+    // ONLY once a status exists, and that guard is safety rather than thrift:
+    // the probe takes the lease itself for the instant it is open, and a
+    // supervisor whose own acquire lands there would be told "another
+    // supervisor already owns this" and EXIT. A supervisor writes its first
+    // status only after it holds the lease, so requiring one closes that
+    // window. A real fault reading `.lock` becomes `unreachable`, never `lost`.
     const lease_held: ?bool = if (status.len == 0)
         null
     else
@@ -680,10 +613,8 @@ fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
 }
 
 /// Read one task file here, `arena`-owned. `error.FileNotFound` answers empty —
-/// the same "nothing written yet" a directory with no status reports locally —
-/// but every other failure (permission denied, a read past `cap`) propagates:
-/// those are this machine unable to answer, and an I/O fault must not read as a
-/// confident "starting". The caller decides what to say about it.
+/// the "nothing written yet" a statusless directory reports locally — but every
+/// other failure propagates: an I/O fault must not read as `starting`.
 fn readTaskFile(
     agent: *Agent,
     ws: std.Io.Dir,
@@ -701,8 +632,8 @@ fn readTaskFile(
 }
 
 /// Put the kill marker down beside the command, which is here. Refused when
-/// there is no such task on this machine: a marker written into nothing would
-/// be a request nobody will ever read, reported as success.
+/// there is no such task: a marker written into nothing is a request nobody
+/// reads, reported as success.
 fn serveTaskKill(agent: *Agent, req: protocol.Request) !void {
     const paths = (try taskPaths(agent, req)) orelse {
         try agent.refuse("task-kill needs a task named <session>/t<N>");
@@ -735,10 +666,9 @@ fn serveTaskKill(agent: *Agent, req: protocol.Request) !void {
 // ask `integrity.validateVersionDir` — the same function activation, `ext run`
 // and a donor copy ask — whether what arrived is that version.
 
-/// Where a pushed version lands: this machine's store, which is the only place
-/// version bytes live here. Not a choice the host gets to make — the host
-/// resolving a path over here would be the host modelling another machine's
-/// file system.
+/// Where a pushed version lands: this machine's store, the only place version
+/// bytes live here. The host resolving a path over here would be the host
+/// modelling another machine's file system.
 fn openUserStore(agent: *Agent) !?std.Io.Dir {
     const spec = try common.storePath(agent.alloc);
     defer agent.alloc.free(spec);
@@ -748,11 +678,9 @@ fn openUserStore(agent: *Agent) !?std.Io.Dir {
     return try ext_store.openOrCreateRoot(agent.io, cwd, spec);
 }
 
-/// A version-relative path this agent is willing to write, or null.
-///
-/// The ordinary rule that a directory being filled from a stream may only grow
-/// inwards: a `..` or an absolute path would put bytes outside the staging
-/// tree, where nothing would ever validate them.
+/// A version-relative path this agent is willing to write, or null: a directory
+/// filled from a stream may only grow inwards, since a `..` or an absolute path
+/// would put bytes where nothing would ever validate them.
 fn safeVersionRel(path: []const u8) ?[]const u8 {
     if (path.len == 0) return null;
     if (std.fs.path.isAbsolute(path)) return null;
@@ -783,9 +711,8 @@ fn serveStoreStat(agent: *Agent, req: protocol.Request) !void {
     var keep_root = false;
     defer if (!keep_root) root.close(agent.io);
 
-    // `.sealed`, not `.structural`: "already there" has to mean the bytes are
-    // still the ones this id names, otherwise a corrupted copy would refuse
-    // every future push of the version that would have repaired it.
+    // `.sealed`, not `.structural`: a corrupted copy claiming "already there"
+    // would refuse every future push of the version that would repair it.
     if (ext_store.Store.init(agent.io, root).versionExists(agent.alloc, req.id, req.version, .sealed)) {
         try agent.reply(.{ .ok = true, .held = true }, "", "");
         return;
@@ -804,9 +731,8 @@ fn serveStoreStat(agent: *Agent, req: protocol.Request) !void {
     };
     errdefer store_lease.close(agent.io);
 
-    // A leftover staging tree from a channel that died mid-push is cleared
-    // rather than resumed: partial bytes from an earlier attempt would either
-    // fail the commit or, worse, pass it while describing two pushes.
+    // A leftover staging tree from a dead push is cleared rather than resumed:
+    // partial bytes would fail the commit, or worse pass.
     root.deleteTree(agent.io, staging_rel) catch {};
     try root.createDirPath(agent.io, staging_rel);
 
@@ -833,8 +759,7 @@ fn serveStorePut(agent: *Agent, req: protocol.Request, payload: []const u8) !voi
         return;
     };
     // The mode a copy would have carried. Refused rather than shrugged off: a
-    // binary that is there and cannot run is the failure a push exists to avoid,
-    // and this is the last moment anyone can see it happen.
+    // binary that is there and cannot run is what a push exists to avoid.
     if (req.exec and std.Io.File.Permissions.has_executable_bit) {
         p.root.setFilePermissions(agent.io, dest, .executable_file, .{}) catch |err| {
             try agent.refuseFmt("could not make '{s}' executable: {s}", .{ rel, @errorName(err) });
@@ -851,9 +776,8 @@ fn serveStoreCommit(agent: *Agent) !void {
     };
     defer closePush(agent);
 
-    // These bytes arrived over a channel, so this is the moment to re-digest
-    // the package, prove it reproduces this very version id, and prove the
-    // binary is the sealed one.
+    // These bytes arrived over a channel, so this is the moment to prove they
+    // reproduce this very version id and that the binary is the sealed one.
     integrity.validateVersionDir(agent.alloc, agent.io, p.root, p.staging_rel, p.version, p.id, .sealed) catch |err| {
         try agent.refuseFmt("what arrived is not {s}@{s} ({s}); nothing was installed", .{ p.id, p.version, @errorName(err) });
         return;
@@ -863,8 +787,8 @@ fn serveStoreCommit(agent: *Agent) !void {
     defer agent.alloc.free(version_rel);
     const versions_dir = std.fs.path.dirname(version_rel).?;
     try p.root.createDirPath(agent.io, versions_dir);
-    // Only reached when this root held no VALID copy (`store-stat`), so what is
-    // being replaced, if anything, is a broken one.
+    // Only reached when this root held no VALID copy, so anything replaced is
+    // a broken one.
     p.root.deleteTree(agent.io, version_rel) catch {};
     p.root.rename(p.staging_rel, p.root, version_rel, agent.io) catch |err| {
         try agent.refuseFmt("could not install {s}@{s}: {s}", .{ p.id, p.version, @errorName(err) });
@@ -889,9 +813,8 @@ fn serveListDir(agent: *Agent, req: protocol.Request) !void {
     var truncated = false;
     var it = dir.iterate();
     while (it.next(agent.io) catch null) |e| {
-        // A name that is not valid UTF-8 cannot be encoded as JSON at all
-        // (`std.json` writes it as an array of numbers, and the host's parse
-        // then declares the channel dead). Skipped, and SAID.
+        // A name that is not valid UTF-8 cannot be encoded as JSON at all, and
+        // the host's parse would declare the channel dead. Skipped, and SAID.
         if (!std.unicode.utf8ValidateSlice(e.name)) {
             skipped += 1;
             continue;
@@ -911,16 +834,14 @@ fn serveListDir(agent: *Agent, req: protocol.Request) !void {
         note = try std.fmt.allocPrint(a, "{d} entries were left out: their names are not valid UTF-8", .{skipped});
     }
     // The listing is the payload: it grows with what this machine holds, and a
-    // header may not (protocol rule 6). The note stays in the header — one
-    // sentence this build wrote, not something the directory sizes.
+    // header may not.
     const body = try protocol.encodeEntries(a, entries.items);
     try agent.reply(.{ .ok = true, .bytes = body.len, .message = note }, body, "");
 }
 
-/// Why a run did not happen, in that machine's own words. An extension gets the
-/// sentence that names the missing version and the command that delivers it —
-/// the one failure a push fixes. The host turns this into an ordinary failed
-/// call, so the model reads it.
+/// Why a run did not happen, in that machine's own words: an extension gets the
+/// sentence naming the missing version and the command that delivers it. The
+/// host turns this into an ordinary failed call, so the model reads it.
 fn runFailure(agent: *Agent, request: @FieldType(RunTask, "req"), err: anyerror) ![]const u8 {
     switch (request) {
         .shell => return std.fmt.allocPrint(agent.arena.allocator(), "could not run the command: {s}", .{@errorName(err)}),
@@ -941,8 +862,7 @@ fn runFailure(agent: *Agent, request: @FieldType(RunTask, "req"), err: anyerror)
 }
 
 fn lessThanEntry(_: void, a: protocol.Entry, b: protocol.Entry) bool {
-    // Directories first, then by name: what a browser wants, and deterministic,
-    // which is what a test wants.
+    // Directories first, then by name: what a browser wants, and deterministic.
     if (a.dir != b.dir) return a.dir;
     return std.mem.lessThan(u8, a.name, b.name);
 }

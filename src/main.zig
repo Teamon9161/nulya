@@ -1,8 +1,7 @@
 //! Nulya — a minimal, self-evolving AI agent harness.
 //!
-//! The entry point is a switch and nothing else: every invocation — including
-//! the bare one, which prints the usage screen — goes to `cli.dispatch`. This
-//! file also aggregates every module's tests for `zig build test`.
+//! The entry point is a switch and nothing else: every invocation goes to
+//! `cli.dispatch`. This file also aggregates every module's tests.
 
 const std = @import("std");
 const cli = @import("cli.zig");
@@ -13,9 +12,8 @@ pub fn main(init: std.process.Init) !u8 {
     const alloc = init.gpa;
     const io = init.io;
 
-    // std 0.16 hands the OS environ only to `main`; register it once so the
-    // layers that read host env (config chain, NULYA_* vars, child-env
-    // sanitization) see the real environment (environment.hostEnvironMap).
+    // std 0.16 hands the OS environ only to `main`; register it once so every
+    // layer that reads host env sees the real environment.
     environment.registerHostEnviron(init.minimal.environ);
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());

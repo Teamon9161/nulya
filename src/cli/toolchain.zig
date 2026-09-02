@@ -1,7 +1,6 @@
 //! `nulya toolchain zig`, plus the one place a Zig compiler is resolved.
 //! `ext build` needs the same answer, so the resolution — and the single line
-//! that admits when the compiler came from an unpinned PATH — lives here rather
-//! than being spelled twice.
+//! that admits when the compiler came from an unpinned PATH — lives here.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -59,9 +58,9 @@ pub const ZigExe = struct {
     }
 
     /// Where this path came from, for a sentence a person has to act on.
-    /// `NULYA_ZIG` is taken verbatim and unchecked, while the other two answer
-    /// only after finding a file — so without this word a broken `NULYA_ZIG`
-    /// and a toolchain that vanished between resolving and spawning read alike.
+    /// `NULYA_ZIG` is taken verbatim and unchecked while the other two answer
+    /// only after finding a file, so without this word a broken `NULYA_ZIG` and
+    /// a vanished toolchain read alike.
     pub fn origin(self: ZigExe) []const u8 {
         return switch (self.source) {
             .env => "from NULYA_ZIG",
@@ -71,16 +70,14 @@ pub const ZigExe = struct {
     }
 };
 
-/// Resolve a zig executable, in this order: `NULYA_ZIG` (the explicit dev
-/// override), the managed toolchain directory (extracted from the embedded
-/// archive when there is one, else whatever pinned zig is already unpacked
-/// there), then a `zig` on PATH. Caller owns the returned path;
-/// `error.NoZigToolchain` means none of the three answered.
+/// Resolve a zig executable, in this order: `NULYA_ZIG`, the managed toolchain
+/// directory (extracted from the embedded archive when there is one), then a
+/// `zig` on PATH. Caller owns the path; `error.NoZigToolchain` means none of
+/// the three answered.
 ///
 /// Taking a PATH zig is safe because a compiled version's id hashes the
 /// compiler identity: a different zig yields a *different version*, never a
-/// silently different binary under the same id. Callers that actually compile
-/// still say so once (`noteUnpinnedZig`).
+/// silently different binary under the same id.
 pub fn resolveZig(alloc: std.mem.Allocator, io: std.Io) !ZigExe {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
@@ -106,9 +103,8 @@ pub fn resolveZig(alloc: std.mem.Allocator, io: std.Io) !ZigExe {
     return .{ .path = on_path, .source = .path };
 }
 
-/// The managed toolchain directory on this machine, absolute — the one place a
-/// person can put a zig 0.16.0 so that every nulya (embedded or not) finds it
-/// before falling back to PATH. Caller owns the result.
+/// The managed toolchain directory on this machine, absolute — where a person
+/// can put a zig 0.16.0 so every nulya finds it before PATH. Caller owns it.
 pub fn managedDirPath(alloc: std.mem.Allocator) ![]u8 {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
@@ -118,8 +114,8 @@ pub fn managedDirPath(alloc: std.mem.Allocator) ![]u8 {
 }
 
 /// The two pinned ways out of "no usable compiler", with the directory spelled
-/// out. Every verb that can hit the wall prints this same sentence, so the
-/// repair is never described two ways. Caller owns the result.
+/// out — every verb that can hit the wall prints this same sentence. Caller
+/// owns the result.
 pub fn noZigHint(alloc: std.mem.Allocator) ![]u8 {
     const dir = try managedDirPath(alloc);
     defer alloc.free(dir);
@@ -131,8 +127,7 @@ pub fn noZigHint(alloc: std.mem.Allocator) ![]u8 {
 }
 
 /// One stderr line naming the compiler that is about to define a version id —
-/// only for the unpinned source, and only from a caller that really compiles
-/// (a data or script package never touches zig).
+/// only for the unpinned source, and only from a caller that really compiles.
 pub fn noteUnpinnedZig(alloc: std.mem.Allocator, io: std.Io, zig: ZigExe) !void {
     if (zig.source != .path) return;
     const note = try std.fmt.allocPrint(
@@ -144,8 +139,7 @@ pub fn noteUnpinnedZig(alloc: std.mem.Allocator, io: std.Io, zig: ZigExe) !void 
     try printErr(io, note);
 }
 
-/// The first executable `zig` on PATH, as an absolute path, or null. Caller owns
-/// the result.
+/// The first executable `zig` on PATH, absolute, or null. Caller owns it.
 fn zigOnPath(alloc: std.mem.Allocator, io: std.Io, host: *const std.process.Environ.Map) !?[]u8 {
     const path_value = host.get("PATH") orelse return null;
     const separator: u8 = if (builtin.os.tag == .windows) ';' else ':';
@@ -157,8 +151,8 @@ fn zigOnPath(alloc: std.mem.Allocator, io: std.Io, host: *const std.process.Envi
         if (dir.len == 0 or !std.fs.path.isAbsolute(dir)) continue;
         const candidate = try std.fs.path.join(alloc, &.{ dir, exe_name });
         errdefer alloc.free(candidate);
-        // `execute` is what matters: a `zig` directory or a non-executable file
-        // on PATH is not a compiler.
+        // `execute` is what matters: a `zig` directory or a non-executable
+        // file on PATH is not a compiler.
         if (std.Io.Dir.accessAbsolute(io, candidate, .{ .execute = true })) |_| return candidate else |err| switch (err) {
             error.Canceled => return err,
             else => alloc.free(candidate),

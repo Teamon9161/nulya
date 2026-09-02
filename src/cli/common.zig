@@ -1,7 +1,7 @@
 //! Plumbing every `nulya` verb file shares: stdout/stderr writing, argv
 //! scanning, the workspace cwd, and the store-plus-pointer-layers view each
-//! `ext` / `skill` / `session` command opens. Nothing here decides anything
-//! about a verb — a helper lands here exactly when two verb files need it.
+//! `ext` / `skill` / `session` command opens. A helper lands here exactly when
+//! two verb files need it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -16,9 +16,8 @@ const environment = @import("../environment.zig");
 pub const StoreView = struct {
     site: site_mod.Site,
     /// The merged config's `[extensions] with` — the ids that are a member of
-    /// every session opened here. Read from the same config load as the store
-    /// path: the store says where an id's code lives, this says whether a
-    /// session gets it.
+    /// every session opened here. The store says where an id's code lives,
+    /// this says whether a session gets it.
     with: []const []const u8,
 
     pub fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) !StoreView {
@@ -36,16 +35,15 @@ pub const StoreView = struct {
 };
 
 /// Where the kernel's repair lines go on this side of the seam: stderr, so
-/// `session step --stream` keeps stdout pure JSON. Stateless, so a `Site` may be
-/// copied and moved freely once it holds one.
+/// `session step --stream` keeps stdout pure JSON. Stateless, so a `Site` may
+/// be copied and moved freely once it holds one.
 pub const stderr_diag: site_mod.Diag = .{ .reportFn = writeDiagLine };
 
 fn writeDiagLine(_: ?*anyopaque, io: std.Io, line: []const u8) void {
     std.Io.File.stderr().writeStreamingAll(io, line) catch {};
 }
 
-/// The two things one config load answers: where this machine's store is, and
-/// the standing member ids (`[extensions] with`). Caller owns both.
+/// Where this machine's store is, and the standing member ids. Caller owns.
 pub fn storeAndWith(alloc: std.mem.Allocator, io: std.Io) !struct {
     store: []const u8,
     with: []const []const u8,
@@ -59,8 +57,7 @@ pub fn storeAndWith(alloc: std.mem.Allocator, io: std.Io) !struct {
     return .{ .store = path, .with = try dupeOwnedList(alloc, cfg.extensions.with) };
 }
 
-/// This machine's store path alone, for a caller with no `with` question.
-/// Caller owns it; empty means the machine has no home directory.
+/// This machine's store path alone. Caller owns it; empty means no home.
 pub fn storePath(alloc: std.mem.Allocator) ![]u8 {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
@@ -78,8 +75,7 @@ fn dupeOwnedList(alloc: std.mem.Allocator, list: []const []const u8) ![]const []
     return out;
 }
 
-/// Where a draft-side command writes: the store under `--user` — where a draft
-/// installed for the whole machine lives beside its versions — else this
+/// Where a draft-side command writes: the store under `--user`, else this
 /// workspace's `.nulya/extensions`. Null means `--user` on a machine with no
 /// home. Caller owns the result.
 pub fn draftRootSpec(alloc: std.mem.Allocator, user: bool) !?[]u8 {
@@ -92,8 +88,7 @@ pub fn draftRootSpec(alloc: std.mem.Allocator, user: bool) !?[]u8 {
     return path;
 }
 
-/// Split `args` into `(has --user, everything else)` — the one flag every
-/// write-side `ext` verb shares. Caller owns the returned positionals.
+/// Split `args` into `(has --user, everything else)`. Caller owns the rest.
 pub fn takeUserFlag(alloc: std.mem.Allocator, args: []const []const u8) !struct { user: bool, rest: [][]const u8 } {
     var rest: std.ArrayList([]const u8) = .empty;
     errdefer rest.deinit(alloc);
@@ -106,9 +101,8 @@ pub fn takeUserFlag(alloc: std.mem.Allocator, args: []const []const u8) !struct 
 
 /// Which pointer layer an `ext activate` writes: `--user` says the store's own
 /// `current` outright; otherwise the workspace layer when this workspace
-/// already has a `<id>/` — a draft, a pointer, or both — and the store layer
-/// when it does not. One rule, so "where did my activate land" has one answer
-/// a person can predict from what is on disk.
+/// already has a `<id>/`, and the store layer when it does not. One rule, so
+/// "where did my activate land" is predictable from what is on disk.
 pub fn activateLayer(site: *const site_mod.Site, id: []const u8, user: bool) site_mod.Layer {
     if (user) return .user;
     return if (site.workspaceHas(id)) .workspace else .user;
@@ -124,13 +118,11 @@ pub fn deactivateLayer(alloc: std.mem.Allocator, site: *const site_mod.Site, id:
     return active.layer;
 }
 
-/// The id of the session this process is running INSIDE, or null when it is
-/// not: `session step` publishes it as `NULYA_SESSION_ID` to everything it
-/// runs. Caller owns the result.
+/// The id of the session this process is running INSIDE, or null: `session
+/// step` publishes it as `NULYA_SESSION_ID`. Caller owns the result.
 ///
-/// The ID, not the stem of `NULYA_SESSION`: callers here want an identity (a
-/// journal column, a task verb's default session, an outcome's `by:`), and a
-/// session whose workspace lives on another machine has an identity there but
+/// The ID, not the stem of `NULYA_SESSION`: callers here want an identity, and
+/// a session whose workspace lives on another machine has an identity there but
 /// no session file. `NULYA_SESSION` stays for callers that need the file.
 pub fn envSessionId(alloc: std.mem.Allocator) !?[]u8 {
     var host = try environment.hostEnvironMap(alloc);
@@ -140,7 +132,6 @@ pub fn envSessionId(alloc: std.mem.Allocator) !?[]u8 {
     return try alloc.dupe(u8, id);
 }
 
-/// Find `--flag <value>` in args; returns the value or null.
 pub fn flagValue(args: []const []const u8, flag: []const u8) ?[]const u8 {
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
@@ -149,22 +140,20 @@ pub fn flagValue(args: []const []const u8, flag: []const u8) ?[]const u8 {
     return null;
 }
 
-/// `<id>[@<version>]` — the one spelling of "an extension, maybe at an exact
-/// version" shared by `session new --with` and `ext run`. Version ids contain
-/// no `@`, extension ids neither, so the last `@` splits unambiguously.
+/// `<id>[@<version>]` — the spelling shared by `session new --with` and
+/// `ext run`. Neither ids nor version ids contain `@`, so the last one splits.
 pub fn withRef(spec: []const u8) composition.WithRef {
     const at = std.mem.lastIndexOfScalar(u8, spec, '@') orelse return .{ .id = spec };
     return .{ .id = spec[0..at], .version = spec[at + 1 ..] };
 }
 
 /// `<id>[@<version>][:<tool>,<tool>…]` — one member of a session, the spelling
-/// `session new --with` and config `[extensions] with` share. Neither an
-/// extension id nor a version contains `:`, so the first one starts the tool
-/// selection. `:none` and an empty selection both mean "a member with nothing
-/// on the model's tool face".
+/// `session new --with` and config `[extensions] with` share. Neither an id nor
+/// a version contains `:`, so the first one starts the tool selection. `:none`
+/// and an empty selection both mean "a member with nothing on the tool face".
 ///
-/// Every string is BORROWED from `spec`, which outlives the composition; only
-/// the names array is allocated, and `freeMemberRefs` releases it.
+/// Every string is BORROWED from `spec`; only the names array is allocated, and
+/// `freeMemberRefs` releases it.
 pub fn memberRef(alloc: std.mem.Allocator, spec: []const u8) !composition.WithRef {
     const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return withRef(spec);
     var ref = withRef(spec[0..colon]);
@@ -231,8 +220,8 @@ pub fn writeInto(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_dir:
 //
 // One block per verb family, so a bare `nulya ext` prints exactly its own lines
 // and `nulya help` prints all of them in order: one text, so the two can never
-// disagree about what a verb takes. Model-facing (it arrives through `shell`),
-// so every line states behaviour and usage and cites no document.
+// disagree. Model-facing (it arrives through `shell`), so every line states
+// behaviour and usage and cites no document.
 
 pub const ext_usage =
     \\  nulya ext init [--zig] [--user] <id> [tool]       scaffold a draft: a script by default, --zig for a compiled one
@@ -349,7 +338,6 @@ pub fn usage(io: std.Io) !u8 {
     return 0;
 }
 
-/// Print one verb family's block — what a bare `nulya ext` / `nulya skill` says.
 pub fn usageSection(io: std.Io, section: []const u8) !u8 {
     try printRaw(io, section);
     return 0;
@@ -361,9 +349,8 @@ pub fn printOut(alloc: std.mem.Allocator, io: std.Io, comptime fmt: []const u8, 
     try printRaw(io, s);
 }
 
-/// `printOut`'s counterpart on stderr, for the diagnostics that need a value in
-/// them. Refusals and warnings go here so stdout stays what a caller can parse:
-/// ids, event JSONL, listings.
+/// `printOut`'s counterpart on stderr. Refusals and warnings go here so stdout
+/// stays what a caller can parse: ids, event JSONL, listings.
 pub fn printErrFmt(alloc: std.mem.Allocator, io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     const s = try std.fmt.allocPrint(alloc, fmt, args);
     defer alloc.free(s);

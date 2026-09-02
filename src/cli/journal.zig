@@ -10,9 +10,9 @@
 //!   * `read <path>` prints back every COMPLETE line, dropping a torn tail. A
 //!     missing file is not a missing FACT: no output, exit 0.
 //!
-//! Both verbs pass `cwd = "."` and the caller's raw `path` as `file_rel`,
-//! relative or absolute: `Dir.createFile` / `Dir.createDirPath` on `Dir.cwd()`
-//! accept an absolute sub_path, so one code path serves both spellings.
+//! Both verbs pass `cwd = "."` and the caller's raw `path` as `file_rel`:
+//! `Dir.createFile` / `Dir.createDirPath` on `Dir.cwd()` accept an absolute
+//! sub_path, so one code path serves both spellings.
 
 const std = @import("std");
 const journal = @import("../journals/journal.zig");
@@ -53,9 +53,8 @@ fn journalAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     };
     defer alloc.free(raw);
 
-    // A trailing newline is how a record normally arrives; anything left after
-    // stripping it is the record, and an embedded newline there means stdin was
-    // never one line to begin with.
+    // A trailing newline is how a record normally arrives; an embedded one
+    // means stdin was never a single line.
     const trimmed = std.mem.trimEnd(u8, raw, "\r\n");
     if (trimmed.len == 0) {
         try printErr(io, "journal append: stdin is empty\n");

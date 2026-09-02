@@ -1,8 +1,7 @@
 //! CLI surface. None of these are model-facing tools: the model reaches them
-//! through `shell`, keeping its tool face tiny.
-//!
-//! This file is the dispatcher and nothing else: one file per verb family under
-//! `cli/`, plus `cli/common.zig` for the plumbing two or more of them share.
+//! through `shell`, keeping its tool face tiny. This file is the dispatcher and
+//! nothing else: one file per verb family under `cli/`, plus `cli/common.zig`
+//! for the plumbing two or more of them share.
 
 const std = @import("std");
 const common = @import("cli/common.zig");
@@ -22,12 +21,11 @@ pub const createSession = cli_session.createSession;
 
 const demo_prompt = "What system am I on?";
 
-/// The top-level help — also what a bare `nulya ext` / `nulya skill` prints, so
-/// it lives beside the rest of the shared plumbing rather than here.
+/// The top-level help — also what a bare `nulya ext` / `nulya skill` prints.
 pub const usage = common.usage;
 
-/// Dispatch `args` (everything after the program name). Returns a process exit
-/// code. Errors are printed and turned into a non-zero code by `main`.
+/// Returns a process exit code; errors are printed and turned into a non-zero
+/// code by `main`.
 pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len == 0) return usage(io);
     if (std.mem.eql(u8, args[0], "help") or std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h")) return usage(io);
@@ -48,7 +46,7 @@ pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
 /// `nulya demo` runs a fixed-prompt session over the durable path: a CLIENT of
 /// `session new` -> `session append` -> `session step`, never a second assembly
 /// of config, environment and session creation. The offline scripted provider
-/// stands in when no credential is set (`session new` says so on stderr).
+/// stands in when no credential is set.
 fn runDemo(alloc: std.mem.Allocator, io: std.Io) !u8 {
     const id = (try cli_session.createSession(alloc, io, &.{}, .stand_in)) orelse return 1;
     defer alloc.free(id);

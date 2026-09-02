@@ -6,11 +6,10 @@
 //! version anyone can compose. Content addressing does the rest: pushing twice
 //! is a no-op.
 //!
-//! Only `remote:` specs: a local `--env` names this machine, so pushing to one
-//! would copy a version into the store it came out of.
-//!
-//! Nothing is activated on the far side, and nothing here decides when a
-//! version should travel.
+//! Only `remote:` specs. An exec target (`--env wsl`) runs commands elsewhere
+//! but keeps the workspace and the store HERE, so pushing to one would copy a
+//! version into the store it came out of. Nothing is activated on the far
+//! side.
 
 const std = @import("std");
 const integrity = @import("../extension/integrity.zig");
@@ -141,9 +140,7 @@ pub fn extPush(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 }
 
 /// One request, with both failure modes already reported: a broken channel and
-/// a refusal from the far side. Null means "already reported, exit 1"; the
-/// caller then stops, leaving the far side's staging directory unnamed under
-/// `versions/`.
+/// a refusal from the far side. Null means "already reported, exit 1".
 fn round(
     alloc: std.mem.Allocator,
     io: std.Io,

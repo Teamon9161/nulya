@@ -1,10 +1,7 @@
 //! `nulya session list`: a READ-ONLY projection of `.nulya/sessions/` — what
-//! was composed, what it cost, how it turned out. It decides nothing and writes
-//! nothing.
-//!
-//! A reader, not a verb: the rest of `session.zig` drives one session, while
-//! everything here walks every session file at once and joins it with the
-//! outcome journal and the extension store.
+//! was composed, what it cost, how it turned out. The rest of `session.zig`
+//! drives one session; everything here walks every session file at once and
+//! joins it with the outcome journal and the extension store.
 
 const std = @import("std");
 const site_mod = @import("../extension/site.zig");
@@ -30,25 +27,21 @@ const SessionView = struct {
     model_id: []const u8,
     /// Which binary created it. Empty for a pre-stamp session.
     nulya: ledger.Stamp,
-    /// Where its `shell` commands run. Empty = this host, which is almost every
-    /// session, so the human table only spends a column on it when there is
-    /// something to say.
+    /// Where its `shell` commands run. Empty = this host, so the human table
+    /// only spends a column on it when there is something to say.
     environment: []const u8,
-    /// The workspace on that machine, when `environment` names a remote one.
     remote_workspace: []const u8,
     events: usize,
     composition: Composition,
-    /// Tool calls this session made and how many came back `ok: false`,
-    /// counted straight off every `tool_results` event — the ledger already
-    /// has this, so the listing does not need the usage journal for it.
+    /// Tool calls this session made and how many came back `ok: false`, counted
+    /// straight off every `tool_results` event — no usage journal needed.
     tools: ToolCounts,
-    /// Sum of every assistant event's recorded usage. Steps whose provider
-    /// reported nothing contribute nothing.
+    /// Sum of every assistant event's recorded usage; a step whose provider
+    /// reported nothing contributes nothing.
     usage: ledger.Usage,
-    /// The same sum over every listed session sharing this `root`: what the whole
-    /// episode cost, which is the number a compacted task actually spent.
+    /// The same sum over every listed session sharing this `root`: what the
+    /// whole episode cost.
     episode_usage: ledger.Usage,
-    /// The opening user turn, truncated — enough to recognize the session by.
     first_user_text: []const u8,
     /// The verdict that stands, or null for "not judged" — which is NOT failure.
     outcome: ?OutcomeView,
@@ -59,9 +52,8 @@ const SessionView = struct {
         /// Every system prompt those frozen versions contribute, as
         /// `<id>@<version>/<path>`.
         system_prompts: []const []const u8,
-        /// The per-session prompts frozen into the header by `--prompt` — their
-        /// labels and sizes only. The text itself is session content, which
-        /// `nulya session events` is for.
+        /// The per-session prompts frozen into the header by `--prompt` —
+        /// labels and sizes only; the text is what `session events` is for.
         prompts: []const InlinePromptView,
     };
 
@@ -86,8 +78,8 @@ const SessionView = struct {
     };
 };
 
-/// How much of the opening user turn `session list` carries. Long enough to tell
-/// two sessions apart, short enough that a hundred of them stay readable.
+/// How much of the opening user turn `session list` carries: enough to tell two
+/// sessions apart, short enough that a hundred stay readable.
 const first_text_limit: usize = 120;
 
 pub fn sessionList(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
@@ -120,20 +112,19 @@ pub fn sessionList(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
-        // The iterator reuses its name buffer, and the view keeps a slice of the
-        // name as the session id — so copy it before the next `next()`.
+        // The iterator reuses its name buffer and the view keeps a slice of the
+        // name as the session id, so copy before the next `next()`.
         const name = try a.dupe(u8, entry.name);
         const view = readSessionView(a, io, dir, name, outcomes, &prompts) catch continue; // a corrupt file is not a reason to hide the rest
         try views.append(a, view);
     }
 
-    // Sessions fork (`session new --parent`), so one task can span several
-    // files; the episode is joined HERE, in the projection, and nowhere else —
-    // an outcome stays recorded against the id it was given.
+    // Sessions fork, so one task can span several files; the episode is joined
+    // HERE, in the projection — an outcome stays recorded against its own id.
     try resolveEpisodes(a, views.items);
 
-    // Newest first. `created` is the fact to sort on; sessions written before it
-    // existed fall back to their id, which embeds the creation time anyway.
+    // Newest first. `created` is the fact to sort on; older sessions fall back
+    // to their id, which embeds the creation time anyway.
     std.mem.sort(SessionView, views.items, {}, struct {
         fn lessThan(_: void, x: SessionView, y: SessionView) bool {
             const xa = if (x.created.len != 0) x.created else x.id;
@@ -147,8 +138,8 @@ pub fn sessionList(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
     return 0;
 }
 
-/// Project one session file. Reads its bytes once: the first line is the header,
-/// the rest are events — counted, summed, and scanned for the opening user turn.
+/// Project one session file, reading its bytes once: the first line is the
+/// header, the rest are events.
 fn readSessionView(
     a: std.mem.Allocator,
     io: std.Io,
@@ -238,11 +229,9 @@ fn readSessionView(
 
 /// Which system prompts a frozen `id@version` contributes, read from its
 /// manifest and memoized by `id@version` — versions are content-addressed, so
-/// one read answers for every session pinning it.
-///
-/// Best effort throughout: a version this machine no longer holds (built in
-/// another checkout, deactivated and pruned) contributes nothing rather than
-/// failing the listing. Absence here means "unknown", not "none".
+/// one read answers for every session pinning it. Best effort: a version this
+/// machine no longer holds contributes nothing rather than failing the listing.
+/// Absence here means "unknown", not "none".
 const PromptIndex = struct {
     site: ?*const site_mod.Site,
     cache: std.StringHashMap([]const []const u8),
@@ -267,8 +256,8 @@ const PromptIndex = struct {
         const resolved = site.resolveVersion(a, ref.id, ref.version, .structural) catch return gop.value_ptr.*;
         defer resolved.deinit(a);
         const paths = try a.alloc([]const u8, resolved.manifest.system_prompts.len);
-        // The manifest owns its strings; the listing outlives it, so copy while
-        // stamping each one with the version it came from.
+        // The manifest owns its strings and the listing outlives it, so copy
+        // while stamping each one with the version it came from.
         for (resolved.manifest.system_prompts, paths) |p, *slot| {
             slot.* = try std.fmt.allocPrint(a, "{s}/{s}", .{ key, p.path });
         }
@@ -278,11 +267,9 @@ const PromptIndex = struct {
 };
 
 /// Fill in each view's `root` (the oldest listed ancestor through `parent`) and
-/// `episode_usage` (that episode's total). Joining them is a projection, never
-/// a change to what any journal recorded.
-///
-/// A parent that is not in the listing (another workspace, a deleted file)
-/// makes its child the root of its own episode.
+/// `episode_usage` (that episode's total). A projection, never a change to what
+/// any journal recorded. A parent that is not in the listing makes its child the
+/// root of its own episode.
 fn resolveEpisodes(a: std.mem.Allocator, views: []SessionView) !void {
     var index: std.StringHashMap(usize) = .init(a);
     defer index.deinit();
@@ -406,8 +393,8 @@ test "resolveEpisodes walks a fork chain to its root and totals the episode's us
         mk.v("a", null, 1),
         mk.v("b", .{ .session = "a", .seq = 3 }, 2),
         mk.v("c", .{ .session = "b", .seq = 4 }, 4),
-        // A parent nobody here can see (another workspace, a deleted file): its
-        // child is the root of its own episode rather than a broken listing.
+        // A parent nobody here can see: its child is the root of its own
+        // episode rather than a broken listing.
         mk.v("orphan", .{ .session = "gone", .seq = 1 }, 8),
         // Only a hand-edited header can say this; it must terminate, not hang.
         mk.v("loop", .{ .session = "loop", .seq = 1 }, 16),
