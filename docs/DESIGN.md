@@ -154,7 +154,7 @@ UI / trajectory / metrics 都是 ledger 的投影，不持久化 mutable 状态�
 
 | journal | 谁写 | 为什么不是 ledger 事件 |
 |---|---|---|
-| `.nulya/tool-usage.jsonl`（§5.5） | 每个执行过 tool 的 completed step、`nulya ext run` | `ext run` 没有对话；进 ledger 会污染 prompt 前缀 |
+| `.nulya/tool-usage.jsonl`（§5.5） | 每个执行过 tool 的 completed step、`nulya ext run` | `duration_ms` 与 `ext run` 场外调用的身份，ledger 说不出；进 ledger 会污染 prompt 前缀 |
 | `.nulya/session-outcomes.jsonl` | 人或 agent 经 `nulya session outcome`（§14） | session 尾部往往没有下一个 step 来排 inbox；verdict 是**关于**这场 session 的判断，不是它的一轮 |
 
 行的形状：
@@ -392,6 +392,8 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
 - **`version`** 是这次调用由哪个冻结实现服务的。它是**双身份的另一半**（PLAN §3.5）：`tool_id` 不带版本，所以一个 tool 的历史是**一段**历史；`version` 在旁边，所以同一段历史也能**按实现**读。null 两种含义都诚实：早于此列 = unknown（不是"没有版本"）；builtin = 它就是内核。两个写点各自拿着答案：session 从**本场冻结的成员列表**（`composition.extensions` 的 `FrozenExtension{id, version}`）反查——版本是冻结成员关系的属性，唯一真相就在那里，不复制进 binding；`ext run` 用它自己刚解析出的那个版本。反查不到 = 写 null，不是错误。
 
 **写它的理由是 evidence 补不了课**：journal 只能 append，今天不记就永远 unknown。所以这一列**只写不读**——内核里没有读者，`aggregate` 一字未动，per-version 投影等第一个真实 consumer。
+
+**这条 journal 不是 ledger 的第二份真相，是 ledger 说不出的那部分。** 一场 session 调了几次工具、几次失败，ledger 的 `tool_results[].ok` 本来就答得出——`session list --json` 的 `tools{calls, failures}`（§14）就是直接数那个字段，不查这条 journal。留着 `ok` 没删的原因是**跨 session 的成功率**：TUI 的 `/usage`（`journals/tool_stats.aggregate`）要按 `tool_id` 聚合整台机器的历史，那个问题不属于任何一个 ledger 文件，只有这条 journal 能连续答。`duration_ms` 与 `ext run` 场外调用的身份同理——两者 ledger 天生不知道。
 
 **四列都可选、`v` 仍是 1**：加宽之前的每一行原样读回，缺的列是 null = "没记录"，绝不是 0。**为什么不升 v2**：这条 journal 的纪律一直是"加可选列、reader 忽略未知列"（`at` / `session` / `duration_ms` 三个先例），升 v2 只会让所有老读者对新行报错。reader 对未知 `v` 精确报错（`UnsupportedStatsVersion`），坏行 / 残尾容忍。
 
@@ -1551,12 +1553,14 @@ nulya                                            ← 无参数：同 `nulya help
 ```
 {sessions:[{id, created, parent, root, model, provider, model_id,
             nulya{version, kernel_hash},           // 创建它的二进制；老 session 两项皆空
-            events, usage, episode_usage, first_user_text（截断）,
+            events, tools{calls, failures}, usage, episode_usage, first_user_text（截断）,
             composition{active:["id@version"], native_tools,
                         system_prompts:["id@version/path"],
                         prompts:[{source, bytes}]},   // `--prompt` 冻进来的，只投 source 与字节数、不投正文
             outcome{verdict,note,at,source,by}|null}]}
 ```
+
+`tools` 数的是这场自己的 `tool_results[].ok`——直接读 ledger，不查 tool-usage journal（§5.5）：`calls` 是结果条数，`failures` 是 `ok:false` 的条数，与 `usage` 一样只对**这一个文件**求和，不并进 `episode_usage` 那条 fork 链。
 
 定位同 `config show`：外壳投影，不决定任何事，也不写任何东西。一个读不动的 session 文件被跳过而不是让整条命令失败。三个派生列：
 

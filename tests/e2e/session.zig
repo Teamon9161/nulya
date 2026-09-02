@@ -1297,6 +1297,12 @@ test "session cli: list --json reports parent, event count, summed usage and the
     }
     // user_text + assistant(call) + tool_results + assistant(end).
     try std.testing.expectEqual(@as(i64, 4), parent.get("events").?.integer);
+    // The one tool call is counted straight off the ledger's `tool_results`,
+    // not the usage journal — and it succeeded.
+    try std.testing.expectEqual(@as(i64, 1), parent.get("tools").?.object.get("calls").?.integer);
+    try std.testing.expectEqual(@as(i64, 0), parent.get("tools").?.object.get("failures").?.integer);
+    // The fork's one event is a bare assistant reply: no tool call at all.
+    try std.testing.expectEqual(@as(i64, 0), child.get("tools").?.object.get("calls").?.integer);
     try std.testing.expect(std.mem.indexOf(u8, parent.get("first_user_text").?.string, "probe the box") != null);
     try std.testing.expectEqualStrings("scripted", parent.get("model").?.string);
     try std.testing.expectEqualStrings("success", parent.get("outcome").?.object.get("verdict").?.string);

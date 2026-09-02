@@ -38,6 +38,10 @@ const SessionView = struct {
     remote_workspace: []const u8,
     events: usize,
     composition: Composition,
+    /// Tool calls this session made and how many came back `ok: false`,
+    /// counted straight off every `tool_results` event — the ledger already
+    /// has this, so the listing does not need the usage journal for it.
+    tools: ToolCounts,
     /// Sum of every assistant event's recorded usage. Steps whose provider
     /// reported nothing contribute nothing.
     usage: ledger.Usage,
@@ -64,6 +68,11 @@ const SessionView = struct {
     const InlinePromptView = struct {
         source: []const u8,
         bytes: usize,
+    };
+
+    const ToolCounts = struct {
+        calls: u64,
+        failures: u64,
     };
 
     const OutcomeView = struct {
@@ -155,6 +164,8 @@ fn readSessionView(
     var events: usize = 0;
     var total: ledger.Usage = .{};
     var first_user_text: []const u8 = "";
+    var tool_calls: u64 = 0;
+    var tool_failures: u64 = 0;
 
     while (lines.next()) |line| {
         if (header == null) {
@@ -167,11 +178,18 @@ fn readSessionView(
         // pre-filter, never the decision: what counts is the decoded line.
         const may_have_usage = std.mem.indexOf(u8, line, "\"usage\":") != null;
         const may_be_first_text = first_user_text.len == 0 and std.mem.indexOf(u8, line, "\"kind\":\"user_text\"") != null;
-        if (!may_have_usage and !may_be_first_text) continue;
+        const may_be_tool_results = std.mem.indexOf(u8, line, "\"kind\":\"tool_results\"") != null;
+        if (!may_have_usage and !may_be_first_text and !may_be_tool_results) continue;
         const parsed = ledger.parseEventLine(a, line) catch continue;
         if (parsed.value.usage) |u| total.add(u);
         if (first_user_text.len == 0 and std.mem.eql(u8, parsed.value.kind, "user_text")) {
             if (parsed.value.text) |t| first_user_text = try summarize(a, t);
+        }
+        if (parsed.value.results) |rs| {
+            tool_calls += rs.len;
+            for (rs) |r| {
+                if (!r.ok) tool_failures += 1;
+            }
         }
     }
 
@@ -204,6 +222,7 @@ fn readSessionView(
             .system_prompts = try prompts.forActive(a, h.composition.active),
             .prompts = inline_prompts,
         },
+        .tools = .{ .calls = tool_calls, .failures = tool_failures },
         .usage = total,
         .episode_usage = total,
         .first_user_text = first_user_text,
@@ -344,6 +363,7 @@ fn printSessionList(alloc: std.mem.Allocator, io: std.Io, views: []const Session
                 try out.writer.writeAll("]");
             }
             // Same rule as `root`: nothing to say costs no width.
+            if (v.tools.calls != 0) try out.writer.print("  {d} tools ({d} failed)", .{ v.tools.calls, v.tools.failures });
             if (v.environment.len != 0) try out.writer.print("  env {s}", .{v.environment});
             if (v.nulya.version.len != 0) try out.writer.print("  nulya {s}", .{v.nulya.version});
             if (v.first_user_text.len != 0) try out.writer.print("  {s}", .{v.first_user_text});
@@ -373,6 +393,7 @@ test "resolveEpisodes walks a fork chain to its root and totals the episode's us
                 .remote_workspace = "",
                 .events = 0,
                 .composition = .{ .active = &.{}, .native_tools = &.{}, .system_prompts = &.{}, .prompts = &.{} },
+                .tools = .{ .calls = 0, .failures = 0 },
                 .usage = .{ .input_tokens = input },
                 .episode_usage = .{},
                 .first_user_text = "",
