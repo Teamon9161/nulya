@@ -47,7 +47,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 **Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|note|step|events|cancel|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *` · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step --stream` 是行协议，`--gate` 是每个 tool call 的一票否决。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
 
-**三条 journal**（append-only，持 `<file>.lock` 写、读端忽略残尾）：`tool-usage`（证据，内核零读者）· `session-outcomes`（评判，没有行 = unknown ≠ failure）· `trusted-stores`（授权，user 层）。
+**三条 journal**（append-only，持 `<file>.lock` 写、读端忽略残尾）：`tool-usage`（证据——耗时与场外调用，session 内的调用计数已经能从 ledger 派生，内核零读者）· `session-outcomes`（评判，没有行 = unknown ≠ failure）· `trusted-stores`（授权，user 层）。
 
 细节看 [docs/DESIGN.md](docs/DESIGN.md)，TUI 看 [docs/tui.md](docs/tui.md)，每个功能的契约与实施日志在 `docs/goals/`。里程碑流水归档在 [docs/history/2026-08-changelog.md](docs/history/2026-08-changelog.md)——**不必读**。
 

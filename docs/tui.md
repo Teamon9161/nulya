@@ -81,7 +81,7 @@
 | 后台回执 / 报告文本 | `[background task <sid>/t<N> started] … log: …`（`shell {background:true}` 的结果）与任务报告 note 正文的两条分隔行 → 两张卡片按文本形状识别（`nulya/ledger.ts`，与 `[exit N]` 同一先例） |
 | `.nulya/sessions/<id>.lock` | 能否非阻塞独占 → 有无别的写者（§5.6）；`session list` 给不了"此刻谁在写"，所以这条探针留在 TUI |
 | `<root>/<id>/versions/v-*/extension.json` | `/ext` 与 CompositionCard 的明细：`runtime`/`contributes`（tools / skills / **system_prompts** / commands / policy / 本前端那一条 `ui.tui`）；root 由 `ext list` 指出 |
-| `.nulya/tool-usage.jsonl` | `/ext` 里的 usage 表：一行取 `tool_id` + `ok` → uses_total / recent / success_rate（**只投影，不重算排序**——排序是 kernel policy，TUI 不复刻）。行上还有 `at` / `session?` / `duration_ms?`（DESIGN §5.5），TUI 只挑它要的两列、其余原样忽略 |
+| `.nulya/tool-usage.jsonl` | `/ext` 里的 usage 表：一行取 `tool_id` + `ok` → uses_total / recent / success_rate，**跨全部 session 聚合**（**只投影，不重算排序**——排序是 kernel policy，TUI 不复刻）。行上还有 `at` / `session?` / `duration_ms?`（DESIGN §5.5），TUI 只挑它要的两列、其余原样忽略。单场自己调了几次工具、几次失败，`session list --json` 的 `tools{calls,failures}` 已经从 ledger 派生（DESIGN §14），这条 journal 只在需要跨 session 的成功率或耗时时才查 |
 | header `composition.native_tools` / `active[]` | 本场冻结契约（§5.1）；与 store `current` 比对 → "下一场会变"的漂移提示 |
 | shell 结果形状 | `stdout` + `--- stderr ---` + `[exit N]`（`tools/shell.zig`）→ 状态 chip 解析 `[exit N]` |
 | `tool_results[].presentation` | UI-only JSON；`{kind:"diff", patch, path?, filetype?, added?, removed?}` 交给宿主 diff primitive。`std.edit` 的 diff 由 extension 从实际 `ReplacementPlan` + 旧/新文件字节写入 sidecar；TUI 不解析 edit 参数；语法高亮与 `+N -N` chip 由宿主从 surface 计算（或读 surface 显式字段） |

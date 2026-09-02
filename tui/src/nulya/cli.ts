@@ -275,12 +275,10 @@ export interface ProfileView {
   credential: boolean
   /**
    * Where the credential comes from: `config` (the profile's own `api_key` in
-   * the user file), `env` (`api_key_env` is set), `file` (the user credential
-   * file answers that same variable name — the one source a spawned
-   * process can still reach, since secrets are stripped from every child's
-   * environment), `login` (codex auth file), `builtin` (scripted), `none`.
+   * the user file), `env` (`api_key_env` is set), `login` (codex auth file),
+   * `builtin` (scripted), `none`.
    */
-  credential_source: "config" | "env" | "file" | "login" | "builtin" | "none"
+  credential_source: "config" | "env" | "login" | "builtin" | "none"
   /** Default model id and the selectable list (the default is always in it). */
   model: string
   models: string[]

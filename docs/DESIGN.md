@@ -154,7 +154,7 @@ UI / trajectory / metrics 都是 ledger 的投影，不持久化 mutable 状态�
 
 | journal | 谁写 | 为什么不是 ledger 事件 |
 |---|---|---|
-| `.nulya/tool-usage.jsonl`（§5.5） | 每个执行过 tool 的 completed step、`nulya ext run` | `ext run` 没有对话；进 ledger 会污染 prompt 前缀 |
+| `.nulya/tool-usage.jsonl`（§5.5） | 每个执行过 tool 的 completed step、`nulya ext run` | `duration_ms` 与 `ext run` 场外调用的身份，ledger 说不出；进 ledger 会污染 prompt 前缀 |
 | `.nulya/session-outcomes.jsonl` | 人或 agent 经 `nulya session outcome`（§14） | session 尾部往往没有下一个 step 来排 inbox；verdict 是**关于**这场 session 的判断，不是它的一轮 |
 
 行的形状：
@@ -392,6 +392,8 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
 - **`version`** 是这次调用由哪个冻结实现服务的。它是**双身份的另一半**（PLAN §3.5）：`tool_id` 不带版本，所以一个 tool 的历史是**一段**历史；`version` 在旁边，所以同一段历史也能**按实现**读。null 两种含义都诚实：早于此列 = unknown（不是"没有版本"）；builtin = 它就是内核。两个写点各自拿着答案：session 从**本场冻结的成员列表**（`composition.extensions` 的 `FrozenExtension{id, version}`）反查——版本是冻结成员关系的属性，唯一真相就在那里，不复制进 binding；`ext run` 用它自己刚解析出的那个版本。反查不到 = 写 null，不是错误。
 
 **写它的理由是 evidence 补不了课**：journal 只能 append，今天不记就永远 unknown。所以这一列**只写不读**——内核里没有读者，`aggregate` 一字未动，per-version 投影等第一个真实 consumer。
+
+**这条 journal 不是 ledger 的第二份真相，是 ledger 说不出的那部分。** 一场 session 调了几次工具、几次失败，ledger 的 `tool_results[].ok` 本来就答得出——`session list --json` 的 `tools{calls, failures}`（§14）就是直接数那个字段，不查这条 journal。留着 `ok` 没删的原因是**跨 session 的成功率**：TUI 的 `/usage`（`journals/tool_stats.aggregate`）要按 `tool_id` 聚合整台机器的历史，那个问题不属于任何一个 ledger 文件，只有这条 journal 能连续答。`duration_ms` 与 `ext run` 场外调用的身份同理——两者 ledger 天生不知道。
 
 **四列都可选、`v` 仍是 1**：加宽之前的每一行原样读回，缺的列是 null = "没记录"，绝不是 0。**为什么不升 v2**：这条 journal 的纪律一直是"加可选列、reader 忽略未知列"（`at` / `session` / `duration_ms` 三个先例），升 v2 只会让所有老读者对新行报错。reader 对未知 `v` 精确报错（`UnsupportedStatsVersion`），坏行 / 残尾容忍。
 
@@ -1208,21 +1210,19 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Roots.resol
 
 #### credential
 
-**三条边界**：secret 不进 session 文件（header 只存 `api_key_env` 的**名字**与 profile 名，每次 step 重新解析）· 不进工具子进程的 env（`environment.isSecretKey`）· 不从 project 层来（checkout 不能定义 profile）。在这三条之内，credential 可以来自**三处**，`launch.credentialSource` 是定义顺序的**唯一一处**（改它，`config show` 的可用性投影 / `session new` 的冻结 / resume 全部跟着走）：
+**三条边界**：secret 不进 session 文件（header 只存 `api_key_env` 的**名字**与 profile 名，每次 step 重新解析）· 不进工具子进程的 env（`environment.isSecretKey`）· 不从 project 层来（checkout 不能定义 profile）。在这三条之内，credential 可以来自**两处**，`launch.credentialSource` 是定义顺序的**唯一一处**（改它，`config show` 的可用性投影 / `session new` 的冻结 / resume 全部跟着走）：
 
 ```
 config  profile 自己的 api_key（user 层 ~/.nulya/config.toml，TUI /model 的 `s` 写的就是它）
   ↓
 env     api_key_env 指的环境变量
-  ↓
-file    <NULYA_HOME | ~/.nulya>/credentials.toml —— 键就是 api_key_env 的那个名字
 ```
 
-**为什么有第三处，以及为什么它的键是环境变量名。** 子进程拿不到 secret（physics #6，不改），代价是**一个后台任务或一个 driver 型 extension 解析不出 `api_key_env`**——它 `session new` 出来的子 session 会没有 key。`codex` 从来没这个问题，因为它的 credential 一直是**文件**（`~/.codex/auth.json`，而 `HOME` 不是 secret）。`credentials.toml` 就是把这个先例推广给其它 provider：它提供的是 profile **已经声明的那些名字**的值（`OPENAI_API_KEY = "…"`），所以 profile 一个字不用改、没有第二套命名、"durable credential 只经 `api_key_env`"这句话字面上仍然成立。格式是 TOML 而不是第四条 journal：三条 `.jsonl` 记的是发生过的事或一次授权，这个是**人写的设定**。POSIX 上 mode 宽于 0600 → stderr 一行警告（每进程至多一次）**照读**（与 `auth.json` 同款态度）；Windows 没有 mode 就不说。**值绝不进任何投影**：`config show` 只报 `credential` 与 `credential_source`（多了 `"file"` 一档）。
+子进程拿不到 secret（physics #6，不改），代价是**一个后台任务或一个 driver 型 extension 解析不出 `api_key_env`**——它 `session new` 出来的子 session 会没有 key，除非那个 profile 把 `api_key` 直接写进了 user config（子进程读得到 config.toml，这就是它能替其它 provider 兜底的原因）。`codex` 没这个问题：它的 credential 一直是**文件**（`~/.codex/auth.json`，而 `HOME` 不是 secret）。**值绝不进任何投影**：`config show` 只报 `credential` 与 `credential_source`。
 
-**缺 credential 就不开场（`session new` exit 1）。** profile 点名一个真实 provider 而三条路都解析不到 → stderr 一句指路（那个变量名 · `credentials.toml` 的绝对路径 · user config · `nulya config show`）+ exit 1，**什么都不创建**。它曾经是"警告一行然后把身份冻结成 scripted"，那是比失败更糟的一种失败：session 开起来了、看着就是被点名的那个模型、而回答它的是离线替身，且因为身份是冻的，这一场此后一辈子如此。现在它与 resume 的 `MissingCredential` 对称。**唯一的例外是 `nulya demo`**：`cli/session.zig` 的 `createSession` 收一个 `KeylessPolicy{refuse, stand_in}`，两个调用点各自写明要哪个（`session new` = `refuse`，`demo` = `stand_in`）。
+**缺 credential 就不开场（`session new` exit 1）。** profile 点名一个真实 provider 而两条路都解析不到 → stderr 一句指路（那个变量名 · user config 的绝对路径 · `nulya config show`）+ exit 1，**什么都不创建**。它曾经是"警告一行然后把身份冻结成 scripted"，那是比失败更糟的一种失败：session 开起来了、看着就是被点名的那个模型、而回答它的是离线替身，且因为身份是冻的，这一场此后一辈子如此。现在它与 resume 的 `MissingCredential` 对称。**唯一的例外是 `nulya demo`**：`cli/session.zig` 的 `createSession` 收一个 `KeylessPolicy{refuse, stand_in}`，两个调用点各自写明要哪个（`session new` = `refuse`，`demo` = `stand_in`）。
 
-resume 时按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDescriptor(.inline_key)`，找不到再看 env、再看 credentials.toml，都没有 → `MissingCredential`，不静默降级。config 在 session 开始解析成 effective 值一次；磁盘改动下一场生效。
+resume 时按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDescriptor(.inline_key)`，找不到再看 env，都没有 → `MissingCredential`，不静默降级。config 在 session 开始解析成 effective 值一次；磁盘改动下一场生效。
 
 ## 10. 内嵌 Zig 工具链（`extension/build/toolchain.zig`）
 
@@ -1553,12 +1553,14 @@ nulya                                            ← 无参数：同 `nulya help
 ```
 {sessions:[{id, created, parent, root, model, provider, model_id,
             nulya{version, kernel_hash},           // 创建它的二进制；老 session 两项皆空
-            events, usage, episode_usage, first_user_text（截断）,
+            events, tools{calls, failures}, usage, episode_usage, first_user_text（截断）,
             composition{active:["id@version"], native_tools,
                         system_prompts:["id@version/path"],
                         prompts:[{source, bytes}]},   // `--prompt` 冻进来的，只投 source 与字节数、不投正文
             outcome{verdict,note,at,source,by}|null}]}
 ```
+
+`tools` 数的是这场自己的 `tool_results[].ok`——直接读 ledger，不查 tool-usage journal（§5.5）：`calls` 是结果条数，`failures` 是 `ok:false` 的条数，与 `usage` 一样只对**这一个文件**求和，不并进 `episode_usage` 那条 fork 链。
 
 定位同 `config show`：外壳投影，不决定任何事，也不写任何东西。一个读不动的 session 文件被跳过而不是让整条命令失败。三个派生列：
 
