@@ -972,15 +972,6 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
             }, .{}),
         } };
     }
-    if (std.mem.eql(u8, w.kind, "model_rebind")) {
-        // The descriptor is required and the profile is not: a session can be
-        // rebound to a model without naming a profile, but a rebind that does
-        // not say what to run is not a rebind.
-        return .{ .model_rebind = .{
-            .profile = w.profile orelse "",
-            .identity = w.identity orelse return error.CorruptLedger,
-        } };
-    }
     if (std.mem.eql(u8, w.kind, "task_finished")) {
         return .{ .note = .{
             .source = note_source_task,
@@ -989,6 +980,15 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
                 .task = w.task orelse return error.CorruptLedger,
                 .exit_code = w.exit_code orelse return error.CorruptLedger,
             }, .{}),
+        } };
+    }
+    if (std.mem.eql(u8, w.kind, "model_rebind")) {
+        // The descriptor is required and the profile is not: a session can be
+        // rebound to a model without naming a profile, but a rebind that does
+        // not say what to run is not a rebind.
+        return .{ .model_rebind = .{
+            .profile = w.profile orelse "",
+            .identity = w.identity orelse return error.CorruptLedger,
         } };
     }
     return error.CorruptLedger;
