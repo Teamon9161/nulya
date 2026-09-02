@@ -1,15 +1,14 @@
 //! Anthropic Messages API provider.
 //!
-//! Unlike Chat Completions, this API caches only where it is told to. The
-//! projected turn prefix only ever grows, never gets rewritten, so two
-//! `cache_control` breakpoints — one after the frozen system blocks, one on
-//! the last content block of the last message — cover the whole prefix, and
-//! the tail breakpoint moves forward on its own as the ledger is appended to.
+//! This API caches only where it is told to. The projected turn prefix only ever
+//! grows, so two `cache_control` breakpoints — one after the frozen system
+//! blocks, one on the last content block of the last message — cover the whole
+//! prefix, and the tail one moves forward as the ledger is appended to.
 //!
 //! Also speaks Anthropic-compatible backends (DeepSeek's `/anthropic` endpoint).
-//! The only place the two differ is the reasoning dial: first-party models take
-//! adaptive thinking guided by `output_config.effort`, compatible backends still
-//! take the classic `thinking.budget_tokens`.
+//! They differ only in the reasoning dial: first-party models take adaptive
+//! thinking guided by `output_config.effort`, compatible backends still take the
+//! classic `thinking.budget_tokens`.
 
 const std = @import("std");
 const ledger = @import("../ledger.zig");
@@ -23,9 +22,8 @@ pub const default_base_url = "https://api.anthropic.com";
 pub const default_model = "claude-sonnet-5";
 
 /// The Messages API rejects a request without `max_tokens`, so "uncapped" has to
-/// become a number somewhere; it belongs to the wire format, not to config. High
-/// enough that no honest answer reaches it, with room left under the ceiling for
-/// the largest thinking budget this provider asks for (which is added on top).
+/// become a number somewhere. High enough that no honest answer reaches it, with
+/// room under the ceiling for the largest thinking budget (added on top).
 const default_max_tokens: u32 = 32_000;
 
 pub const Config = struct {
@@ -40,8 +38,7 @@ pub const AnthropicProvider = struct {
     api_key: []const u8,
     model: []const u8,
     base_url: []const u8,
-    /// True when talking to the first-party API rather than an
-    /// Anthropic-compatible backend. Decides the effort wire format and whether
+    /// True for the first-party API. Decides the effort wire format and whether
     /// a bearer token is sent alongside `x-api-key`.
     native: bool,
 
@@ -99,8 +96,7 @@ pub const AnthropicProvider = struct {
         defer alloc.free(url);
 
         // Compatible backends (DeepSeek) authenticate with a bearer token; the
-        // first-party API rejects a request carrying both, so it gets `x-api-key`
-        // alone.
+        // first-party API rejects a request carrying both.
         const auth = if (self.native) null else try std.fmt.allocPrint(alloc, "Bearer {s}", .{self.api_key});
         defer if (auth) |a| alloc.free(a);
 
@@ -179,8 +175,8 @@ pub fn buildRequestJson(
             try jw.write("disabled");
             try jw.endObject();
         } else if (native) {
-            // First-party models dropped the legacy budget field (it 400s) for
-            // adaptive thinking guided by an effort level.
+            // First-party models 400 on the legacy budget field; they take an
+            // effort level instead.
             try jw.objectField("thinking");
             try jw.beginObject();
             try jw.objectField("type");
@@ -211,8 +207,8 @@ fn effortLevel(effort: []const u8) []const u8 {
     return "high";
 }
 
-/// The legacy budget, and the amount `max_tokens` grows by so the answer itself
-/// still fits under the cap. Zero unless the compatible-backend arm is taken.
+/// The legacy budget, and the amount `max_tokens` grows by so the answer still
+/// fits under the cap. Zero unless the compatible-backend arm is taken.
 fn thinkingBudget(native: bool, effort: ?[]const u8) u32 {
     const e = effort orelse return 0;
     if (native or std.mem.eql(u8, e, "off")) return 0;
@@ -222,8 +218,7 @@ fn thinkingBudget(native: bool, effort: ?[]const u8) u32 {
 }
 
 /// The frozen system blocks, with the cache breakpoint on the last one. Tools
-/// are cached by the same breakpoint (they precede system in the cache prefix),
-/// so one is enough for the whole immutable head of the request.
+/// precede system in the cache prefix, so it covers the whole immutable head.
 fn writeSystem(jw: *std.json.Stringify, blocks: []const prompt.SystemBlock) !void {
     try jw.beginArray();
     if (blocks.len == 0) {
@@ -248,8 +243,7 @@ fn writeTextBlock(jw: *std.json.Stringify, text: []const u8, cached: bool) !void
 }
 
 /// An inline image as a content block: this API takes the media type and the
-/// base64 as separate fields of a `source`, which is why it does not share the
-/// data-URI helper the other two dialects do.
+/// base64 as separate fields of a `source`, not as a data URI.
 fn writeImageBlock(jw: *std.json.Stringify, img: ledger.Image, cached: bool) !void {
     try jw.beginObject();
     try jw.objectField("type");
@@ -278,7 +272,7 @@ fn writeCacheControl(jw: *std.json.Stringify) !void {
 const Role = enum { user, assistant };
 
 /// Which message role a turn belongs to. Tool results and notes are user-side
-/// content on this API — there is no mid-conversation system role.
+/// content: there is no mid-conversation system role.
 fn roleOf(turn: prompt.Turn) Role {
     return switch (turn) {
         .user_text, .tool_results, .note => .user,
@@ -286,8 +280,8 @@ fn roleOf(turn: prompt.Turn) Role {
     };
 }
 
-/// Consecutive same-role turns become ONE message: that is what a batched
-/// `tool_results` turn is on this wire, and it keeps roles alternating.
+/// Consecutive same-role turns become ONE message, which keeps roles
+/// alternating.
 fn writeMessages(jw: *std.json.Stringify, alloc: std.mem.Allocator, turns: []const prompt.Turn) !void {
     try jw.beginArray();
     var i: usize = 0;
@@ -303,9 +297,7 @@ fn writeMessages(jw: *std.json.Stringify, alloc: std.mem.Allocator, turns: []con
 
 fn writeMessage(jw: *std.json.Stringify, alloc: std.mem.Allocator, role: Role, run: []const prompt.Turn, last: bool) !void {
     // The moving cache breakpoint sits on the final content block of the final
-    // message, so every request extends the cached prefix by exactly the turns
-    // appended since the last one. Counted rather than indexed: one turn writes
-    // as many content blocks as it has parts.
+    // message. Counted, not indexed: a turn writes one block per part.
     const eligible = cacheableBlocks(run);
     const breakpoint: ?usize = if (last and eligible != 0) eligible - 1 else null;
     var seen: usize = 0;
@@ -317,22 +309,18 @@ fn writeMessage(jw: *std.json.Stringify, alloc: std.mem.Allocator, role: Role, r
     try jw.beginArray();
     for (run) |turn| switch (turn) {
         .user_text => |u| {
-            // Text first, then the images inlined with it. An image-only turn
-            // writes NO text block: this API rejects an empty one, and
-            // `session append --image` with nothing said is a legal turn.
-            // `cacheableBlocks` counts by the same rule — the two must agree
-            // or the moving breakpoint lands on the wrong block.
+            // An image-only turn writes NO text block (this API rejects an
+            // empty one). `cacheableBlocks` must count by the same rule or the
+            // moving breakpoint lands on the wrong block.
             if (u.text.len != 0 or u.images.len == 0) try writeTextBlock(jw, u.text, takes(breakpoint, &seen));
             for (u.images) |img| try writeImageBlock(jw, img, takes(breakpoint, &seen));
         },
         .note => |text| try writeTextBlock(jw, text, takes(breakpoint, &seen)),
         .assistant => |as| {
-            // The turn's `thinking` / `redacted_thinking` blocks, exactly as this
-            // API streamed them (signature included). They must lead the
-            // assistant message that carries the `tool_use` they preceded — with
-            // thinking on, the API rejects a tool-use turn whose thinking was
-            // dropped — so replaying them is what makes a tool loop legal here,
-            // not only what keeps the model's reasoning continuous.
+            // The turn's `thinking` / `redacted_thinking` blocks exactly as
+            // streamed (signature included). With thinking on, the API rejects a
+            // tool-use turn whose thinking was dropped, so they must lead the
+            // assistant message carrying the `tool_use` they preceded.
             if (as.reasoning.len != 0) try wire.writeReasoningItems(jw, alloc, as.reasoning);
             // An assistant turn that only issued tool calls has no text block;
             // `content: []` would be rejected, so the calls carry the message.
@@ -369,18 +357,16 @@ fn writeMessage(jw: *std.json.Stringify, alloc: std.mem.Allocator, role: Role, r
             try jw.endObject();
         },
     };
-    // A pure-empty assistant turn (no text, no calls) would leave `content: []`,
-    // which the API rejects; give it a body rather than dropping the turn, so
-    // the projection and the wire history stay one-to-one. Replayed thinking
-    // blocks are a body of their own, so a thinking-only turn needs none. Such a
-    // run has no cacheable block, hence no breakpoint to place here either.
+    // A pure-empty assistant turn would leave `content: []`, which the API
+    // rejects; give it a body so projection and wire history stay one-to-one.
+    // Thinking blocks are a body of their own.
     if (eligible == 0 and !hasReasoning(run)) try writeTextBlock(jw, "", false);
     try jw.endArray();
     try jw.endObject();
 }
 
-/// Whether the content block about to be written is the one carrying the
-/// breakpoint, advancing the position as it answers.
+/// Whether the block about to be written carries the breakpoint, advancing the
+/// position as it answers.
 fn takes(breakpoint: ?usize, seen: *usize) bool {
     defer seen.* += 1;
     return breakpoint != null and breakpoint.? == seen.*;
@@ -395,13 +381,13 @@ fn hasReasoning(run: []const prompt.Turn) bool {
 }
 
 /// How many content blocks of `run` can carry the cache breakpoint: an empty
-/// assistant text emits no block at all, and thinking blocks are replayed
-/// verbatim (no `cache_control` is spliced into them), so neither counts.
+/// assistant text emits no block, and thinking blocks are replayed verbatim
+/// (nothing is spliced into them), so neither counts.
 fn cacheableBlocks(run: []const prompt.Turn) usize {
     var n: usize = 0;
     for (run) |turn| switch (turn) {
         // Same rule as `writeMessage`: no text block for an image-only turn,
-        // one cacheable block per image (an image block takes `cache_control`).
+        // one cacheable block per image.
         .user_text => |u| {
             if (u.text.len != 0 or u.images.len == 0) n += 1;
             n += u.images.len;
@@ -434,9 +420,8 @@ fn writeTools(jw: *std.json.Stringify, tools: []const tool.ToolDefinition) !void
 // ------------------------------------------------------------------ stream --
 
 /// Usage arrives in two events: `message_start` carries the input and cache
-/// counters, `message_delta` the output count (and, on newer API versions, a
-/// partial repeat of the rest). This merges instead of replacing — otherwise
-/// the cache-read counter would be zeroed by the final event.
+/// counters, `message_delta` the output count (and sometimes a partial repeat).
+/// Merging rather than replacing keeps the cache-read counter from being zeroed.
 pub const StreamState = struct {
     alloc: std.mem.Allocator,
     sink: provider.EventSink,
@@ -444,9 +429,8 @@ pub const StreamState = struct {
     stop: provider.StopReason = .end_turn,
     started: bool = false,
     done: bool = false,
-    /// The `thinking` block currently streaming, if any. Its text and signature
-    /// arrive as deltas and the block is only whole at `content_block_stop`,
-    /// which is when it is emitted as one `reasoning_item` for replay.
+    /// The `thinking` block currently streaming, if any. Whole only at
+    /// `content_block_stop`, when it is emitted as one `reasoning_item`.
     thinking: ?Thinking = null,
 
     const Thinking = struct {
@@ -521,9 +505,8 @@ pub const StreamState = struct {
         } else if (std.mem.eql(u8, kind, "content_block_stop")) {
             if (self.thinking) |*think| {
                 defer self.dropThinking();
-                // The block exactly as the API defines it, so it replays as-is.
-                // With `display: omitted` the text is empty and the signature is
-                // still what makes the block valid.
+                // The block exactly as the API defines it, so it replays as-is;
+                // with `display: omitted` the signature alone makes it valid.
                 const item = try std.json.Stringify.valueAlloc(self.alloc, .{
                     .type = "thinking",
                     .thinking = think.text.written(),
@@ -544,8 +527,7 @@ pub const StreamState = struct {
         } else if (std.mem.eql(u8, kind, "error")) {
             const err = wire.field(root, "error") orelse root;
             std.debug.print("anthropic stream error: {s}\n", .{wire.string(err, "message") orelse data});
-            // A 529 that arrives after the head is already 200 comes as an
-            // in-stream `overloaded_error`; it is the same transient fault.
+            // A 529 after a 200 head arrives as an in-stream `overloaded_error`.
             if (std.mem.eql(u8, wire.string(err, "type") orelse "", "overloaded_error")) return error.ServerError;
             return error.AnthropicStreamError;
         }
@@ -559,8 +541,7 @@ pub const StreamState = struct {
     }
 
     fn mergeUsage(self: *StreamState, u: std.json.Value) !void {
-        // `input_tokens` here already excludes both cache counters, which is
-        // exactly what `provider.Usage.input_tokens` means.
+        // `input_tokens` here already excludes both cache counters.
         setIfNonZero(&self.usage.input_tokens, wire.uint(u, "input_tokens"));
         setIfNonZero(&self.usage.output_tokens, wire.uint(u, "output_tokens"));
         setIfNonZero(&self.usage.cache_read_tokens, wire.uint(u, "cache_read_input_tokens"));
@@ -622,12 +603,10 @@ test "cache breakpoints sit after system and on the last content block" {
     const body = try testRequestJson(alloc, &l, true, null);
     defer alloc.free(body);
 
-    // Exactly two: the immutable head (tools + system) and the moving tail.
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"cache_control\""));
     const system_bp = std.mem.indexOf(u8, body, "\"cache_control\"").?;
     const messages = std.mem.indexOf(u8, body, "\"messages\"").?;
     try std.testing.expect(system_bp < messages);
-    // The tail breakpoint is on the last message's last content block.
     try std.testing.expect(std.mem.lastIndexOf(u8, body, "\"cache_control\"").? > messages);
 }
 
@@ -648,13 +627,10 @@ test "the tail breakpoint follows the appended turn, and a batch is one user mes
     const body = try testRequestJson(alloc, &l, true, null);
     defer alloc.free(body);
 
-    // user / assistant / user: the two results share one message, and the
-    // text-less assistant turn is carried by its tool_use blocks alone.
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"role\":\"user\""));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "\"role\":\"assistant\""));
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"type\":\"tool_result\""));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "\"is_error\":true"));
-    // Still two breakpoints, and the tail one moved onto the newest block.
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"cache_control\""));
     const last_result = std.mem.lastIndexOf(u8, body, "\"tool_use_id\":\"c2\"").?;
     try std.testing.expect(std.mem.lastIndexOf(u8, body, "\"cache_control\"").? > last_result);
@@ -684,7 +660,6 @@ test "effort maps to adaptive thinking natively and to a budget on compatible ba
     const compat = try testRequestJson(alloc, &l, false, "medium");
     defer alloc.free(compat);
     try std.testing.expect(std.mem.indexOf(u8, compat, "\"budget_tokens\":12288") != null);
-    // The budget is added on top so the answer still fits under the cap.
     try std.testing.expect(std.mem.indexOf(u8, compat, "\"max_tokens\":44288") != null);
 }
 
@@ -706,8 +681,6 @@ test "SSE events collect into a turn and cache metrics survive the final usage e
     try std.testing.expect(!try state.onData(
         \\{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"echo hi\"}"}}
     ));
-    // The closing usage event reports only output tokens; the cache counters
-    // from message_start must not be lost.
     try std.testing.expect(!try state.onData(
         \\{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}
     ));
@@ -731,8 +704,6 @@ test "SSE events collect into a turn and cache metrics survive the final usage e
 test "thinking blocks are collected whole and replayed verbatim ahead of the turn's tool_use" {
     const alloc = std.testing.allocator;
 
-    // Stream: a thinking block (text + signature in deltas), a redacted one, a
-    // tool call. The two thinking blocks come out as complete items.
     var collector = provider.TurnCollector.init(alloc);
     defer collector.deinit();
     var state: StreamState = .{ .alloc = alloc, .sink = collector.sink() };
@@ -775,10 +746,8 @@ test "thinking blocks are collected whole and replayed verbatim ahead of the tur
     try std.testing.expectEqualStrings("", turn.text);
     try std.testing.expectEqual(@as(usize, 1), turn.calls.len);
 
-    // Replay: the ledger's assistant event carries the items, and the request
-    // puts them first in the assistant message, before the tool_use — the shape
-    // the API demands when thinking is enabled. The tail breakpoint stays on
-    // the last real content block, never on a thinking block.
+    // Replay puts the items before the tool_use, and the tail breakpoint stays
+    // on the last real block, never on a thinking block.
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
     try l.append(.{ .user_text = .{ .text = "hello" } });
@@ -793,7 +762,6 @@ test "thinking blocks are collected whole and replayed verbatim ahead of the tur
     try std.testing.expect(think < redacted and redacted < tool_use);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "\"role\":\"assistant\""));
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"cache_control\""));
-    // No empty text block was invented: the thinking blocks and the call are the body.
     try std.testing.expect(std.mem.indexOf(u8, body, "\"text\":\"\"") == null);
 }
 
@@ -812,14 +780,10 @@ test "a note is a user text block the moving breakpoint can land on" {
     const body = try testRequestJson(alloc, &l, true, null);
     defer alloc.free(body);
 
-    // User side on this wire: there is no mid-conversation system role here to
-    // put it in.
     const report_at = std.mem.indexOf(u8, body, "[background task s-1/t3 finished]").?;
     const last_user_at = std.mem.lastIndexOf(u8, body, "\"role\":\"user\"").?;
     try std.testing.expect(last_user_at < report_at);
 
-    // `cacheableBlocks` counted it, so the moving breakpoint sits on it — the
-    // last block of the last message — and there are still exactly two.
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"cache_control\""));
     try std.testing.expect(std.mem.lastIndexOf(u8, body, "\"cache_control\"").? > report_at);
 }
@@ -832,7 +796,6 @@ test "an image is a source block that can take the moving breakpoint; a turn wit
     try plain.append(.{ .user_text = .{ .text = "hello" } });
     const plain_body = try testRequestJson(alloc, &plain, true, null);
     defer alloc.free(plain_body);
-    // The whole user message, byte for byte as it was before images existed.
     try std.testing.expect(std.mem.indexOf(u8, plain_body, "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\",\"cache_control\":{\"type\":\"ephemeral\"}}]}") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain_body, "\"type\":\"image\"") == null);
 
@@ -845,21 +808,14 @@ test "an image is a source block that can take the moving breakpoint; a turn wit
     const body = try testRequestJson(alloc, &shot, true, null);
     defer alloc.free(body);
 
-    // Text block, then the image as a base64 source block — and the turn is
-    // still ONE message.
     const text_at = std.mem.indexOf(u8, body, "\"type\":\"text\",\"text\":\"what is this\"").?;
     const image_at = std.mem.indexOf(u8, body, "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"iVBORw0=\"}").?;
     try std.testing.expect(text_at < image_at);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "\"role\":\"user\""));
 
-    // `cacheableBlocks` and `writeMessage` agree: the turn grew from one block
-    // to two, so the moving breakpoint is on the IMAGE, the last block of the
-    // last message — still exactly two breakpoints in the request.
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"cache_control\""));
     try std.testing.expect(std.mem.lastIndexOf(u8, body, "\"cache_control\"").? > image_at);
 
-    // An image-only turn writes no text block at all (this API rejects an empty
-    // one), and the breakpoint still lands on the last block written.
     var bare = ledger.Ledger.init(alloc);
     defer bare.deinit();
     try bare.append(.{ .user_text = .{ .text = "", .images = &.{.{ .media_type = "image/jpeg", .data = "/9j/" }} } });

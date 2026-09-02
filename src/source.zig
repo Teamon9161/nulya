@@ -1,13 +1,7 @@
-//! Embedded self-view of nulya's own source, backing `nulya src`.
-//!
-//! build.zig `@embedFile`s the whole `src/**` tree into the binary, so a read
-//! gets the REAL kernel source with zero API drift — no hand-maintained
-//! "here's the signature" text to fall out of sync with the code.
-//!
-//! `test` blocks are stored verbatim but STRIPPED on print by default: reading
-//! for structure/contract wants the declarations, not the test tokens. Tests
-//! stay in-file and `--tests` prints them unstripped; this module only chooses
-//! what a given read projects. Storage vs projection, kept separate.
+//! Embedded self-view of nulya's own source, backing `nulya src`. build.zig
+//! `@embedFile`s the whole `src/**` tree, so a read gets the REAL kernel source
+//! with zero API drift. `test` blocks are stored verbatim but STRIPPED on print
+//! by default; `--tests` prints them unstripped.
 
 const std = @import("std");
 const embed = @import("src_embed");
@@ -28,10 +22,9 @@ pub fn find(path: []const u8) ?[]const u8 {
 /// Return `src` with every top-level `test` block removed. Caller owns the result.
 ///
 /// Relies on `zig fmt`'s invariant that a top-level declaration's closing brace
-/// sits in column 0: a test block starts at a line beginning with `test` (followed
-/// by a space, `"`, or `{`) and ends at the next line beginning with `}`. Nothing
-/// inside a well-formatted function body de-dents to column 0, so this needs no
-/// tokenizer.
+/// sits in column 0: a test block starts at a line beginning with `test` (then a
+/// space, `"`, or `{`) and ends at the next line beginning with `}`. Nothing in a
+/// well-formatted function body de-dents to column 0, so this needs no tokenizer.
 pub fn stripTests(alloc: std.mem.Allocator, src: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
@@ -50,8 +43,8 @@ pub fn stripTests(alloc: std.mem.Allocator, src: []const u8) ![]u8 {
         }
         if (isTestHeader(line)) {
             skipping = true;
-            // Drop the blank separator before the test so deleting the block does
-            // not leave a double blank between the surrounding declarations.
+            // Drop the blank separator before the test so deleting the block
+            // leaves no double blank between the surrounding declarations.
             dropTrailingBlankLine(&out);
             continue;
         }
@@ -97,7 +90,6 @@ test "stripTests removes top-level test blocks but keeps declarations" {
     try std.testing.expect(std.mem.indexOf(u8, out, "test \"add works\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "pub fn add") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "pub const answer = 42;") != null);
-    // No double blank left where the block used to be.
     try std.testing.expect(std.mem.indexOf(u8, out, "\n\n\n") == null);
 }
 
@@ -135,9 +127,8 @@ test "embedded self-view includes this file and round-trips a known path" {
     try std.testing.expect(find("does/not/exist.zig") == null);
 }
 
-/// The pointers a shipped comment must not carry. Split around `++` so this
-/// list does not match itself: the guard covers every embedded file, its own
-/// included, and an exemption would be a hole in exactly the wrong place.
+/// The pointers a shipped comment must not carry. Split around `++` so this list
+/// does not match itself: the guard covers every embedded file, its own included.
 const doc_pointers = [_][]const u8{
     "DESIGN" ++ " §",
     "DESIGN" ++ ".md",
@@ -152,8 +143,7 @@ const doc_pointers = [_][]const u8{
 
 test "shipped source carries no documentation pointers" {
     // `nulya src` prints these bytes to a reader who cannot open `docs/`: a
-    // section reference there costs tokens and resolves to nothing. Whatever a
-    // comment needs from that section belongs in the comment as a fact.
+    // section reference costs tokens and resolves to nothing.
     var offenders: usize = 0;
     for (files) |f| offenders += scanForPointers(f.path, f.bytes);
     for (bundled.files) |f| {

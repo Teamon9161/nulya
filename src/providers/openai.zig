@@ -1,17 +1,13 @@
-//! OpenAI-compatible Chat Completions provider.
+//! OpenAI-compatible Chat Completions provider: streaming SSE normalized into
+//! `provider.StreamEvent`s, which a `provider.TurnCollector` accumulates into one
+//! `ModelTurn`.
 //!
-//! The provider speaks streaming SSE on the wire and normalizes deltas into the
-//! core `provider.StreamEvent` shape. A `provider.TurnCollector` accumulates
-//! those events into one `ModelTurn`, while an observer can watch the same
-//! stream as it arrives.
-//!
-//! DeepSeek's endpoint speaks this wire with two documented differences
-//! (api-docs.deepseek.com, "Thinking Mode"): thinking is on by default and is
-//! switched off with `thinking: {type: "disabled"}` rather than an effort value,
-//! and the `reasoning_content` of a tool-calling assistant turn MUST be sent back
-//! on later requests of the same turn (the API answers 400 without it). Both are
-//! handled here — the reasoning as one opaque `reasoning_item` per turn, exactly
-//! the mechanism the Anthropic and Codex wires use for their replayable thinking.
+//! DeepSeek's endpoint speaks this wire with two documented differences:
+//! thinking is on by default and is switched off with `thinking: {type:
+//! "disabled"}` rather than an effort value, and the `reasoning_content` of a
+//! tool-calling assistant turn MUST be sent back on later requests of the same
+//! turn (400 without it). Both are handled here, the reasoning as one opaque
+//! `reasoning_item` per turn.
 
 const std = @import("std");
 const prompt = @import("../prompt.zig");
@@ -29,7 +25,7 @@ pub const Config = struct {
 };
 
 /// True for DeepSeek's OpenAI-compatible endpoint, whose thinking switch and
-/// reasoning replay differ from OpenAI's own (see the module doc).
+/// reasoning replay differ from OpenAI's own.
 pub fn isDeepSeek(base_url: []const u8) bool {
     return std.mem.indexOf(u8, base_url, "deepseek.com") != null;
 }
@@ -110,8 +106,8 @@ pub const OpenAiProvider = struct {
             .stall_ms = request.stall_ms,
         }, &state, SseState.onData);
 
-        // `[DONE]` already emitted `done` and stopped the loop; reaching here
-        // means the body ended without it.
+        // `[DONE]` emits `done` and stops the loop, so reaching here means the
+        // body ended without it.
         if (state.finish) |reason| {
             try state.flushReasoning();
             try sink.emit(.{ .done = reason });
@@ -157,16 +153,15 @@ pub fn buildRequestJson(
     try jw.objectField("include_usage");
     try jw.write(true);
     try jw.endObject();
-    // No `max_tokens` unless asked: the endpoint's own output limit is the right
-    // default for a chat turn, and on backends that think by default the
+    // No `max_tokens` unless asked: on backends that think by default the
     // reasoning is spent against the same cap.
     if (request.options.max_output_tokens) |max| {
         try jw.objectField("max_tokens");
         try jw.write(max);
     }
-    // `off` is not an effort level on this wire: DeepSeek (thinking on by
-    // default) takes an explicit `thinking` switch, everyone else gets nothing.
-    // Any other level is the standard `reasoning_effort` dial.
+    // `off` is not an effort level on this wire: DeepSeek takes an explicit
+    // `thinking` switch, everyone else nothing. Any other level is
+    // `reasoning_effort`.
     if (request.options.effort) |effort| {
         if (std.mem.eql(u8, effort, "off")) {
             if (deepseek) {
@@ -200,11 +195,8 @@ fn writeMessages(alloc: std.mem.Allocator, jw: *std.json.Stringify, ir: *const p
     }
     for (ir.turns) |turn| switch (turn) {
         .user_text => |u| try writeUserMessage(alloc, jw, u),
-        // One turn, one assistant message: text, this turn's reasoning and its
-        // calls all belong to it.
         .assistant => |as| try writeAssistantMessage(alloc, jw, as),
-        // A batch is one turn but one `role: "tool"` message per result — that
-        // is simply how this wire spells it.
+        // A batch is one turn but one `role: "tool"` message per result.
         .tool_results => |results| for (results) |result| {
             try jw.beginObject();
             try jw.objectField("role");
@@ -215,20 +207,16 @@ fn writeMessages(alloc: std.mem.Allocator, jw: *std.json.Stringify, ir: *const p
             try jw.write(result.output);
             try jw.endObject();
         },
-        // A machine fact from outside the step. NOT the system role: a note can
-        // carry the output of an arbitrary process, and the system role is the
-        // one place the model is entitled to read as the harness speaking.
-        // `user` is what the other two wires already give it.
+        // NOT the system role: a note can carry an arbitrary process's output,
+        // and the system role is the harness's own voice.
         .note => |text| try writeRoleContentMessage(jw, "user", text),
     };
     try jw.endArray();
 }
 
-/// A user turn. WITHOUT images it is the plain-string form this endpoint has
-/// always been sent — byte for byte, because that string is the implicit prefix
-/// cache's key material and a turn that carries no picture must not move it.
-/// With images it becomes the parts array, which is the only shape that can
-/// carry one.
+/// A user turn. WITHOUT images it is the plain-string form, byte for byte,
+/// because that string is the implicit prefix cache's key material. With images
+/// it becomes the parts array, the only shape that can carry one.
 fn writeUserMessage(alloc: std.mem.Allocator, jw: *std.json.Stringify, u: prompt.Turn.UserText) !void {
     if (u.images.len == 0) return writeRoleContentMessage(jw, "user", u.text);
     try jw.beginObject();
@@ -236,7 +224,6 @@ fn writeUserMessage(alloc: std.mem.Allocator, jw: *std.json.Stringify, u: prompt
     try jw.write("user");
     try jw.objectField("content");
     try jw.beginArray();
-    // An image-only turn writes no text part rather than an empty one.
     if (u.text.len != 0) {
         try jw.beginObject();
         try jw.objectField("type");
@@ -284,9 +271,8 @@ fn writeAssistantMessage(alloc: std.mem.Allocator, jw: *std.json.Stringify, as: 
     if (as.calls.len != 0) {
         // DeepSeek requires the CoT of a tool-calling turn on every later
         // request of that turn (400 otherwise) and ignores it elsewhere, so it
-        // rides only on messages that carry tool_calls. Only this wire produces
-        // `reasoning_content` items, so reasoning of another shape (a session
-        // that ran on a different provider) contributes nothing.
+        // rides only on messages carrying tool_calls. Reasoning of another
+        // provider's shape contributes nothing.
         if (as.reasoning.len != 0) {
             const text = try joinReasoningContent(alloc, as.reasoning);
             defer alloc.free(text);
@@ -338,15 +324,14 @@ fn writeTools(jw: *std.json.Stringify, tools: []const tool.ToolDefinition) !void
 }
 
 /// The reasoning item this wire keeps for replay: the turn's whole
-/// `reasoning_content` as one object, so `writeAssistantMessage` can hand it
-/// back verbatim under the same field name. Opaque to the kernel like every
-/// other provider's item; only this file reads it.
+/// `reasoning_content` as one object, handed back verbatim under the same field
+/// name. Opaque to the kernel; only this file reads it.
 const reasoning_field = "reasoning_content";
 
-/// Per-stream SSE state. Chat Completions has no explicit terminator other than
-/// `[DONE]`, so the finish reason seen on the last chunk is carried here in case
-/// the connection ends without one; the turn's `reasoning_content` deltas
-/// accumulate here and leave as ONE `reasoning_item` right before `done`.
+/// Per-stream SSE state. Chat Completions has no terminator other than `[DONE]`,
+/// so the last chunk's finish reason is carried here in case the connection ends
+/// without one; `reasoning_content` deltas accumulate and leave as ONE
+/// `reasoning_item` right before `done`.
 pub const SseState = struct {
     alloc: std.mem.Allocator,
     sink: provider.EventSink,
@@ -372,8 +357,7 @@ pub const SseState = struct {
     }
 
     /// Emit the accumulated reasoning as one item (and forget it). A no-op when
-    /// the model did not think aloud, so on non-reasoning endpoints the turn's
-    /// `reasoning` stays empty.
+    /// the model did not think aloud.
     pub fn flushReasoning(self: *SseState) !void {
         const text = self.reasoning.written();
         if (text.len == 0) return;
@@ -424,7 +408,6 @@ pub fn processSseData(state: *SseState, data: []const u8) !bool {
     }
     if (wire.string(delta, reasoning_field)) |thinking| {
         if (thinking.len != 0) {
-            // Display now, and keep for the turn's replayable item.
             try sink.emit(.{ .thinking_delta = thinking });
             try state.reasoning.writer.writeAll(thinking);
         }
@@ -438,8 +421,8 @@ pub fn processSseData(state: *SseState, data: []const u8) !bool {
 }
 
 /// Concatenate the `reasoning_content` of every item in a turn's `reasoning`
-/// (a JSON array; see `SseState.flushReasoning`). Items of another shape — from
-/// a provider that is not this wire — contribute nothing. Caller owns the result.
+/// (a JSON array). Items of another provider's shape contribute nothing. Caller
+/// owns the result.
 fn joinReasoningContent(alloc: std.mem.Allocator, reasoning: []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
@@ -565,13 +548,11 @@ test "SSE parser extracts streamed text tool calls usage and done" {
     const turn = try collector.finish();
     defer turn.deinit(alloc);
     try std.testing.expectEqualStrings("run", turn.text);
-    // No reasoning_content on the wire → no reasoning item at all.
     try std.testing.expectEqualStrings("", turn.reasoning);
     try std.testing.expectEqual(@as(usize, 1), turn.calls.len);
     try std.testing.expectEqualStrings("call_1", turn.calls[0].id);
     try std.testing.expectEqualStrings("shell", turn.calls[0].tool);
     try std.testing.expectEqualStrings("{\"command\":\"echo hi\"}", turn.calls[0].args_json);
-    // Usage survives the collector into the ModelTurn.
     try std.testing.expectEqual(@as(u64, 20), turn.usage.input_tokens);
     try std.testing.expectEqual(@as(u64, 80), turn.usage.cache_read_tokens);
     try std.testing.expectEqual(@as(u64, 5), turn.usage.output_tokens);
@@ -596,13 +577,11 @@ test "DeepSeek: effort off disables thinking, other levels are reasoning_effort,
     try std.testing.expect(std.mem.indexOf(u8, high, "\"reasoning_effort\":\"high\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, high, "\"thinking\"") == null);
 
-    // An absent effort is the server default (thinking on) — nothing is sent.
     const auto = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{} });
     defer alloc.free(auto);
     try std.testing.expect(std.mem.indexOf(u8, auto, "\"thinking\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, auto, "reasoning_effort") == null);
 
-    // OpenAI's own endpoint has no `thinking` switch: `off` sends nothing.
     const openai_off = try buildRequestJson(alloc, "gpt-x", false, .{ .prompt_ir = &ir, .tools = &.{}, .options = .{ .effort = "off" } });
     defer alloc.free(openai_off);
     try std.testing.expect(std.mem.indexOf(u8, openai_off, "\"thinking\"") == null);
@@ -619,7 +598,6 @@ test "DeepSeek: a tool-calling turn's reasoning_content is kept as one item and 
     var state = SseState.init(alloc, collector.sink());
     defer state.deinit();
 
-    // The CoT streams in pieces before the call; the item is emitted whole at [DONE].
     _ = try processSseData(&state,
         \\{"choices":[{"delta":{"reasoning_content":"I should "},"finish_reason":null}]}
     );
@@ -636,8 +614,6 @@ test "DeepSeek: a tool-calling turn's reasoning_content is kept as one item and 
     try std.testing.expectEqualStrings("[{\"reasoning_content\":\"I should run ls.\"}]", turn.reasoning);
     try std.testing.expectEqual(@as(usize, 1), turn.calls.len);
 
-    // Ledger → projection → request: the assistant message carries it back,
-    // ahead of its tool_calls, and the tool result follows as usual.
     var l = @import("../ledger.zig").Ledger.init(alloc);
     defer l.deinit();
     try l.append(.{ .user_text = .{ .text = "list files" } });
@@ -651,7 +627,6 @@ test "DeepSeek: a tool-calling turn's reasoning_content is kept as one item and 
     const calls_at = std.mem.indexOf(u8, body, "\"tool_calls\":[").?;
     const result_at = std.mem.indexOf(u8, body, "\"role\":\"tool\"").?;
     try std.testing.expect(reasoning_at < calls_at and calls_at < result_at);
-    // The raw item array never leaks onto the wire.
     try std.testing.expect(std.mem.indexOf(u8, body, "[{\"reasoning_content\"") == null);
 }
 
@@ -660,10 +635,8 @@ test "reasoning without tool calls, or of another provider's shape, is not repla
     var l = @import("../ledger.zig").Ledger.init(alloc);
     defer l.deinit();
     try l.append(.{ .user_text = .{ .text = "q" } });
-    // A text-only turn: DeepSeek ignores its CoT on later turns, so it stays home.
     try l.append(.{ .assistant = .{ .reasoning = "[{\"reasoning_content\":\"private\"}]", .text = "answer", .calls = &.{} } });
     try l.append(.{ .user_text = .{ .text = "again" } });
-    // A tool-calling turn whose reasoning came from an Anthropic-shaped item.
     try l.append(.{ .assistant = .{
         .reasoning = "[{\"type\":\"thinking\",\"thinking\":\"plan\",\"signature\":\"sig\"}]",
         .text = "",
@@ -713,9 +686,6 @@ test "a finished background task is a user message here, not a system one like a
     const body = try buildRequestJson(alloc, "test-model", false, .{ .prompt_ir = &ir, .tools = &.{} });
     defer alloc.free(body);
 
-    // Whatever deposited it, a note is user-side content here: the system role
-    // is the model's evidence that the harness itself is speaking, and a note
-    // can carry an arbitrary process's output.
     try std.testing.expect(std.mem.indexOf(u8, body, "{\"role\":\"user\",\"content\":\"note text\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "{\"role\":\"user\",\"content\":\"task text\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"role\":\"system\",\"content\":\"note text\"") == null);
@@ -725,8 +695,6 @@ test "an image turn becomes a parts array; a turn without one keeps the plain-st
     const alloc = std.testing.allocator;
     const L = @import("../ledger.zig").Ledger;
 
-    // The shape this endpoint has always been sent, captured from a ledger that
-    // knows nothing about images.
     var plain = L.init(alloc);
     defer plain.deinit();
     try plain.append(.{ .user_text = .{ .text = "hello" } });
@@ -734,8 +702,8 @@ test "an image turn becomes a parts array; a turn without one keeps the plain-st
     defer plain_ir.deinit(alloc);
     const plain_body = try buildRequestJson(alloc, "test-model", false, .{ .prompt_ir = &plain_ir, .tools = &.{} });
     defer alloc.free(plain_body);
-    // Not merely "contains": the whole user message is the pre-image bytes, so
-    // the implicit prefix cache sees the same key material it always did.
+    // The whole user message is the pre-image bytes, so the implicit prefix
+    // cache sees the same key material.
     try std.testing.expect(std.mem.indexOf(u8, plain_body, "{\"role\":\"user\",\"content\":\"hello\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain_body, "image_url") == null);
 
@@ -752,7 +720,6 @@ test "an image turn becomes a parts array; a turn without one keeps the plain-st
     try std.testing.expect(std.mem.indexOf(u8, shot_body, "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"what is this\"}," ++
         "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0=\"}}]}") != null);
 
-    // An image with nothing said about it writes no empty text part.
     var bare = L.init(alloc);
     defer bare.deinit();
     try bare.append(.{ .user_text = .{ .text = "", .images = &.{.{ .media_type = "image/jpeg", .data = "/9j/" }} } });

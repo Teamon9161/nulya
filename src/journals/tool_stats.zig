@@ -1,23 +1,22 @@
-//! Durable, append-only journal of completed tool-call facts, recorded after
-//! execution: the loop runs, the ledger records the batch, and `AgentSession`
-//! resolves each model-facing call name to its stable `ToolDefinition.id` and
-//! appends one `UseEvent`. Ranking and promotion policy are derived later.
+//! Durable, append-only journal of completed tool-call facts. Ranking and
+//! promotion policy are derived from `aggregate` / `readAll`, never stored here.
 //!
 //! One JSON object per line in `<workspace>/.nulya/tool-usage.jsonl`:
 //!   {"v":1,"at":"2026-08-17T09:31:07Z","session":"s-1786-3f",
 //!    "tool_id":"ext:web.search/web_search","version":"v-3f9c…","ok":true,
 //!    "duration_ms":812}
 //!
-//! `v` is the schema version; a bump fails old journals with a precise error
-//! instead of misreading them. `tool_id` is the durable identity, never the
-//! model-facing name; `version` records which implementation served the call.
-//! Every column beyond `tool_id`/`ok` is optional both ways: absent on read means
-//! "not recorded", never a zero.
+//! `v` is the schema version; a bump fails old journals with a precise error.
+//! `tool_id` is the durable identity, never the model-facing name, so history
+//! accumulates across implementation versions while `version` records which one
+//! served a call. Every column beyond `tool_id`/`ok` is optional both ways:
+//! absent on read means "not recorded", never a zero. A torn final line is
+//! dropped by the next append and skipped on read; a malformed COMPLETE line is
+//! an explicit error.
 
 const std = @import("std");
 const journal = @import("journal.zig");
 
-/// Directory for the journal, relative to the workspace root.
 pub const journal_dir = journal.journal_dir;
 /// Journal path, relative to the workspace root.
 pub const journal_rel = journal_dir ++ std.fs.path.sep_str ++ "tool-usage.jsonl";
@@ -34,30 +33,26 @@ pub const Error = error{
 };
 
 /// One recorded tool call as it was READ BACK. `tool_id` and `ok` are the two
-/// facts every line has ever carried; the rest are null when the line predates
-/// them or the writer had nothing to say (see the module header). Owned by the
-/// caller that received it from `readAll`; free with `freeEvents`.
+/// facts every line carries; the rest are null when not recorded. Owned by the
+/// caller of `readAll`; free with `freeEvents`.
 pub const UseEvent = struct {
     tool_id: []const u8,
     ok: bool,
     /// When the call was recorded, RFC3339 UTC — the same stamp the outcome
-    /// journal writes, so the two can be read on one timeline.
+    /// journal writes, so the two share one timeline.
     at: ?[]const u8 = null,
     /// The durable session the call ran in.
     session: ?[]const u8 = null,
-    /// The frozen extension version that served the call (`v-<hash>`). Null is
-    /// honest in two different ways: an old line never recorded one (unknown),
-    /// and a new line for a builtin has none to record.
+    /// The frozen extension version that served the call (`v-<hash>`). Null
+    /// means either unknown (an old line) or none to record (a builtin).
     version: ?[]const u8 = null,
     /// Wall-clock milliseconds the call itself took.
     duration_ms: ?u64 = null,
 };
 
 /// What one `append` records. Only the caller can know the three optional
-/// columns: `session` is the session id when there is a durable one,
-/// `version` is the frozen extension version the caller resolved this call
-/// against, and `duration_ms` is a measurement taken around the executor, at
-/// the one place that brackets it (`loop.zig`).
+/// columns: the durable session id, the frozen extension version it resolved
+/// this call against, and the duration measured around the executor.
 pub const Append = struct {
     tool_id: []const u8,
     ok: bool,
@@ -82,16 +77,10 @@ pub const Stats = struct {
     }
 };
 
-/// Append one event as a complete line, stamped with the current instant —
-/// `at` is when the fact was recorded, which only this function is in a position
-/// to know, so no caller passes one and no caller can forget one. Creates
-/// `.nulya` and the journal when missing; opens an existing journal without
-/// truncating and writes at its end. If a previous append was interrupted
-/// (cancel/crash) and left a partial final line, that tail is dropped back to
-/// the last complete line first, so the new event can never be glued onto it
-/// into a permanently malformed middle line. Host faults (missing workspace,
-/// permission, I/O, OOM, cancellation) propagate — only the *journal file* being
-/// absent is a normal "no stats yet", and that is handled by `readAll`, not here.
+/// Append one event as a complete line, stamped here with the current instant so
+/// no caller can pass or forget one. Creates `.nulya` and the journal when
+/// missing; appends without truncating, after dropping any partial final line so
+/// the new event is never glued onto it. Host faults propagate.
 pub fn append(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, event: Append) !void {
     const at = try journal.rfc3339Now(alloc, io);
     defer alloc.free(at);
@@ -102,8 +91,7 @@ pub fn append(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, event: Appe
 
 /// Read every event in journal order. A missing journal file reads as empty; a
 /// missing *workspace* is a host fault and propagates. Blank lines and a torn
-/// final line (`journal.readAll`) are ignored; any malformed COMPLETE line is an
-/// explicit error, never silently skipped.
+/// final line are ignored; a malformed COMPLETE line is an explicit error.
 pub fn readAll(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) ![]UseEvent {
     const bytes = (try journal.readAll(alloc, io, cwd, journal_rel)) orelse return alloc.alloc(UseEvent, 0);
     defer alloc.free(bytes);
@@ -166,8 +154,7 @@ pub fn freeStats(alloc: std.mem.Allocator, stats: []Stats) void {
 }
 
 /// Optional columns are written only when the caller had something to say, so a
-/// line carries exactly the facts that exist — and a workspace whose tools are
-/// all invoked outside a session keeps writing the shape it always did.
+/// line carries exactly the facts that exist.
 fn encodeEvent(alloc: std.mem.Allocator, event: Append, at: []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
@@ -183,7 +170,6 @@ fn encodeEvent(alloc: std.mem.Allocator, event: Append, at: []const u8) ![]u8 {
     }
     try jw.objectField("tool_id");
     try jw.write(event.tool_id);
-    // Beside the identity it qualifies: the same call, by this implementation.
     if (event.version) |v| {
         try jw.objectField("version");
         try jw.write(v);
@@ -199,15 +185,14 @@ fn encodeEvent(alloc: std.mem.Allocator, event: Append, at: []const u8) ![]u8 {
     return out.toOwnedSlice();
 }
 
-/// One journal line's shape. The two original columns are REQUIRED — a complete
-/// line missing either is malformed, not a line with defaults — and the four
-/// added ones default to null, which is how an old line reads back unchanged.
-/// Unknown fields are ignored so a newer writer at the same `v` never breaks an
-/// older reader.
+/// One journal line's shape. `tool_id` and `ok` are REQUIRED — a complete line
+/// missing either is malformed, not a line with defaults; the rest default to
+/// null. Unknown fields are ignored so a newer writer at the same `v` never
+/// breaks an older reader.
 const WireEvent = struct {
     /// Wider than `journal_schema_version` on purpose: a number this build does
-    /// not understand must reach the version check as a version, not fail
-    /// parsing as if the line were malformed.
+    /// not understand must reach the version check, not fail parsing as if the
+    /// line were malformed.
     v: u32,
     tool_id: []const u8,
     ok: bool,
@@ -278,25 +263,20 @@ test "append and read roundtrip preserves order and every column" {
     try std.testing.expectEqualStrings("v-3f9c", events[0].version.?);
     try std.testing.expectEqual(@as(?u64, 812), events[0].duration_ms);
 
-    // A writer with nothing to say about a column simply omits it, and the
-    // reader gives back "not recorded" — not a zero, and not an empty id.
+    // An omitted column reads back "not recorded", not a zero.
     try std.testing.expectEqualStrings("ext:b.pkg/beta", events[1].tool_id);
     try std.testing.expect(!events[1].ok);
     try std.testing.expect(events[1].session == null);
     try std.testing.expect(events[1].version == null);
     try std.testing.expect(events[1].duration_ms == null);
 
-    // …which is a different fact from a measured zero.
     try std.testing.expectEqual(@as(?u64, 0), events[2].duration_ms);
 
-    // Every line is stamped, in the outcome journal's format.
     for (events) |e| {
         try std.testing.expectEqual(@as(usize, 20), e.at.?.len);
         try std.testing.expectEqual(@as(u8, 'Z'), e.at.?[19]);
     }
 
-    // The journal is exactly one complete JSON line per event (`encodeEvent`'s
-    // own test pins the column order).
     var ws = try std.Io.Dir.openDirAbsolute(io, cwd, .{});
     defer ws.close(io);
     const raw = try ws.readFileAlloc(io, journal_rel, alloc, .unlimited);
@@ -325,8 +305,6 @@ test "the line carries its columns in a fixed order, and only the ones that exis
         full,
     );
 
-    // A builtin has no implementation version, so the column is simply not
-    // there — the shape a pre-`version` writer produced, byte for byte.
     const bare = try encodeEvent(alloc, .{ .tool_id = "builtin.shell", .ok = false }, "2026-08-17T09:31:07Z");
     defer alloc.free(bare);
     try std.testing.expectEqualStrings(
@@ -346,8 +324,6 @@ test "a line written before the added columns reads back with them absent" {
     var ws = try std.Io.Dir.openDirAbsolute(io, cwd, .{});
     defer ws.close(io);
     try ws.createDirPath(io, journal_dir);
-    // Byte-for-byte what every pre-widening append wrote. Still `v:1`: the two
-    // facts it carries mean exactly what they always did.
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"tool_id\":\"ext:a.pkg/alpha\",\"ok\":true}\n" });
 
     const events = try readAll(alloc, io, cwd);
@@ -357,13 +333,10 @@ test "a line written before the added columns reads back with them absent" {
     try std.testing.expect(events[0].ok);
     try std.testing.expect(events[0].at == null);
     try std.testing.expect(events[0].session == null);
-    // Unknown, not "no version": evidence cannot be backfilled, so a call
-    // recorded before the column existed stays unattributed forever.
+    // Unknown, not "no version": evidence cannot be backfilled.
     try std.testing.expect(events[0].version == null);
     try std.testing.expect(events[0].duration_ms == null);
 
-    // A column this build does not know is ignored, not an error: a newer writer
-    // at the same `v` may add one, and the facts here still hold.
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"tool_id\":\"x\",\"ok\":true,\"future\":1}\n" });
     const newer = try readAll(alloc, io, cwd);
     defer freeEvents(alloc, newer);
@@ -381,7 +354,6 @@ test "an old line and a new one live in the same journal, each honest about its 
     var ws = try std.Io.Dir.openDirAbsolute(io, cwd, .{});
     defer ws.close(io);
     try ws.createDirPath(io, journal_dir);
-    // A line from before this column existed — still `v:1`, still true.
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"at\":\"2026-08-17T09:31:07Z\",\"tool_id\":\"ext:a.pkg/alpha\",\"ok\":true}\n" });
 
     try append(alloc, io, cwd, .{ .tool_id = "ext:a.pkg/alpha", .ok = true, .version = "v-3f9c" });
@@ -389,15 +361,11 @@ test "an old line and a new one live in the same journal, each honest about its 
     const events = try readAll(alloc, io, cwd);
     defer freeEvents(alloc, events);
     try std.testing.expectEqual(@as(usize, 2), events.len);
-    // Same tool, one history — and no retroactive attribution: the old call
-    // stays unknown, because evidence is append-only and cannot be backfilled.
     try std.testing.expectEqualStrings("ext:a.pkg/alpha", events[0].tool_id);
     try std.testing.expect(events[0].version == null);
     try std.testing.expectEqualStrings("ext:a.pkg/alpha", events[1].tool_id);
     try std.testing.expectEqualStrings("v-3f9c", events[1].version.?);
 
-    // And the addition changes nothing about how calls are counted: `aggregate`
-    // still groups the whole history under the one stable id.
     const stats = try aggregate(alloc, events);
     defer freeStats(alloc, stats);
     try std.testing.expectEqual(@as(usize, 1), stats.len);
@@ -414,7 +382,6 @@ test "aggregate groups by stable id in lexical order" {
     defer freeStats(std.testing.allocator, stats);
 
     try std.testing.expectEqual(@as(usize, 2), stats.len);
-    // Lexical order, independent of first-seen order.
     try std.testing.expectEqualStrings("ext:a.pkg/alpha", stats[0].tool_id);
     try std.testing.expectEqual(@as(u64, 2), stats[0].uses_total);
     try std.testing.expectEqual(@as(u64, 2), stats[0].successes);
@@ -481,21 +448,18 @@ test "malformed journal lines produce an explicit error" {
     defer ws.close(io);
     try ws.createDirPath(io, journal_dir);
 
-    // Not JSON.
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "not json\n" });
     try std.testing.expectError(error.InvalidStatsJournal, readAll(alloc, io, cwd));
 
-    // Missing / mistyped field.
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"tool_id\":\"x\"}\n" });
     try std.testing.expectError(error.InvalidStatsJournal, readAll(alloc, io, cwd));
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"tool_id\":\"x\",\"ok\":\"yes\"}\n" });
     try std.testing.expectError(error.InvalidStatsJournal, readAll(alloc, io, cwd));
 
-    // Unsupported schema version.
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":2,\"tool_id\":\"x\",\"ok\":true}\n" });
     try std.testing.expectError(error.UnsupportedStatsVersion, readAll(alloc, io, cwd));
 
-    // A torn final line (interrupted or in-flight append) is skipped, not an error.
+    // A torn final line is skipped, not an error.
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"tool_id\":\"x\",\"ok\":true}\n{\"v\":1,\"tool_id\":\"x\",\"ok\":tru" });
     const torn = try readAll(alloc, io, cwd);
     defer freeEvents(alloc, torn);
@@ -513,13 +477,10 @@ test "append repairs a truncated crash tail before writing" {
     var ws = try std.Io.Dir.openDirAbsolute(io, cwd, .{});
     defer ws.close(io);
     try ws.createDirPath(io, journal_dir);
-    // A previous append was interrupted mid-write: the final line is partial.
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"tool_id\":\"ext:a.pkg/alpha\",\"ok\":true}\n{\"v\":1,\"tool_id\":\"ext:b.pkg/beta\",\"ok\":false}\n{\"v\":1,\"tool_id\":\"ext:c.pkg/gamma\",\"ok\":tru" });
 
     try append(alloc, io, cwd, .{ .tool_id = "ext:d.pkg/delta", .ok = true });
 
-    // The partial line was dropped back to the last '\n'; delta follows the
-    // complete events, and the journal parses cleanly again.
     const raw = try ws.readFileAlloc(io, journal_rel, alloc, .unlimited);
     defer alloc.free(raw);
     try std.testing.expect(std.mem.startsWith(
@@ -549,7 +510,6 @@ test "append repairs a tail with no complete line at all" {
     var ws = try std.Io.Dir.openDirAbsolute(io, cwd, .{});
     defer ws.close(io);
     try ws.createDirPath(io, journal_dir);
-    // The whole file is a partial first event; appending must not glue onto it.
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"tool_id\":\"ext:a.pkg/alph" });
 
     try append(alloc, io, cwd, .{ .tool_id = "ext:d.pkg/delta", .ok = true });
@@ -564,7 +524,6 @@ test "host filesystem faults propagate, never read as empty" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    // A missing workspace is a host fault, not "no stats yet".
     try std.testing.expectError(error.FileNotFound, readAll(alloc, io, "nulya-absent-workspace"));
     try std.testing.expectError(error.FileNotFound, append(alloc, io, "nulya-absent-workspace", .{ .tool_id = "ext:a.pkg/alpha", .ok = true }));
 }
@@ -577,14 +536,13 @@ test "an allocation failure propagates as OutOfMemory" {
     const cwd = try tmpCwd(alloc, io, tmp);
     defer alloc.free(cwd);
 
-    // append: the timestamp is the first allocation, and it must propagate
-    // rather than be swallowed into an unstamped line.
+    // append: the timestamp is the first allocation and must propagate rather
+    // than be swallowed into an unstamped line.
     var failing_stamp = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, append(failing_stamp.allocator(), io, cwd, .{ .tool_id = "ext:a.pkg/alpha", .ok = true }));
 
-    // The line encode is next. The allocating JSON writer folds OOM into
-    // error.WriteFailed (its only failure mode), the same host-resource-fault
-    // treatment protocol.zig gives it — it must propagate too.
+    // The allocating JSON writer folds OOM into error.WriteFailed (its only
+    // failure mode); that must propagate too.
     var failing_encode = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
     try std.testing.expectError(error.WriteFailed, encodeEvent(
         failing_encode.allocator(),
@@ -592,7 +550,6 @@ test "an allocation failure propagates as OutOfMemory" {
         "2026-08-17T09:31:07Z",
     ));
 
-    // readAll on a present journal: the file read is the first allocation.
     try append(alloc, io, cwd, .{ .tool_id = "ext:a.pkg/alpha", .ok = true });
     var failing_read = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, readAll(failing_read.allocator(), io, cwd));

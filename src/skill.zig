@@ -1,7 +1,5 @@
-//! Core Agent Skill metadata and session catalog semantics.
-//!
-//! This file is intentionally source-agnostic: extensions, MCP, local files, or
-//! any future source can produce the same `SkillDescriptor` values.
+//! Core Agent Skill metadata and session catalog semantics. Source-agnostic:
+//! extensions, MCP or local files all produce the same `SkillDescriptor` values.
 
 const std = @import("std");
 

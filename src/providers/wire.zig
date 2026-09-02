@@ -1,24 +1,16 @@
-//! Shared provider wire plumbing.
-//!
-//! Three providers — `openai` (chat/completions), `anthropic` (messages) and
-//! `codex` (the ChatGPT-subscription responses endpoint) — speak different JSON
-//! dialects over the same transport: one streaming HTTPS POST whose body is SSE.
-//! What all three genuinely share lives here: the POST + SSE loop, the JSON
-//! scalar readers, and the one piece of PromptIR serialization that is the same
-//! everywhere (`writeReasoningItems`). A provider file is then only its own wire
-//! shape — the turn structure it needs comes typed out of `prompt.Turn`.
+//! Shared provider wire plumbing: `openai`, `anthropic` and `codex` speak
+//! different JSON dialects over the same transport — one streaming HTTPS POST
+//! whose body is SSE. What all three share lives here: the POST + SSE loop, the
+//! JSON scalar readers, and `writeReasoningItems`.
 
 const std = @import("std");
 
 // ---------------------------------------------------------------- PromptIR --
 
 /// Write every item of a turn's `reasoning` (the JSON array a `TurnCollector`
-/// joined from the provider's own `reasoning_item`s) as one JSON value each,
-/// into whatever array `jw` is currently inside. Both wires that replay
-/// reasoning place the items bare — Anthropic as content blocks, Responses as
-/// input items — so the splitting is shared; only the surrounding container is
-/// the provider's. Items are re-serialized from the parsed value, which keeps
-/// key order and is what a signature / encrypted blob is indifferent to.
+/// joined from the provider's `reasoning_item`s) as one JSON value each, into
+/// whatever array `jw` is inside. Re-serialized from the parsed value, which
+/// keeps key order.
 pub fn writeReasoningItems(jw: *std.json.Stringify, alloc: std.mem.Allocator, reasoning: []const u8) !void {
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, reasoning, .{}) catch return error.CorruptReasoning;
     defer parsed.deinit();
@@ -26,13 +18,9 @@ pub fn writeReasoningItems(jw: *std.json.Stringify, alloc: std.mem.Allocator, re
     for (parsed.value.array.items) |item| try jw.write(item);
 }
 
-/// The `data:<media_type>;base64,<data>` URI an inline image travels as on BOTH
-/// JSON dialects that take one as a URL (chat/completions' `image_url`, the
-/// responses endpoint's `input_image`). Anthropic's block carries the two parts
-/// separately, so it does not come through here — two consumers, not three.
-/// Built as a string rather than spliced raw so the JSON writer still escapes
-/// it: the ledger stores whatever it was handed, and this is the wire, not
-/// the place to trust it. Caller owns the result.
+/// The `data:<media_type>;base64,<data>` URI an inline image travels as on the
+/// dialects that take one as a URL. Built as a string rather than spliced raw so
+/// the JSON writer still escapes it. Caller owns the result.
 pub fn dataUri(alloc: std.mem.Allocator, media_type: []const u8, data: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, "data:{s};base64,{s}", .{ media_type, data });
 }
@@ -72,22 +60,16 @@ pub fn writeRaw(jw: *std.json.Stringify, raw: []const u8) !void {
 pub const Post = struct {
     url: []const u8,
     body: []const u8,
-    /// The HTTP method. Every model request is a POST; the one exception is the
-    /// Codex subscription's model catalogue, a plain GET that is otherwise the
-    /// same exchange — same auth headers, same status classification, same stall
-    /// guard — so it rides here rather than in a second transport (`getJson`).
+    /// Every model request is a POST; the one exception is the Codex model
+    /// catalogue, a GET that is otherwise the same exchange (`getJson`).
     method: std.http.Method = .POST,
     /// Full `Authorization` header value (e.g. `Bearer sk-…`); null omits it.
     authorization: ?[]const u8 = null,
     /// Provider-specific headers (`x-api-key`, `anthropic-version`, …).
     extra_headers: []const std.http.Header = &.{},
-    /// Silence budget (`provider.RetryPolicy.stall_timeout_ms`): if the server
-    /// sends NOTHING — not a response head, not one more line of body — for this
-    /// long, the exchange is canceled and reported as `Transport`, so the loop
-    /// retries instead of the process hanging until the OS gives up on the
-    /// socket. Counted from the request going out and reset by every line,
-    /// keepalives and events we never decode included, so a live-but-slow model
-    /// is only mistaken for a stall after this much true silence. 0 = off.
+    /// Silence budget: if the server sends NOTHING for this long the exchange is
+    /// canceled and reported as `Transport`, so the loop retries instead of
+    /// hanging on the socket. Reset by every line, keepalives included. 0 = off.
     stall_ms: u64 = 0,
 };
 
@@ -96,9 +78,8 @@ pub const Post = struct {
 const Heartbeat = struct {
     io: std.Io,
     last_ms: std.atomic.Value(i64),
-    /// Set by the watchdog's side once it declared a stall and is canceling the
-    /// exchange: whatever read error the interrupted exchange then sees is our
-    /// doing, not worth a diagnostic of its own.
+    /// Set once the watchdog declared a stall and is canceling the exchange: the
+    /// read error the exchange then sees is our doing, not worth a diagnostic.
     stalled: std.atomic.Value(bool) = .init(false),
 
     fn init(io: std.Io) Heartbeat {
@@ -114,8 +95,8 @@ const Heartbeat = struct {
     }
 };
 
-/// Returns once `stall_ms` passed with no beat. Being canceled — the exchange
-/// finished first — is simply the end of the watch.
+/// Returns once `stall_ms` passed with no beat. Being canceled (the exchange
+/// finished first) is simply the end of the watch.
 fn watchdog(hb: *Heartbeat, stall_ms: u64) void {
     while (true) {
         const idle = Heartbeat.nowMs(hb.io) - hb.last_ms.load(.monotonic);
@@ -124,13 +105,11 @@ fn watchdog(hb: *Heartbeat, stall_ms: u64) void {
     }
 }
 
-/// Run `exchange(args…, *Heartbeat)` under the stall watchdog. Both are their
-/// own tasks so whichever finishes first cancels the other — a stalled exchange
-/// is interrupted in its blocking read (`std.Io` cancellation reaches syscalls on
-/// every backend we run on). Our own cancellation arrives at `await`, cancels
-/// both, and propagates. If the io cannot give the pair their own units of
-/// concurrency the exchange simply runs unguarded: never a false stall, just no
-/// guard. `R` is the exchange's (error-union) result type.
+/// Run `exchange(args…, *Heartbeat)` under the stall watchdog. Both are their own
+/// tasks so whichever finishes first cancels the other; a stalled exchange is
+/// interrupted in its blocking read. Our own cancellation arrives at `await`,
+/// cancels both, propagates. Without units of concurrency for the pair, the
+/// exchange runs unguarded rather than falsely stalling.
 fn Watched(comptime R: type) type {
     return struct {
         const Race = union(enum) { exchange: R, stall: void };
@@ -160,13 +139,11 @@ fn Watched(comptime R: type) type {
     };
 }
 
-/// How a request can fail short of a good stream. The loop retries the
-/// transient ones (`provider.isTransient`); a provider handles `Unauthorized`
-/// itself when it can refresh; the rest fail the step.
+/// How a request can fail short of a good stream. The loop retries the transient
+/// ones; a provider handles `Unauthorized` itself; the rest fail the step.
 pub const HttpError = error{
     /// The connection itself failed — connect, TLS, send, headers, or the body
-    /// cut off — as opposed to the server answering. `transport` folds every
-    /// such fault into this one error and prints the concrete cause.
+    /// cut off — as opposed to the server answering.
     Transport,
     /// 401: the caller may be able to refresh a credential and retry once.
     Unauthorized,
@@ -174,7 +151,7 @@ pub const HttpError = error{
     RateLimited,
     /// Any 5xx (Anthropic's 529 overloaded included).
     ServerError,
-    /// Any other non-2xx: the request itself is wrong, so re-sending it cannot
+    /// Any other non-2xx: the request itself is wrong, so re-sending cannot
     /// help. The response body is printed as a diagnostic.
     ApiError,
 };
@@ -186,7 +163,7 @@ fn transport(err: anyerror, hb: *const Heartbeat) anyerror {
         else => {
             // The read the watchdog interrupted fails too; only the stall is news.
             if (err != error.Stalled and hb.stalled.load(.acquire)) return error.Transport;
-            // (Silent under `zig build test`, whose stall test provokes this on purpose.)
+            // (Silent under `zig build test`, which provokes it on purpose.)
             if (!@import("builtin").is_test) std.debug.print("provider transport error: {s}\n", .{@errorName(err)});
             return error.Transport;
         },
@@ -200,7 +177,6 @@ fn open(client: *std.http.Client, p: Post, hb: *const Heartbeat) !std.http.Clien
         .redirect_behavior = .unhandled,
         .headers = .{
             .authorization = if (p.authorization) |a| .{ .override = a } else .default,
-            // A bodiless request has no content type to declare.
             .content_type = if (p.method.requestHasBody()) .{ .override = "application/json" } else .default,
             // Avoid gzip/deflate here so the SSE parser can read directly.
             .accept_encoding = .omit,
@@ -228,11 +204,9 @@ fn sendInner(req: *std.http.Client.Request, body: []const u8, redirect_buffer: [
 }
 
 /// POST `p` and hand every SSE `data:` payload to `onData`, stopping when it
-/// returns true (the stream's own terminator) or the body ends.
-///
-/// SSE lines are accumulated into a growable buffer rather than the reader's
-/// fixed transfer buffer: one `data:` line can carry a whole response object
-/// (Codex's `response.completed`), far past any fixed line limit.
+/// returns true (the stream's own terminator) or the body ends. SSE lines
+/// accumulate in a growable buffer, not the reader's fixed one: a single `data:`
+/// line can carry a whole response object.
 pub fn postSse(
     client: *std.http.Client,
     alloc: std.mem.Allocator,
@@ -240,7 +214,6 @@ pub fn postSse(
     ctx: anytype,
     comptime onData: fn (@TypeOf(ctx), []const u8) anyerror!bool,
 ) !void {
-    // A task needs a plain (non-generic) function: bind `onData` here.
     const Exchange = struct {
         fn run(c: *std.http.Client, a: std.mem.Allocator, post: Post, cx: @TypeOf(ctx), hb: *Heartbeat) anyerror!void {
             return exchangeSse(c, a, post, cx, onData, hb);
@@ -272,33 +245,30 @@ fn exchangeSse(
         line.clearRetainingCapacity();
         _ = reader.streamDelimiterEnding(&line.writer, '\n') catch |err| return transport(err, hb);
         hb.beat();
-        // Documented contract: at end of stream nothing is left buffered;
-        // otherwise the next byte is the delimiter we just stopped at.
+        // At end of stream nothing is buffered; otherwise the next byte is the
+        // delimiter we just stopped at.
         const at_end = reader.bufferedLen() == 0;
         if (!at_end) reader.toss(1);
 
         const text = std.mem.trimEnd(u8, line.written(), "\r");
         if (std.mem.startsWith(u8, text, "data:")) {
             const data = std.mem.trim(u8, text[5..], " ");
-            // `event:` lines are ignored on purpose: every dialect we speak also
-            // carries its event name inside the payload (`type` / `choices`).
+            // `event:` lines are ignored: every dialect carries its event name
+            // inside the payload (`type` / `choices`).
             if (data.len != 0 and try onData(ctx, data)) return;
         }
         if (at_end) break;
     }
 }
 
-/// POST `p` and return the whole response body (caller owns). Used for the small
-/// non-streaming calls a provider needs around its stream, such as the Codex
-/// OAuth token refresh.
+/// POST `p` and return the whole response body (caller owns). For the small
+/// non-streaming calls around a stream, such as the Codex OAuth refresh.
 pub fn postJson(client: *std.http.Client, alloc: std.mem.Allocator, p: Post) ![]u8 {
     return jsonExchange(client, alloc, p);
 }
 
 /// GET `p.url` and return the whole response body (caller owns) — the same
-/// exchange minus a body. Its one caller is the Codex subscription's model
-/// catalogue, which is a projection rather than a model request; `p.body` and
-/// `p.method` are ignored.
+/// exchange minus a body. `p.body` and `p.method` are ignored.
 pub fn getJson(client: *std.http.Client, alloc: std.mem.Allocator, p: Post) ![]u8 {
     var get = p;
     get.method = .GET;
@@ -344,15 +314,14 @@ test "the stall watchdog: a silent server is a Transport fault within the budget
     defer threaded.deinit();
     const io = threaded.io();
 
-    // A one-connection HTTP "server": either replies with a canned 200 or holds
-    // the accepted connection open without sending a byte.
+    // A one-connection HTTP "server": a canned 200, or silence.
     const Peer = struct {
         fn serve(server: *std.Io.net.Server, io_: std.Io, reply: bool) void {
             const stream = server.accept(io_) catch return;
             defer stream.close(io_);
             if (reply) {
-                // Read the whole request first: closing with unread bytes in
-                // the receive buffer makes TCP send RST instead of FIN.
+                // Read the whole request first: closing with unread bytes in the
+                // receive buffer makes TCP send RST instead of FIN.
                 var rbuf: [4096]u8 = undefined;
                 var r = stream.reader(io_, &rbuf);
                 while (std.mem.indexOf(u8, r.interface.buffered(), "\r\n\r\n{}") == null) r.interface.fillMore() catch return;
@@ -370,8 +339,7 @@ test "the stall watchdog: a silent server is a Transport fault within the budget
     var client: std.http.Client = .{ .allocator = alloc, .io = io };
     defer client.deinit();
 
-    // Silent peer: the exchange must be cut and reported as Transport long
-    // before the peer's own 10 s, however long the OS would have waited.
+    // Silent peer: the exchange is cut and reported as Transport.
     {
         var server = try addr.listen(io, .{});
         defer server.deinit(io);
@@ -385,8 +353,6 @@ test "the stall watchdog: a silent server is a Transport fault within the budget
         try std.testing.expect(Heartbeat.nowMs(io) - started < 5_000);
     }
 
-    // Talking peer: the same guard lets a normal exchange through, and stops
-    // its watchdog cleanly afterwards.
     {
         var server = try addr.listen(io, .{});
         defer server.deinit(io);
@@ -407,8 +373,6 @@ test "getJson is the same exchange minus a body: a bodiless GET, no content-type
     defer threaded.deinit();
     const io = threaded.io();
 
-    // What the server actually received, so the request shape is checked where
-    // it is made rather than trusted.
     const Capture = struct { buf: [1024]u8 = undefined, len: usize = 0 };
     const Peer = struct {
         fn serve(server: *std.Io.net.Server, io_: std.Io, seen: *Capture) void {
@@ -416,7 +380,6 @@ test "getJson is the same exchange minus a body: a bodiless GET, no content-type
             defer stream.close(io_);
             var rbuf: [4096]u8 = undefined;
             var r = stream.reader(io_, &rbuf);
-            // A GET ends at the blank line: there is no body to wait for.
             while (std.mem.indexOf(u8, r.interface.buffered(), "\r\n\r\n") == null) r.interface.fillMore() catch return;
             const head = r.interface.buffered();
             seen.len = @min(head.len, seen.buf.len);
@@ -453,7 +416,6 @@ test "getJson is the same exchange minus a body: a bodiless GET, no content-type
     try std.testing.expect(std.mem.startsWith(u8, request, "GET /models?client_version=1 HTTP/1.1"));
     try std.testing.expect(std.mem.indexOf(u8, request, "authorization: Bearer t") != null);
     try std.testing.expect(std.mem.indexOf(u8, request, "originator: codex_cli_rs") != null);
-    // Nothing was sent that a bodiless request cannot have.
     try std.testing.expect(std.mem.indexOf(u8, request, "content-type") == null);
     try std.testing.expect(std.mem.indexOf(u8, request, "content-length") == null);
     try std.testing.expect(std.mem.indexOf(u8, request, "ignored") == null);

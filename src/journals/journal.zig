@@ -1,18 +1,18 @@
-//! The shared file layer under Nulya's durable JSONL journals (tool usage in
-//! `tool_stats.zig`, session outcomes in `outcome.zig`). What they share is the
-//! FILE discipline below and the clock; each owns its own schema, encode/parse
-//! and error set.
+//! The shared file layer under Nulya's durable JSONL journals (`tool_stats.zig`,
+//! `outcome.zig`). They record different facts and neither knows the other's
+//! schema; what they share is the FILE discipline:
 //!
 //!   * one complete JSON line per event, appended at the end, never rewritten;
-//!   * many processes append (every `session step`, `ext run`, `session
-//!     outcome`), so an append holds a short exclusive lease on the sidecar
-//!     `<journal>.lock` while it measures, repairs and writes — two appends can
-//!     never land on the same offset. Readers take no lock;
-//!   * an append cut short by cancel or crash leaves a partial final line: the
-//!     next append drops that tail back to the last `\n` before writing, and a
-//!     read skips it, so a torn write is never glued onto a later event. A
+//!   * a journal is written by MANY processes, so an append holds a short
+//!     exclusive lease on the sidecar `<journal>.lock` while it measures,
+//!     repairs and writes — two appends can never land on the same offset.
+//!     Readers take no lock: they see whole lines plus, at worst, one torn tail;
+//!   * an interrupted append can leave a partial final line, so the next append
+//!     drops that tail back to the last `\n` and a READ ignores it too. A
 //!     malformed COMPLETE line is still the consumer's error;
-//!   * a missing file reads as "no facts yet"; a missing workspace propagates.
+//!   * a missing journal file reads as "no facts yet"; a missing workspace (or
+//!     any other host fault) propagates. What a missing DIRECTORY means is the
+//!     journal's own call, not this layer's.
 
 const std = @import("std");
 const lease = @import("../lease.zig");
@@ -22,9 +22,8 @@ pub const journal_dir = ".nulya";
 
 /// The current instant as RFC3339 UTC (`2026-08-16T09:31:00Z`) — how every
 /// journal line, and a session header's `created`, stamp WHEN. Second
-/// granularity: these are human-facing timestamps for ordering and reading, not
-/// a measurement (a duration is measured on a monotonic clock, at its source).
-/// Caller owns the result.
+/// granularity: human-facing timestamps for ordering, not a measurement (a
+/// duration is measured on a monotonic clock, at its source). Caller owns it.
 pub fn rfc3339Now(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
     const ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
     return rfc3339FromUnixSeconds(alloc, if (ms < 0) 0 else @intCast(@divFloor(ms, 1000)));
@@ -48,13 +47,10 @@ fn rfc3339FromUnixSeconds(alloc: std.mem.Allocator, secs: u64) ![]u8 {
 
 /// Append `line` (which must already end with `\n`) as a complete line to the
 /// journal at `file_rel` under `cwd`. Creates the journal's own parent directory
-/// (whatever `file_rel` names — `.nulya` for a workspace journal, nothing for one
-/// that sits directly in `cwd`) and the file when missing; opens an existing
-/// journal without truncating and writes at its end, after repairing any partial
-/// trailing line. Holds the journal's writer lease
-/// (`<file_rel>.lock`, exclusive, blocking — the critical section is a stat and
-/// one write) for the duration, so concurrent appenders serialize instead of
-/// overwriting each other.
+/// and the file when missing; opens an existing journal without truncating and
+/// writes at its end, after repairing any partial trailing line. Holds the
+/// journal's writer lease (`<file_rel>.lock`, exclusive, blocking) throughout, so
+/// concurrent appenders serialize instead of overwriting each other.
 pub fn appendLine(io: std.Io, cwd: []const u8, file_rel: []const u8, line: []const u8) !void {
     var workspace = try openWorkspace(io, cwd);
     defer workspace.close(io);
@@ -95,12 +91,10 @@ fn openWorkspace(io: std.Io, cwd: []const u8) !std.Io.Dir {
 }
 
 /// If the journal does not end with a complete line (a previous append was
-/// interrupted), return the byte offset just past the last `\n` — where the
-/// next event must be written — dropping the partial trailing bytes. Returns 0
-/// when no line in the file is complete. Events are single-line JSON (a
-/// literal newline can never appear inside one), so `\n` always separates
-/// events. The intact case (last byte `\n`) costs one read; the backward scan
-/// only runs after a truncated tail.
+/// interrupted), return the byte offset just past the last `\n` — where the next
+/// event must be written — dropping the partial trailing bytes. Returns 0 when no
+/// line is complete. Events are single-line JSON, so `\n` always separates them.
+/// The intact case costs one read; the backward scan runs only after a torn tail.
 fn repairCrashTail(file: std.Io.File, io: std.Io, size: u64) !u64 {
     if (size == 0) return 0;
     var last: [1]u8 = undefined;
@@ -147,7 +141,6 @@ test "appendLine creates the journal, appends in order, and readAll returns ever
     const bytes = (try readAll(alloc, io, cwd, test_rel)).?;
     defer alloc.free(bytes);
     try std.testing.expectEqualStrings("{\"a\":1}\n{\"a\":2}\n", bytes);
-    // The lease is a sidecar next to the journal, never inside it.
     try tmp.dir.access(io, test_rel ++ ".lock", .{});
 }
 
@@ -159,10 +152,9 @@ test "a journal that sits directly in its directory creates no subdirectory" {
     const cwd = try tmpCwd(alloc, io, tmp);
     defer alloc.free(cwd);
 
-    // A bare file name: the only directory involved is the one already
-    // passed in.
-    try appendLine(io, cwd, "bare-name.jsonl", "{\"v\":1}\n");
-    const bytes = (try readAll(alloc, io, cwd, "bare-name.jsonl")).?;
+    // A bare file name: the only directory involved is the one passed in.
+    try appendLine(io, cwd, "trusted-stores.jsonl", "{\"v\":1}\n");
+    const bytes = (try readAll(alloc, io, cwd, "trusted-stores.jsonl")).?;
     defer alloc.free(bytes);
     try std.testing.expectEqualStrings("{\"v\":1}\n", bytes);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, journal_dir, .{}));
@@ -186,7 +178,6 @@ test "appendLine drops a truncated crash tail instead of gluing onto it" {
     defer alloc.free(bytes);
     try std.testing.expectEqualStrings("{\"a\":1}\n{\"a\":3}\n", bytes);
 
-    // A file that is one partial first event keeps nothing.
     try ws.writeFile(io, .{ .sub_path = test_rel, .data = "{\"a\":1" });
     try appendLine(io, cwd, test_rel, "{\"a\":4}\n");
     const after = (try readAll(alloc, io, cwd, test_rel)).?;
@@ -211,13 +202,11 @@ test "readAll ignores a torn final line but returns a malformed complete one for
     defer alloc.free(torn);
     try std.testing.expectEqualStrings("{\"a\":1}\n", torn);
 
-    // Nothing complete at all reads as an empty journal, not a missing one.
     try ws.writeFile(io, .{ .sub_path = test_rel, .data = "{\"a\":1" });
     const only_torn = (try readAll(alloc, io, cwd, test_rel)).?;
     defer alloc.free(only_torn);
     try std.testing.expectEqualStrings("", only_torn);
 
-    // A complete but malformed line is not the tail rule's business.
     try ws.writeFile(io, .{ .sub_path = test_rel, .data = "{\"a\":1}\nnot json\n" });
     const bad = (try readAll(alloc, io, cwd, test_rel)).?;
     defer alloc.free(bad);
@@ -236,13 +225,11 @@ test "appendLine takes the journal's writer lease: a held lease blocks a second 
 
     try appendLine(io, cwd, test_rel, "{\"a\":1}\n");
 
-    // Hold the lease from outside, exactly as another process's append would.
     var ws = try std.Io.Dir.openDirAbsolute(io, cwd, .{});
     defer ws.close(io);
     var held = try ws.createFile(io, test_rel ++ ".lock", .{ .truncate = false, .read = true, .lock = .exclusive });
 
     var fut = try io.concurrent(appendLine, .{ io, cwd, test_rel, "{\"a\":2}\n" });
-    // While the lease is held, the appender is parked: the journal is unchanged.
     io.sleep(.fromMilliseconds(50), .awake) catch {};
     const before = (try readAll(alloc, io, cwd, test_rel)).?;
     defer alloc.free(before);
@@ -265,7 +252,6 @@ test "rfc3339 renders a UTC instant, and now() is one of them" {
     defer alloc.free(day);
     try std.testing.expectEqualStrings("2026-08-16T09:31:07Z", day);
 
-    // A leap day is not off by one.
     const leap = try rfc3339FromUnixSeconds(alloc, 1_709_251_199);
     defer alloc.free(leap);
     try std.testing.expectEqualStrings("2024-02-29T23:59:59Z", leap);

@@ -1,18 +1,14 @@
-//! Provider/model boundary.
-//!
-//! The agent loop owns ledger append/order invariants. A provider owns transport
-//! state, request serialization, cache breakpoint placement, and wire-format
-//! normalization for one configured model.
+//! Provider/model boundary. The loop owns ledger append/order invariants; a
+//! provider owns transport state, request serialization, cache breakpoint
+//! placement and wire-format normalization for one configured model.
 
 const std = @import("std");
 const ledger = @import("ledger.zig");
 const prompt = @import("prompt.zig");
 const tool = @import("tool.zig");
 
-/// What the loop and the projection must know about a provider. One field: a
-/// provider that cannot replay opaque reasoning items gets the `reasoning`
-/// block skipped. Anything a provider can decide for itself stays inside the
-/// provider.
+/// What the loop and the projection must know about a provider: a provider that
+/// cannot replay opaque reasoning items gets the `reasoning` block skipped.
 pub const ProviderCapabilities = struct {
     thinking_replay: bool = false,
 };
@@ -22,32 +18,25 @@ pub const Options = struct {
     effort: ?[]const u8 = null,
 };
 
-/// What one turn cost. The same struct the ledger records on the assistant
-/// event — one shape end to end, no conversion in the loop. `input_tokens` is
-/// NON-cached input: providers whose counters include cached tokens must
-/// subtract before filling this in.
+/// What one turn cost, as the ledger records it. `input_tokens` is NON-cached
+/// input: providers whose counters include cached tokens must subtract first.
 pub const Usage = ledger.Usage;
 
-/// Why the model stopped. The same enum the ledger records on the assistant
-/// event — one shape end to end, no conversion in the loop.
+/// Why the model stopped, as the ledger records it.
 pub const StopReason = ledger.StopReason;
 
-/// How the loop treats a wire that fails or falls silent. A provider makes
-/// ONE attempt per `stream` and reports a transient fault as one
-/// of the errors `isTransient` names; the loop (`loop.collectTurn`) owns the
-/// single retry loop, so connect failures and mid-stream drops back off the same
-/// way and every attempt is visible to an observer. Backoff before the n-th
-/// retry is `initial · 2^(n-1)`, capped at `max`.
+/// How the loop treats a wire that fails or falls silent. A provider makes ONE
+/// attempt per `stream` and reports a transient fault as one of the errors
+/// `isTransient` names; the loop owns the retry. Backoff before the n-th retry
+/// is `initial · 2^(n-1)`, capped at `max`.
 pub const RetryPolicy = struct {
     max_retries: u32 = 5,
     initial_backoff_ms: u64 = 1_000,
     max_backoff_ms: u64 = 30_000,
     /// How long the server may send nothing at all before the request counts as
     /// stalled (a `Transport` fault, retried like one). Byte-level: any line,
-    /// keepalives included, resets it — so this bounds a dead-but-open socket
-    /// without a fixed "first token within N seconds" that a slow reasoning
-    /// model would trip. Generous on purpose; 0 disables. (`Request.stall_ms`
-    /// → `wire.Post.stall_ms`.)
+    /// keepalives included, resets it, so this bounds a dead-but-open socket
+    /// without tripping a slow reasoning model. 0 disables.
     stall_timeout_ms: u64 = 120_000,
 
     pub fn backoffMs(self: RetryPolicy, attempt: u32) u64 {
@@ -56,11 +45,9 @@ pub const RetryPolicy = struct {
     }
 };
 
-/// The faults an identical request may cure: the connection itself failed
-/// (`wire.zig` folds every connect / TLS / send / read fault into `Transport`),
-/// the body ended before the stream's own terminator, or the server said 429 /
-/// 5xx. Anything else — a 4xx, a refused credential, a malformed payload,
-/// cancellation — fails the step at once.
+/// The faults an identical request may cure: the connection failed, the body
+/// ended before the stream's own terminator, or the server said 429 / 5xx.
+/// Anything else fails the step at once.
 pub fn isTransient(err: anyerror) bool {
     return switch (err) {
         error.Transport, error.StreamEndedEarly, error.RateLimited, error.ServerError => true,
@@ -80,8 +67,7 @@ pub const ToolUseInputDelta = struct {
 };
 
 /// Streaming providers normalize their wire events to this shape. The loop can
-/// either forward these to a UI or let a `TurnCollector` accumulate them into a
-/// complete assistant turn.
+/// forward these to a UI or let a `TurnCollector` accumulate them into a turn.
 pub const StreamEvent = union(enum) {
     started,
     text_delta: []const u8,
@@ -89,11 +75,8 @@ pub const StreamEvent = union(enum) {
     /// does not keep it, and it is never replayed.
     thinking_delta: []const u8,
     /// One COMPLETE reasoning item, as one JSON value in the provider's own wire
-    /// shape (an Anthropic `thinking` / `redacted_thinking` block, a Responses
-    /// `reasoning` item with its `encrypted_content`, …). Emitted once the item
-    /// is whole; the collector keeps every item verbatim so the turn's reasoning
-    /// can be replayed to the same model on later steps. The kernel never looks
-    /// inside.
+    /// shape, emitted once whole. The collector keeps every item verbatim so the
+    /// turn's reasoning can be replayed to the same model. Opaque to the kernel.
     reasoning_item: []const u8,
     tool_use_start: ToolUseStart,
     tool_use_input_delta: ToolUseInputDelta,
@@ -116,28 +99,26 @@ pub const Request = struct {
     prompt_ir: *const prompt.PromptIR,
     tools: []const tool.ToolDefinition,
     options: Options = .{},
-    /// Transport, not a generation option: the silence budget a wire provider hands to
-    /// `wire.Post.stall_ms` (`RetryPolicy.stall_timeout_ms`; 0 = no watchdog).
+    /// Transport, not a generation option: the silence budget a wire provider
+    /// hands to its stall watchdog; 0 = no watchdog.
     stall_ms: u64 = 0,
 };
 
-/// One fully assembled assistant turn returned by the provider boundary.
-/// All slices are owned by the caller's allocator; `deinit` releases them after
-/// the ledger has cloned the event into append-only storage.
+/// One fully assembled assistant turn. All slices are owned by the caller's
+/// allocator; `deinit` releases them after the ledger has cloned the event.
 pub const ModelTurn = struct {
     /// The turn's reasoning items as one JSON array of opaque provider values,
     /// in emission order; `""` when the model produced none. Stored on the
-    /// ledger's `assistant` event as-is and handed back to the provider by the
-    /// projection so it can replay them (see `StreamEvent.reasoning_item`).
+    /// ledger as-is and handed back by the projection so it can replay them.
     reasoning: []const u8,
     text: []const u8,
     calls: []const ledger.ToolCall,
-    /// Token accounting for this turn. Carries the cache-read counter so the loop
-    /// can *measure* the cache-generation invariant, not just hope for it. No
-    /// owned allocations — `deinit` leaves it untouched.
+    /// Token accounting for this turn. Carries the cache-read counter so the
+    /// loop can MEASURE the cache-generation invariant. No owned allocations —
+    /// `deinit` leaves it untouched.
     usage: Usage = .{},
-    /// Why the model stopped. `tool_use` vs `end_turn` drive the loop; `max_tokens`
-    /// tells the caller the turn was truncated mid-thought.
+    /// Why the model stopped. `tool_use` vs `end_turn` drive the loop;
+    /// `max_tokens` says the turn was truncated mid-thought.
     stop_reason: StopReason = .end_turn,
 
     pub fn deinit(self: ModelTurn, alloc: std.mem.Allocator) void {
@@ -343,9 +324,8 @@ pub const TurnCollector = struct {
     }
 };
 
-/// `[item,item,…]` from already-serialized JSON values, or `""` for none. The
-/// items are spliced, not re-encoded, so a provider gets back exactly the bytes
-/// it emitted.
+/// `[item,item,…]` from already-serialized JSON values, or `""` for none. Items
+/// are spliced, not re-encoded, so a provider gets back exactly its own bytes.
 fn joinReasoning(alloc: std.mem.Allocator, items: []const []u8) ![]u8 {
     if (items.len == 0) return alloc.dupe(u8, "");
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -413,7 +393,6 @@ test "model stream is collected into owned turn" {
             try std.testing.expectEqual(@as(usize, 1), request.prompt_ir.turns.len);
             try std.testing.expectEqual(@as(usize, 0), request.tools.len);
             try sink.emit(.started);
-            // Display-only text is dropped; complete items are kept verbatim.
             try sink.emit(.{ .thinking_delta = "hmm" });
             try sink.emit(.{ .reasoning_item = "{\"type\":\"thinking\",\"thinking\":\"hmm\",\"signature\":\"sig\"}" });
             try sink.emit(.{ .reasoning_item = "{\"type\":\"redacted_thinking\",\"data\":\"xx\"}" });
@@ -447,8 +426,6 @@ test "model stream is collected into owned turn" {
     try std.testing.expectEqualStrings("fake", model.name());
     try std.testing.expect(model.capabilities().thinking_replay);
 
-    // The collector is the only way a stream becomes a turn (the loop drives it
-    // the same way, teeing the events to an observer first).
     var collector = TurnCollector.init(alloc);
     defer collector.deinit();
     try model.stream(alloc, .{ .prompt_ir = &ir, .tools = &.{} }, collector.sink());

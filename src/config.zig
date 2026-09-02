@@ -1,9 +1,6 @@
-//! Layered Nulya configuration.
-//!
-//! The loader resolves `default -> system -> user -> project`, with the project
-//! layer passed through the "can tighten, cannot loosen" trust boundary. Disk
-//! config is parsed into an effective value at conversation start; it is not a
-//! second mutable state store.
+//! Layered Nulya configuration: `default -> system -> user -> project`, with the
+//! project layer passed through the "can tighten, cannot loosen" trust boundary.
+//! Parsed into an effective value at conversation start; not a mutable store.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -44,10 +41,9 @@ pub const ShellDialect = enum {
     }
 };
 
-/// A profile says HOW to reach a provider (kind, endpoint, credential name) and
-/// WHICH model ids it serves; the ids' intrinsic properties live in the
-/// `[[models]]` catalog (`ModelParams`), so a model reached through two
-/// endpoints is described once.
+/// A profile says HOW to reach a provider and WHICH model ids it serves; the
+/// ids' intrinsic properties live in the `[[models]]` catalog, so a model
+/// reached through two endpoints is described once.
 pub const ProviderProfile = struct {
     name: []const u8,
     kind: ProviderKind = .openai,
@@ -71,36 +67,30 @@ pub const ProviderProfile = struct {
     }
 };
 
-/// Intrinsic properties of one model id, independent of which profile serves
-/// it: a display label, the reasoning-effort dial it accepts, and its context
-/// window. Purely descriptive — the kernel never reads it; `launch`/`cli` use
-/// it to default a session's effort, and `nulya config show` projects it for
-/// pickers.
+/// Intrinsic properties of one model id, independent of which profile serves it.
+/// Purely descriptive — the kernel never reads it; the shell uses it to default
+/// a session's effort and to project a picker.
 pub const ModelParams = struct {
     id: []const u8,
     label: []const u8 = "",
-    /// Effort levels the model accepts, lowest → highest. Empty means the model
-    /// has no dial (an absent effort is always legal and means the provider's
-    /// default).
+    /// Effort levels the model accepts, lowest → highest. Empty means no dial
+    /// (an absent effort is always legal and means the provider's default).
     efforts: []const []const u8 = &.{},
     /// Sent when neither the CLI nor the profile names an effort. Null means
     /// "send nothing" (provider default).
     default_effort: ?[]const u8 = null,
     context_window: ?u64 = null,
     /// Whether this model accepts images in a user turn. Explicit opt-in: an id
-    /// with no catalog entry, or an entry that does not say so, does not accept
-    /// them — `session append --image` refuses rather than guessing and letting
-    /// the provider 400 mid-run. Descriptive like every other field here; the
-    /// kernel never reads it, the shell does.
+    /// that does not say so does not accept them, and `--image` refuses rather
+    /// than letting the provider 400 mid-run.
     vision: bool = false,
 };
 
 pub const Provider = struct {
     active_profile: []const u8 = "",
     profiles: []ProviderProfile = &.{},
-    /// How a transient model-request failure is retried (`provider.RetryPolicy`).
-    /// One policy for every profile: it describes the wire, not a model.
-    /// Trusted layers only.
+    /// How a transient model-request failure is retried. One policy for every
+    /// profile: it describes the wire, not a model. Trusted layers only.
     retry: provider.RetryPolicy = .{},
 
     pub fn activeProfile(self: Provider) ?ProviderProfile {
@@ -119,8 +109,7 @@ pub const Provider = struct {
 };
 
 /// How many tools a session may expose at all. A ceiling, never a selection:
-/// which tools are on the face is decided by `Extensions.with`, and nothing in
-/// the kernel reads usage to fill a slot.
+/// which tools are on the face is decided by `Extensions.with`.
 pub const Registry = struct {
     max_tools: u32 = 20,
 };
@@ -131,15 +120,13 @@ pub const Environment = struct {
 };
 
 pub const Extensions = struct {
-    /// The members of every session opened in this workspace — skills into the
-    /// catalog, system prompts into the system blocks, tools reachable through
-    /// the CLI, and the tools the entry selects on the model's tool face. The
-    /// standing half of the ONE axis; `session new --with` is the per-session
-    /// half, and the shell joins the two before the composition sees them.
+    /// The members of every session opened in this workspace — skills, system
+    /// prompts, CLI-reachable tools, and the tools the entry selects on the
+    /// model's tool face. The standing half of the ONE axis; `session new --with`
+    /// is the per-session half, joined by the shell before composition sees them.
     ///
-    /// Each entry is `<id>[@<version>][:<tool>,<tool>…]`. Leaving the version
-    /// out is the usual spelling: the member follows `current`, so `ext
-    /// activate` still moves it and a rollback stays one verb.
+    /// Each entry is `<id>[@<version>][:<tool>,<tool>…]`. Leaving the version out
+    /// makes the member follow `current`, so `ext activate` still moves it.
     with: []const []const u8 = &.{},
 };
 
@@ -174,18 +161,14 @@ pub const Config = struct {
 
     /// The effort a session runs with when its driver names none: the profile's
     /// override first, then the catalog default for the model id, else nothing
-    /// (provider default). Both inputs are what a session header carries
-    /// (`model` = profile name, `model_identity.model` = model id), so a step
-    /// can re-derive this without the config being frozen.
+    /// (provider default). Both inputs are what a session header carries, so a
+    /// step can re-derive this without the config being frozen.
     pub fn defaultEffort(self: *const Config, profile_name: []const u8, model_id: []const u8) ?[]const u8 {
         if (self.provider.findProfile(profile_name)) |p| {
             if (p.effort) |e| return e;
-            // A codex profile stops here. The catalog describes an id as the
-            // public API serves it, and the subscription serves several of the
-            // same ids with a different dial and its own per-model default —
-            // which the backend applies when nothing is sent. Sending the
-            // catalog's default instead would silently overrule it; "auto" here
-            // has to mean the subscription's auto.
+            // A codex profile stops here: the catalog describes an id as the
+            // public API serves it, while the subscription serves the same ids
+            // with their own per-model default, applied when nothing is sent.
             if (p.kind == .codex) return null;
         }
         if (self.findModel(model_id)) |m| return m.default_effort;
@@ -339,11 +322,9 @@ fn mergeProject(cfg: *Config, raw: RawConfig) !void {
     const arena = cfg.arenaAlloc();
 
     if (raw.provider) |provider_cfg| {
-        // Project config may select a trusted profile, but it may not define or
-        // mutate profiles: base_url/api_key_env in a checkout are a secret and
-        // request-routing boundary. The `[[models]]` catalog is likewise trusted
-        // layers only — a checkout should not be able to change what a model id
-        // means to the picker or which effort a session silently defaults to.
+        // Project config may select a trusted profile but never define or mutate
+        // one: base_url/api_key_env in a checkout are a secret and
+        // request-routing boundary. `[[models]]` is trusted layers only too.
         if (provider_cfg.active_profile) |name| {
             if (cfg.provider.findProfile(name) != null) cfg.provider.active_profile = try arena.dupe(u8, name);
         }
@@ -360,10 +341,8 @@ fn mergeProject(cfg: *Config, raw: RawConfig) !void {
     }
 
     // `extensions.with` IS read here: a member names a version this machine
-    // already built into its one store, so a checkout cannot use it to
-    // introduce code — only to select among what is here. A project-level
-    // house-style prompt is exactly the use, and it lasts as long as the
-    // checkout is open.
+    // already built into its store, so a checkout can only select among what is
+    // here, never introduce code.
     if (raw.extensions) |extensions| {
         if (extensions.with) |with| cfg.extensions.with = try dupeStringList(arena, with);
     }
@@ -437,14 +416,11 @@ fn backendStrictness(backend: EnvironmentBackend) u8 {
     };
 }
 
-/// The project-layer file, relative to the workspace.
 pub const project_config_path = ".nulya/config.toml";
 
-/// Where the config chain reads from. The user layer is `~/.nulya/config.toml`
-/// on every platform (`%USERPROFILE%\.nulya\config.toml` on Windows) — one
-/// findable place, the same shape as the workspace's own `.nulya/` — and
-/// `NULYA_HOME` relocates that directory wholesale (tests, or a second identity).
-/// The system layer stays where administrators expect it.
+/// Where the config chain reads from. The user layer is `~/.nulya/config.toml` on
+/// every platform (`%USERPROFILE%\.nulya\config.toml` on Windows); `NULYA_HOME`
+/// relocates that directory wholesale.
 pub const ConfigPaths = struct {
     system: []const u8,
     user: []const u8,
@@ -535,8 +511,6 @@ test "default catalog: every model a built-in profile lists is described, and ef
     var cfg = try loadFromLayers(std.testing.allocator, &.{.{ .source = default_toml }});
     defer cfg.deinit();
 
-    // A profile's selectable ids all have a catalog entry (a picker never shows
-    // a bare id it cannot describe), and the default is one of them.
     for (cfg.provider.profiles) |p| {
         if (p.kind == .scripted) continue;
         try std.testing.expect(p.defaultModel().len != 0);
@@ -548,8 +522,6 @@ test "default catalog: every model a built-in profile lists is described, and ef
         try std.testing.expect(default_listed);
     }
 
-    // DeepSeek thinks by default server-side; the catalog leaves the dial on
-    // "auto" (send nothing) but lists the levels the endpoint accepts.
     const flash = cfg.findModel("deepseek-v4-flash").?;
     try std.testing.expect(flash.efforts.len != 0);
     try std.testing.expectEqualStrings("off", flash.efforts[0]);
@@ -583,20 +555,15 @@ test "[[models]] merge by id and a profile effort overrides the catalog default"
     });
     defer cfg.deinit();
 
-    // Overlay kept the built-in label and added the default effort.
     const flash = cfg.findModel("deepseek-v4-flash").?;
     try std.testing.expect(flash.label.len != 0);
     try std.testing.expectEqualStrings("high", flash.default_effort.?);
-    // Catalog default applies through the profile that lacks its own effort…
     try std.testing.expectEqualStrings("high", cfg.defaultEffort("deepseek", "deepseek-v4-flash").?);
-    // …and a profile-level effort wins over it.
     try std.testing.expectEqualStrings("low", cfg.defaultEffort("deepseek-anthropic", "deepseek-v4-flash").?);
 
-    // A new profile with only `models` gets its default from the list.
     const local = cfg.provider.findProfile("local").?;
     try std.testing.expectEqualStrings("my-local-model", local.defaultModel());
     try std.testing.expectEqualStrings("Local", cfg.findModel("my-local-model").?.label);
-    // Unknown ids resolve to "no effort" rather than an error.
     try std.testing.expect(cfg.defaultEffort("local", "something-else") == null);
 }
 
@@ -613,13 +580,11 @@ test "a codex profile defaults its effort to the subscription's, never the catal
     });
     defer cfg.deinit();
 
-    // `gpt-5.6-sol` is in the catalog with default_effort = "medium" because
-    // that is what OpenAI's own API does with it. The subscription serves the
-    // same id with its own default, so nothing is sent and the backend decides.
+    // The catalog gives this id a default_effort, but the subscription serves
+    // the same id with its own, so nothing is sent.
     try std.testing.expectEqualStrings("medium", cfg.findModel("gpt-5.6-sol").?.default_effort.?);
     try std.testing.expectEqualStrings("medium", cfg.defaultEffort("openai", "gpt-5.6-sol").?);
     try std.testing.expect(cfg.defaultEffort("codex", "gpt-5.6-sol") == null);
-    // An explicit profile effort is a decision, and still wins.
     try std.testing.expectEqualStrings("high", cfg.defaultEffort("codex-high", "gpt-5.6-sol").?);
 }
 
@@ -682,16 +647,12 @@ test "project layer may tighten but not loosen trusted authority" {
     });
     defer cfg.deinit();
 
-    // A checkout may narrow what runs (fewer tools) but never widen it back to a
-    // looser execution backend than a trusted layer chose.
     try std.testing.expectEqual(EnvironmentBackend.sandbox, cfg.environment.backend);
     try std.testing.expectEqual(@as(u32, 4), cfg.registry.max_tools);
 }
 
 test "a config file naming the retired 'remote' backend fails to load, rather than reading as local" {
-    // An old file with `backend = "remote"` must say so loudly (the
-    // enum-decode error every other unrecognized TOML value already gets),
-    // not silently downgrade to a laxer backend than whoever wrote it asked for.
+    // An unrecognized backend fails to decode rather than downgrading silently.
     try std.testing.expectError(error.InvalidValueType, loadFromLayers(std.testing.allocator, &.{
         .{ .source = default_toml },
         .{ .source =

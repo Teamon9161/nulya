@@ -1,18 +1,14 @@
-//! The extension drafts this binary ships, backing `nulya ext seed`.
-//!
-//! build.zig `@embedFile`s the repo's own `extensions/**` tree — the same move
-//! as `src_embed` (`nulya src`), pointed at the bundled drafts. A distributed
-//! binary therefore carries the drafts themselves, and `ext seed` can write
-//! them into a store root on a machine that never saw this checkout. Nothing
-//! here builds or trusts anything: a seeded draft is an ordinary draft, and
-//! `ext sync` / the store's own gates take it from there.
+//! The extension drafts this binary ships, backing `nulya ext seed`. build.zig
+//! `@embedFile`s the repo's own `extensions/**` tree, so a distributed binary can
+//! seed a store root on a machine that never saw this checkout. Nothing here
+//! builds or trusts anything: a seeded draft is an ordinary draft.
 
 const std = @import("std");
 const embed = @import("ext_embed");
 
 /// Every embedded draft file, sorted by path. Paths are relative to the repo's
-/// `extensions/` directory and slash-normalized (`std/src/main.zig`), so the
-/// first component is the draft id.
+/// `extensions/` directory and slash-normalized, so the first component is the
+/// draft id.
 pub const files: []const embed.Entry = &embed.files;
 
 /// The draft id a path belongs to: its first component.
@@ -26,7 +22,7 @@ pub fn idOf(path: []const u8) []const u8 {
 pub fn ids(alloc: std.mem.Allocator) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     errdefer out.deinit(alloc);
-    // `files` is sorted by path, so one id's files are adjacent: comparing
+    // `files` is sorted by path, so one id's files are adjacent and comparing
     // against the last appended id is a full dedupe.
     for (files) |f| {
         const id = idOf(f.path);
@@ -57,7 +53,6 @@ test "bundled drafts include every one the repo ships, each with a manifest at i
         }
         try std.testing.expect(found);
     }
-    // Sorted + unique is what the seed loop leans on.
     for (list, 0..) |id, i| {
         if (i > 0) try std.testing.expect(std.mem.lessThan(u8, list[i - 1], id));
     }

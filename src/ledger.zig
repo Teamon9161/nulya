@@ -12,7 +12,6 @@
 const std = @import("std");
 const lease = @import("lease.zig");
 
-/// A tool call requested by the assistant within one step.
 pub const ToolCall = struct {
     id: []const u8,
     tool: []const u8,
@@ -20,7 +19,6 @@ pub const ToolCall = struct {
     args_json: []const u8,
 };
 
-/// One tool's result inside a batched result turn.
 pub const ToolResultEntry = struct {
     call_id: []const u8,
     ok: bool,
@@ -72,8 +70,7 @@ pub const Image = struct {
     data: []const u8,
 };
 
-/// A user turn: text, plus zero or more images inlined with it. Both are
-/// model-visible, so both are projected.
+/// A user turn. Text and images are both model-visible, so both are projected.
 pub const UserText = struct {
     text: []const u8,
     images: []const Image = &.{},
@@ -135,19 +132,17 @@ pub const note_source_ext = "ext";
 
 pub const Ledger = struct {
     alloc: std.mem.Allocator,
-    /// Every byte an appended event owns. A ledger is append-only and released
-    /// whole, so its payloads have exactly one lifetime and one arena expresses
-    /// it. `append` copies what it is given; the caller's slices are free the
-    /// moment it returns.
+    /// Every byte an appended event owns: one lifetime, one arena. `append`
+    /// copies what it is given; the caller's slices are free when it returns.
     arena: std.heap.ArenaAllocator,
     events: std.ArrayList(Event),
     /// When set, every appended event is also persisted as one JSONL line.
     durable: ?Durable = null,
     /// Delivery ids of inbox proposals already applied. A drained event persists
-    /// its inbox filename(s) as `origin` / `origins` on its line, and this set is
-    /// rebuilt from both on replay — which is what makes inbox application
-    /// EXACTLY-once: a crash between appending and deleting the inbox file leaves
-    /// the file behind, and the next drain skips it. Never projected.
+    /// its inbox filename(s) on its line and this set is rebuilt from them on
+    /// replay, which is what makes application EXACTLY-once: a crash between
+    /// appending and deleting leaves the file behind, and the next drain skips
+    /// it. Never projected.
     origins: std.StringHashMapUnmanaged(void) = .empty,
 
     pub fn init(alloc: std.mem.Allocator) Ledger {
@@ -163,12 +158,10 @@ pub const Ledger = struct {
         if (self.durable) |*d| d.deinit();
     }
 
-    /// The only mutation. Appends one event to the end. No other write exists.
-    ///
-    /// Takes a SNAPSHOT of the payload: callers may free or reuse every slice
-    /// passed in once this returns. When the ledger is durable the event is
-    /// persisted before the call returns, and a persistence failure rewinds the
-    /// in-memory append so memory and file never diverge.
+    /// The only mutation. Takes a SNAPSHOT of the payload: callers may free or
+    /// reuse every slice passed in once this returns. When the ledger is durable
+    /// the event is persisted before the call returns, and a persistence failure
+    /// rewinds the in-memory append so memory and file never diverge.
     pub fn append(self: *Ledger, e: Event) !void {
         return self.appendInternal(e, &.{});
     }
@@ -339,12 +332,11 @@ pub const InlinePrompt = struct {
     text: []const u8 = "",
 };
 
-/// The RESOLVED model identity frozen at session creation: config chooses the
-/// model when a session is created and can never change an existing session's.
-/// On resume the writer reconstructs exactly this model, re-resolving only the
-/// credential named by `api_key_env` — no secret is stored, and there is no
-/// silent fallback to a different provider. `provider == ""` marks a legacy
-/// header with no frozen identity (treated as scripted).
+/// The RESOLVED model identity frozen at session creation; config can never
+/// change an existing session's. On resume the writer reconstructs exactly this
+/// model, re-resolving only the credential named by `api_key_env` — no secret is
+/// stored, no silent fallback to another provider. `provider == ""` marks a
+/// legacy header with no frozen identity (treated as scripted).
 pub const ModelDescriptor = struct {
     /// `"scripted"` | `"openai"` (the `config.ProviderKind` tag name).
     provider: []const u8 = "",

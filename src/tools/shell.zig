@@ -1,24 +1,21 @@
 //! Builtin tool: shell.
 //!
 //! `{ command, cwd?, timeout_ms?, background? }`. Hands the command to the
-//! execution Environment (which picks the dialect and provides a sanitized
-//! child env), captures stdout+stderr, appends the exit code, and returns raw
-//! text. The agent loop applies `emit` uniformly after every executor
-//! returns.
+//! execution Environment (which picks the dialect and provides a sanitized child
+//! env), captures stdout+stderr, appends the exit code, and returns raw text;
+//! the loop applies `emit` afterwards.
 //!
-//! `background: true` is the other half: the command is started DETACHED and
-//! this returns at once with a receipt. It is a flag on this tool rather than
-//! a separate CLI verb on purpose — a gate and an approval policy read
-//! `shell`'s own `command`, and a `nulya task run -- rm -rf x` wrapper would
-//! blind both of them.
+//! `background: true` starts the command DETACHED and returns at once with a
+//! receipt. A flag on this tool rather than a separate CLI verb because a gate
+//! and an approval policy read `shell`'s own `command`, and a wrapper verb would
+//! blind both.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const tool = @import("../tool.zig");
 const environment = @import("../environment.zig");
 
-/// Raise the runner's capture cap well above the emit budget so that `emit` —
-/// not the process runner — is what decides truncation.
+/// Well above the emit budget, so `emit` decides truncation, not the runner.
 const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 
 pub const def: tool.Tool = .{
@@ -33,9 +30,8 @@ pub const def: tool.Tool = .{
     .executor = tool.functionExecutor(run),
 };
 
-/// What a background call is told when there is no session to report back to.
-/// Teaching, not just refusing: the tool says how to get one and what to do
-/// right now.
+/// What a background call is told when there is no session to report back to:
+/// how to get one, and what to do right now.
 const no_session_text = "background needs a durable session (nulya session new); run it in the foreground here";
 const remote_lost_text = "the connection to the machine this session's commands run on ended while this command was in flight; whether it ran, is still running, or never started there is unknown - do not assume either, and do not simply run it again";
 const remote_refused_text = "the machine this session's commands run on would not start a background task; check that it is answering (nulya remote check) and run it in the foreground here meanwhile";
@@ -69,14 +65,12 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
         .max_output_bytes = MAX_CAPTURE_BYTES,
         .timeout_ms = timeout_ms,
     }) catch |err| switch (err) {
-        // A canceled step must surface AS cancellation, not as a shell failure
-        // string — the loop consumes it at the step boundary. std.process.run has
-        // already killed the child and closed its pipes on this path.
+        // A canceled step must surface AS cancellation, not a shell failure
+        // string — the loop consumes it at the step boundary.
         error.Canceled => return error.Canceled,
-        // The channel to the machine this session runs on ended, or stopped
-        // answering, while this command was in flight. What happened over there
-        // is genuinely unknown, so an exit code is not invented and nothing is
-        // retried — a command that already ran must not run twice.
+        // The channel to the machine this session runs on ended mid-command.
+        // What happened over there is unknown, so no exit code is invented and
+        // nothing is retried — a command that already ran must not run twice.
         error.RemoteChannelLost, error.RemoteChannelStalled => return .{
             .ok = false,
             .output = try alloc.dupe(u8, remote_lost_text),
@@ -88,7 +82,6 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
     };
     defer outcome.deinit(alloc);
 
-    // Assemble stdout, then a `--- stderr ---` section, then the exit line.
     var raw: std.ArrayList(u8) = .empty;
     defer raw.deinit(alloc);
     try raw.appendSlice(alloc, outcome.stdout);
@@ -98,8 +91,7 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
         try raw.appendSlice(alloc, outcome.stderr);
     }
     // A timeout says so between the captured output and the exit line: what is
-    // above is real but partial, and the exit code is the host's, not the
-    // command's.
+    // above is real but partial, and the exit code is the host's.
     if (outcome.timed_out) {
         if (raw.items.len > 0 and raw.items[raw.items.len - 1] != '\n') try raw.append(alloc, '\n');
         try raw.print(alloc, "[timed out after {d} ms; process killed, output above is partial]", .{timeout_ms});
@@ -111,10 +103,8 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
     return .{ .ok = outcome.exit_code == 0 and !outcome.timed_out, .output = out };
 }
 
-/// Start the command detached and answer immediately. The receipt is the whole
-/// of what the model gets now — a name, where the output is accumulating, and
-/// the three commands that ask about it — because the RESULT arrives later, as
-/// its own turn.
+/// Start the command detached and answer immediately with a receipt; the RESULT
+/// arrives later as its own turn.
 fn startBackground(
     alloc: std.mem.Allocator,
     req: tool.ToolRequest,
@@ -133,12 +123,10 @@ fn startBackground(
         .timeout_ms = timeout_ms,
     }) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
-        // Nowhere to report a result TO. Not a failure of the command — it was
-        // never started — so the model is told what is missing, and what works.
+        // Nowhere to report a result TO, so the command was never started.
         error.NoDurableSession => return .{ .ok = false, .output = try alloc.dupe(u8, no_session_text) },
-        // The machine this session's commands run on would not start it. Its
-        // own sentence cannot come back — a start either yields a receipt or
-        // an error — so this says which half failed and where to look.
+        // A start either yields a receipt or an error, so the far side's own
+        // sentence cannot come back: say which half failed and where to look.
         error.RemoteTaskRefused => return .{ .ok = false, .output = try alloc.dupe(u8, remote_refused_text) },
         else => return .{
             .ok = false,
@@ -157,10 +145,9 @@ fn startBackground(
     ) };
 }
 
-/// `background` is a bool or it is nothing: a string `"yes"` is refused rather
-/// than guessed at, the same discipline `timeout_ms` follows. Getting this wrong
-/// silently would mean the model believes a command is running in the background
-/// while the step waits for it (or the reverse).
+/// `background` is a bool or nothing: a string `"yes"` is refused rather than
+/// guessed at, which would leave the model believing a command runs in the
+/// background while the step waits for it, or the reverse.
 fn backgroundFlag(args: std.json.Value) !bool {
     if (args != .object) return false;
     const v = args.object.get("background") orelse return false;
@@ -169,9 +156,7 @@ fn backgroundFlag(args: std.json.Value) !bool {
 }
 
 /// A background task's budget: passed through as given, with NO default and NO
-/// ceiling. Outliving the step is the whole point of the flag, so
-/// the foreground's 120s / 600s would defeat it; what ends a task instead is
-/// `nulya task kill`. Only the "not a positive integer" refusal is shared.
+/// ceiling — outliving the step is the point. `nulya task kill` ends a task.
 fn backgroundTimeoutMs(args: std.json.Value) !?u32 {
     if (args != .object) return null;
     const v = args.object.get("timeout_ms") orelse return null;
@@ -180,9 +165,8 @@ fn backgroundTimeoutMs(args: std.json.Value) !?u32 {
 }
 
 /// The command's wall-clock budget: the model's `timeout_ms` clamped into
-/// `[1, shell_max_ms]`, or the default when it said nothing (`tool.Timeouts`).
-/// A non-integer or non-positive value is refused rather than rounded, so the
-/// model is told once instead of silently getting another number.
+/// `[1, shell_max_ms]`, or the default when it said nothing. A non-integer or
+/// non-positive value is refused rather than rounded.
 fn timeoutMs(args: std.json.Value) !u32 {
     if (args != .object) return tool.Timeouts.shell_default_ms;
     const v = args.object.get("timeout_ms") orelse return tool.Timeouts.shell_default_ms;
@@ -201,25 +185,16 @@ test "a command that outruns its timeout_ms is killed and reported, not waited o
     var root_real: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = root_real[0..try tmp.dir.realPath(io, &root_real)];
 
-    // The DEFAULT dialect on purpose — on this project's development machine
-    // that is Git Bash, whose `bin\bash.exe` re-execs the real shell as a
-    // grandchild that holds the pipe write-ends. Killing only the direct child
-    // would leave the drain blocked for the command's full 5s, so the elapsed
-    // assertion below is proof the whole process TREE dies (`Tree` in
-    // environment.zig). Same on POSIX, where `bash -lc "a; b"` forks for `b`.
+    // The DEFAULT dialect on purpose: an interpreter may re-exec the real shell
+    // as a grandchild holding the pipe write-ends (Git Bash does; so does
+    // `bash -lc "a; b"`). The elapsed assertion below is proof the whole process
+    // TREE dies, not just the direct child.
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
     // Print first, then sleep far past the budget: the output above the kill
-    // must come back with the result, not be thrown away.
-    //
-    // The budget has to clear the INTERPRETER's own startup, not just the
-    // command's: nothing is written until the shell is up, and the kill does
-    // not wait for that. On this project's development machine, `bash -lc
-    // "echo …; sleep 5"` through the Git Bash launcher takes 268-425 ms
-    // (n=15, mean 309) to put its first byte in the pipe, so the budget must
-    // clear that with margin and still land well under the 5s sleep — both
-    // bounds are what the assertions below read.
+    // must come back with the result. The budget must clear the INTERPRETER's
+    // own startup (a few hundred ms) and stay well under the 5s sleep.
     const args_json = switch (lenv.dialect_val) {
         .bash => "{\"command\":\"echo before-the-wait; sleep 5\",\"timeout_ms\":1500}",
         .powershell => "{\"command\":\"Write-Output before-the-wait; Start-Sleep -Seconds 5\",\"timeout_ms\":1500}",
@@ -233,9 +208,8 @@ test "a command that outruns its timeout_ms is killed and reported, not waited o
     defer alloc.free(res.output);
     const elapsed_ms = started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
 
-    // The budget is what ended it, not the command: startup plus 1500ms lands
-    // around 1.8s, well under the 5s sleep. It was ~5000ms before the tree kill,
-    // which is exactly the regression this pins.
+    // The budget is what ended it, not the command: without the tree kill this
+    // would wait out the full 5s sleep.
     try std.testing.expect(elapsed_ms >= 0 and elapsed_ms < 4000);
     try std.testing.expect(!res.ok);
     try std.testing.expect(std.mem.indexOf(u8, res.output, "timed out after 1500 ms") != null);
@@ -247,13 +221,10 @@ test "a command that outruns its timeout_ms is killed and reported, not waited o
 test "timeout_ms is clamped to the max, and a non-integer teaches instead of guessing" {
     const alloc = std.testing.allocator;
 
-    // Missing: the kernel default.
     const parsed_default = try std.json.parseFromSlice(std.json.Value, alloc, "{\"command\":\"x\"}", .{});
     defer parsed_default.deinit();
     try std.testing.expectEqual(tool.Timeouts.shell_default_ms, try timeoutMs(parsed_default.value));
 
-    // Above the ceiling: clamped, not refused — the model asked for "as long as
-    // possible" and gets exactly that.
     const parsed_big = try std.json.parseFromSlice(std.json.Value, alloc, "{\"timeout_ms\":9999999}", .{});
     defer parsed_big.deinit();
     try std.testing.expectEqual(tool.Timeouts.shell_max_ms, try timeoutMs(parsed_big.value));
@@ -262,8 +233,6 @@ test "timeout_ms is clamped to the max, and a non-integer teaches instead of gue
     defer parsed_ok.deinit();
     try std.testing.expectEqual(@as(u32, 1500), try timeoutMs(parsed_ok.value));
 
-    // A string or a zero is refused: silently substituting another number would
-    // leave the model believing a bound it never got.
     for ([_][]const u8{ "{\"timeout_ms\":\"300\"}", "{\"timeout_ms\":0}", "{\"timeout_ms\":-5}", "{\"timeout_ms\":1.5}" }) |body| {
         const bad = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
         defer bad.deinit();
@@ -282,8 +251,7 @@ test "background:true outside a durable session teaches instead of starting anyt
     var root_real: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = root_real[0..try tmp.dir.realPath(io, &root_real)];
 
-    // An environment with no session — a `session new`, the demo, a library
-    // caller. There is nowhere to deposit a report note, so nothing starts.
+    // No session means nowhere to deposit a report note, so nothing starts.
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
     const ctx: tool.ToolContext = .{ .environment = lenv.environment(), .cwd = cwd };
@@ -295,12 +263,8 @@ test "background:true outside a durable session teaches instead of starting anyt
     defer alloc.free(res.output);
     try std.testing.expect(!res.ok);
     try std.testing.expectEqualStrings(no_session_text, res.output);
-    // And it really did not start: no tasks tree was created anywhere.
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, ".nulya", .{}));
 
-    // A `background` that is not a bool is refused, not guessed at — believing
-    // a command is detached when it is not (or the reverse) is the failure this
-    // prevents.
     const bad = try run(alloc, .{
         .args_json = "{\"command\":\"echo never\",\"background\":\"yes\"}",
         .ctx = ctx,
@@ -314,7 +278,6 @@ test "background:true outside a durable session teaches instead of starting anyt
 test "a background timeout is passed through unclamped; a foreground one is still clamped" {
     const alloc = std.testing.allocator;
 
-    // No default and no ceiling: outliving the step is the point.
     const none = try std.json.parseFromSlice(std.json.Value, alloc, "{\"command\":\"x\"}", .{});
     defer none.deinit();
     try std.testing.expectEqual(@as(?u32, null), try backgroundTimeoutMs(none.value));
@@ -322,7 +285,6 @@ test "a background timeout is passed through unclamped; a foreground one is stil
     const huge = try std.json.parseFromSlice(std.json.Value, alloc, "{\"timeout_ms\":3600000}", .{});
     defer huge.deinit();
     try std.testing.expectEqual(@as(?u32, 3_600_000), (try backgroundTimeoutMs(huge.value)).?);
-    // The same number in the foreground is still clamped to the kernel ceiling.
     try std.testing.expectEqual(tool.Timeouts.shell_max_ms, try timeoutMs(huge.value));
 
     for ([_][]const u8{ "{\"timeout_ms\":0}", "{\"timeout_ms\":-1}", "{\"timeout_ms\":\"600\"}" }) |body| {
@@ -359,8 +321,8 @@ test "shell tool reports cancellation as an error, not a failure result" {
 
     var fut = io.async(run, .{ alloc, req });
 
-    // Bounded only so a broken spawn fails instead of hanging; a busy machine is
-    // allowed to take its time getting the child up (see `environment.zig`).
+    // Bounded only so a broken spawn fails instead of hanging; a busy machine
+    // may take its time getting the child up.
     var waited: usize = 0;
     while (waited < 1500) : (waited += 1) {
         if (blk: {
@@ -370,7 +332,6 @@ test "shell tool reports cancellation as an error, not a failure result" {
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(20), .awake) catch {};
     }
 
-    // The special-case in `run` must let error.Canceled through rather than
-    // producing `{ ok=false, output="failed to spawn shell: Canceled" }`.
+    // `run` must let error.Canceled through, not make it a failed shell result.
     try std.testing.expectError(error.Canceled, fut.cancel(io));
 }

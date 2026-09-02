@@ -1,17 +1,13 @@
 //! The tool boundary. A tool is a pure-ish function `f(args, ctx_header)`:
+//! `args` is model-distilled *semantic* input (JSON) and the tool never sees the
+//! ledger; `ctx_header` is *constant-size* context that must NOT grow with the
+//! conversation, which is what keeps the cache prefix stable and tools
+//! least-privilege; factual data (files, command output) is reached through the
+//! environment and `cwd`, not passed in.
 //!
-//!   - `args`      : model-distilled *semantic* input (JSON). The model curates
-//!                   this out of the conversation; the tool never sees the ledger.
-//!   - `ctx_header`: *constant-size* context. It must NOT grow with the
-//!                   conversation — that is what keeps the cache prefix stable
-//!                   and keeps tools least-privilege.
-//!   - factual data (files, command output) is reached through the environment
-//!     and `cwd`, not passed in. "Needs the whole conversation" -> it is a
-//!     subagent, not a tool.
-//!
-//! Everything a tool is allowed to touch enters through `ToolRequest`. If a
-//! field would grow unbounded with the dialogue, it does not belong in
-//! `ToolContext`.
+//! Everything a tool may touch enters through `ToolRequest`; a field that would
+//! grow unbounded with the dialogue does not belong in `ToolContext`. "Needs the
+//! whole conversation" -> it is a subagent, not a tool.
 
 const std = @import("std");
 const emit = @import("emit.zig");
@@ -19,44 +15,36 @@ const environment = @import("environment.zig");
 
 pub const Environment = environment.Environment;
 
-/// Truncation / spill limits. Kernel defaults live here and are the primary
-/// knob for per-result token cost.
+/// Truncation / spill limits — the primary knob for per-result token cost.
 pub const OutputBudget = emit.OutputBudget;
 
 pub const StepOutputBudget = emit.StepOutputBudget;
 
 /// Wall-clock caps for the child processes the kernel spawns. ONE table, so no
-/// call site carries its own literal: `shell` defaults to `shell_default_ms`
-/// and clamps a model-supplied `timeout_ms` into `[1, shell_max_ms]`; an
-/// extension's oneshot `tool/call` gets `extension_ms` unless its manifest
-/// declares its own, which may reach `extension_max_ms`. Not config: a
-/// timeout is a property of the tool contract the model is taught, not of an
-/// operator's deployment.
+/// call site carries its own literal: `shell` defaults to `shell_default_ms` and
+/// clamps a model-supplied `timeout_ms` into `[1, shell_max_ms]`; an extension's
+/// oneshot `tool/call` gets `extension_ms` unless its manifest declares its own,
+/// up to `extension_max_ms`. Not config: a timeout is part of the tool contract.
 pub const Timeouts = struct {
     pub const shell_default_ms: u32 = 120_000;
     pub const shell_max_ms: u32 = 600_000;
     pub const extension_ms: u32 = 30_000;
-    /// Ceiling for a manifest-declared `contributes.tools[].timeout_ms`, the
-    /// same ten minutes `shell` may be asked for: a tool that knows it is slow
-    /// (one that steps a real model, say) says so, but no manifest may hand the
-    /// host an unbounded wait.
+    /// Ceiling for a manifest-declared `contributes.tools[].timeout_ms`: a slow
+    /// tool may say so, but no manifest hands the host an unbounded wait.
     pub const extension_max_ms: u32 = 600_000;
 };
 
 /// Constant-size context handed to every tool call.
 ///
 /// INVARIANT: every field here is fixed-shape and executor-facing. Unbounded
-/// loop/session data such as spill directories, event sequence numbers, and
-/// output budgets stays outside this type; `presentation_file` is only a
-/// constant-size pointer to a side channel the loop owns.
+/// loop/session data (spill directories, event sequence numbers, output budgets)
+/// stays outside this type.
 pub const ToolContext = struct {
-    /// The process execution environment.
     environment: Environment,
-    /// Working directory for filesystem-relative operations.
     cwd: []const u8,
     /// Optional workspace-relative file where an executor may write UI-only
-    /// presentation JSON. The loop reads it after the call and records it in
-    /// the ledger, but PromptIR never projects it, so it is not model-visible.
+    /// presentation JSON. The loop reads it after the call and records it in the
+    /// ledger; PromptIR never projects it, so it is not model-visible.
     presentation_file: ?[]const u8 = null,
 };
 
@@ -71,9 +59,8 @@ pub const ToolRequest = struct {
 pub const RawToolResult = struct {
     ok: bool,
     /// Raw text produced by the executor, owned by the caller's allocator. The
-    /// kernel applies `emit` after the executor returns, so builtin / extension /
-    /// MCP executors never need to know scratch paths, spill budgets, or
-    /// presentation rules.
+    /// kernel applies `emit` afterwards, so no executor needs to know scratch
+    /// paths, spill budgets or presentation rules.
     output: []const u8,
 };
 
@@ -96,33 +83,27 @@ pub fn functionExecutor(comptime runFn: *const fn (alloc: std.mem.Allocator, req
     return .{ .ptr = null, .callFn = Adapter.call };
 }
 
-/// Model-facing tool definition. This is the shape provider serialization and
-/// extension manifests share.
+/// Model-facing tool definition — the shape provider serialization and extension
+/// manifests share.
 pub const ToolDefinition = struct {
     id: []const u8,
     name: []const u8,
     description: []const u8,
     input_schema: []const u8,
-    /// This tool's own claim that it only reads, frozen from its manifest
-    /// (`contributes.tools[].readonly`). The kernel enforces nothing with it;
-    /// it travels here so that whoever answers the gate reads the frozen fact
-    /// instead of re-deriving it from a manifest — which is a derivation that
-    /// can fail silently, and did.
+    /// This tool's own claim that it only reads, frozen from its manifest. The
+    /// kernel enforces nothing with it; it travels here so whoever answers the
+    /// gate reads the frozen fact instead of re-deriving it from a manifest.
     ///
-    /// `null` is not `false`: the package said nothing (and the builtin `shell`
-    /// is the kernel itself, which makes no claim either). Not part of the
-    /// provider wire — a definition's readonly-ness is a fact about the tool,
-    /// not part of what the model is told about it — so `kernel_hash` (which
-    /// hashes the builtin definitions) is unaffected by the default.
+    /// `null` is not `false`: the package said nothing (nor does the builtin
+    /// `shell`). Not part of the provider wire, so `kernel_hash` is unaffected.
     readonly: ?bool = null,
 };
 
 /// A registered tool: its model-facing definition and its execution handler.
-///
-/// Several calls may arrive in one assistant turn; the loop runs them
-/// serially, which preserves model-call order and makes every side effect
-/// visible to the calls after it. Batching is about ONE round trip, not about
-/// concurrency, so a tool never has to be concurrency-safe.
+/// Several calls may arrive in one assistant turn; the loop runs them serially,
+/// preserving model-call order and making every side effect visible to the calls
+/// after it. Batching is ONE round trip, not concurrency, so a tool is never
+/// required to be concurrency-safe.
 pub const Tool = struct {
     definition: ToolDefinition,
     executor: ToolExecutor,
@@ -132,8 +113,8 @@ pub fn parseArgs(alloc: std.mem.Allocator, args_json: []const u8) !std.json.Pars
     return std.json.parseFromSlice(std.json.Value, alloc, args_json, .{}) catch error.InvalidArgsJson;
 }
 
-/// Distinct error variants (`ArgsNotObject` / `MissingField` / `FieldNotString`)
-/// so a caller's failure message can teach the model exactly what was wrong.
+/// Distinct error variants so a caller's failure message can teach the model
+/// exactly what was wrong.
 pub fn requireString(args: std.json.Value, field: []const u8) ![]const u8 {
     if (args != .object) return error.ArgsNotObject;
     const v = args.object.get(field) orelse return error.MissingField;

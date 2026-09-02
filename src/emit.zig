@@ -1,28 +1,24 @@
-//! The single output-discipline primitive: the kernel's one truncation/spill
-//! path, through which every tool's output passes. Guarantees:
-//!   1. per-line clip — no single line blows up a result
-//!   2. byte budget   — returned text is bounded by `max_bytes`
-//!   3. auto-spill    — whenever anything was truncated the full raw output is
-//!                      written to the WORKSPACE and the model-visible text
-//!                      carries the spill path. It is workspace-relative and
-//!                      the bytes go through `FileSink`, so a workspace on
-//!                      another machine gets the file where the reader's hands
-//!                      are, not where the harness runs
-//!   4. determinism   — the spill filename derives from `seq`, never a runtime
-//!                      counter, so a replayed ledger reproduces byte-for-byte
-//!   5. valid UTF-8   — returned text is valid UTF-8 whatever the tool wrote
-//!                      (`utf8Lossy`), because ledger strings have to be
+//! The single output-discipline primitive: every tool's output passes through
+//! `emit`, so there is exactly ONE truncation/spill code path in the kernel.
+//!
+//! Guarantees:
+//!   1. per-line clip     — no single line blows up a result
+//!   2. byte budget       — returned text is bounded by `max_bytes`
+//!   3. auto-spill        — the full raw output is ALWAYS written to the
+//!                          WORKSPACE when anything was truncated, and the
+//!                          model-visible text carries the workspace-relative
+//!                          spill path; the bytes go through `FileSink`, so a
+//!                          remote workspace gets the file where its reader is
+//!   4. determinism       — spill filename derives from `seq`, never a runtime
+//!                          counter, so a replayed ledger reproduces byte-for-byte
+//!   5. valid UTF-8       — the returned text is valid UTF-8 whatever the tool
+//!                          wrote, because the ledger's strings have to be
 
 const std = @import("std");
 
 /// Where a spill's bytes go. `emit` writes no files itself: it hands the
-/// workspace-relative path and the bytes to the session's environment
-/// (`Environment.putWorkspaceFile`), which is the thing that knows which
-/// machine the workspace is on. The interface lives here rather than in
-/// `environment.zig` because `emit` must stay importable by everything and
-/// know nothing about processes — and there is no adapter between the two:
-/// this IS the shape of a vtable entry, so `Environment.fileSink()` just hands
-/// over the pointer and that function.
+/// workspace-relative path and the bytes to the session's environment, which
+/// knows which machine the workspace is on.
 pub const FileSink = struct {
     ptr: *anyopaque,
     writeFn: *const fn (ptr: *anyopaque, rel_path: []const u8, bytes: []const u8) anyerror!void,
@@ -63,9 +59,9 @@ pub const Emitted = struct {
     }
 };
 
-/// Pass `raw` through the output discipline. `tool`, `event_seq`, and
+/// Pass `raw` through the output discipline. `tool`, `event_seq` and
 /// `call_index` name the spill file; `scratch_dir` is where it lands; `sink`
-/// performs the spill write, wherever this session's workspace is.
+/// performs the write.
 pub fn emit(
     alloc: std.mem.Allocator,
     sink: FileSink,
@@ -135,10 +131,9 @@ pub const Lossy = struct {
 };
 
 /// `raw` as valid UTF-8, or null when it already is (no copy). Caller owns `text`.
-///
-/// Why it has to happen: `std.json.Stringify` writes a `[]const u8` that is not
-/// valid UTF-8 as an ARRAY OF NUMBERS, so one stray byte from a subprocess
-/// changes the shape of the session file and of every request built from it.
+/// `std.json.Stringify` writes an invalid-UTF-8 `[]const u8` as an ARRAY OF
+/// NUMBERS, so one stray byte would change the shape of the session file and of
+/// every request built from it.
 pub fn utf8Lossy(alloc: std.mem.Allocator, raw: []const u8) !?Lossy {
     if (std.unicode.utf8ValidateSlice(raw)) return null;
 
@@ -167,15 +162,10 @@ pub fn utf8Lossy(alloc: std.mem.Allocator, raw: []const u8) !?Lossy {
     return .{ .text = try out.toOwnedSlice(alloc), .replaced = replaced };
 }
 
-/// The head+tail discipline on its own, without the spill: `body` trimmed to
-/// `budget.max_bytes` by keeping a head and a tail around the same self-
-/// describing elision marker `emit` uses, on UTF-8 (and where it can, line)
-/// boundaries. Caller owns the result.
-///
-/// The second consumer of that discipline (`emit` is the first): a background
-/// task's report quotes the tail of a log that is ALREADY the complete bytes on
-/// disk, so it needs the trimming and must not spill a second copy. Everything
-/// the two share stays in one implementation here.
+/// The head+tail discipline without the spill: `body` trimmed to
+/// `budget.max_bytes` around the same elision marker `emit` uses, on UTF-8 (and
+/// where it can, line) boundaries. For callers whose complete bytes are already
+/// on disk. Caller owns the result.
 pub fn headTail(alloc: std.mem.Allocator, body: []const u8, budget: OutputBudget) ![]u8 {
     if (body.len <= budget.max_bytes) return alloc.dupe(u8, body);
     var out: std.ArrayList(u8) = .empty;
@@ -241,15 +231,10 @@ fn spillName(alloc: std.mem.Allocator, tool: []const u8, event_seq: u64, call_in
     return std.fmt.allocPrint(alloc, "{s}-{d}-{d}.txt", .{ tool, event_seq, call_index });
 }
 
-/// Join the parts of a workspace-relative path the MODEL will read — a spill
-/// footer, a background task's log — with `/` on every OS, never the native
-/// separator. Two reasons, both about the reader rather than the file system
-/// (which accepts `/` on Windows just the same): a
-/// backslash path pasted into a bash command is mangled the moment it is read
-/// (`\t` is a tab), and every other relative path the harness shows is already
-/// spelled with `/` (`.nulya/sessions/…`, `.nulya/handoffs/…`) — one spelling,
-/// so the same place is never written two ways in one transcript. Callers pass
-/// parts without separators of their own; this does no normalisation.
+/// Join the parts of a workspace-relative path the MODEL will read with `/` on
+/// every OS: a backslash path pasted into a bash command is mangled the moment
+/// it is read (`\t` is a tab), and every other relative path the harness shows is
+/// already spelled with `/`. Callers pass parts without separators of their own.
 pub fn joinRel(alloc: std.mem.Allocator, parts: []const []const u8) ![]u8 {
     return std.mem.join(alloc, "/", parts);
 }
@@ -271,13 +256,11 @@ pub const StepOutputLimiter = struct {
     }
 
     /// Charge one result against the step budget, in batch order. The budget
-    /// bounds result BODIES; it never decides which results the model gets to
-    /// see — a batch's most important error may be its last. A result that no
-    /// longer fits keeps, whichever is smaller, its own text verbatim or a head
-    /// prefix ending in a COMPLETE pointer to the full bytes on disk. The
-    /// footer is the per-result floor and is not charged to the budget, so one
-    /// step's visible tool text is bounded by `max_bytes` plus at most one
-    /// footer per call.
+    /// bounds result BODIES; it never decides which results the model sees. A
+    /// result that no longer fits keeps, whichever is smaller, its own text
+    /// verbatim or a head prefix ending in a COMPLETE pointer to the bytes on
+    /// disk. That footer is the per-result floor and is not charged, so a step's
+    /// visible tool text is `max_bytes` plus at most one footer per call.
     pub fn apply(
         self: *StepOutputLimiter,
         alloc: std.mem.Allocator,
@@ -292,8 +275,8 @@ pub const StepOutputLimiter = struct {
             return;
         }
 
-        // Point the footer at the per-call spill when `emit` already wrote one
-        // (it holds the raw bytes); otherwise at a step spill written below.
+        // Point the footer at the per-call spill when `emit` already wrote one;
+        // otherwise at a step spill written below.
         var path_owned = spill_path.* == null;
         const path = spill_path.* orelse try stepSpillPath(alloc, self.scratch_dir, tool_name, self.event_seq, call_index);
         errdefer if (path_owned) alloc.free(path);
@@ -301,8 +284,7 @@ pub const StepOutputLimiter = struct {
         defer alloc.free(footer);
 
         // A replacement must never cost more than what it replaces: a result
-        // no longer than its would-be prefix+footer stays verbatim — same
-        // bound, nothing hidden behind an indirection, no spill file.
+        // no longer than its would-be prefix+footer stays verbatim.
         if (output.*.len <= remaining + footer.len) {
             if (path_owned) alloc.free(path);
             self.used += output.*.len;
@@ -396,11 +378,8 @@ fn isUtf8Continuation(byte: u8) bool {
 
 // ── tests ───────────────────────────────────────────────────────────────────
 
-/// A sink that keeps what it was handed instead of writing it. Every test here
-/// wants the same two answers — WHICH path was spilled to and WHAT bytes went
-/// there — and asking a file system for them would put a second "bytes become a
-/// file" implementation in the repository, which is the one thing `FileSink`
-/// exists to prevent.
+/// A sink that keeps what it was handed instead of writing it: the tests want
+/// WHICH path was spilled to and WHAT bytes went there.
 const RecordingSink = struct {
     alloc: std.mem.Allocator,
     path: ?[]u8 = null,
@@ -443,14 +422,10 @@ test "emit clips an over-long line with a self-describing marker and footer" {
     const long = "x" ** 40;
     const out = try emit(alloc, rec.sink(), long, "shell", 2, 0, ".", .{ .max_line_bytes = 10 });
     defer out.deinit(alloc);
-    // The path the model reads is spelled with `/` on every OS (`joinRel`): a
-    // relative scratch dir yields no native separator anywhere in it.
     try std.testing.expectEqualStrings("./tool-output/shell-2-0.txt", out.spill_path.?);
     try std.testing.expect(std.mem.startsWith(u8, out.text, "xxxxxxxxxx\u{2026}[+30 bytes]"));
     try std.testing.expect(std.mem.indexOf(u8, out.text, "[full output: ") != null);
-    // The footer's path and the sink's destination are ONE string: that is the
-    // whole promise of guarantee 3, and what makes it survive a workspace that
-    // lives on another machine.
+    // The footer's path and the sink's destination are ONE string.
     try std.testing.expectEqualStrings(out.spill_path.?, rec.path.?);
 }
 
@@ -480,17 +455,14 @@ test "utf8Lossy leaves valid input alone and repairs the rest byte for byte" {
     const alloc = std.testing.allocator;
     try std.testing.expect(try utf8Lossy(alloc, "plain ascii and 你好") == null);
 
-    // The shape that motivated this: a CP936 console banner.
     const gbk = "Microsoft Windows [\xb0\xe6\xb1\xbe 10.0.26200]\n";
     const fixed = (try utf8Lossy(alloc, gbk)).?;
     defer alloc.free(fixed.text);
     try std.testing.expect(std.unicode.utf8ValidateSlice(fixed.text));
-    // GBK and UTF-8 overlap by accident, so the count is not the byte count.
     try std.testing.expect(fixed.replaced > 0);
     try std.testing.expect(std.mem.startsWith(u8, fixed.text, "Microsoft Windows ["));
     try std.testing.expect(std.mem.endsWith(u8, fixed.text, " 10.0.26200]\n"));
 
-    // A character cut in half: the valid prefix survives, the orphans count.
     const torn = (try utf8Lossy(alloc, "ok \xe4\xbd")).?;
     defer alloc.free(torn.text);
     try std.testing.expect(std.unicode.utf8ValidateSlice(torn.text));
@@ -509,8 +481,6 @@ test "emit repairs invalid utf-8, says so, and hands the RAW bytes to the sink" 
     try std.testing.expect(std.mem.indexOf(u8, out.text, "not valid UTF-8") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.text, "[exit 0]\n[full output: ") != null);
 
-    // What the model reads was repaired; what was kept is the original, down to
-    // the bytes that could not be shown.
     try std.testing.expectEqualStrings(raw, rec.data.?);
     try std.testing.expectEqualStrings(out.spill_path.?, rec.path.?);
 }
@@ -530,15 +500,12 @@ test "step output limiter clips an oversized aggregate result and spills it" {
     var limiter = StepOutputLimiter.init(rec.sink(), ".", 7, .{ .max_bytes = 160 });
     try limiter.apply(alloc, "shell", 2, &output, &spill_path);
 
-    // The body is clipped to the budget; the pointer footer rides on top of it
-    // (the floor is not charged), always complete, never truncated.
     try std.testing.expect(std.mem.startsWith(u8, output, "x" ** 160));
     try std.testing.expect(!std.mem.startsWith(u8, output, "x" ** 161));
     try std.testing.expect(std.mem.indexOf(u8, output, "clipped by step output budget; full output: ") != null);
     try std.testing.expect(std.mem.endsWith(u8, output, "]"));
     try std.testing.expectEqual(@as(usize, 160), limiter.used);
     try std.testing.expectEqualStrings(spill_path.?, rec.path.?);
-    // The whole result is kept, not the prefix the model was shown.
     try std.testing.expectEqualStrings(long, rec.data.?);
 }
 
@@ -556,8 +523,7 @@ test "step budget exhaustion never blanks a later result: the pointer floor surv
     try std.testing.expectEqualStrings("aaaaaaaa", first);
     try std.testing.expect(first_spill == null);
 
-    // The second result finds the budget spent. Before the floor existed it
-    // became the empty string — order decided what the model got to see.
+    // The second result finds the budget spent; the floor keeps it visible.
     var second: []const u8 = try alloc.dupe(u8, "e" ** 600);
     var second_spill: ?[]const u8 = null;
     defer {
@@ -584,8 +550,6 @@ test "a short result over the spent budget stays verbatim instead of becoming a 
     var first_spill: ?[]const u8 = null;
     try limiter.apply(alloc, "shell", 0, &first, &first_spill);
 
-    // Shorter than the footer that would replace it: keeping the real status
-    // line beats pointing at a file holding the same eleven bytes.
     var second: []const u8 = try alloc.dupe(u8, "ok [exit 0]");
     defer alloc.free(second);
     var second_spill: ?[]const u8 = null;
@@ -593,6 +557,5 @@ test "a short result over the spent budget stays verbatim instead of becoming a 
 
     try std.testing.expectEqualStrings("ok [exit 0]", second);
     try std.testing.expect(second_spill == null);
-    // Nothing was written for it, either.
     try std.testing.expect(rec.path == null);
 }

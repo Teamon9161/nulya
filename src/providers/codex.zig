@@ -1,18 +1,18 @@
 //! Codex backend: the Responses endpoint the Codex CLI uses
 //! (`chatgpt.com/backend-api/codex/responses`), authenticated with the OAuth
-//! tokens `codex login` leaves in `~/.codex/auth.json` — no API key, usage bills
-//! against the ChatGPT subscription. Plain Chat Completions is
-//! `providers/openai.zig`. Three wire constraints:
+//! tokens `codex login` leaves in `~/.codex/auth.json` — no API key; usage bills
+//! against the ChatGPT subscription. Chat Completions is `providers/openai.zig`.
+//!
+//! Wire differences from Chat Completions:
 //!  - History is a flat list of typed *items* (message / function_call /
 //!    function_call_output), not role messages.
 //!  - The prompt cache is keyed by the `session_id` header (the backend writes
 //!    it over the body's `prompt_cache_key`), derived here from the durable
-//!    session id, so the cache survives across separate `session step` processes.
+//!    session id so the cache survives across `session step` processes.
 //!  - The endpoint 400s on `max_output_tokens` at any value.
-//! Reasoning IS replayed: with `store: false` each `reasoning` item's
-//! `encrypted_content` (requested via `include`) is emitted whole as a
-//! `reasoning_item`, kept on the ledger's `assistant` event, and sent back
-//! verbatim ahead of the function_call it preceded.
+//!  - Reasoning IS replayed: with `store: false` it returns as a `reasoning`
+//!    item whose `encrypted_content` (requested via `include`) is kept on the
+//!    ledger and sent back verbatim ahead of the function_call it preceded.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -23,19 +23,18 @@ const wire = @import("wire.zig");
 
 const backend_url = "https://chatgpt.com/backend-api/codex/responses";
 const token_url = "https://auth.openai.com/oauth/token";
-/// The subscription's model catalogue — the same endpoint the Codex CLI polls to
-/// fill `models_cache.json`, authenticated exactly like `/responses`.
+/// The subscription's model catalogue, authenticated exactly like `/responses`.
 const models_url = "https://chatgpt.com/backend-api/codex/models";
-/// The Codex CLI's public OAuth client id. Reusing it means the tokens refreshed
-/// here are the same ones a `codex login` produces, so both tools share the file.
+/// The Codex CLI's public OAuth client id: reusing it lets both tools share the
+/// same `auth.json`.
 const client_id = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 pub const default_model = "gpt-5.5";
 
 pub const Config = struct {
     model: []const u8 = default_model,
-    /// The durable session id. Hashed into the stable per-conversation cache
-    /// scope; empty means "one scope per process".
+    /// The durable session id, hashed into the per-conversation cache scope;
+    /// empty means "one scope per process".
     cache_key: []const u8 = "",
     /// The host environment, consulted only for `CODEX_HOME` / the home dir.
     env: *const std.process.Environ.Map,
@@ -50,9 +49,9 @@ pub const CodexProvider = struct {
     client: std.http.Client,
     model: []const u8,
     auth: Auth,
-    /// `session_id` header / `prompt_cache_key`, in UUID shape because that is
-    /// what the backend expects. Derived from the session id, so it is the same
-    /// value every time this session is stepped, from any process.
+    /// `session_id` header / `prompt_cache_key`, in the UUID shape the backend
+    /// expects. Derived from the session id, so every process stepping this
+    /// session sends the same value.
     session_uuid: [36]u8,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, cfg: Config) InitError!CodexProvider {
@@ -104,9 +103,8 @@ pub const CodexProvider = struct {
         defer alloc.free(body);
 
         var state: StreamState = .{ .alloc = alloc, .sink = sink };
-        // One retry, and only for 401: the access token is short-lived, so an
-        // expired one is routine rather than a fault. A 401 arrives before any
-        // SSE data, so the retry cannot duplicate emitted events.
+        // One retry, and only for 401 (short-lived access token). A 401 arrives
+        // before any SSE data, so the retry cannot duplicate emitted events.
         self.send(alloc, body, &state, request.stall_ms) catch |err| switch (err) {
             error.Unauthorized => {
                 try self.auth.refresh(alloc, self.io, self.env, &self.client, request.stall_ms);
@@ -147,8 +145,7 @@ pub const CodexProvider = struct {
 // --------------------------------------------------------------------- auth --
 
 /// The subscription credential, read from (and written back to) the Codex CLI's
-/// `auth.json`. A nulya session never stores it: `Auth.load` reads the file at
-/// build time and the session header only records that the provider is `codex`.
+/// `auth.json`. Never stored by nulya: the header records only `codex`.
 pub const Auth = struct {
     access_token: []const u8,
     refresh_token: []const u8,
@@ -183,8 +180,7 @@ pub const Auth = struct {
         return out;
     }
 
-    /// Whether a subscription credential exists right now — the codex answer to
-    /// "is this profile usable", checked where other providers check an env var.
+    /// Whether a subscription credential exists right now.
     pub fn available(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) bool {
         var a = (load(alloc, io, env) catch return false) orelse return false;
         a.deinit(alloc);
@@ -192,9 +188,7 @@ pub const Auth = struct {
     }
 
     /// Exchange the refresh token for fresh credentials and write them back to
-    /// auth.json, exactly as the Codex CLI does, so the two stay interchangeable.
-    /// Used to repair a 401 both on the model stream and on the catalogue fetch
-    /// (`refreshCatalog`).
+    /// auth.json exactly as the Codex CLI does, so the two stay interchangeable.
     pub fn refresh(
         self: *Auth,
         alloc: std.mem.Allocator,
@@ -243,9 +237,8 @@ pub const Auth = struct {
         var parsed = try std.json.parseFromSlice(std.json.Value, alloc, text, .{});
         defer parsed.deinit();
         if (parsed.value != .object) return;
-        // Mutate only the token fields, in place: every other key in the file
-        // (`OPENAI_API_KEY`, `auth_mode`, …) belongs to the Codex CLI and is
-        // written back untouched.
+        // Mutate only the token fields: every other key in the file belongs to
+        // the Codex CLI and is written back untouched.
         const tokens = parsed.value.object.getPtr("tokens") orelse return;
         if (tokens.* != .object) return;
         const arena = parsed.arena.allocator();
@@ -271,18 +264,11 @@ fn homePath(alloc: std.mem.Allocator, env: *const std.process.Environ.Map, sub: 
 
 // ----------------------------------------------------------------- models --
 
-/// The subscription's own model line-up, read from the file the Codex CLI keeps
-/// it in (`$CODEX_HOME/models_cache.json`, else `~/.codex/models_cache.json`).
-///
-/// Read only, never configured in `config.toml`: `nulya config show`
-/// projects it for a picker and `nulya config refresh` refills the file.
-///
-/// The numbers are the subscription's, not the public API's: the same id is
-/// served here with a smaller window (`effective_context_window_percent` of the
-/// raw one — the budget Codex advertises to its own clients), an extra effort
-/// level, and its own default. That is precisely why this cannot be folded into
-/// the id-keyed `[[models]]` catalog, which describes an id once for every
-/// endpoint that serves it.
+/// The subscription's own model line-up, read from `$CODEX_HOME/models_cache.json`
+/// (else `~/.codex/`). Read only, never configured in `config.toml`. The numbers
+/// are the subscription's, not the public API's — a smaller window, an extra
+/// effort level, its own default — so it cannot fold into the id-keyed
+/// `[[models]]` catalog, where an id is described once for every endpoint.
 pub const Catalog = struct {
     arena: std.heap.ArenaAllocator,
     /// In the order the file lists them; never empty (no listable model is null).
@@ -294,8 +280,7 @@ pub const Catalog = struct {
     }
 
     /// Null when there is nothing usable: no home, no file, unreadable JSON, or
-    /// not one listable model. Null is "this machine cannot say", never an
-    /// assertion that the subscription serves nothing.
+    /// not one listable model — "cannot say", never "there are none".
     pub fn load(
         alloc: std.mem.Allocator,
         io: std.Io,
@@ -316,14 +301,10 @@ pub const Catalog = struct {
     }
 };
 
-/// One cache document → the model parameters it states. Everything the file
-/// carries beyond these (base instructions, tool policies, service tiers) is the
-/// Codex CLI's business, not a description of the id.
-///
-/// Both shapes are accepted — the file is always `{"models":[…]}`, but the
-/// endpoint may answer with a bare array — so one function validates what is
-/// fetched and reads what is on disk. Everything is allocated in `arena`, which
-/// must also outlive `text` (JSON strings without escapes alias it).
+/// One cache document → the model parameters it states; everything else the file
+/// carries is the Codex CLI's business. Both shapes are accepted: the file is
+/// always `{"models":[…]}`, the endpoint may answer with a bare array. Allocated
+/// in `arena`, which must outlive `text` (unescaped JSON strings alias it).
 fn parse(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}!?[]const config.ModelParams {
     const doc = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch return null;
     const listed = switch (wire.field(doc, "models") orelse doc) {
@@ -333,9 +314,8 @@ fn parse(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}!?[]const
 
     var out: std.ArrayList(config.ModelParams) = .empty;
     for (listed) |m| {
-        // `hide` is how the catalogue carries models that exist but are not
-        // offered (an internal review model, say): listing them would put a
-        // choice in a picker that is not the user's to make.
+        // `hide` marks models that exist but are not offered; listing them
+        // would put a choice in a picker that is not the user's to make.
         if (!eqlString(wire.string(m, "visibility"), "list")) continue;
         const slug = wire.string(m, "slug") orelse continue;
         if (slug.len == 0) continue;
@@ -354,10 +334,8 @@ fn parse(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}!?[]const
             .efforts = try efforts.toOwnedSlice(arena),
             .default_effort = nonEmptyString(wire.string(m, "default_reasoning_level")),
             .context_window = effectiveWindow(m),
-            // Deliberately not claimed here even though the entry says whether
-            // it takes images: the `session append --image` gate reads the
-            // id-keyed `[[models]]` catalog, so a claim in this projection is
-            // one nothing honours.
+            // Not claimed here: the `--image` gate reads the id-keyed
+            // `[[models]]` catalog, so a claim here is one nothing honours.
             .vision = false,
         });
     }
@@ -365,10 +343,8 @@ fn parse(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}!?[]const
     return try out.toOwnedSlice(arena);
 }
 
-/// The window the subscription actually gives you: the raw one, times the
-/// percentage it reserves for its own clients. A model that states no window is
-/// kept without one (`?u64` already means "not stated") rather than dropped —
-/// a listed model is selectable whether or not it says how big it is.
+/// The window the subscription actually gives: the raw one, times the percentage
+/// it reserves. A model that states no window is kept without one.
 fn effectiveWindow(m: std.json.Value) ?u64 {
     const raw = wire.field(m, "context_window") orelse return null;
     if (raw != .integer and raw != .float) return null;
@@ -385,15 +361,9 @@ fn nonEmptyString(value: ?[]const u8) ?[]const u8 {
     return if (v.len == 0) null else v;
 }
 
-/// Fetch the live catalogue and write it into the Codex CLI's own cache file, so
-/// every later read — this binary's and the CLI's — sees today's line-up. There
-/// is no `codex login` in nulya, so nothing refreshes this on its own: the only
-/// trigger is `nulya config refresh`.
-///
-/// `client_version` is this binary's version string (the endpoint takes it as a
-/// query parameter, as the CLI does). A 401 means the short-lived access token
-/// expired, which is routine: refresh once and retry, exactly as the model
-/// stream does.
+/// Fetch the live catalogue into the Codex CLI's own cache file. Nothing
+/// refreshes it on its own; the only trigger is `nulya config refresh`.
+/// `client_version` is this binary's version string, a query parameter here.
 pub fn refreshCatalog(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -421,16 +391,14 @@ pub fn refreshCatalog(
     defer arena.deinit();
     const a = arena.allocator();
     const response = std.json.parseFromSliceLeaky(std.json.Value, a, body, .{}) catch return error.CodexCatalogUnreadable;
-    // Refuse to overwrite a good cache with an answer that describes no model:
-    // the same predicate the reader applies, so what is written is what will be
-    // read back.
+    // Never overwrite a good cache with an answer describing no model — the
+    // same predicate the reader applies.
     if ((try parse(a, body)) == null) return error.CodexCatalogEmpty;
     try saveCatalog(alloc, io, env, a, response);
 }
 
-/// A projection is not a step: a catalogue that goes quiet should fail in
-/// seconds and leave the file alone, not hold `config show` for two minutes the
-/// way a reasoning model legitimately may (`provider.RetryPolicy.stall_timeout_ms`).
+/// A projection is not a step: a catalogue that goes quiet fails in seconds and
+/// leaves the file alone rather than holding `config show` for minutes.
 const catalog_stall_ms = 15_000;
 
 fn fetchCatalog(alloc: std.mem.Allocator, client: *std.http.Client, auth: *const Auth, url: []const u8) ![]u8 {
@@ -450,11 +418,8 @@ fn fetchCatalog(alloc: std.mem.Allocator, client: *std.http.Client, auth: *const
 }
 
 /// Write the fetched models into `models_cache.json`. The file belongs to the
-/// Codex CLI, so only `models` is replaced and every other key it keeps there
-/// (`fetched_at`, `etag`, `client_version`) is written back untouched — the same
-/// discipline as `Auth.save`, and the reason nothing here invents that
-/// metadata: a stale etag costs the CLI one conditional request, a fabricated
-/// one could cost it the truth.
+/// Codex CLI, so only `models` is replaced; `fetched_at`, `etag` and the rest are
+/// written back untouched and never invented.
 fn saveCatalog(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -466,7 +431,7 @@ fn saveCatalog(
     defer alloc.free(path);
 
     // The endpoint may answer with a bare array; the cache is always the object
-    // form, because that is the shape the CLI reads.
+    // form, the shape the CLI reads.
     const models = wire.field(response, "models") orelse response;
     var doc: std.json.Value = .{ .object = .empty };
     if (std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(16 << 20))) |existing| {
@@ -481,9 +446,8 @@ fn saveCatalog(
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = encoded });
 }
 
-/// A UUID-shaped, deterministic name hash. The backend wants UUID syntax; what
-/// matters to us is that the same session id always maps to the same value, so
-/// its prompt cache is one scope across processes.
+/// A UUID-shaped, deterministic name hash: the backend wants UUID syntax, and the
+/// same session id must map to the same value so its cache is one scope.
 fn stableUuid(name: []const u8) [36]u8 {
     var digest: [16]u8 = undefined;
     std.crypto.hash.Blake3.hash(name, &digest, .{});
@@ -533,25 +497,24 @@ pub fn buildRequestJson(
     try jw.write(true);
     try jw.objectField("store");
     try jw.write(false);
-    // Nothing is stored server-side, so the reasoning that must survive to the
-    // next step has to travel with the response: this asks for it encrypted.
+    // Nothing is stored server-side, so reasoning that must survive to the
+    // next step travels with the response, encrypted.
     try jw.objectField("include");
     try jw.beginArray();
     try jw.write("reasoning.encrypted_content");
     try jw.endArray();
     try jw.objectField("stream");
     try jw.write(true);
-    // The backend overwrites this with the `session_id` header, but sending it
-    // keeps the body self-describing for anyone reading a captured request.
+    // The backend overwrites this with the `session_id` header; sending it
+    // keeps a captured request self-describing.
     try jw.objectField("prompt_cache_key");
     try jw.write(cache_key);
     try jw.objectField("reasoning");
     try jw.beginObject();
     if (request.options.effort) |effort| {
         try jw.objectField("effort");
-        // `off` is our name for "do not reason"; the Responses API spells it
-        // `none`, and sending `off` verbatim is a 400. An absent effort stays
-        // absent, which means the server default — not the same thing.
+        // The Responses API spells "do not reason" as `none`; `off` verbatim is
+        // a 400. An absent effort stays absent, meaning the server default.
         try jw.write(if (std.mem.eql(u8, effort, "off")) "none" else effort);
     }
     try jw.objectField("summary");
@@ -561,9 +524,8 @@ pub fn buildRequestJson(
     return out.toOwnedSlice();
 }
 
-/// This API takes one instructions string, not a block list; the frozen system
-/// blocks are joined in order, which keeps the cached prefix byte-identical
-/// between turns.
+/// This API takes one instructions string, not a block list; joining the frozen
+/// blocks in order keeps the cached prefix byte-identical between turns.
 fn writeInstructions(jw: *std.json.Stringify, alloc: std.mem.Allocator, blocks: []const prompt.SystemBlock) !void {
     var joined: std.Io.Writer.Allocating = .init(alloc);
     defer joined.deinit();
@@ -581,9 +543,8 @@ fn writeInput(jw: *std.json.Stringify, alloc: std.mem.Allocator, turns: []const 
         .user_text => |u| try writeUserItem(jw, alloc, u),
         .note => |text| try writeMessageItem(jw, "user", "input_text", text),
         .assistant => |as| {
-            // The turn's `reasoning` items exactly as they came back — id,
-            // summary and `encrypted_content` — placed before the output they
-            // preceded, which is the position the model produced them in.
+            // `reasoning` items exactly as they came back, in the position the
+            // model produced them: before the output they preceded.
             if (as.reasoning.len != 0) try wire.writeReasoningItems(jw, alloc, as.reasoning);
             if (as.text.len != 0) try writeMessageItem(jw, "assistant", "output_text", as.text);
             for (as.calls) |call| {
@@ -614,10 +575,8 @@ fn writeInput(jw: *std.json.Stringify, alloc: std.mem.Allocator, turns: []const 
     try jw.endArray();
 }
 
-/// A user turn: its text and the images inlined with it, as parts of ONE
-/// message item. This wire is already a parts array, so an image is one more
-/// part — an `input_image` carrying the data URI. An image-only turn writes no
-/// text part rather than an empty one.
+/// A user turn: text and inlined images as parts of ONE message item; an image is
+/// an `input_image` part, and an image-only turn writes no text part.
 fn writeUserItem(jw: *std.json.Stringify, alloc: std.mem.Allocator, u: prompt.Turn.UserText) !void {
     if (u.images.len == 0) return writeMessageItem(jw, "user", "input_text", u.text);
     try jw.beginObject();
@@ -688,9 +647,8 @@ fn writeTools(jw: *std.json.Stringify, tools: []const tool.ToolDefinition) !void
 
 // ------------------------------------------------------------------ stream --
 
-/// Match tcode's Responses-stream classification: only an explicit rate-limit,
-/// overload, or "you can retry" failure is safe to resend. Other stream errors
-/// may describe a permanent model/request problem and must keep failing once.
+/// Only an explicit rate-limit, overload, or "you can retry" failure is safe to
+/// resend; anything else may be a permanent model/request problem and fails.
 fn streamError(root: std.json.Value) error{ RateLimited, ServerError, CodexStreamError } {
     const response = wire.field(root, "response") orelse root;
     const response_error = wire.field(response, "error") orelse response;
@@ -725,7 +683,6 @@ pub const StreamState = struct {
     done: bool = false,
 
     pub fn onData(self: *StreamState, data: []const u8) anyerror!bool {
-        // The stream ends with a `[DONE]` sentinel that is not JSON.
         const parsed = std.json.parseFromSlice(std.json.Value, self.alloc, data, .{}) catch return false;
         defer parsed.deinit();
         const root = parsed.value;
@@ -757,10 +714,9 @@ pub const StreamState = struct {
                 } });
             }
         } else if (std.mem.eql(u8, kind, "response.output_item.done")) {
-            // A finished reasoning item carries its `encrypted_content` only here
-            // (and only when `include` asked for it). Without that field the item
-            // could not be replayed under `store: false` — an id the backend no
-            // longer knows — so such an item is not worth keeping.
+            // A finished reasoning item carries `encrypted_content` only here,
+            // and only when `include` asked for it. Without that field it
+            // cannot be replayed under `store: false`, so it is not kept.
             const item = wire.field(root, "item") orelse return false;
             if (!eqlString(wire.string(item, "type"), "reasoning")) return false;
             const encrypted = wire.string(item, "encrypted_content") orelse return false;
@@ -808,7 +764,6 @@ test "the prompt cache key is derived from the session id, so it is stable acros
     const other = stableUuid("s-1700000000001-abc123");
     try std.testing.expectEqualStrings(&a, &b);
     try std.testing.expect(!std.mem.eql(u8, &a, &other));
-    // UUID shape: 8-4-4-4-12 hex.
     try std.testing.expectEqual(@as(usize, 36), a.len);
     for ([_]usize{ 8, 13, 18, 23 }) |i| try std.testing.expectEqual(@as(u8, '-'), a[i]);
     for (a, 0..) |c, i| {
@@ -834,33 +789,26 @@ test "the subscription's catalogue is read, not configured: listable models only
         \\]}
     )).?;
 
-    // The hidden model is not a choice anyone is offered.
     try std.testing.expectEqual(@as(usize, 2), models.len);
     try std.testing.expectEqualStrings("gpt-5.6-sol", models[0].id);
     try std.testing.expectEqualStrings("GPT-5.6-Sol", models[0].label);
-    // The window the subscription gives, not the raw one the public API states.
     try std.testing.expectEqual(@as(u64, 258_400), models[0].context_window.?);
     try std.testing.expectEqual(@as(usize, 3), models[0].efforts.len);
     try std.testing.expectEqualStrings("low", models[0].efforts[0]);
     try std.testing.expectEqualStrings("xhigh", models[0].efforts[2]);
     try std.testing.expectEqualStrings("low", models[0].default_effort.?);
-    // An id with nothing stated is still selectable; it just claims nothing.
     try std.testing.expectEqualStrings("bare", models[1].id);
     try std.testing.expectEqualStrings("", models[1].label);
     try std.testing.expectEqual(@as(usize, 0), models[1].efforts.len);
     try std.testing.expect(models[1].default_effort == null);
     try std.testing.expect(models[1].context_window == null);
-    // Vision is claimed by the id-keyed catalog the `--image` gate reads, never here.
     try std.testing.expect(!models[0].vision);
 
-    // A missing percentage is 100 %, and the endpoint's bare-array answer reads
-    // through the same function that reads the file.
     const bare = (try parse(a,
         \\[{"slug":"gpt-5.5","visibility":"list","context_window":272000}]
     )).?;
     try std.testing.expectEqual(@as(u64, 272_000), bare[0].context_window.?);
 
-    // Nothing usable is null — "this machine cannot say", not "there are none".
     try std.testing.expect((try parse(a, "not json")) == null);
     try std.testing.expect((try parse(a, "{\"models\":[]}")) == null);
     try std.testing.expect((try parse(a, "{\"models\":[{\"slug\":\"x\",\"visibility\":\"hide\"}]}")) == null);
@@ -900,12 +848,10 @@ test "history serializes to flat Responses items and effort off becomes none" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"instructions\":\"base\\n\\nextra\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"function_call\",\"call_id\":\"c1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"function_call_output\",\"call_id\":\"c1\"") != null);
-    // Arguments ride as a JSON string on this wire, so the braces are escaped.
     try std.testing.expect(std.mem.indexOf(u8, body, "\"arguments\":\"{\\\"command\\\":\\\"echo hi\\\"}\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"prompt_cache_key\":\"cache-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"reasoning\":{\"effort\":\"none\",\"summary\":\"auto\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"include\":[\"reasoning.encrypted_content\"]") != null);
-    // The endpoint 400s on this field at any value.
     try std.testing.expect(std.mem.indexOf(u8, body, "max_output_tokens") == null);
 }
 
@@ -945,15 +891,12 @@ test "an encrypted reasoning item is kept whole and replayed ahead of its functi
     try std.testing.expect(!try state.onData(
         \\{"type":"response.created"}
     ));
-    // Summary text streams for display; the item itself is only complete at
-    // `output_item.done`, and only useful when the encrypted payload is there.
     try std.testing.expect(!try state.onData(
         \\{"type":"response.reasoning_summary_text.delta","delta":"planning"}
     ));
     try std.testing.expect(!try state.onData(
         \\{"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"planning"}],"encrypted_content":"gAAAAA"}}
     ));
-    // A reasoning item without encrypted content cannot be replayed: dropped.
     try std.testing.expect(!try state.onData(
         \\{"type":"response.output_item.done","output_index":1,"item":{"id":"rs_2","type":"reasoning","summary":[]}}
     ));
@@ -1077,7 +1020,6 @@ test "an image rides as an input_image part; a turn without one keeps its pre-im
     defer shot_ir.deinit(alloc);
     const shot_body = try buildRequestJson(alloc, "gpt-5.5", "cache-1", .{ .prompt_ir = &shot_ir, .tools = &.{} });
     defer alloc.free(shot_body);
-    // One message item, two parts, in the order the turn holds them.
     try std.testing.expect(std.mem.indexOf(u8, shot_body, "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"what is this\"}," ++
         "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0=\"}]}") != null);
 }

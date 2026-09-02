@@ -1,11 +1,7 @@
-//! The tool registry.
-//!
-//! In the immutable kernel there is exactly ONE builtin tool: shell.
-//! Everything else the AI grows as an extension: a session member puts its
-//! selected tools on the model face, and every other extension capability is
-//! invoked through `nulya ext run`.
-//! A session receives a frozen `ToolSetSnapshot` through `SessionComposition`;
-//! execution never queries a live registry mid-step.
+//! The tool registry. Exactly ONE builtin tool: shell. Everything else the AI
+//! grows as an extension, reaching the model face through the session's
+//! composition or, otherwise, `nulya ext run`. A session receives a frozen
+//! `ToolSetSnapshot`; execution never queries a live registry mid-step.
 
 const std = @import("std");
 const tool = @import("tool.zig");
@@ -15,23 +11,19 @@ const builtins = [_]tool.Tool{
     shell.def,
 };
 
-/// Permanent model-facing tool slots (shell). The tool budget always reserves
-/// these before any extension tool is promoted.
+/// Permanent model-facing tool slots, reserved before any extension tool.
 pub const builtin_count: usize = builtins.len;
 
-/// A snapshot rejects two ways of colliding. Both are logical-identity clashes,
-/// not resource faults, so they stay their own error set.
+/// A snapshot rejects two ways of colliding: logical-identity clashes, not
+/// resource faults, so they stay their own error set.
 pub const SnapshotError = error{
-    /// Two tools share a stable `ToolDefinition.id`.
     DuplicateToolId,
-    /// Two tools share a model-facing `ToolDefinition.name`.
     DuplicateToolName,
 };
 
 pub const ToolSetSnapshot = struct {
     /// Frozen model-facing tool set for the session composition. Names must be
-    /// unique inside the snapshot; the builtin name `shell` is permanently
-    /// reserved.
+    /// unique inside the snapshot; `shell` is permanently reserved.
     tools: []const tool.Tool,
 
     pub fn deinit(self: ToolSetSnapshot, alloc: std.mem.Allocator) void {
@@ -45,9 +37,8 @@ pub const ToolSetSnapshot = struct {
         return null;
     }
 
-    /// Borrow-free model-facing definitions for provider serialization. The
-    /// returned slice owns only the array; each definition points at the frozen
-    /// snapshot's static/manifest-backed strings.
+    /// Model-facing definitions for provider serialization. The returned slice
+    /// owns only the array; the definitions point into the frozen snapshot.
     pub fn definitions(self: ToolSetSnapshot, alloc: std.mem.Allocator) ![]tool.ToolDefinition {
         const defs = try alloc.alloc(tool.ToolDefinition, self.tools.len);
         for (self.tools, 0..) |t, i| defs[i] = t.definition;
@@ -59,20 +50,17 @@ pub fn snapshot(alloc: std.mem.Allocator) !ToolSetSnapshot {
     return snapshotWith(alloc, &.{});
 }
 
-/// Freeze the builtin table plus `extras` into one model-facing tool set.
-///
-/// The registry stays ignorant of what `extras` are — extension tools, MCP
-/// tools, anything adapted to `tool.Tool` — and only enforces the two identity
-/// invariants every snapshot must hold: unique stable id and unique model-facing
-/// name. The builtin keeps its leading slot; extras follow, sorted by stable id
-/// so the frozen set is deterministic regardless of caller order.
+/// Freeze the builtin table plus `extras` into one model-facing tool set. The
+/// registry stays ignorant of what `extras` are and only enforces two identity
+/// invariants: unique stable id, unique model-facing name. The builtin keeps its
+/// leading slot; extras follow sorted by stable id, so the frozen set is
+/// deterministic regardless of caller order.
 pub fn snapshotWith(alloc: std.mem.Allocator, extras: []const tool.Tool) !ToolSetSnapshot {
     const tools = try alloc.alloc(tool.Tool, builtins.len + extras.len);
     errdefer alloc.free(tools);
 
     @memcpy(tools[0..builtins.len], &builtins);
     @memcpy(tools[builtins.len..], extras);
-    // Only the extras are sorted; builtins keep their reserved leading order.
     std.mem.sort(tool.Tool, tools[builtins.len..], {}, lessThanById);
 
     for (tools, 0..) |a, i| {
@@ -94,8 +82,7 @@ test "snapshot freezes builtin table for lookup" {
     defer snap.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), snap.tools.len);
     try std.testing.expect(snap.lookup("shell") != null);
-    // `edit` is not a builtin: it is a tool of the bundled `std` extension and
-    // arrives, if at all, through a session's member list.
+    // `edit` is not a builtin: it is a tool of the bundled `std` extension.
     try std.testing.expect(snap.lookup("edit") == null);
     try std.testing.expect(snap.lookup("nope") == null);
 }
@@ -139,9 +126,8 @@ test "snapshotWith keeps builtins first and sorts extras by stable id" {
     defer snap.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 3), snap.tools.len);
-    // The builtin keeps its reserved leading slot regardless of extras.
     try std.testing.expectEqualStrings("shell", snap.tools[0].definition.name);
-    // Extras follow, ordered by stable id (a before z), not by caller order.
+    // Extras follow, ordered by stable id, not by caller order.
     try std.testing.expectEqualStrings("ext:a.pkg/alpha", snap.tools[1].definition.id);
     try std.testing.expectEqualStrings("ext:z.pkg/zeta", snap.tools[2].definition.id);
 }
