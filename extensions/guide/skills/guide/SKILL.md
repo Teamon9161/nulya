@@ -234,9 +234,12 @@ Store and scope:
 ## Sessions and drivers
 
 - `nulya session new` freezes composition and prints an id. `append` queues a
-  user turn. `step` runs to the end of a turn or its budget. `events` tails the
-  log. `cancel` asks it to stop at the next step boundary. `outcome` records a
-  verdict. `list` projects them all.
+  user turn and prints the delivery name it deposited under — the name that
+  later shows up as `origin` (or one entry of `origins`) on the drained
+  `user_text` event, so a caller can match its own turn against the log rather
+  than guessing from text. `step` runs to the end of a turn or its budget.
+  `events` tails the log. `cancel` asks it to stop at the next step boundary.
+  `outcome` records a verdict. `list` projects them all.
 - Only `step` writes the session file. `append`, `note` and `cancel` deposit
   into sibling files that the next step boundary drains, so all three work on a
   session another process is currently running.

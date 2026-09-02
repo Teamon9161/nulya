@@ -1417,7 +1417,7 @@ nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--carry] [--
                                                     解析不出或本 host 够不着 · `remote:` 且有 compiled 成员时那台机器没答 /
                                                     本 store 没有它那个 target 的 build（指路 `ext build --target` + `ext push`）
           | append <id> [<text>|--file f] [--image <path>]…
-                                                ← 把一条 user turn 投进 inbox（下一 step 边界进 ledger）；`--image` 可重复，与文本合成**同一条**事件
+                                                ← 把一条 user turn 投进 inbox（下一 step 边界进 ledger），成功时印投递名一行回执；`--image` 可重复，与文本合成**同一条**事件
           | note <id> --source <label> [--meta <json>] (<text>|--file f)
                                                 ← 把一条**机器事实**投进 inbox（§3.1 的 `note`）：driver / 插件 / watcher 看见的东西，不是人说的话
                                                   `--source` 必给且非空（内核不解释）；`--meta` 给了就必须是**一个合法 JSON 值**，否则 exit 1、什么都不投
@@ -1472,7 +1472,7 @@ nulya                                            ← 无参数：同 `nulya help
 
 `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`（带着历史换就是 `session new --parent … --carry`，§11）。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `note` 投递到 `<id>.inbox/`、`cancel` 写 `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append / note / cancel），`events` 是只读 tail。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。
 
-**stdout 只放数据与成功输出**（新 session 的 id、事件 JSONL、`list` 的两种形态、`<id>: <verdict>`、`cancel requested for <id>`）：所有拒绝与警告一律走 stderr，所以一个 driver 拿到的 stdout 要么是它要的东西要么什么都没有。唯一的例外是 `session step`：它的诊断是行协议的一部分，走 stdout 而非 stderr。
+**stdout 只放数据与成功输出**（新 session 的 id、`append` 的投递名、事件 JSONL、`list` 的两种形态、`<id>: <verdict>`、`cancel requested for <id>`）：所有拒绝与警告一律走 stderr，所以一个 driver 拿到的 stdout 要么是它要的东西要么什么都没有。唯一的例外是 `session step`：它的诊断是行协议的一部分，走 stdout 而非 stderr。
 
 `events` 打印时**唯一的例外**是带 `images` 的 `user_text` 行：每张图的 base64 换成 `[image <media_type>, N base64 bytes]` 再重编码，`seq` / `origin` / 其它列一字不动，解析不了的行照旧原样打印（ledger 存事实、投影选择呈现，几百 KB 的截图没有一个转录读者想要它；原始字节仍在文件里）。而 **`session step` 的 ledger 行不省略**——那是 driver 面，要与文件同形，前端自己折叠。
 
@@ -1525,6 +1525,8 @@ nulya                                            ← 无参数：同 `nulya help
 纯文本 append 一个字节都没变（三道门只在 `--image` 出现时才跑）；库路径直接 `append` 绕过它们的后果是 provider 的 400 原样浮出——诚实。
 
 `session append` 全程持 `<id>.inbox/.deposit.lock`（§3.4）：投递名是从"inbox 里已经等着什么"铸出来的，两条并发的 append 不串起来会取到同一个队列位置；而 `session prune` 不能在这条命令的检查与投递之间把这一场拿走。
+
+**成功时 stdout 印这个投递名一行，作为回执**（例如 `msg-0003.json`）：这正是排干时落进 `origin`（或合并批次时 `origins` 里的一项）的那个名字，所以一个 driver 能拿它去认下一次 `step` / `events` 里的哪条 `user_text` 是它刚发的那条，不必靠比对文本做乐观回显。`session note` 同一条投递机制，不印回执——它的调用方是 driver / 插件自己，不是"发了话等着认出来"的那一半。
 
 #### `session outcome` 与 `session list`
 

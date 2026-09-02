@@ -251,8 +251,8 @@ pub const session_usage =
     \\                                                    remote:wsl | remote:ssh:<dest> | remote:exec:<argv…>, which moves the whole workspace (--workspace says where),
     \\                                                    --bare reads no standing layer: the config `with` list is left out
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
-    \\                                                    queue a user turn for the next step boundary; --image inlines a
-    \\                                                    png/jpeg ≤5 MB, if the model's catalog entry says vision = true
+    \\                                                    queue a user turn for the next step boundary, print the delivery name;
+    \\                                                    --image inlines a png/jpeg ≤5 MB, if the model's catalog entry says vision = true
     \\  nulya session note <id> --source <label> [--meta <json>] (<text> | --file <p>)
     \\                                                    queue a machine fact instead of a user turn: --source names who saw it
     \\  nulya session step <id> [--max-steps N] [--effort E] [--gate] [--stream] [--ssh-password-stdin]

@@ -809,6 +809,10 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         },
         else => return err,
     };
+    // The receipt: this is the name that lands as `origin` (or one entry of
+    // `origins`) on the drained `user_text` event, so a driver that sent the
+    // turn can match it against the ledger fact rather than echo it back by text.
+    try printOut(alloc, io, "{s}\n", .{name});
     return 0;
 }
 
