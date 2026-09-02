@@ -430,12 +430,12 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 - **recents 在 user 层**：`<NULYA_HOME | ~/.nulya>/tui-recents.json`（§7）。**建场成功时才记**——浏览过不等于在那儿工作过，一个记下光标走过的地方的清单是点击史不是地点表。`no project` 不进 recents（它有恒定的第一行）。
 - **持久与恢复**：`tui-state.json` 的 `tabs`（§7）。恢复**只做第一个之后的那些**：第一个 tab 仍由这一趟启动决定（`--session`，否则 draft，T22），所以单 tab 的屏幕逐帧不变；draft 不记（盘上什么都没有），文件已经不在的 session 跳过。
 
-**`/env`：下一场的 shell 跑在哪**（`local` / `wsl` / `wsl:<distro>` / `remote:wsl:<distro>` / `remote:ssh:<host>`，DESIGN §8.1/§8.2）。这条轴不是权限也不是 backend：`Dialect` 说命令用哪种语言写，`environment.backend` 说它被关得多紧，exec target 说**哪台机器的 shell 读它**。
+**`/env`：下一场的 shell 跑在哪**（`local` / `remote:wsl:<distro>` / `remote:ssh:<host>`，DESIGN §8.1/§8.2）。这条轴不是权限也不是 backend：`Dialect` 说命令用哪种语言写，`environment.backend` 说它被关得多紧，exec target 说**哪台机器的 shell 读它**——今天只有两点：`local`，或 `remote:` 一族（连工作区一起搬）。
 
-- **前端只做三件事**：把选择放进 `session new --env`（落点是 `sessionExtras()`，与 `session_with` / `session_prompts` 同一处同一时刻）· 记住它（`tui-state.json` 的 `exec_env`——**内核没有对应的 config 键、也不该有**：给 `[environment]` 加一个默认值就要回答「`wsl` 比 `local` 更严还是更松」，而 config 链的收窄规则对这个问题没有诚实答案；记住一个选择是前端的事，给目标排序不是）· 用状态行上的 `⇥ <spec>` 说出来（非 local 才占列；已开场的读冻结 header，draft 读待定选择——`/env` 动不了已经开始的那一场）。**不校验拼写**：`session new` 已经会拒绝并带上整套词表，这边再写一个 parser 就是一个问题两个答案。
-- **picker 列的是探测出来的东西**（`state/targets.ts`）：`local` 恒在 · Windows 上 `wsl.exe -l -q` 的每个发行版 · `~/.ssh/config` 里非模式的 `Host`（`Host *` 是一段缺省不是一台机器，`Include` 不跟——那正是最后一行存在的理由）。同一份探测数据产两族（只搬 shell 的 `wsl:` / 连工作区一起搬的 `remote:`），最后一行 `somewhere else…` **不是一个 target**，它把 `/env ` 写进输入框——一个 picker 最不该做的事就是暗示它列出来的就是全部。
+- **前端只做三件事**：把选择放进 `session new --env`（落点是 `sessionExtras()`，与 `session_with` / `session_prompts` 同一处同一时刻）· 记住它（`tui-state.json` 的 `exec_env`——**内核没有对应的 config 键、也不该有**：给 `[environment]` 加一个默认值就要回答「这个目标比 `local` 更严还是更松」，而 config 链的收窄规则对这个问题没有诚实答案；记住一个选择是前端的事，给目标排序不是）· 用状态行上的 `⇥ <spec>` 说出来（非 local 才占列；已开场的读冻结 header，draft 读待定选择——`/env` 动不了已经开始的那一场）。**不校验拼写**：`session new` 已经会拒绝并带上整套词表，这边再写一个 parser 就是一个问题两个答案。
+- **picker 列的是探测出来的东西**（`state/targets.ts`）：`local` 恒在 · Windows 上 `wsl.exe -l -q` 的每个发行版，产 `remote:wsl:<name>` 行 · `~/.ssh/config` 里非模式的 `Host`，产 `remote:ssh:<host>` 行（`Host *` 是一段缺省不是一台机器，`Include` 不跟——那正是最后一行存在的理由）。最后一行 `somewhere else…` **不是一个 target**，它把 `/env ` 写进输入框——一个 picker 最不该做的事就是暗示它列出来的就是全部。
 - **remote 档要两次回答**：选机器只是一半，另一半是**那台机器上的哪个目录**（内核的 `--workspace` 是独立的一个 flag）。选中 `remote:` 行之后 `nulya remote check --env <spec> --json` 开一次真通道取 `home` 当起点，接上**同一个** `DirBrowser`（换的只是一个 `DirSource`：`list` / `exists` / `join` / `dirname` 四件事——远端永远用 posix 拼路径，Windows 宿主上 `node:path.join` 对一条要发给 Linux 的路径是错的字节）。check 失败就原样显示内核的话、**浏览器不开**——对一台连不上的机器展示「选个目录」只是同一个失败的第二次重复。spec 与 workspace **同一次调用成对写入、成对清空**（§7）。
-- **remote 场里的工具面另配一份**（`tui.toml` 的 `[env.<kind>]`，§7）：缺省 `bare = true` + 空的 `with` / `session_prompts`——`std` 的 read/grep/glob 读的是**本地**盘、`ground` 渲染的是**本地**事实，把它们放到一场工作区在别处的 session 上只会制造 not-found 与假话。`wsl`（不带 `remote:`）与 local 相同：经 `/mnt/` 是同一个文件系统换个名字看。
+- **remote 场里的工具面另配一份**（`tui.toml` 的 `[env.<kind>]`，§7）：缺省 `bare = true` + 空的 `with` / `session_prompts`——`std` 的 read/grep/glob 读的是**本地**盘、`ground` 渲染的是**本地**事实，把它们放到一场工作区在别处的 session 上只会制造 not-found 与假话。
 - **包也要过去**：`/ext` 的 `r` = `ext push <id>@<v> --env <spec>`，只在这一场是 remote 时存在（§5.3）。
 
 ## 6. 视觉规范（设计语言）
@@ -546,7 +546,7 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 | `◈` | `#` | **这一场以什么身份/档位在跑**：选它的那些对话框标题（`/model` `/mode` `/agent` `/with`）、状态栏「戴着谁」的 chip、包自己的 panel 标题。列 store 或 journal 的面板是「地方」，标题**不带记号**（T31）；审批对话框也不带——它不是选身份，是**一个 call 被裁决**，颜色（warn）说完了 |
 | `‹ ›` | `<` `>` | `/model` 的 effort 转盘 |
 | `✓` | `*` | **现在生效的那一个**：`/model` 的 current model、`/ext` 版本线的 `✓ current`、`/mode` 当前档（一律 `ok` 色） |
-| `⇥` | `⇥` | **shell 跑在哪**（`⇥ wsl:Ubuntu`，只在状态行、只在非 local 时；warn 色——它是让 `rm -rf build` 变成两件事的那个事实） |
+| `⇥` | `⇥` | **shell 跑在哪**（`⇥ remote:wsl:Ubuntu`，只在状态行、只在非 local 时；warn 色——它是让 `rm -rf build` 变成两件事的那个事实） |
 | `⏸` | `⏸` | **排着队的消息**（`⏸ N queued`，只在输入框上面那条 queue lane，§4.4） |
 | `○◔◑◕●` | `.:oO#` | **一把梯子，不是五个字形**：context 环与面板里那条横条的刻度（`theme.glyphs.ring`）。各自没有意思，只有在同一刻度上的位置；两头永不被取进去（用掉了就不画空环，还有余量就不画满环），精确的百分比写在旁边。面板里的横条用同一条规则、**两个形状**（`theme.glyphs.meter`）而不是两种颜色——`NO_COLOR` 下也得看得出满到哪儿 |
 
@@ -620,11 +620,10 @@ session_prompts = ["ground"] # 每场开场前问一次「这一场的开场文�
 plugins       = true        # 代码层总开关（T40）：加载 trusted + 已激活/本场戴着的包的 `contributes.ui.tui.entry`
                             # false = 只剩声明层（commands / policy / 每个 tool 的 ui 照常，逐字节等于 T39 结束时）
 
-# 按 `/env` 目标的种类（local | wsl | remote）覆盖上面这两个列表。
-# 不写这一节、或写出来但留空，就是下面注释里那份缺省；`bare` 缺省时 local/wsl = false、remote = true。
+# 按 `/env` 目标的种类（local | remote）覆盖上面这两个列表。
+# 不写这一节、或写出来但留空，就是下面注释里那份缺省；`bare` 缺省时 local = false、remote = true。
 # 写了的字段整体替换缺省，没写的沿用——与 session_with 那条「替换不合并」同一条纪律。
 [env.local]                 # 不写 = local 的缺省：bare=false，用 [extensions] 那两个列表
-[env.wsl]                   # 不写 = 与 local 相同——WSL 经 /mnt/ 共享主机文件系统
 [env.remote]                # 不写 = { bare = true, with = [], session_prompts = [] }
 # bare = true                 # 缺省已是 true；config 的 `[extensions] with` 不读
 # with  = []                  # 缺省已是 []；想在远端场里也带某个包，写它的 id

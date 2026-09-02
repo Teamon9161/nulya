@@ -304,7 +304,7 @@ export function StatusBar(props: {
     return worn.length > 0 && screen().width >= 60 ? ` ${style.glyphs.picker} ${worn.join(" ")}` : ""
   }
   /**
-   * ` ⇥ wsl:Ubuntu` — where the commands go. Warn-coloured rather than dim: it
+   * ` ⇥ remote:wsl:Ubuntu` — where the commands go. Warn-coloured rather than dim: it
    * is not a decoration but the thing that makes `rm -rf build` mean two
    * different acts, and a person who forgot they set it has to be reminded by
    * the line rather than by the result.

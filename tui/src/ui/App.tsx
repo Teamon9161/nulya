@@ -2275,7 +2275,7 @@ export function App(props: AppProps) {
   /**
    * Everything the SCREEN adds to a top-level `session new`: one `--with` for
    * each id the exec-target profile brings in — `[extensions] session_with`
-   * on `local` / `wsl`, or whatever `tui.toml`'s `[env.<kind>]` says instead
+   * on `local`, or whatever `tui.toml`'s `[env.<kind>]` says instead
    * (`envProfile`). `/env`'s pending choice decides which profile this
    * is, and it is read once, right here, at the same moment as everything
    * else on this list — a choice made after this line is a choice about the

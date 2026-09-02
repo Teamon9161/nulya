@@ -59,9 +59,9 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /provider                         endpoints and their keys                                         
                                    add an OpenAI- or Anthropic-compatible one                       
  /effort <level|auto>              change this tab's effort now; the next step runs with it         
- /env [<target>]                   where the next session's shell runs: local | wsl |               
-                                   wsl:<distro> · no argument lists what this machine can reach     
-                                   only shell moves, this harness stays here                        
+ /env [<target>]                   where the next session's shell runs: local | remote:…            
+                                   no argument lists what this machine can reach                    
+                                   remote:… moves the whole workspace there too                     
  /new [--profile p] [--model id]   a SECOND tab, on the last pick or the named profile — this tab   
                                    is untouched                                                     
  /clear [--profile p] [--model i…  replace THIS tab with a fresh draft, in place — the old          

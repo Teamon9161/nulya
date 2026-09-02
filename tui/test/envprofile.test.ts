@@ -18,26 +18,22 @@ describe("execTargetKind", () => {
     expect(execTargetKind("local")).toBe("local")
   })
 
-  test("wsl: bare or with a distro", () => {
-    expect(execTargetKind("wsl")).toBe("wsl")
-    expect(execTargetKind("wsl:Ubuntu")).toBe("wsl")
-    expect(execTargetKind("wsl:")).toBe("wsl")
-  })
-
   test("anything unrecognised reads as local — the fuller composition, not the stripped one", () => {
     // `session new` is the one that refuses a bad spelling; this classifier
     // only picks a profile, and the conservative pick costs nothing extra.
-    // `ssh:<dest>` used to be its own kind — retired 2026-08-30
-    // — and now falls in here with any other
-    // spelling `session new` will refuse.
+    // `ssh:<dest>` and `wsl[:<distro>]` used to be their own kind — retired
+    // 2026-08-30 and 2026-09-02 respectively — and now fall in here with any
+    // other spelling `session new` will refuse.
     expect(execTargetKind("docker:box")).toBe("local")
     expect(execTargetKind("ssh")).toBe("local")
     expect(execTargetKind("ssh:box")).toBe("local")
     expect(execTargetKind("ssh:user@host")).toBe("local")
+    expect(execTargetKind("wsl")).toBe("local")
+    expect(execTargetKind("wsl:Ubuntu")).toBe("local")
   })
 
   test("surrounding whitespace does not change the kind", () => {
-    expect(execTargetKind("  wsl:Ubuntu  ")).toBe("wsl")
+    expect(execTargetKind("  remote:wsl:Ubuntu  ")).toBe("remote")
   })
 
   test("remote: covers the whole family — wsl, ssh, and exec — as one kind", () => {
@@ -55,14 +51,6 @@ describe("resolveEnvProfile: zero-config defaults", () => {
 
   test("local is today's behaviour verbatim: not bare, the front end's own lists", () => {
     expect(resolveEnvProfile("local", session_with, session_prompts, no_overrides)).toEqual({
-      bare: false,
-      with: session_with,
-      session_prompts,
-    })
-  })
-
-  test("wsl composes exactly like local — it shares the host filesystem through /mnt/", () => {
-    expect(resolveEnvProfile("wsl", session_with, session_prompts, no_overrides)).toEqual({
       bare: false,
       with: session_with,
       session_prompts,
@@ -114,19 +102,14 @@ describe("resolveEnvProfile: field-level override", () => {
   })
 
   test("an empty override table for a kind is exactly its default", () => {
-    expect(resolveEnvProfile("wsl", session_with, session_prompts, { wsl: {} })).toEqual(
-      resolveEnvProfile("wsl", session_with, session_prompts, {}),
+    expect(resolveEnvProfile("local", session_with, session_prompts, { local: {} })).toEqual(
+      resolveEnvProfile("local", session_with, session_prompts, {}),
     )
   })
 
   test("a table for one kind never leaks into another", () => {
     const overrides: EnvProfiles = { remote: { with: ["ops"], bare: false } }
     expect(resolveEnvProfile("local", session_with, session_prompts, overrides)).toEqual({
-      bare: false,
-      with: session_with,
-      session_prompts,
-    })
-    expect(resolveEnvProfile("wsl", session_with, session_prompts, overrides)).toEqual({
       bare: false,
       with: session_with,
       session_prompts,

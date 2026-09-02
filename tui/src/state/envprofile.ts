@@ -1,13 +1,11 @@
 /**
- * Per exec-target-KIND tool-face profile (`tui.toml` `[env.local]` / `[env.wsl]`
- * / `[env.remote]`).
+ * Per exec-target-KIND tool-face profile (`tui.toml` `[env.local]` /
+ * `[env.remote]`).
  *
  * `/env` moves where a session's `shell` commands run, but
  * the screen's own composition choices — which packages ride along as
  * `--with` and which packages render this session's opening prompt — do not
- * automatically follow, and the two halves
- * of `remote:` have DIFFERENT reasons for not following (goals/ground-remote.md
- * §5-§6).
+ * automatically follow.
  *
  * `ground` renders host facts — this cwd, this branch, this git status — and on
  * a `remote:` target the workspace those describe is somewhere else. It is a
@@ -27,12 +25,12 @@
  * old one read as "a remote session cannot have file tools in principle", and
  * it is one `ext push` away.
  *
- * `local` and `wsl` have neither problem — WSL shares the host filesystem
- * through `/mnt/`, so a `std` pin or `ground`'s facts are exactly as true there
- * as on the host.
+ * `local` has neither problem — it IS the host filesystem, so a `std` pin or
+ * `ground`'s facts are exactly as true there as anywhere.
  *
- * (The exec-target `ssh:<dest>` spelling this file used to carry a third kind
- * for was retired 2026-08-30, goals/remote-env.md §7.1 — it wrapped the shell
+ * (Two other kinds used to live here. The exec-target `ssh:<dest>` spelling
+ * was retired 2026-08-30, goals/remote-env.md §7.1; `wsl` (the exec-target
+ * spelling, not `remote:wsl`) was retired 2026-09-02. Both wrapped the shell
  * elsewhere while leaving `std`/`ground` pointed at the host, exactly the
  * mismatch this profile exists to route around, so removing the word removed
  * the kind rather than leaving an unreachable branch behind.)
@@ -45,16 +43,16 @@
  */
 
 /**
- * The three kinds `/env`'s spec grammar can name. `remote` covers the whole
+ * The two kinds `/env`'s spec grammar can name. `remote` covers the whole
  * `remote:` family — `wsl` vs `ssh` vs `exec` moves the CHANNEL, not what
  * this profile should compose, and the reasoning below (no `std` pin, no
  * `ground`, `--bare`) applies identically to all three.
  *
- * `[env.ssh]` is an unrecognised key in `tui.toml` (`settings.ts` does not
- * read it), and a bare `ssh:<dest>` spec reads as `local` below, same as
- * any other spelling this classifier does not know.
+ * `[env.ssh]` / `[env.wsl]` are unrecognised keys in `tui.toml` (`settings.ts`
+ * does not read them), and a bare `ssh:<dest>` or `wsl[:<distro>]` spec reads
+ * as `local` below, same as any other spelling this classifier does not know.
  */
-export type ExecTargetKind = "local" | "wsl" | "remote"
+export type ExecTargetKind = "local" | "remote"
 
 /**
  * Classify an exec target spec into which KIND it is, for picking a profile —
@@ -63,19 +61,12 @@ export type ExecTargetKind = "local" | "wsl" | "remote"
  * function does not recognise is treated as `local` here, which is the
  * conservative reading (the fuller composition, not the stripped one) and
  * costs nothing extra since the kernel will refuse the bad spelling anyway —
- * `ssh:<dest>` included, now that `session new` refuses it too.
- *
- * `remote:` is checked before `wsl` on purpose: `remote:wsl:distro` does not
- * start with `wsl:`, so order would not actually matter here — but a
- * `remote:` spec that DID happen to read as the shorter prefix first would be
- * the wrong kind of wrong, composing a workspace-moving session with the
- * shell-only profile.
+ * `ssh:<dest>` and `wsl[:<distro>]` included, now that `session new` refuses
+ * both.
  */
 export function execTargetKind(spec: string): ExecTargetKind {
   const trimmed = spec.trim()
-  if (trimmed.length === 0 || trimmed === "local") return "local"
   if (trimmed.startsWith("remote:")) return "remote"
-  if (trimmed === "wsl" || trimmed.startsWith("wsl:")) return "wsl"
   return "local"
 }
 
@@ -94,7 +85,6 @@ export interface EnvProfileOverride {
 /** `tui.toml`'s `[env.*]` tables, keyed by kind. Any or all may be absent. */
 export interface EnvProfiles {
   local?: EnvProfileOverride
-  wsl?: EnvProfileOverride
   remote?: EnvProfileOverride
 }
 
@@ -113,9 +103,9 @@ export interface ResolvedEnvProfile {
 }
 
 /**
- * Zero-config defaults, one per kind. `local` and `wsl` are the screen's
- * existing behaviour verbatim — the front end's `session_with` /
- * `session_prompts` lists, the standing table left alone.
+ * Zero-config defaults, one per kind. `local` is the screen's existing
+ * behaviour verbatim — the front end's `session_with` / `session_prompts`
+ * lists, the standing table left alone.
  * `remote` only has `shell`/the workspace itself: no members, no renderers,
  * and `--bare` so the config's own standing packages (which were configured
  * with a local filesystem in mind) do not creep in either — this is a

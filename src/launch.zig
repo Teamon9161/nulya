@@ -267,12 +267,6 @@ pub fn nonEmpty(value: []const u8, fallback: []const u8) []const u8 {
 /// Both halves are computed HERE rather than derived down in the environment:
 /// where a workspace keeps its sidecars is the shell layer's decision.
 ///
-/// `exec` is the session's `--env` spec (`""` = local) — a different axis from
-/// `backend`: it says which machine's shell reads a `shell` command, not how
-/// confined that command is. A parameter rather than a config key because it is
-/// decided per session and frozen in that session's header, like the model
-/// identity.
-///
 /// `ext_roots` is where THIS machine keeps extension versions (`extensionRoots`).
 /// The environment needs them because resolving `(id, version)` into something
 /// to spawn belongs to the machine that holds the bytes; a caller that runs no
@@ -282,14 +276,12 @@ pub fn localEnvironment(
     io: std.Io,
     cfg: *const config.Config,
     session: ?environment.SessionRef,
-    exec: []const u8,
     ext_roots: []const []const u8,
 ) !environment.LocalEnvironment {
     if (cfg.environment.backend != .local) return error.UnsupportedEnvironmentBackend;
     return environment.LocalEnvironment.init(alloc, io, .{
         .dialect = cfg.environment.shell.toLocalOption(),
         .session = session,
-        .exec = exec,
         .extension_roots = ext_roots,
     });
 }
@@ -299,21 +291,25 @@ pub fn localEnvironment(
 pub const remote_spec_syntax = remote.spec_syntax;
 
 /// Whether an `--env` spec names the REMOTE backend (the workspace lives over
-/// there) rather than the exec target (only the command travels). One predicate,
-/// so the four call sites that must branch cannot each invent their own test.
+/// there) rather than plain `local`. One predicate, so the call sites that must
+/// branch cannot each invent their own test.
 pub fn isRemoteSpec(exec: []const u8) bool {
     return remote.isSpec(environment.normalizeExecSpec(exec));
 }
 
-/// The sentence `ssh:<destination>` gets: that exec-target spelling no longer
-/// exists. A resume that finds it frozen into an old header gets these same
-/// words appended to its own refusal, NOT a silent re-interpretation as
-/// `remote:ssh:` — the two move different things (only the command versus the
-/// whole workspace, which is why `--workspace` matters for one and not the
-/// other), so which one an old session meant cannot be guessed.
+/// The sentences the two retired exec-target spellings get: `ssh:<destination>`
+/// and `wsl[:<distro>]` moved only the `shell` command while the workspace,
+/// extensions and every spilled file stayed on this host — neither exists any
+/// more. A resume that finds one frozen into an old header gets these same
+/// words appended to its own refusal, NOT a silent re-interpretation as the
+/// `remote:` spelling — that one moves the whole workspace too (hence
+/// `--workspace`), so which one an old session meant cannot be guessed.
 pub const legacy_ssh_hint =
     "ssh as an exec target was retired; use --env remote:ssh:<destination> instead " ++
-    "to move the whole workspace there (see --workspace), or --env wsl to keep only the shell elsewhere";
+    "to move the whole workspace there (see --workspace)";
+pub const legacy_wsl_hint =
+    "wsl as an exec target was retired; use --env remote:wsl[:<distro>] instead " ++
+    "to move the whole workspace there (see --workspace)";
 
 /// Null unless `spec` (already `normalizeExecSpec`d) is the retired
 /// `ssh:<destination>` exec-target spelling. `remote:ssh:` does not match —
@@ -323,23 +319,34 @@ pub fn legacySshHint(spec: []const u8) ?[]const u8 {
     return legacy_ssh_hint;
 }
 
+/// Null unless `spec` (already `normalizeExecSpec`d) is the retired `wsl` or
+/// `wsl:<distro>` exec-target spelling. `remote:wsl…` does not match — every
+/// caller checks that first.
+pub fn legacyWslHint(spec: []const u8) ?[]const u8 {
+    if (!std.mem.eql(u8, spec, "wsl") and !std.mem.startsWith(u8, spec, "wsl:")) return null;
+    return legacy_wsl_hint;
+}
+
+/// Either retired hint, whichever (if either) `spec` matches.
+pub fn legacyExecHint(spec: []const u8) ?[]const u8 {
+    return legacySshHint(spec) orelse legacyWslHint(spec);
+}
+
 /// Say why an `--env` spec cannot be used, or null when it can — so a CLI verb
-/// can refuse BEFORE it creates anything. The four answers are kept apart: a
-/// typo, the wrong machine, a spelling from the other family, and the retired
-/// spelling are four different fixes.
+/// can refuse BEFORE it creates anything. The answers are kept apart: the wrong
+/// machine, a retired spelling, and anything else unrecognized are different
+/// fixes.
 pub fn execTargetRefusal(exec: []const u8) ?[]const u8 {
     const spec = environment.normalizeExecSpec(exec);
+    if (spec.len == 0) return null;
     if (remote.isSpec(spec)) {
         const launch = remote.parseSpec(spec) catch
             return "unrecognized (want " ++ remote.spec_syntax ++ ")";
         if (!remote.supportedOnHost(launch)) return "cannot be reached from this host (wsl needs Windows)";
         return null;
     }
-    if (legacySshHint(spec)) |hint| return hint;
-    const target = environment.parseExecTarget(spec) catch
-        return "unrecognized (want " ++ environment.exec_target_syntax ++ ", or " ++ remote.spec_syntax ++ ")";
-    if (!environment.execTargetSupportedOnHost(target)) return "cannot be reached from this host (wsl needs Windows)";
-    return null;
+    if (legacyExecHint(spec)) |hint| return hint;
+    return "unrecognized (want " ++ remote.spec_syntax ++ ")";
 }
 
 /// The execution environment a session runs its tools behind: the local backend
@@ -388,6 +395,11 @@ pub const SessionEnvironment = union(enum) {
 /// A remote spec CONNECTS here — the transport is spawned and the handshake
 /// completes — because there is no honest way to hand back a handle to a machine
 /// that has not answered. A failure is therefore loud and at the top of the step.
+///
+/// Anything that is neither empty (local) nor a `remote:…` spec is
+/// `error.InvalidExecTarget` — a retired exec-target spelling (frozen into a
+/// header from before it retired) or plain garbage both refuse here rather
+/// than falling back to running the command on this host.
 pub fn sessionEnvironment(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -417,7 +429,8 @@ pub fn sessionEnvironment(
             }),
         };
     }
-    return .{ .local = try localEnvironment(alloc, io, cfg, session, exec, ext_roots) };
+    if (spec.len != 0) return error.InvalidExecTarget;
+    return .{ .local = try localEnvironment(alloc, io, cfg, session, ext_roots) };
 }
 
 /// The extension store roots this process searches, in order:
@@ -846,35 +859,37 @@ test "only the local environment backend runs; sandbox is refused, not silently 
     defer cfg.deinit();
 
     // The default backend builds an environment as usual…
-    var local = try localEnvironment(alloc, std.testing.io, &cfg, null, "", &.{});
+    var local = try localEnvironment(alloc, std.testing.io, &cfg, null, &.{});
     local.deinit();
 
     // …and a backend this build cannot honour fails rather than running the
     // tools locally under a config that asked for isolation.
     cfg.environment.backend = .sandbox;
-    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, "", &.{}));
+    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, &.{}));
 }
 
-test "an exec target is refused before anything is built, and the two refusals differ" {
+test "an exec target is refused before anything is built, and the refusals differ" {
     try std.testing.expectEqual(@as(?[]const u8, null), execTargetRefusal(""));
     try std.testing.expectEqual(@as(?[]const u8, null), execTargetRefusal("local"));
-    // The retired exec-target `ssh:<dest>` spelling is refused with a SPECIFIC
-    // sentence naming the replacement, distinct from the generic "unrecognized"
-    // a typo gets (which also mentions `remote:ssh:` as part of the whole
-    // vocabulary, so the two are told apart by identity, not substring).
+    // The two retired exec-target spellings are refused with SPECIFIC sentences
+    // naming their `remote:` replacement, distinct from the generic
+    // "unrecognized" a typo gets (which also mentions `remote:` as part of the
+    // whole vocabulary, so the three are told apart by identity, not substring).
     try std.testing.expectEqualStrings(legacy_ssh_hint, execTargetRefusal("ssh:me@box").?);
-    // A typo and an unreachable target are different problems with different
-    // fixes, so they are not the same sentence as either of the above.
+    try std.testing.expectEqualStrings(legacy_wsl_hint, execTargetRefusal("wsl").?);
+    try std.testing.expectEqualStrings(legacy_wsl_hint, execTargetRefusal("wsl:Ubuntu").?);
     const typo = execTargetRefusal("wsl2").?;
     try std.testing.expect(!std.mem.eql(u8, typo, legacy_ssh_hint));
-    try std.testing.expectEqual(builtin.os.tag != .windows, execTargetRefusal("wsl") != null);
+    try std.testing.expect(!std.mem.eql(u8, typo, legacy_wsl_hint));
 }
 
-test "legacySshHint only fires on the retired ssh: exec-target prefix" {
-    try std.testing.expectEqualStrings(legacy_ssh_hint, legacySshHint("ssh:me@box").?);
-    try std.testing.expectEqual(@as(?[]const u8, null), legacySshHint("local"));
-    try std.testing.expectEqual(@as(?[]const u8, null), legacySshHint("wsl"));
-    try std.testing.expectEqual(@as(?[]const u8, null), legacySshHint("remote:ssh:me@box"));
+test "legacyExecHint only fires on the two retired exec-target prefixes" {
+    try std.testing.expectEqualStrings(legacy_ssh_hint, legacyExecHint("ssh:me@box").?);
+    try std.testing.expectEqualStrings(legacy_wsl_hint, legacyExecHint("wsl").?);
+    try std.testing.expectEqualStrings(legacy_wsl_hint, legacyExecHint("wsl:Ubuntu").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), legacyExecHint("local"));
+    try std.testing.expectEqual(@as(?[]const u8, null), legacyExecHint("remote:ssh:me@box"));
+    try std.testing.expectEqual(@as(?[]const u8, null), legacyExecHint("remote:wsl:Ubuntu"));
 }
 
 test "a session's tasks live beside its spills, under one removable subtree" {

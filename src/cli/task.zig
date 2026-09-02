@@ -342,21 +342,6 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     const task_name = flagValue(args, "--task");
     if ((session_path == null) == (task_name == null)) return superviseUsage(io);
     const run_cwd = flagValue(args, "--cwd") orelse return superviseUsage(io);
-    // Where the WATCHED command runs. The supervisor itself is always a host
-    // process — it holds the lease, drains the log and deposits the event into
-    // a file on this machine — so this only ever reaches `shellArgv`.
-    const exec = flagValue(args, "--env") orelse "";
-    // A supervisor WRAPS a command (`shellArgv`); a remote spec is a channel,
-    // not a wrapping. A remote session's task is supervised on that machine, by
-    // a supervisor the agent over there started.
-    if (launch.isRemoteSpec(exec)) {
-        try printErr(io, "--env takes an exec target; a remote session's background task is supervised on that machine, not wrapped from here\n");
-        return 1;
-    }
-    if (launch.execTargetRefusal(exec)) |why| {
-        try printErrFmt(alloc, io, "--env {s}: {s}\n", .{ exec, why });
-        return 1;
-    }
     var timeout_ms: ?u32 = null;
     if (flagValue(args, "--timeout-ms")) |v| {
         timeout_ms = std.fmt.parseInt(u32, v, 10) catch {
@@ -433,7 +418,7 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         var cfg = try config.load(alloc, io, &cfg_host);
         defer cfg.deinit();
         // No session ref: a supervisor runs one command, it never starts tasks.
-        var lenv = try launch.localEnvironment(alloc, io, &cfg, null, exec, &.{});
+        var lenv = try launch.localEnvironment(alloc, io, &cfg, null, &.{});
         defer lenv.deinit();
 
         const outcome = try runWatched(alloc, io, &lenv, .{
@@ -503,7 +488,7 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 }
 
 fn superviseUsage(io: std.Io) !u8 {
-    try printErr(io, "usage: nulya task supervise --dir <task-dir> (--session <session-file> | --task <session>/t<N>) --cwd <dir> [--env <spec>] [--timeout-ms N] -- <command>\n");
+    try printErr(io, "usage: nulya task supervise --dir <task-dir> (--session <session-file> | --task <session>/t<N>) --cwd <dir> [--timeout-ms N] -- <command>\n");
     return 1;
 }
 
@@ -601,8 +586,8 @@ fn runWatched(alloc: std.mem.Allocator, io: std.Io, lenv: *environment.LocalEnvi
     var log = try cwd.createFile(io, req.log_path, .{});
     defer log.close(io);
 
-    var argv_buf: [8][]const u8 = undefined;
-    const cmdline = try lenv.shellArgv(alloc, req.command, req.cwd, &argv_buf);
+    var argv_buf: [5][]const u8 = undefined;
+    const cmdline = try lenv.shellArgv(alloc, req.command, &argv_buf);
     defer cmdline.deinit(alloc);
 
     // `Tree`, so a kill reaches the grandchildren a shell forks.
@@ -1051,11 +1036,11 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             try printErrFmt(alloc, io, "session '{s}' runs its commands on '{s}', which did not answer; nothing was started here instead\n", .{ session_id, hdr.value.environment });
             return 1;
         },
-        error.InvalidExecTarget, error.ExecTargetUnsupportedOnHost, error.InvalidRemoteSpec, error.RemoteSpecUnsupportedOnHost => {
-            // Same pointer `execTargetRefusal` gives a fresh `--env ssh:…`,
-            // for a header frozen with the retired spelling — never a silent
-            // re-interpretation.
-            if (launch.legacySshHint(environment.normalizeExecSpec(hdr.value.environment))) |hint| {
+        error.InvalidExecTarget, error.InvalidRemoteSpec, error.RemoteSpecUnsupportedOnHost => {
+            // Same pointer `execTargetRefusal` gives a fresh `--env ssh:…` or
+            // `--env wsl`, for a header frozen with a retired spelling —
+            // never a silent re-interpretation.
+            if (launch.legacyExecHint(environment.normalizeExecSpec(hdr.value.environment))) |hint| {
                 try printErrFmt(alloc, io, "session '{s}' runs its commands in '{s}', which this host cannot reach ({s})\n", .{ session_id, hdr.value.environment, hint });
                 return 1;
             }

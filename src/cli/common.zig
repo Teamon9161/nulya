@@ -247,8 +247,8 @@ pub const session_usage =
     \\                                                    version in, :tool,tool adds its manual tools to the model's tool face (:none adds
     \\                                                    nothing), --parent forks that session and --carry copies its events 1..seq along
     \\                                                    (how a live conversation changes model, tools or prompt), --prompt freezes a file as this session's
-    \\                                                    system prompt, --env freezes where shell runs: wsl | wsl:<distro> move only the command;
-    \\                                                    remote:wsl | remote:ssh:<dest> | remote:exec:<argv…> move the workspace (--workspace says where),
+    \\                                                    system prompt, --env freezes where shell runs: local (default) or
+    \\                                                    remote:wsl | remote:ssh:<dest> | remote:exec:<argv…>, which moves the whole workspace (--workspace says where),
     \\                                                    --bare reads no standing layer: the config `with` list is left out
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
     \\                                                    queue a user turn for the next step boundary; --image inlines a

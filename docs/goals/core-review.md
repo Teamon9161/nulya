@@ -224,3 +224,26 @@ vtable 后面这道缝。
 
 - **2026-09-02 · 中刀 G**（`1c8aec3` 删 credentials.toml · `b3ca604` tool-usage journal 收窄）：两把独立的删法，各一个 commit。① 删 `launch.fileValue`/`fileValueAt`/`credentialFilePath`/`credentials_file`/`warned_credentials_mode` 与 `CredentialSource.file`，`credentialSource` 收成 config → env → (codex) login 两处；`session new` 的缺凭证提示、`config show` 的 `credential_source`（靠 `@tagName` 自动收窄，没有硬编码词表要改）、TUI 的联合类型、DESIGN §9.5 同步；e2e 的凭证测试从"写 credentials.toml"改成"设 env"，launch.zig 删文件路径单测、留一条更小的 config-beats-env 优先级单测。② tool-usage journal 该收到多窄，契约给了两个方案，选了较小的那个：`session.recordCompletedToolStats` 与它写的 `ok` 列原样保留——TUI `/ext` 的 usage 表要跨全部 session 聚合成功率，那是单个 ledger 文件答不出的问题，把它搬到 ledger 需要重写那张表的数据源；改成给 `session list --json` 加一列 `tools{calls, failures}`，直接数当前 session 文件里的 `tool_results[].ok`，不碰 journal。journal 现在的立足点缩到两件 ledger 说不出的事（`duration_ms`、`ext run` 场外调用的身份），单场调了几次、几次失败已经有 ledger 原生的答案；不升 `v`。DESIGN §3.3/§5.5/§14、CLAUDE.md「三条 journal」一句、docs/tui.md §2.1 同步；PLAN §3.5 未提及这两列的删减，未改。
   验收：`zig build test` 593/593 · `zig build e2e` 172 pass 3 skip · `tui/` 下 `bun test` 769 pass 1 fail，同一条 `/ext` 的 `r` 帮助行长路径折行（与前几条 lane 记的是同一条，本刀之前就红）。
+
+- **2026-09-02 · 中刀 E**（`0fa2835` 内核 + docs · `56fb0e4` TUI + tui.md）：契约逐条落地。
+  `ExecTarget` / `parseExecTarget` / `execTargetSupportedOnHost` / `exec_target_syntax` /
+  `wslPath` / `wslScript` / `appendSingleQuoted` 与 `LocalEnvironment` 的 `exec_spec` /
+  `target`（连同 `shellArgv` 的 wsl 分支与不再需要的 `cwd` 参数、argv buf 从 `[8]` 收到
+  `[5]`）一并删除；`LocalOptions.exec`、`task supervise --env`、`SupervisorSpawn.exec_spec`
+  同理。`launch.execTargetRefusal` 收窄成三档：`remote:*` 的解析/可达判定、两个退役拼法
+  （`legacySshHint` 与新 `legacyWslHint`，合成 `legacyExecHint`）、其余一律 unrecognized；
+  `sessionEnvironment` 把"非空且非 `remote:`"直接判 `error.InvalidExecTarget`，老 header
+  里的 `wsl` / `wsl:<distro>` resume 时在 `session step` 与 `task run` 两处都响亮拒绝并
+  指路 `remote:wsl`。`remote:wsl` 一族（`environment/remote/mod.zig` 里 WSL 自己那份实现）
+  一字未动。TUI：`state/envprofile.ts` 的 `ExecTargetKind` 从三档收成 `local | remote`，
+  `[env.wsl]` 变成未识别键（同 `[env.ssh]` 的待遇）；`state/targets.ts` 的 picker 不再产
+  裸 `wsl:<name>` 行；`state/tui_state.ts` 读老状态文件里的 `wsl`/`wsl:<distro>` 同 `ssh:`
+  一样丢回本机，不重写升级。
+  两处偏离：① `src/cli/ext_push.zig` 里"`--env wsl`"的过时措辞留着没改——那个文件属于
+  Lane B 并行占用的 `src/cli/ext*.zig`，契约点名不碰；② `docs/PLAN.md` §3.8 的
+  "exec target 的三件已知欠账"整段改写而非删除，换成一句"只搬 shell、其余留在 host 今天
+  没有答案"——三件旧欠账里两件（config 缺省的比较对象、kill 保证）随 wsl 退役本身消失，
+  第三件（`NULYA_EXE` 到不了对面）本来就是 wsl 独有的失效点，不值得留一具体面目的空壳。
+  验收：`zig build test` 592/592 · `zig build e2e` 174 pass 1 skip · `tui/` 下 `bun test`
+  769 pass 1 fail，那一条仍是 `/ext` 的 `r` 帮助行在本机 worktree 长路径下折行（与
+  Lane A/C/D 记的是同一条，与本刀无关）。

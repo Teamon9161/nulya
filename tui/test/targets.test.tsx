@@ -70,31 +70,19 @@ test("a target this host cannot reach is not offered", async () => {
   // …and on the host that can, the distribution is named rather than left to
   // `wsl`'s default, which is a setting that can move under a frozen session.
   const onWindows = await execChoices(probe({ wsl: async () => ["Ubuntu"], ssh: async () => ["box"] }))
-  expect(onWindows.map((one) => one.spec)).toEqual([
-    "local",
-    "wsl:Ubuntu",
-    "remote:wsl:Ubuntu",
-    "remote:ssh:box",
-  ])
+  expect(onWindows.map((one) => one.spec)).toEqual(["local", "remote:wsl:Ubuntu", "remote:ssh:box"])
 })
 
-test("the remote: family rides the same two sources, one row each behind the shell-only wsl row", async () => {
-  // Same data (`wsl -l`, `~/.ssh/config`), a second family of rows — not a
-  // second probe, and not the SAME spec doing double duty. `local` never gets
-  // a `remote:local` twin: this
-  // machine's own workspace is not a target `--workspace` would move to. The
-  // ssh source only seeds the `remote:ssh:` row: there is no bare `ssh:`
-  // exec target.
+test("the remote: family rides the same two sources, one row each", async () => {
+  // Same data (`wsl -l`, `~/.ssh/config`) — not a second probe. `local` never
+  // gets a `remote:local` twin: this machine's own workspace is not a target
+  // `--workspace` would move to. Neither source seeds a bare `wsl:`/`ssh:`
+  // row: the exec-target spellings that moved only the shell are retired, so
+  // `remote:wsl:`/`remote:ssh:` are the only shapes `session new` accepts.
   const listed = await execChoices(probe({ wsl: async () => ["Ubuntu"], ssh: async () => ["box"] }))
-  expect(listed.map((one) => one.spec)).toEqual([
-    "local",
-    "wsl:Ubuntu",
-    "remote:wsl:Ubuntu",
-    "remote:ssh:box",
-  ])
-  // The sentence is the only thing telling the two families apart, so it has
-  // to actually say the workspace moves — the whole reason a person would
-  // pick the `remote:` row over the plain one right above it.
+  expect(listed.map((one) => one.spec)).toEqual(["local", "remote:wsl:Ubuntu", "remote:ssh:box"])
+  // The sentence says the workspace moves — the reason a person would pick
+  // one of these rows over the plain `local` one above them.
   const remoteWsl = listed.find((one) => one.spec === "remote:wsl:Ubuntu")!
   const remoteSsh = listed.find((one) => one.spec === "remote:ssh:box")!
   expect(remoteWsl.what.toUpperCase()).toContain("WORKSPACE")
@@ -113,7 +101,7 @@ test("the last row is not a target: it hands the typing back", async () => {
   const picked: Array<string | null> = []
   const choices = [
     { spec: "local", what: "this machine" },
-    { spec: "wsl:Ubuntu", what: "a distribution" },
+    { spec: "remote:wsl:Ubuntu", what: "a distribution" },
   ]
   const setup = await mount(() => (
     <EnvPicker
@@ -126,7 +114,7 @@ test("the last row is not a target: it hands the typing back", async () => {
   ))
   try {
     const frame = await settle(setup, 2)
-    expect(frame).toContain("wsl:Ubuntu")
+    expect(frame).toContain("remote:wsl:Ubuntu")
     // The syntax for what the list could not enumerate is on the screen, so a
     // person who does not see their host knows the dialog is not the limit —
     // `remote:ssh:<dest>` now, since the bare `ssh:<dest>` exec target this

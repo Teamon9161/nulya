@@ -43,7 +43,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 **Provider**：`openai` / `anthropic`（两个 cache_control breakpoint）/ `codex`（ChatGPT 订阅 OAuth）/ `scripted`（离线替身，九档）。三个真实 provider 的 prompt cache 命中由 `zig build integration` 实测。
 
-**执行环境**：`--env local | wsl[:distro] | remote:{wsl,ssh,exec}`。`wsl` 只搬 `shell` 的命令；`remote:` 那族把整个工作区搬到别的机器——shell、extension（`ext build --target` + `ext push` 送过去）、spill、后台任务都在那边跑，报告被取回来翻成 inbox 事件。远端那个常驻进程就是 `nulya remote serve`，同一个二进制。
+**执行环境**：`--env local | remote:{wsl,ssh,exec}`。`remote:` 那族把整个工作区搬到别的机器——shell、extension（`ext build --target` + `ext push` 送过去）、spill、后台任务都在那边跑，报告被取回来翻成 inbox 事件。远端那个常驻进程就是 `nulya remote serve`，同一个二进制。曾经有一根只搬 `shell` 命令的轴（`wsl[:distro]`，更早还有 `ssh:<dest>`）已退役：老 header 里冻着它们 resume 时响亮拒绝并指路对应的 `remote:` 拼法。
 
 **Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|note|step|events|cancel|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *` · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step --stream` 是行协议，`--gate` 是每个 tool call 的一票否决。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
 
