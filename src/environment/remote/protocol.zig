@@ -340,7 +340,7 @@ pub const TaskSnapshot = struct {
     /// then. Its presence is what tells the host there is something to deliver.
     report: []const u8 = "",
     /// Is a supervisor still holding this task's lease, over there? Filled by
-    /// that machine's own `leaseHeldIn` (`cli/task.zig`), in the same round as
+    /// that machine's own `lease.taskHeld`, in the same round as
     /// `status` — the only way `lost` (a supervisor that died) is knowable
     /// without a second question per poll. Null when the peer predates this
     /// column (`ignore_unknown_fields` + a default make that safe): "unknown"

@@ -8,12 +8,13 @@
 //! Layout under the store (`<NULYA_HOME | ~/.nulya>/store`):
 //!   <id>/versions/v-<hash>/{extension.json, package/{src,skills}/..., bin/<entry>}
 //!   <id>/current  — plain text file naming one version: "v-<hash>".
-//!   <id>/.lock    — writer lease held by build / activate / deactivate.
+//!   <id>/.lock    — the writer lease (`lease.extensionStore`).
 //!
 //! A `current` file also lives in the workspace pointer layer, which holds no
 //! versions; the pointer half of this file works on either directory.
 
 const std = @import("std");
+const lease_mod = @import("../lease.zig");
 const manifest = @import("manifest.zig");
 const integrity = @import("integrity.zig");
 const testkit = @import("testkit.zig");
@@ -25,7 +26,6 @@ pub const version_prefix = integrity.version_prefix;
 /// questions, and a default would silently answer one with the other.
 pub const Level = integrity.Level;
 const current_file = "current";
-const lock_file = ".lock";
 const versions_dir = "versions";
 const exe_suffix = integrity.exe_suffix;
 
@@ -109,17 +109,11 @@ pub const Store = struct {
         return true;
     }
 
-    /// Take `<id>/.lock`, the writer lease every mutation of `<id>/` runs under
-    /// (build, activate, deactivate). Blocking, and held for the whole
-    /// mutation — for a compiled build that is the entire `zig build-exe`,
-    /// since a second writer wants the result, not a refusal. Creates `<id>/`
-    /// when missing. Closing the returned handle releases the lease.
+    /// This store's writer lease on `<id>/`, held for the whole of a build,
+    /// activate or deactivate. Closing the returned handle releases it.
     pub fn lease(self: Store, alloc: std.mem.Allocator, id: []const u8) !std.Io.File {
         if (!manifest.isValidId(id)) return error.InvalidId;
-        try self.root.createDirPath(self.io, id);
-        const sub = try std.fs.path.join(alloc, &.{ id, lock_file });
-        defer alloc.free(sub);
-        return self.root.createFile(self.io, sub, .{ .truncate = false, .read = true, .lock = .exclusive });
+        return lease_mod.extensionStore(alloc, self.io, self.root, id);
     }
 
     /// Point THIS store's `current` at `version`, refusing one that was never

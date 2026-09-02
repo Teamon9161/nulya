@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const ledger = @import("ledger.zig");
+const lease = @import("lease.zig");
 const loop = @import("loop.zig");
 const registry = @import("registry.zig");
 const provider = @import("provider.zig");
@@ -48,14 +49,14 @@ pub const DurableRef = struct {
 /// consumes it in `prepareStep` and reports that step as `.canceled` without
 /// calling the model. Requesting twice is one request.
 pub fn requestCancel(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir, session_path: []const u8) !void {
-    const marker = try ledger.siblingPath(alloc, session_path, ".cancel");
+    const marker = try lease.siblingPath(alloc, session_path, ".cancel");
     defer alloc.free(marker);
     try workspace.writeFile(io, .{ .sub_path = marker, .data = "" });
 }
 
 /// If a cancel marker exists for the session, delete it and return true.
 fn consumeCancel(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir, session_path: []const u8) !bool {
-    const marker = try ledger.siblingPath(alloc, session_path, ".cancel");
+    const marker = try lease.siblingPath(alloc, session_path, ".cancel");
     defer alloc.free(marker);
     workspace.deleteFile(io, marker) catch |err| switch (err) {
         error.FileNotFound => return false,

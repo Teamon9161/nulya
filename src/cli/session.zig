@@ -16,6 +16,7 @@ const journal = @import("../journals/journal.zig");
 const outcome = @import("../journals/outcome.zig");
 const config = @import("../config.zig");
 const ledger = @import("../ledger.zig");
+const lease = @import("../lease.zig");
 const prompt = @import("../prompt.zig");
 const session = @import("../session.zig");
 const loop = @import("../loop.zig");
@@ -727,11 +728,11 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     // minted from what is already waiting, so two racing appends could
     // otherwise take the same queue position; and `session prune` may not take
     // the session away between the check below and the deposit.
-    var lease = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
+    var held = lease.sessionDeposits(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
         try printErr(io, "session append failed: cannot open this session's inbox\n");
         return 1;
     };
-    defer lease.close(io);
+    defer held.close(io);
     // Under the lease, because waiting for it is a moment in which the session
     // can have been pruned.
     if (!sessionExists(io, spath)) {
@@ -878,11 +879,11 @@ fn sessionNote(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     }
     // Held across "does this session still exist" and the deposit, and across
     // minting the delivery name from what is already queued.
-    var lease = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
+    var held = lease.sessionDeposits(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
         try printErr(io, "session note failed: cannot open this session's inbox\n");
         return 1;
     };
-    defer lease.close(io);
+    defer held.close(io);
     if (!sessionExists(io, spath)) {
         try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
         return 1;
@@ -964,7 +965,7 @@ fn sessionPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     // Asking first and locking after leaves exactly the window where both
     // commands report success and the session is gone from under a running
     // supervisor.
-    var leases = ledger.acquireSessionLeases(alloc, io, std.Io.Dir.cwd(), spath) catch |err| switch (err) {
+    var leases = lease.sessionLifetime(alloc, io, std.Io.Dir.cwd(), spath) catch |err| switch (err) {
         error.DepositInFlight => {
             try printErrFmt(alloc, io, "session prune refused: something is writing into '{s}' right now\n", .{session_id});
             return 1;

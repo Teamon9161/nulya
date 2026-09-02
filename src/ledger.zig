@@ -10,6 +10,7 @@
 //! other processes deposit events into.
 
 const std = @import("std");
+const lease = @import("lease.zig");
 
 /// A tool call requested by the assistant within one step.
 pub const ToolCall = struct {
@@ -505,24 +506,6 @@ const Durable = struct {
     }
 };
 
-/// Acquire the exclusive writer lease for the session at `path` (relative to
-/// `dir`): an advisory lock on the sibling `<stem>.lock`, taken non-blocking so a
-/// second writer fails fast with `error.SessionBusy` instead of racing. The
-/// returned handle must stay open for the writer's lifetime; closing it releases
-/// the lease. Caller frees nothing else.
-///
-/// Public because one caller is not a writer at all: `pruneSession` has to know
-/// that nobody is writing, and that is a question only taking the lease can
-/// answer — probing a lock races with whoever is about to take it.
-pub fn acquireWriterLease(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !std.Io.File {
-    const lock_path = try siblingPath(alloc, path, ".lock");
-    defer alloc.free(lock_path);
-    return dir.createFile(io, lock_path, .{ .truncate = false, .read = true, .lock = .exclusive, .lock_nonblocking = true }) catch |err| switch (err) {
-        error.WouldBlock => error.SessionBusy,
-        else => err,
-    };
-}
-
 /// Create a new session file at `path` (relative to `dir`), writing `hdr` as
 /// line 1, and return a durable ledger with no events yet. The parent directory
 /// must already exist. Fails if the file already exists.
@@ -534,7 +517,7 @@ pub fn createDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path
     const owned = try parseHeaderLine(alloc, line);
     errdefer owned.deinit();
 
-    var lock_file = try acquireWriterLease(alloc, io, dir, path);
+    var lock_file = try lease.sessionWriter(alloc, io, dir, path);
     errdefer lock_file.close(io);
 
     var file = try dir.createFile(io, path, .{ .truncate = true, .read = true, .exclusive = true });
@@ -560,7 +543,7 @@ pub fn createDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path
 pub fn openDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !Ledger {
     // Take the writer lease FIRST: once held, no other writer is mid-append, so
     // the bytes read below are a stable snapshot (readers never write).
-    var lock_file = try acquireWriterLease(alloc, io, dir, path);
+    var lock_file = try lease.sessionWriter(alloc, io, dir, path);
     errdefer lock_file.close(io);
 
     const bytes = try dir.readFileAlloc(io, path, alloc, .unlimited);
@@ -922,19 +905,8 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
 // event never lands inside a tool batch. Deposits are atomic (write `.tmp`,
 // rename), so a drain never reads a half-written body.
 
-/// `<dir>/<stem><suffix>` for a session file path: the naming rule for every
-/// per-session sibling (`.inbox`, `.cancel`). Purely lexical, so it preserves
-/// whether `session_path` is relative or absolute. Caller owns the result.
-pub fn siblingPath(alloc: std.mem.Allocator, session_path: []const u8, suffix: []const u8) ![]u8 {
-    const stem = std.fs.path.stem(std.fs.path.basename(session_path));
-    const name = try std.fmt.allocPrint(alloc, "{s}{s}", .{ stem, suffix });
-    defer alloc.free(name);
-    if (std.fs.path.dirname(session_path)) |dir| return std.fs.path.join(alloc, &.{ dir, name });
-    return alloc.dupe(u8, name);
-}
-
 pub fn inboxPath(alloc: std.mem.Allocator, session_path: []const u8) ![]u8 {
-    return siblingPath(alloc, session_path, ".inbox");
+    return lease.siblingPath(alloc, session_path, ".inbox");
 }
 
 /// Deposit `e` as `<inbox>/<name>.json`, creating the inbox if needed. `base` is
@@ -952,121 +924,9 @@ pub fn inboxPath(alloc: std.mem.Allocator, session_path: []const u8) ![]u8 {
 /// remember it. A caller already holding the lease across a read-then-deposit
 /// calls `depositEventLeased` instead (taking it twice deadlocks).
 pub fn depositEvent(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8, name: []const u8, e: Event) !void {
-    var lease = try acquireDepositLease(alloc, io, base, session_path, .block);
-    defer lease.close(io);
+    var held = try lease.sessionDeposits(alloc, io, base, session_path, .block);
+    defer held.close(io);
     return depositEventLeased(alloc, io, base, session_path, name, e);
-}
-
-/// Whether taking the deposit lease waits for whoever holds it.
-///
-/// A depositor WAITS: it is here to add a fact, and the other holder is about
-/// to finish. `pruneSession` does NOT: it is here to take a session away, so
-/// "somebody is depositing right now" is an answer, not a queue to join.
-pub const DepositWait = enum { block, fail_fast };
-
-/// The exclusive right to deposit into this session's inbox. Held by EVERY
-/// writer of the inbox, for three rules:
-///
-///   * A delivery id is minted from what is already waiting
-///     (`freshDeliveryName`), so two depositors racing would otherwise take
-///     the same queue position.
-///   * A session may not be taken away between a depositor's check and its
-///     write. `pruneSession` removes one only while holding this and the writer
-///     lease; every deposit re-checks the session under this lease
-///     (`depositEventLeased`), closing the window from the other side.
-///   * Nor between the check and the START of something long-lived under it: a
-///     background task's supervisor writes into the session's scratch tree for
-///     as long as it runs, and `nulya task run` holds this across "does this
-///     session exist" and the spawn. Together with the writer lease — which
-///     covers the other way a task starts, from inside a step — that makes the
-///     pair the session's lifetime freeze (`SessionLeases`).
-///
-/// It lives INSIDE the inbox, and is emphatically NOT the session's `.lock`:
-/// that one belongs to `step`, and every gate above must work while a step runs.
-/// Neither the drain nor a scan looks at anything but `*.json` there.
-///
-/// LOCK ORDER: nothing takes the writer lease and then this one (`step` never
-/// deposits); `acquireSessionLeases`, the one place both are held, takes this
-/// one first and the writer lease non-blocking. Two of THESE at once is
-/// `moveDeposit` alone, in session-path order.
-pub fn acquireDepositLease(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    base: std.Io.Dir,
-    session_path: []const u8,
-    wait: DepositWait,
-) !Lease {
-    const inbox = try inboxPath(alloc, session_path);
-    defer alloc.free(inbox);
-    try base.createDirPath(io, inbox);
-    const lock_rel = try depositLockPath(alloc, session_path);
-    defer alloc.free(lock_rel);
-    return .{ .file = try base.createFile(io, lock_rel, .{
-        .truncate = false,
-        .read = true,
-        .lock = .exclusive,
-        .lock_nonblocking = wait == .fail_fast,
-    }) };
-}
-
-/// A held lease, either of a session's two. Closing it releases the lease;
-/// closing it twice is a no-op, which is what lets a callee release it at the
-/// one moment it may (a lock file cannot be unlinked while its opener holds it)
-/// without taking the handle away from the caller's `defer`.
-pub const Lease = struct {
-    file: std.Io.File,
-    open: bool = true,
-
-    pub fn close(self: *Lease, io: std.Io) void {
-        if (!self.open) return;
-        self.file.close(io);
-        self.open = false;
-    }
-};
-
-/// BOTH of a session's leases, held at once.
-///
-/// Only under the pair does "nothing is alive under this session" stay true
-/// long enough to act on, because a long-lived writer under a session's scratch
-/// tree can be started down either of two paths: `nulya task run` takes the
-/// deposit lease across it, and an in-step `shell {background:true}` is covered
-/// by the writer lease its step is holding. A caller that answers that question
-/// under one of them alone has only narrowed the window it is racing.
-///
-/// The order is fixed here rather than remembered at each site: deposit lease
-/// first, writer lease non-blocking. Nothing in the system takes the writer
-/// lease and then a deposit lease (`step` never deposits), so this is the only
-/// place the two are held at once.
-pub const SessionLeases = struct {
-    deposits: Lease,
-    writer: Lease,
-
-    pub fn close(self: *SessionLeases, io: std.Io) void {
-        self.writer.close(io);
-        self.deposits.close(io);
-    }
-};
-
-/// Take both of a session's leases: `error.DepositInFlight` when somebody is
-/// inside its inbox, `error.SessionBusy` when a step is writing it. Neither is
-/// a queue to join — both are answers.
-pub fn acquireSessionLeases(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    base: std.Io.Dir,
-    session_path: []const u8,
-) !SessionLeases {
-    var deposits = try leaseOrRefuse(alloc, io, base, session_path, .fail_fast);
-    errdefer deposits.close(io);
-    const writer = try acquireWriterLease(alloc, io, base, session_path);
-    return .{ .deposits = deposits, .writer = .{ .file = writer } };
-}
-
-/// `<inbox>/.deposit.lock`.
-fn depositLockPath(alloc: std.mem.Allocator, session_path: []const u8) ![]u8 {
-    const inbox = try inboxPath(alloc, session_path);
-    defer alloc.free(inbox);
-    return std.fmt.allocPrint(alloc, "{s}{c}.deposit.lock", .{ inbox, std.fs.path.sep });
 }
 
 /// `depositEvent` for a caller that ALREADY holds the deposit lease.
@@ -1096,45 +956,6 @@ pub fn depositEventLeased(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir
     try base.rename(tmp_rel, base, final_rel, io);
 }
 
-/// The deposit leases of TWO sessions, held at once — what any act that changes
-/// WHERE a result will land needs, because such an act touches both ends and
-/// neither end may be pruned out from under it in between. Naming one session
-/// twice takes one lease; taking the same lease twice would deadlock on the
-/// second.
-///
-/// LOCK ORDER: in session-path order, never in call order — two such pairs in
-/// opposite directions would otherwise each hold what the other waits for.
-pub const DepositPair = struct {
-    first: Lease,
-    second: ?Lease,
-
-    pub fn close(self: *DepositPair, io: std.Io) void {
-        if (self.second) |*l| l.close(io);
-        self.first.close(io);
-    }
-};
-
-pub fn acquireDepositPair(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    base: std.Io.Dir,
-    a_session_path: []const u8,
-    b_session_path: []const u8,
-    wait: DepositWait,
-) !DepositPair {
-    if (std.mem.eql(u8, a_session_path, b_session_path)) {
-        return .{ .first = try leaseOrRefuse(alloc, io, base, a_session_path, wait), .second = null };
-    }
-    const a_first = std.mem.lessThan(u8, a_session_path, b_session_path);
-    const first_path = if (a_first) a_session_path else b_session_path;
-    const second_path = if (a_first) b_session_path else a_session_path;
-
-    var first = try leaseOrRefuse(alloc, io, base, first_path, wait);
-    errdefer first.close(io);
-    const second = try leaseOrRefuse(alloc, io, base, second_path, wait);
-    return .{ .first = first, .second = second };
-}
-
 /// Move the undrained deposit `name` from one session's inbox to another's —
 /// the second way a fact reaches an inbox, and the only way one leaves an inbox
 /// without being drained. False when there was nothing to move, which is the
@@ -1155,7 +976,7 @@ pub fn moveDeposit(
     from_session_path: []const u8,
     to_session_path: []const u8,
     name: []const u8,
-    wait: DepositWait,
+    wait: lease.Wait,
 ) !bool {
     if (std.mem.eql(u8, from_session_path, to_session_path)) return false;
 
@@ -1166,13 +987,13 @@ pub fn moveDeposit(
     // nobody the leases to say so.
     base.access(io, src, .{}) catch return false;
 
-    var pair = try acquireDepositPair(alloc, io, base, from_session_path, to_session_path, wait);
+    var pair = try lease.depositPair(alloc, io, base, from_session_path, to_session_path, wait);
     defer pair.close(io);
     return moveDepositLeased(alloc, io, base, from_session_path, to_session_path, name);
 }
 
 /// `moveDeposit` for a caller that ALREADY holds both inboxes' leases
-/// (`acquireDepositPair`) — because the move is only half of what it has to do
+/// (`lease.depositPair`) — because the move is only half of what it has to do
 /// atomically. `task retarget` is the case: the `notify` pointer it writes and
 /// the deposit it moves are two physical halves of ONE routing fact, and the
 /// destination has to still exist for both of them or neither.
@@ -1197,21 +1018,6 @@ pub fn moveDepositLeased(
     base.access(io, src, .{}) catch return false;
     try base.rename(src, base, dst, io);
     return true;
-}
-
-/// `acquireDepositLease` with the caller's `fail_fast` spelled as the refusal
-/// every reader of one already knows.
-fn leaseOrRefuse(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    base: std.Io.Dir,
-    session_path: []const u8,
-    wait: DepositWait,
-) !Lease {
-    return acquireDepositLease(alloc, io, base, session_path, wait) catch |err| switch (err) {
-        error.WouldBlock => error.DepositInFlight,
-        else => err,
-    };
 }
 
 /// `<inbox>/<name>.json` — where one deposited event lands.
@@ -1386,7 +1192,7 @@ pub fn pruneSession(
     opts: PruneOptions,
 ) !PruneReport {
     base.access(io, session_path, .{}) catch return error.NoSuchSession;
-    var leases = try acquireSessionLeases(alloc, io, base, session_path);
+    var leases = try lease.sessionLifetime(alloc, io, base, session_path);
     defer leases.close(io);
     return pruneSessionLeased(alloc, io, base, session_path, opts, &leases);
 }
@@ -1394,7 +1200,7 @@ pub fn pruneSession(
 /// `pruneSession` for a caller that ALREADY holds this session's leases — and
 /// holds them because it had a question of its own to settle under them.
 ///
-/// The pair is what freezes a session's LIFETIME (`SessionLeases`): with both
+/// The pair is what freezes a session's LIFETIME (`lease.SessionLeases`): with both
 /// held, no new background task can appear under this session by either path.
 /// The question that needs them — "is a task of this session still running?" —
 /// is the caller's to answer, because reading every task directory (and, for a
@@ -1409,7 +1215,7 @@ pub fn pruneSessionLeased(
     base: std.Io.Dir,
     session_path: []const u8,
     opts: PruneOptions,
-    leases: *SessionLeases,
+    leases: *lease.SessionLeases,
 ) !PruneReport {
     // Asked again under the leases: another prune could have finished in
     // between, and taking the deposit lease recreated the inbox it just removed.
@@ -1479,7 +1285,7 @@ fn removeInbox(
     session_path: []const u8,
     names: []const []u8,
 ) !void {
-    const lock_rel = try depositLockPath(alloc, session_path);
+    const lock_rel = try lease.depositLockPath(alloc, session_path);
     defer alloc.free(lock_rel);
     try deleteIfPresent(io, base, lock_rel);
 
@@ -1497,7 +1303,7 @@ fn removeInbox(
 }
 
 fn deleteSibling(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8, suffix: []const u8) !void {
-    const path = try siblingPath(alloc, session_path, suffix);
+    const path = try lease.siblingPath(alloc, session_path, suffix);
     defer alloc.free(path);
     try deleteIfPresent(io, base, path);
 }
@@ -1997,7 +1803,7 @@ test "pruneSession removes what a session is made of, and refuses history unless
         var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "leased" });
         l.deinit();
 
-        var held = try acquireSessionLeases(alloc, io, tmp.dir, spath);
+        var held = try lease.sessionLifetime(alloc, io, tmp.dir, spath);
         defer held.close(io);
         _ = try pruneSessionLeased(alloc, io, tmp.dir, spath, .{}, &held);
         try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, spath, .{}));
@@ -2064,7 +1870,7 @@ test "a held deposit pair freezes BOTH sessions, in path order either way round"
     b.deinit();
 
     {
-        var pair = try acquireDepositPair(alloc, io, tmp.dir, "b.jsonl", "a.jsonl", .block);
+        var pair = try lease.depositPair(alloc, io, tmp.dir, "b.jsonl", "a.jsonl", .block);
         defer pair.close(io);
         // Both ends, not just the one named first.
         try std.testing.expectError(error.DepositInFlight, pruneSession(alloc, io, tmp.dir, "a.jsonl", .{}));
@@ -2073,7 +1879,7 @@ test "a held deposit pair freezes BOTH sessions, in path order either way round"
 
     // Naming one session twice is one lease: taking it twice would deadlock on
     // the second, and there is no second inbox to protect.
-    var same = try acquireDepositPair(alloc, io, tmp.dir, "a.jsonl", "a.jsonl", .block);
+    var same = try lease.depositPair(alloc, io, tmp.dir, "a.jsonl", "a.jsonl", .block);
     try std.testing.expect(same.second == null);
     same.close(io);
 
@@ -2098,7 +1904,7 @@ test "moveDeposit takes BOTH inboxes' leases, and moves only what is still there
     // Somebody is inside the SOURCE inbox: not a queue to join for a caller
     // that asked to be told instead.
     {
-        var held = try acquireDepositLease(alloc, io, tmp.dir, "a.jsonl", .block);
+        var held = try lease.sessionDeposits(alloc, io, tmp.dir, "a.jsonl", .block);
         defer held.close(io);
         try std.testing.expectError(
             error.DepositInFlight,
@@ -2133,12 +1939,12 @@ test "the inbox lease is exclusive, and a deposit into a session that is gone is
     var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
 
     {
-        var held = try acquireDepositLease(alloc, io, tmp.dir, spath, .block);
+        var held = try lease.sessionDeposits(alloc, io, tmp.dir, spath, .block);
         defer held.close(io);
         // What `session prune` asks, and the answer that makes it refuse.
         try std.testing.expectError(
-            error.WouldBlock,
-            acquireDepositLease(alloc, io, tmp.dir, spath, .fail_fast),
+            error.DepositInFlight,
+            lease.sessionDeposits(alloc, io, tmp.dir, spath, .fail_fast),
         );
     }
 
@@ -2674,17 +2480,6 @@ test "the writer holds an exclusive lease: a second writer is refused with Sessi
     try std.testing.expectEqual(@as(usize, 1), b.len());
     try b.append(.{ .user_text = .{ .text = "two" } });
     try std.testing.expectEqual(@as(usize, 2), b.len());
-}
-
-test "siblingPath names <stem><suffix> next to the session file" {
-    const alloc = std.testing.allocator;
-    const a = try inboxPath(alloc, ".nulya/sessions/s-1.jsonl");
-    defer alloc.free(a);
-    try std.testing.expectEqualStrings(".nulya/sessions" ++ std.fs.path.sep_str ++ "s-1.inbox", a);
-
-    const b = try siblingPath(alloc, "s-2.jsonl", ".cancel");
-    defer alloc.free(b);
-    try std.testing.expectEqualStrings("s-2.cancel", b);
 }
 
 test "inbox: deposits drain in name order and never touch the main file" {

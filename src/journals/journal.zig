@@ -1,10 +1,8 @@
 //! The shared file layer under Nulya's durable JSONL journals.
 //!
 //! Two journals live in the workspace's `.nulya/`: tool usage (`tool_stats.zig`)
-//! and session outcomes (`outcome.zig`); a third, trusted stores (`trust.zig`),
-//! lives in the USER's `~/.nulya/` because a checkout must not be able to sign
-//! for itself. They record different facts and none knows another's schema —
-//! what they genuinely share is the FILE discipline:
+//! and session outcomes (`outcome.zig`). They record different facts and neither
+//! knows the other's schema — what they genuinely share is the FILE discipline:
 //!
 //!   * one complete JSON line per event, appended at the end, never rewritten;
 //!   * a journal is written by MANY processes (every `session step`, every
@@ -22,18 +20,16 @@
 //!   * a missing journal file reads as "no facts yet", while a missing workspace
 //!     (or any other host fault) propagates. What a missing *directory* means is
 //!     the journal's own call, not this layer's: for a workspace journal it is a
-//!     host fault (the workspace is supposed to be there), for the user-level
-//!     trust journal it is simply "nothing recorded yet".
+//!     host fault, the workspace is supposed to be there.
 //!
 //! That I/O and the CLOCK are what is shared. There is deliberately no
 //! `Journal(T)`: each journal owns its own encode/parse, its own schema version,
 //! and its own error set.
 
 const std = @import("std");
+const lease = @import("../lease.zig");
 
 /// Directory holding the workspace journals, relative to the workspace root.
-/// (The user-level trust journal sits directly in `<NULYA_HOME | ~/.nulya>`, so
-/// it does not use this.)
 pub const journal_dir = ".nulya";
 
 /// The current instant as RFC3339 UTC (`2026-08-16T09:31:00Z`) — how every
@@ -76,10 +72,8 @@ pub fn appendLine(io: std.Io, cwd: []const u8, file_rel: []const u8, line: []con
     defer workspace.close(io);
     if (std.fs.path.dirname(file_rel)) |parent| try workspace.createDirPath(io, parent);
 
-    var lock_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const lock_rel = try std.fmt.bufPrint(&lock_buf, "{s}.lock", .{file_rel});
-    var lease = try workspace.createFile(io, lock_rel, .{ .truncate = false, .read = true, .lock = .exclusive });
-    defer lease.close(io);
+    var held = try lease.journalAppend(io, workspace, file_rel);
+    defer held.close(io);
 
     var file = try workspace.createFile(io, file_rel, .{ .truncate = false, .read = true });
     defer file.close(io);
