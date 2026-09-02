@@ -310,10 +310,6 @@ pub fn createSession(
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    if (!try storeTrusted(alloc, io, &host, cwd_path)) {
-        try printErr(io, "session new failed: the workspace extension store is not trusted (see the lines above)\n");
-        return null;
-    }
 
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
@@ -517,11 +513,11 @@ pub fn createSession(
     // opening a connection, and `session new` runs nothing. Freezing the spec
     // is the whole of its job; the first `step` is where that machine has to
     // answer.
-    const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
-    defer launch.freeExtensionRoots(alloc, ext_roots);
+    const ext_store = try launch.storePath(alloc, &host);
+    defer alloc.free(ext_store);
 
     const compose_exec = if (launch.isRemoteSpec(exec)) "" else exec;
-    var lenv = launch.localEnvironment(alloc, io, &cfg, null, compose_exec, ext_roots) catch |err| switch (err) {
+    var lenv = launch.localEnvironment(alloc, io, &cfg, null, compose_exec, ext_store) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return null;
@@ -556,7 +552,7 @@ pub fn createSession(
             .tool_context = .{ .environment = lenv.environment(), .cwd = cwd_path },
             .scratch_dir = scratch,
         },
-        .extension_roots = ext_roots,
+        .extension_store = ext_store,
         .registry = .{
             .max_tools = cfg.registry.max_tools,
             .with = with,
@@ -615,31 +611,6 @@ pub fn createSession(
     sess.deinit();
 
     return try alloc.dupe(u8, id);
-}
-
-/// The workspace-store gate, asked before a session composes anything.
-/// `.nulya/extensions` is checkout content AND the first store root, so a store
-/// that arrived with a clone would otherwise put its active versions into the
-/// composition — system prompts into the system blocks, tools one `ext run`
-/// away — with nothing in between. False means the session was refused and the
-/// reason is already on stderr.
-///
-/// The refusal is HARD rather than "start without that root": a session missing
-/// a capability it was composed with is not the session that was asked for.
-fn storeTrusted(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    host: *const std.process.Environ.Map,
-    cwd_path: []const u8,
-) !bool {
-    launch.ensureWorkspaceStoreTrusted(alloc, io, host, cwd_path) catch |err| switch (err) {
-        error.WorkspaceStoreUntrusted => {
-            try cli_ext.printUntrustedStoreRefusal(alloc, io, cwd_path);
-            return false;
-        },
-        else => return err,
-    };
-    return true;
 }
 
 /// One line for a refused member: what went wrong, plus every member this
@@ -1338,12 +1309,6 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    // Gated on every step, not only at creation: composition is frozen in the
-    // header, but the extension BYTES are read from the store on each resume,
-    // so a store that arrived between two steps must not be executed either.
-    if (!try storeTrusted(alloc, io, &host, cwd_path)) {
-        return stepFail(alloc, io, stream, "the workspace extension store is not trusted (see the lines above); run `nulya ext trust` after reviewing it", .{});
-    }
 
     var hdr = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch |err| {
         // A file this binary is too old to read is not a missing session: say
@@ -1370,12 +1335,12 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // flag or today's config: it was decided once, at creation. A target this
     // host cannot reach fails loudly — running the commands here instead would
     // be a silent substitution.
-    const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
-    defer launch.freeExtensionRoots(alloc, ext_roots);
+    const ext_store = try launch.storePath(alloc, &host);
+    defer alloc.free(ext_store);
     var lenv = launch.sessionEnvironment(alloc, io, &cfg, .{
         .session_path = spath,
         .tasks_dir = tasks_dir,
-    }, hdr.value.environment, hdr.value.remote_workspace, ext_roots, ssh_password) catch |err| switch (err) {
+    }, hdr.value.environment, hdr.value.remote_workspace, ext_store, ssh_password) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             return stepFail(alloc, io, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
         },
@@ -1463,7 +1428,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
             .observer = if (stream) |s| s.observer() else null,
             .gate = if (gate) |g| g.gate() else null,
         },
-        .extension_roots = ext_roots,
+        .extension_store = ext_store,
         .rebind = rebinder.resolver(),
     }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath }) catch |err| switch (err) {
         // The header's credential was fine (it built above); the one the

@@ -420,7 +420,7 @@ test "session step --stream emits the line protocol in order" {
             .observer = stream.observer(),
         },
         .model_options = .{},
-        .extension_roots = &.{"nulya-absent-extensions-root"},
+        .extension_store = "nulya-absent-extensions-store",
     };
     defer sess.l.deinit();
 
@@ -506,7 +506,7 @@ test "a reply cut by max_tokens is recorded replayable, closed with a marker, re
             .observer = stream.observer(),
         },
         .model_options = .{},
-        .extension_roots = &.{"nulya-absent-extensions-root"},
+        .extension_store = "nulya-absent-extensions-store",
     };
     defer sess.l.deinit();
 

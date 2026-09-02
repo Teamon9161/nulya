@@ -485,7 +485,7 @@ test "--with <id> onto a broken current names the version and refuses the sessio
     defer alloc.free(version);
 
     // Corrupt the seal of the version `current` points at.
-    const seal = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "mode.silent", "versions", version, "seal.json" });
+    const seal = try std.fs.path.join(alloc, &.{ support.store_rel, "mode.silent", "versions", version, "seal.json" });
     defer alloc.free(seal);
     try ws.writeFile(io, .{ .sub_path = seal, .data = "{}" });
 
@@ -517,10 +517,9 @@ test "--with <id> onto a broken current names the version and refuses the sessio
     }
 }
 
-/// The frozen `extension.json` of `id@version` in the workspace store. Caller
-/// owns it.
+/// The frozen `extension.json` of `id@version` in the store. Caller owns it.
 fn frozenManifestPath(alloc: std.mem.Allocator, id: []const u8, version: []const u8) ![]u8 {
-    return std.fs.path.join(alloc, &.{ ".nulya", "extensions", id, "versions", version, "extension.json" });
+    return std.fs.path.join(alloc, &.{ support.store_rel, id, "versions", version, "extension.json" });
 }
 
 test "editing a frozen manifest breaks its seal rather than changing what a session gets" {

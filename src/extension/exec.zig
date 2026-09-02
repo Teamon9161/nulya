@@ -5,7 +5,7 @@
 //! Which file to run is an answer only the executing machine can give: the
 //! entry variant is picked per OS, integrity has to be checked where the
 //! bytes are (or a host would verify its own copy and run someone else's),
-//! and a store root is a directory on that machine. So both execution sides
+//! and the store is a directory on that machine. So both execution sides
 //! share this one resolver: the local backend and the remote agent.
 //!
 //! `.sealed` is paid once per (id, version) per resolver, not per call: a
@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const manifest = @import("manifest.zig");
-const roots_mod = @import("roots.zig");
+const site_mod = @import("site.zig");
 const store = @import("store.zig");
 
 /// Is this a failure to resolve the version on this machine, rather than a
@@ -47,15 +47,10 @@ pub const Entry = struct {
 pub const Resolver = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
-    /// The root specs to search, owned. Opened lazily: a process that never runs
-    /// an extension never opens a directory, and — crucially — relative specs
-    /// resolve against the WORKSPACE the call names, which is not known until
-    /// the first call arrives.
-    specs: []const []const u8,
-    roots: ?roots_mod.Roots = null,
-    /// Which workspace `roots` was opened against, so a resolver handed a
-    /// different one notices instead of silently answering for the old one.
-    opened_for: []const u8 = "",
+    /// This machine's one store, owned; empty when it has none. Opened lazily,
+    /// so a process that never runs an extension never opens a directory.
+    store_path: []const u8,
+    site: ?site_mod.Site = null,
     memo: std.ArrayList(Memo) = .empty,
 
     const Memo = struct {
@@ -65,26 +60,15 @@ pub const Resolver = struct {
         interpreter: ?[]const u8,
     };
 
-    /// Take a copy of the root specs. Nothing is opened and nothing can fail
+    /// Take a copy of the store path. Nothing is opened and nothing can fail
     /// about the store here — an environment must be constructible on a machine
     /// with no extensions at all.
-    pub fn init(alloc: std.mem.Allocator, io: std.Io, specs: []const []const u8) !Resolver {
-        const owned = try alloc.alloc([]const u8, specs.len);
-        var filled: usize = 0;
-        errdefer {
-            for (owned[0..filled]) |s| alloc.free(s);
-            alloc.free(owned);
-        }
-        for (specs, owned) |spec, *slot| {
-            slot.* = try alloc.dupe(u8, spec);
-            filled += 1;
-        }
-        return .{ .alloc = alloc, .io = io, .specs = owned };
+    pub fn init(alloc: std.mem.Allocator, io: std.Io, store_path: []const u8) !Resolver {
+        return .{ .alloc = alloc, .io = io, .store_path = try alloc.dupe(u8, store_path) };
     }
 
     pub fn deinit(self: *Resolver) void {
-        if (self.roots) |*r| r.deinit();
-        if (self.opened_for.len != 0) self.alloc.free(self.opened_for);
+        if (self.site) |*s| s.deinit();
         for (self.memo.items) |m| {
             self.alloc.free(m.id);
             self.alloc.free(m.version);
@@ -92,31 +76,26 @@ pub const Resolver = struct {
             if (m.interpreter) |i| self.alloc.free(i);
         }
         self.memo.deinit(self.alloc);
-        for (self.specs) |s| self.alloc.free(s);
-        self.alloc.free(self.specs);
+        self.alloc.free(self.store_path);
         self.* = undefined;
     }
 
     /// Where to find `<id>@<version>` on this machine, having verified it
     /// against its own seal at least once in this process.
-    ///
-    /// `workspace` is the directory relative root specs resolve against — the
-    /// same directory the call itself runs in, so each side reads "the
-    /// workspace store" as its own.
-    pub fn resolve(self: *Resolver, workspace: []const u8, id: []const u8, version: []const u8) !Entry {
+    pub fn resolve(self: *Resolver, id: []const u8, version: []const u8) !Entry {
         for (self.memo.items) |m| {
             if (std.mem.eql(u8, m.id, id) and std.mem.eql(u8, m.version, version)) {
                 return .{ .path = m.path, .interpreter = m.interpreter };
             }
         }
-        const roots = try self.openRoots(workspace);
+        const site = try self.openSite();
 
         // `.sealed`: this process is about to RUN these bytes.
-        const resolved = try roots.resolveVersion(self.alloc, id, version, .sealed);
+        const resolved = try site.resolveVersion(self.alloc, id, version, .sealed);
         defer resolved.deinit(self.alloc);
         if (resolved.manifest.runtime == null) return error.MissingRuntime;
 
-        const path = try resolved.entryPathAbs(self.alloc, roots);
+        const path = try resolved.entryPathAbs(self.alloc, site);
         errdefer self.alloc.free(path);
         const interpreter: ?[]const u8 = if (resolved.manifest.runtime.?.interpreter) |ip|
             if (ip.forHost()) |value| try self.alloc.dupe(u8, value) else null
@@ -137,33 +116,13 @@ pub const Resolver = struct {
         return .{ .path = path, .interpreter = interpreter };
     }
 
-    fn openRoots(self: *Resolver, workspace: []const u8) !*const roots_mod.Roots {
-        if (self.roots) |*r| {
-            if (std.mem.eql(u8, self.opened_for, workspace)) return r;
-            // A single environment serves one session, which has one workspace;
-            // if that ever stops being true, reopening is the honest answer and
-            // the memo has to go with it — every path in it names the old root.
-            self.closeRoots();
-        }
-        const opened_for = try self.alloc.dupe(u8, workspace);
-        errdefer self.alloc.free(opened_for);
-        self.roots = try roots_mod.Roots.open(self.alloc, self.io, workspace, self.specs);
-        self.opened_for = opened_for;
-        return &self.roots.?;
-    }
-
-    fn closeRoots(self: *Resolver) void {
-        if (self.roots) |*r| r.deinit();
-        self.roots = null;
-        if (self.opened_for.len != 0) self.alloc.free(self.opened_for);
-        self.opened_for = "";
-        for (self.memo.items) |m| {
-            self.alloc.free(m.id);
-            self.alloc.free(m.version);
-            self.alloc.free(m.path);
-            if (m.interpreter) |i| self.alloc.free(i);
-        }
-        self.memo.clearRetainingCapacity();
+    /// The store, opened once and kept for the resolver's life — one `session
+    /// step` or one served channel, which is exactly the span `.sealed` is paid
+    /// over.
+    fn openSite(self: *Resolver) !*const site_mod.Site {
+        if (self.site) |*s| return s;
+        self.site = try site_mod.Site.openStore(self.alloc, self.io, self.store_path);
+        return &self.site.?;
     }
 };
 
@@ -175,8 +134,9 @@ test "a version is resolved to an entry on this machine, and verified once" {
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, ".nulya/extensions");
-    var root = try tmp.dir.openDir(io, ".nulya/extensions", .{ .iterate = true });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = buf[0..try tmp.dir.realPath(io, &buf)];
+    var root = try store.openOrCreateRoot(io, base, "store");
     defer root.close(io);
 
     const manifest_bytes =
@@ -187,13 +147,12 @@ test "a version is resolved to an entry on this machine, and verified once" {
     });
     defer alloc.free(version);
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ws = buf[0..try tmp.dir.realPath(io, &buf)];
-
-    var resolver = try Resolver.init(alloc, io, &.{".nulya/extensions"});
+    const store_path = try std.fs.path.join(alloc, &.{ base, "store" });
+    defer alloc.free(store_path);
+    var resolver = try Resolver.init(alloc, io, store_path);
     defer resolver.deinit();
 
-    const first = try resolver.resolve(ws, "scripted", version);
+    const first = try resolver.resolve("scripted", version);
     try testing.expect(std.fs.path.isAbsolute(first.path));
     // A script's entry lives inside `package/`, and its interpreter comes off
     // the frozen manifest — both decided here, by the machine that will spawn it.
@@ -202,20 +161,20 @@ test "a version is resolved to an entry on this machine, and verified once" {
 
     // The second call is the memo: the same strings, and no second digest. That
     // is what keeps `.sealed` a per-process price rather than a per-call one.
-    const second = try resolver.resolve(ws, "scripted", version);
+    const second = try resolver.resolve("scripted", version);
     try testing.expectEqual(first.path.ptr, second.path.ptr);
     try testing.expectEqual(@as(usize, 1), resolver.memo.items.len);
 
     // A version this machine does not hold is a refusal, not a guess.
     try testing.expectError(
         error.VersionNotFound,
-        resolver.resolve(ws, "scripted", "v-000000000000000000000000"),
+        resolver.resolve("scripted", "v-000000000000000000000000"),
     );
 }
 
-test "a resolver with no roots at all refuses rather than inventing one" {
+test "a resolver with no store at all refuses rather than inventing one" {
     const alloc = testing.allocator;
-    var resolver = try Resolver.init(alloc, testing.io, &.{});
+    var resolver = try Resolver.init(alloc, testing.io, "");
     defer resolver.deinit();
-    try testing.expectError(error.VersionNotFound, resolver.resolve(".", "nope", "v-000000000000000000000000"));
+    try testing.expectError(error.VersionNotFound, resolver.resolve("nope", "v-000000000000000000000000"));
 }

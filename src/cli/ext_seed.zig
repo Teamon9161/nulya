@@ -19,7 +19,7 @@ const bundled = @import("../bundled.zig");
 const launch = @import("../launch.zig");
 const journal = @import("../journals/journal.zig");
 const common = @import("common.zig");
-const writeRootSpec = common.writeRootSpec;
+const draftRootSpec = common.draftRootSpec;
 const takeUserFlag = common.takeUserFlag;
 const cwdRealPath = common.cwdRealPath;
 const printOut = common.printOut;
@@ -320,7 +320,7 @@ pub fn extSeed(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         return 1;
     }
 
-    const root_spec = (try writeRootSpec(alloc, flags.user)) orelse {
+    const root_spec = (try draftRootSpec(alloc, flags.user)) orelse {
         try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
         return 1;
     };

@@ -4,15 +4,15 @@
 //!
 //! A reader, not a verb: the rest of `session.zig` drives one session, while
 //! everything here walks every session file at once and joins it with the
-//! outcome journal and the store roots.
+//! outcome journal and the extension store.
 
 const std = @import("std");
-const roots_mod = @import("../extension/roots.zig");
+const site_mod = @import("../extension/site.zig");
 const outcome = @import("../journals/outcome.zig");
 const ledger = @import("../ledger.zig");
 const launch = @import("../launch.zig");
 const common = @import("common.zig");
-const RootSearch = common.RootSearch;
+const StoreView = common.StoreView;
 const cwdRealPath = common.cwdRealPath;
 const printRaw = common.printRaw;
 
@@ -93,9 +93,9 @@ pub fn sessionList(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
 
     // Opened once for the whole listing; frozen versions are content-addressed,
     // so one manifest read answers for every session naming it.
-    var search = RootSearch.open(a, io, cwd_path) catch null;
+    var search = StoreView.open(a, io, cwd_path) catch null;
     defer if (search) |*s| s.deinit(a);
-    var prompts: PromptIndex = .{ .roots = if (search) |*s| &s.roots else null, .cache = .init(a) };
+    var prompts: PromptIndex = .{ .site = if (search) |*s| &s.site else null, .cache = .init(a) };
     defer prompts.cache.deinit();
 
     var views: std.ArrayList(SessionView) = .empty;
@@ -234,7 +234,7 @@ fn readSessionView(
 /// another checkout, deactivated and pruned) contributes nothing rather than
 /// failing the listing. Absence here means "unknown", not "none".
 const PromptIndex = struct {
-    roots: ?*const roots_mod.Roots,
+    site: ?*const site_mod.Site,
     cache: std.StringHashMap([]const []const u8),
 
     fn forActive(self: *PromptIndex, a: std.mem.Allocator, active: []const ledger.ExtensionRef) ![]const []const u8 {
@@ -246,7 +246,7 @@ const PromptIndex = struct {
     }
 
     fn forOne(self: *PromptIndex, a: std.mem.Allocator, ref: ledger.ExtensionRef) ![]const []const u8 {
-        const roots = self.roots orelse return &.{};
+        const site = self.site orelse return &.{};
         const key = try std.fmt.allocPrint(a, "{s}@{s}", .{ ref.id, ref.version });
         const gop = try self.cache.getOrPut(key);
         if (gop.found_existing) return gop.value_ptr.*;
@@ -254,7 +254,7 @@ const PromptIndex = struct {
 
         // `.structural`: nothing in a listing runs, so a version whose bytes
         // cannot be verified still contributes its declaration.
-        const resolved = roots.resolveVersion(a, ref.id, ref.version, .structural) catch return gop.value_ptr.*;
+        const resolved = site.resolveVersion(a, ref.id, ref.version, .structural) catch return gop.value_ptr.*;
         defer resolved.deinit(a);
         const paths = try a.alloc([]const u8, resolved.manifest.system_prompts.len);
         // The manifest owns its strings; the listing outlives it, so copy while

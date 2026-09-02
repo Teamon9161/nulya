@@ -25,12 +25,12 @@ pub const provider = support.provider;
 pub const remote = support.remote;
 pub const remote_protocol = support.remote_protocol;
 pub const session = support.session;
+pub const site = support.site;
 pub const store = support.store;
 pub const target = support.target;
 pub const templates = support.templates;
 pub const tool = support.tool;
 pub const tool_stats = support.tool_stats;
-pub const trust = support.trust;
 
 /// A single-file compiled extension, as small as the wire allows: drain stdin
 /// (so the host's write never blocks), print one line, exit 0. Its stdout IS
@@ -100,9 +100,7 @@ pub fn buildAndActivate(
 ) ![]u8 {
     const version = try scaffoldAndBuild(alloc, io, ws, zig_exe, id, tool_name, main_src);
     errdefer alloc.free(version);
-    var ext_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
-    defer ext_root.close(io);
-    try store.Store.init(io, ext_root).activate(alloc, id, version);
+    try activateInStore(alloc, io, ws, id, version);
     return version;
 }
 
@@ -124,7 +122,7 @@ pub fn scaffoldAndBuild(
 ) ![]u8 {
     const manifest_bytes = try fixtureManifestJson(alloc, id, tool_name);
     defer alloc.free(manifest_bytes);
-    try writeSingleFileDraft(alloc, io, ws, ".nulya" ++ std.fs.path.sep_str ++ "extensions", id, manifest_bytes, main_src);
+    try writeSingleFileDraft(alloc, io, ws, workspace_rel, id, manifest_bytes, main_src);
     return installPrebuilt(alloc, io, ws, zig_exe, id, manifest_bytes, main_src);
 }
 
@@ -179,16 +177,46 @@ pub fn greetSource(alloc: std.mem.Allocator, greeting: []const u8) ![]u8 {
     return buf;
 }
 
-/// The workspace store, as an environment resolves it: relative, against the
-/// workspace the CALL names — which is what makes the same spec correct on a
-/// remote agent looking at its own workspace.
-pub const workspace_store_roots: []const []const u8 = &.{".nulya/extensions"};
+/// The workspace's drafts and its own pointer layer, relative to the workspace.
+pub const workspace_rel = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
+
+/// The one store every e2e workspace uses, under the isolated test home.
+/// Caller owns the result.
+pub fn storePath(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir) ![]u8 {
+    const home = try defaultHome(alloc, io, ws);
+    defer alloc.free(home);
+    return std.fs.path.join(alloc, &.{ home, "store" });
+}
+
+/// Open (creating if needed) that store. Caller closes it.
+pub fn openStore(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir) !std.Io.Dir {
+    const path = try storePath(alloc, io, ws);
+    defer alloc.free(path);
+    return store.openOrCreateRoot(io, ".", path);
+}
+
+/// The absolute path of a directory inside `ws` — what an environment's store
+/// path has to be, since nothing there resolves against a workspace. Caller
+/// owns the result.
+pub fn absIn(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, rel: []const u8) ![]u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = buf[0..try ws.realPath(io, &buf)];
+    return std.fs.path.join(alloc, &.{ ws_path, rel });
+}
+
+/// Point the store's own `current` at a version, the way `ext activate --user`
+/// would.
+pub fn activateInStore(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8, version: []const u8) !void {
+    var dir = try openStore(alloc, io, ws);
+    defer dir.close(io);
+    try store.Store.init(io, dir).activate(alloc, id, version);
+}
 
 /// One native tool invocation through the real executor chain: a fresh
 /// `LocalEnvironment` resolves the frozen version against this workspace's
 /// store, spawns it, and returns its output. Caller owns `result.output`.
-pub fn callNative(alloc: std.mem.Allocator, io: std.Io, t: tool.Tool, ws_path: []const u8) !tool.RawToolResult {
-    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_roots = workspace_store_roots });
+pub fn callNative(alloc: std.mem.Allocator, io: std.Io, t: tool.Tool, ws_path: []const u8, store_path: []const u8) !tool.RawToolResult {
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_store = store_path });
     defer lenv.deinit();
     return t.executor.call(alloc, .{
         .args_json = "{}",
@@ -353,12 +381,15 @@ pub fn runCliEnv(
 pub const EnvPair = struct { key: []const u8, value: []const u8 };
 
 /// The child's user layer, defaulted into the workspace so no e2e run ever reads
-/// or writes the developer's real `~/.nulya`: the user store `--user` writes to,
-/// the user config, and the trusted-stores journal `ext build` / `ext trust`
-/// append to all live under `NULYA_HOME`. A test that cares about the
-/// user layer passes its own `NULYA_HOME` pair, which wins — the pairs are applied
+/// or writes the developer's real `~/.nulya`: the ONE extension store and the
+/// user config both live under `NULYA_HOME`. A test that cares about the user
+/// layer passes its own `NULYA_HOME` pair, which wins — the pairs are applied
 /// after this.
 pub const home_subdir = ".nulya-test-home";
+
+/// The ONE store, relative to the workspace — where every version an e2e run
+/// builds lands, since `NULYA_HOME` points into the workspace.
+pub const store_rel = home_subdir ++ std.fs.path.sep_str ++ "store";
 
 /// That same user layer, for a test that spawns `nulya` some other way than
 /// `runCli` — an in-process session whose `shell` runs the CLI has to point its
@@ -607,28 +638,22 @@ fn prebuiltVersion(
     return version;
 }
 
-/// Copy the frozen `<id>/versions/<version>` out of the shared cache into `ws`'s
-/// workspace store, byte for byte, and record that store as trusted.
+/// Copy the frozen `<id>/versions/<version>` out of the shared cache into this
+/// workspace's store, byte for byte.
 ///
 /// The copy is what makes this cheap AND what makes it honest: a version is
-/// content-addressed, so identical bytes are the same version. What a copy
-/// cannot reproduce is the store's BIRTH — a workspace store is trusted because
-/// a local `ext build` filled it, and nothing local filled this one. So the
-/// trust is recorded here explicitly: the harness standing in for the person
-/// who would have run `nulya ext trust`, in the same isolated home `runCli` uses.
+/// content-addressed, so identical bytes are the same version.
 fn installVersion(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8, version: []const u8) !void {
-    try installVersionInto(alloc, io, ws, ".nulya" ++ std.fs.path.sep_str ++ "extensions", id, version);
-    try trustWorkspaceStore(alloc, io, ws);
+    var dest_root = try openStore(alloc, io, ws);
+    defer dest_root.close(io);
+    try installVersionInto(alloc, io, dest_root, id, version);
 }
 
-/// The copy itself, into any store root under `ws` — the workspace store, or a
-/// user root a test points `NULYA_HOME` at. Trust is the caller's business: it
-/// is the WORKSPACE store alone that a session gates on.
+/// The copy itself, into an already-open store directory.
 fn installVersionInto(
     alloc: std.mem.Allocator,
     io: std.Io,
-    ws: std.Io.Dir,
-    root_rel: []const u8,
+    dest_root: std.Io.Dir,
     id: []const u8,
     version: []const u8,
 ) !void {
@@ -640,10 +665,8 @@ fn installVersionInto(
     var src = try cache_store.openDir(io, version_rel, .{ .iterate = true });
     defer src.close(io);
 
-    const dest_rel = try std.fs.path.join(alloc, &.{ root_rel, id, "versions", version });
-    defer alloc.free(dest_rel);
-    try ws.createDirPath(io, dest_rel);
-    var dest = try ws.openDir(io, dest_rel, .{});
+    try dest_root.createDirPath(io, version_rel);
+    var dest = try dest_root.openDir(io, version_rel, .{});
     defer dest.close(io);
     try copyTree(alloc, io, src, dest);
 }
@@ -705,20 +728,6 @@ fn expectTreeSubset(alloc: std.mem.Allocator, io: std.Io, from: std.Io.Dir, to: 
     }
 }
 
-/// Record `ws`'s workspace extension store in the test home's trust journal, the
-/// way `nulya ext trust` would. Idempotent.
-fn trustWorkspaceStore(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir) !void {
-    var store_dir = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
-    defer store_dir.close(io);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const store_path = buf[0..try store_dir.realPath(io, &buf)];
-
-    const home = try defaultHome(alloc, io, ws);
-    defer alloc.free(home);
-    if (try trust.isTrusted(alloc, io, home, store_path)) return;
-    try trust.append(alloc, io, home, store_path);
-}
-
 /// Put a built version of the single-file extension `<id>`/`<tool>` in `ws`'s
 /// workspace store, compiling it at most once per repo checkout. Returns the
 /// version id; caller frees.
@@ -745,22 +754,21 @@ pub fn installPrebuilt(
     return alloc.dupe(u8, version);
 }
 
-/// Put a built version of the repo's OWN `extensions/<id>` in `ws`'s workspace
+/// Put a built version of the repo's OWN `extensions/<id>` in this workspace's
 /// store, so the `nulya ext build` a test — or a driver script it spawns — is
 /// about to run finds it and answers "already built" instead of compiling it
 /// again. The CLI path under test is unchanged; only its cost is. Returns the
 /// version id; caller frees.
 pub fn stageBundled(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8) ![]u8 {
-    const version = try stageBundledIn(alloc, io, ws, ".nulya" ++ std.fs.path.sep_str ++ "extensions", id);
-    errdefer alloc.free(version);
-    try trustWorkspaceStore(alloc, io, ws);
-    return version;
+    var dest_root = try openStore(alloc, io, ws);
+    defer dest_root.close(io);
+    return stageBundledIn(alloc, io, dest_root, id);
 }
 
-/// `stageBundled` into a named store root under `ws` — for a test that needs the
-/// repo's own extension to sit in a root OTHER than the workspace store (a user
-/// root the test points `NULYA_HOME` at, say). Returns the version id; caller frees.
-pub fn stageBundledIn(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, root_rel: []const u8, id: []const u8) ![]u8 {
+/// `stageBundled` into an already-open store — for a test that stands up a
+/// SECOND machine's store (a far side's `NULYA_HOME`, say). Returns the version
+/// id; caller frees.
+pub fn stageBundledIn(alloc: std.mem.Allocator, io: std.Io, dest_root: std.Io.Dir, id: []const u8) ![]u8 {
     var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
@@ -776,7 +784,7 @@ pub fn stageBundledIn(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, root
     defer alloc.free(draft_rel);
 
     const version = try prebuiltVersion(alloc, io, key, repo_dir, draft_rel, zig_exe);
-    try installVersionInto(alloc, io, ws, root_rel, id, version);
+    try installVersionInto(alloc, io, dest_root, id, version);
     return alloc.dupe(u8, version);
 }
 

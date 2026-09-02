@@ -116,6 +116,7 @@ test "durable ledger: an assistant-with-calls tail left on disk by a crash is re
             .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
+        .extension_store = support.store_rel,
     };
 
     // Process A "crashes" right after appending an assistant-with-calls: the tail
@@ -475,6 +476,7 @@ test "durable ledger: a capability note deposited by a separate CLI process is r
             .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
+        .extension_store = support.store_rel,
     };
 
     // Close this writer before the durable-resume check below — the lease is
@@ -1389,6 +1391,7 @@ test "session cli: --with pins a built-but-not-activated version into one sessio
             .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
+        .extension_store = support.store_rel,
     };
     const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{with_id});
     defer alloc.free(spath);
@@ -1570,6 +1573,7 @@ test "session cli: --prompt freezes a file's bytes into the header, blocks land 
             .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
+        .extension_store = support.store_rel,
     };
     const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
     defer alloc.free(spath);

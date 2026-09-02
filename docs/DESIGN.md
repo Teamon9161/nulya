@@ -161,15 +161,15 @@ header 冻一个模型身份而 header 不可改写（physics #1），所以"换
 
 ### 3.3 派生视图
 
-UI / trajectory / metrics 都是 ledger 的投影，不持久化 mutable 状态。**证据在 ledger 之外的 journal 里**——三条 append-only JSONL：前两条在 workspace 的 `.nulya/` 下，`trusted-stores.jsonl` 记的不是证据而是一次授权，所以在 **user** 层（§9）。
+UI / trajectory / metrics 都是 ledger 的投影，不持久化 mutable 状态。**证据在 ledger 之外的 journal 里**——两条 append-only JSONL，都在 workspace 的 `.nulya/` 下。
 
 三条共用 `journals/journal.zig` 的文件层，因为每个 `session step` / `ext run` / `session outcome` 进程都写同一个文件：
 
 - append 全程持 `<journal>.lock` 排他 lease——不是形式，临界区是"stat + 写"，两个并发 append 会落到同一 offset。
 - append 前修残尾，**只修最后一个换行之后的部分**：崩溃只可能停在进行中的那次 append，而多修一行就是把别人的证据当成自己的错误清掉。
 - 读端不拿锁、忽略残尾——所以 `session list` 不会因为一次 crash 在下一次写之前一直失败。
-- 文件不存在 = 还没有事实。目录不存在意味着什么由各 journal 自己决定（workspace journal 是 host fault，user 层的 trust journal 是"还没记过"）。
-- 同一个时钟 `journal.rfc3339Now`，三条 journal 的 `at` 与 session header 的 `created` 同一格式。
+- 文件不存在 = 还没有事实；目录不存在是 host fault。
+- 同一个时钟 `journal.rfc3339Now`，两条 journal 的 `at` 与 session header 的 `created` 同一格式。
 
 **这套纪律经 `nulya journal append|read`（§14）暴露给 extension**：`journals/journal.zig` 是 `src/` 内部模块，脚本 extension import 不到它（`extensions/agent/src/record.zig` 就是手抄一遍的先例）。`append <path>` 从 stdin 读一条记录（不走 argv——Windows 命令行上限），去掉结尾换行后须是单行合法 JSON，否则拒绝且不写一个字节；`read <path>` 打印全部完整行，文件不存在 = 空输出 exit 0。**无 `--stamp`**（`at` 归调用者的 schema），**无 mailbox 动词**（put/peek/ack 是更强的投递契约，唯一 consumer 是 agent 包自己）。
 
@@ -346,7 +346,7 @@ session 开始时一次选定，整场冻结（`composition.SessionComposition.i
 - 写 `:a,b` = 在缺省之上再把 `a`、`b` 放上模型面。
 - 写 `:none` = 成员，但一个工具都不上面（skills、system prompts、CLI 可达照旧）。
 
-成员来自两处，同义、并集、后者胜：config 的 **`[extensions] with`**（这个 workspace 的每一场；project 层也可以写——它只能在这台机器**已持有且已信任**的包里挑，不像 `extensions.paths` 那样决定哪些目录可以供出代码，§9.5），与 **`session new --with`**（这一场，可重复）。同一个 id 被提到两次，后一次连版本带工具选择整个替换前一次。
+成员来自两处，同义、并集、后者胜：config 的 **`[extensions] with`**（这个 workspace 的每一场；project 层也可以写——它只能在这台机器 store **已有的**包里挑，引不进任何代码，§9.5），与 **`session new --with`**（这一场，可重复）。同一个 id 被提到两次，后一次连版本带工具选择整个替换前一次。
 
 **`surface` 的三个词，问的都是同一个问题**：*这个包已经是本场成员了，这个 tool 到不到模型面前、怎么到？*
 
@@ -502,35 +502,46 @@ Extension = 子进程；wire protocol 就是 ABI（不用 `.so/.dll`、不用 WA
 
 `nulya ext init` **缺省生成脚本骨架**（`src/run.sh` + `src/run.ps1`、manifest 用对象形式的 entry + interpreter、tool input 声明一个可选 `name`），`--zig` 才是编译骨架——**被调用的方式一模一样**；`--script` 是保留一个版本期的无操作别名，usage 不再列它。脚本与编译 extension 共用 seal / integrity / store / activate / rollback / usage，区别只在"是否编译"和 hash 是否含 compiler。
 
-### 7.2 Store roots：搜索顺序（首个 active 持有者胜）
+### 7.2 一个 store，两层指针
 
-extension 装在**多个 store root** 里，按固定顺序搜索（`extension/roots.zig` 的 `Roots`）：
+**built 版本的字节在一台机器上只有一处**：`<NULYA_HOME | ~/.nulya>/store/<id>/versions/<v>/`。
+workspace 只放 **draft** 与一个**可选的 `current` 指针**：`.nulya/extensions/<id>/{extension.json, src/…, skills/…, current}`——**永远没有 `versions/`**。
+`extension/site.zig` 的 `Site` 是这两者合起来的唯一读口。
 
-| # | root | 谁写 | 备注 |
+| 层 | 路径 | 放什么 | 谁写 |
 |---|---|---|---|
-| ① | workspace `.nulya/extensions` | 默认 | 一个 checkout 自己的能力 |
-| ② | user `<NULYA_HOME \| ~/.nulya>/extensions` | `--user` | 造一次、每个 workspace 都有 |
-| ③ | `extensions.paths`（**只认 trusted 层**，§9.5） | operator | project 层写了也忽略 |
+| store | `<NULYA_HOME \| ~/.nulya>/store/<id>/` | `versions/<v>/`、`current`、`.lock` | `ext build`（总是）· `ext activate --user` |
+| workspace | `.nulya/extensions/<id>/` | draft 源码、`current` | `ext init` · `ext seed` · `ext activate` |
 
-- **同一个 id 在多个 root → 首个持有 active 版本（有 `current`）的 root 胜**（workspace 遮蔽 user）。"持有"看 `current` 不看目录：只有 `<id>/` 目录、没有 `current` 的 root（draft、已 `deactivate` 的副本）**不参与遮蔽**——否则在 workspace `deactivate` 会静默藏起 user 那份。同一定义贯穿 `Roots.listActive`（composition / `skill list`）、`Roots.firstActive`（`ext run`、`--with` 不带版本、`ext deactivate` 的落点）与 `ext list` 的 `(shadowed)` 标记。
-- **frozen 版本按 root 顺序找**（`initFrozen`、`skill load` 的 frozen ref、`ext run <id>@<version>`）：version 内容寻址、integrity 照验，所以顺序只决定"在哪找到"，不决定"跑什么"。data / script 版本的 id 就是 snapshot hash，任意 root 的副本**严格**同字节；compiled 版本的 id 是 `snapshot + compiler + target` 的 hash，二进制 digest 只进 seal 不进 id，所以"两个 root 各自编出的同 id 副本同字节"是**可复现构建不变量**（同源、同编译器、同 target），不是数学保证。
-- **`--user` 从 session 里跑会说一句**：`ext activate|rollback --user` 在 `NULYA_SESSION` 存在时往 stderr 打一行 `note: activating <id>@<version> in the user store from inside session <sid>: it becomes active for every workspace on this machine`，该版本若声明了 system_prompts 再接 ` and its system prompt enters every future session`。**照做，不拦**；不带 `--user`、或不在 session 里，一个字不说。
-- **写端的落点：`activate` / `rollback` 作用于该 id 生效中的那个 root**（`Roots.firstActive`）——在被遮蔽的 root 里激活会"成功"却改变不了任何 session 看到的东西。要激活的版本不在生效 root 里 → 明确失败（指出它建在哪个 root、可用 `--user` 显式打到 user store）；只有该 id **在任何 root 都没有 active 副本**时才按 `firstWithVersion` 找首个持有该 built 版本的 root。操作完成后重算一次 `firstActive`：只有生效的 `{root, version}` 真是目标时才向 live session 投能力宣告 note（§5.3），否则打印 `note: not in effect — <id>@<v> in <root> shadows it`。`deactivate` 同样作用于生效的那份。
-- **每个 `<id>/` 的变更都在 `<root>/<id>/.lock` 下进行**（`Store.lease`：build 写 `versions/<v>`、activate / rollback 改 `current`、deactivate 删 `current`；阻塞式排他 advisory 锁）——user store 被这台机器上的每个 workspace 共写。读端不拿锁：`current` 是原子 rename，版本目录靠 seal 校验。
-- **header 不记 root**（`active` 仍是 `{id, version}`）：记了就是把一台机器的目录布局冻进会话，而那与"跑的是哪份字节"无关。
-- 不存在的 root 是**缺席**不是错误；写端（`ext init --user` / `ext build --user`）需要时才创建。
-- **project 层不能加 root**：一个 root 决定这台机器上哪些目录可以供出 `current`，即哪些代码可以被跑起来——checkout 能加就是拓宽权限（§9.5 "只能收窄"）。同一条理由的另一面是 **workspace root 自己就在 checkout 里**，所以它有一道一次性的 trust gate（§9）；只读投影不过门。
+- **指针分层**：workspace 的 `current` 压过 store 的；两层都没有 = 这里没激活。同一条规则贯穿
+  `Site.listActive`（composition / `skill list` / `ext list`）、`Site.activePointer`（`ext run`、`--with` 不带版本、`ext deactivate` 的落点）。
+- **版本按名字查，只查 store**（`initFrozen`、`skill load` 的 frozen ref、`ext run <id>@<version>`、`exec_version` 反查）：
+  version 内容寻址、integrity 照验，指针一个字都不参与。
+- **`ext activate [--user]` 只决定写哪一层的指针**：`--user` = store 的那份；否则 **这个 workspace 已经有 `<id>/` 目录**（draft、指针，或两者）就写 workspace 层，没有就写 store 层。
+  `ext deactivate [--user]` 删的是**生效中**的那一层（`--user` 强制 store 层）。`ext build` 从不碰任何指针。
+- **`--user` 从 session 里跑会说一句**：`ext activate --user` 在 `NULYA_SESSION` 存在时往 stderr 打一行
+  `note: activating <id>@<version> in the user layer from inside session <sid>: <id> now means this version for every workspace on this machine`。**照做，不拦**。
+- 激活后重算一次生效指针：只有这一层真是生效的那一层时才向 live session 投能力宣告 note（§5.3），否则打印 `note: not in effect — the <layer> pointer names <id>@<v>`。
+- **每个 `<id>/` 的变更都在 `<store>/<id>/.lock` 下进行**（`Store.lease`：build 写 `versions/<v>`、activate 改任一层的 `current`、deactivate 删它；阻塞式排他 advisory 锁）——store 被这台机器上的每个 workspace 共写。读端不拿锁：`current` 是原子 rename，版本目录靠 seal 校验。
+- **header 不记位置**（`active` 仍是 `{id, version}`）：所以老布局写下的 session，只要版本进了 store 就照常 resume。
+- 不存在的 store 是**缺席**不是错误（没有 home 的机器就没有 store）；写端需要时才创建。
+- **checkout 里没有可执行的字节**：workspace 能带的只有源码，所以从前那道 workspace-store trust gate 连同 `trusted-stores` journal 一起删掉了。
 
-**三个作用于整个 root 的壳层动词**（`cli/ext.zig` / `cli/ext_seed.zig`，都不改任何语义）：
+**`nulya ext migrate [--dry-run]`**（`cli/ext.zig`）是一次性的搬家：把老布局的
+`.nulya/extensions/<id>/versions/*` 与 `<NULYA_HOME | ~/.nulya>/extensions/<id>/versions/*` 搬进 store，
+指针跟着它原来的语义走——user root 的 `current` 变成 store 的，workspace 的留在 workspace。
+store 里已有同名版本就保留 store 那份、删掉老的（内容寻址，字节相同）。跑两遍第二遍无事可做。
 
-- **`nulya ext seed [--user] [<id>…] [--force] [--dry-run]`** = 把**这个二进制内嵌的自带 draft**（build.zig 把 `extensions/**` `@embedFile` 进来，`src/bundled.zig` 投影；§7.8）写进该 root——**分发就是二进制本身**。只写**源码**：build 归 `ext sync`，trust / activate 的每道门原样不动；版本目录不碰（physics #5）。
-  - **它也是自带扩展的更新通道**：seed 每写一个 draft 就在 `<root>/<id>/.seed` 记下自己写的那棵树的 digest（`{v,digest,nulya,at}`；**不进 package snapshot**，version id 不受影响）。四种答案：**没有** → seed；**与本二进制逐字节相同** → up to date（顺手补记录）；**记录仍描述盘上这棵树**（本 harness 自己写的、没人动过）→ **自动刷新成新源码**（`updated`，连该 draft 下 seed 不再提供的文件一起清掉，`versions/` / `current` / `.lock` / `.seed` 除外）；**记录对不上或根本没有记录**（有人编辑过、或是记录出现之前的老 seed）→ **原样留着并点名**，`--force` 是唯一覆盖入口。**记录只授予覆盖权**：读不出、版本不认、不存在，一律落回"别动它"。
-  - 点名不存在的 id → 报错并列出内嵌清单，exit 1。`--dry-run` 不写盘，连 root 目录都不建。
-- **`nulya ext sync [--user] [--activate] [--seed] [--dry-run]`** = 把这个 root 下每个 **draft**（判据：`<root>/<id>/extension.json` 存在，只认一层）走一遍 `ext build`。drafts 彼此独立，**一个失败不中断其它**（每个 id 一行；host fault 仍照原样传播），有任何一个没拿到版本就 exit 1。
-  - `--activate` 单独一档（**build 是机械的、activate 是决定**，§7.4）：只把 `current` 指向**这一趟新拿进来的版本**、以及**根本没有 `current` 的 id**；`current` 已经指着别处的一律不动，所以一次 rollback 活得过下一次 sync。在它动的那些 id 上就是 `ext activate`，包括它在 stderr 上那句「激活不等于组合」的提示。
-  - `--dry-run` 走同一条计算（`build_ext` 的 `Mode.plan`：同一份 manifest / snapshot / 搜索，写之前停手、也不拿 lease），所以它与真跑不可能对同一个 draft 说两样话。填满一个空 workspace store 时同样按 §9 记一条 birth trust。
+**三个作用于一整个目录的壳层动词**（`cli/ext.zig` / `cli/ext_seed.zig`，都不改任何语义）：
+
+- **`nulya ext seed [--user] [<id>…] [--force] [--dry-run]`** = 把**这个二进制内嵌的自带 draft**（build.zig 把 `extensions/**` `@embedFile` 进来，`src/bundled.zig` 投影；§7.8）写进 workspace（`--user` = 写进 store 目录，与版本并排）——**分发就是二进制本身**。只写**源码**：build 归 `ext sync`；版本目录不碰（physics #5）。
+  - **它也是自带扩展的更新通道**：seed 每写一个 draft 就在 `<dir>/<id>/.seed` 记下自己写的那棵树的 digest（`{v,digest,nulya,at}`；**不进 package snapshot**，version id 不受影响）。四种答案：**没有** → seed；**与本二进制逐字节相同** → up to date（顺手补记录）；**记录仍描述盘上这棵树**（本 harness 自己写的、没人动过）→ **自动刷新成新源码**（`updated`，连该 draft 下 seed 不再提供的文件一起清掉，`versions/` / `current` / `.lock` / `.seed` 除外）；**记录对不上或根本没有记录**（有人编辑过、或是记录出现之前的老 seed）→ **原样留着并点名**，`--force` 是唯一覆盖入口。**记录只授予覆盖权**：读不出、版本不认、不存在，一律落回"别动它"。
+  - 点名不存在的 id → 报错并列出内嵌清单，exit 1。`--dry-run` 不写盘，连目录都不建。
+- **`nulya ext sync [--user] [--activate] [--seed] [--dry-run]`** = 把那个目录下每个 **draft**（判据：`<dir>/<id>/extension.json` 存在，只认一层）走一遍 `ext build`，**产物一律进 store**。drafts 彼此独立，**一个失败不中断其它**（每个 id 一行；host fault 仍照原样传播），有任何一个没拿到版本就 exit 1。
+  - `--activate` 单独一档（**build 是机械的、activate 是决定**，§7.4）：只把 `current` 指向**这一趟新拿进来的版本**、以及**根本没有 `current` 的 id**；`current` 已经指着别处的一律不动，所以一次 rollback 活得过下一次 sync。写哪一层与 `ext activate` 同一条规则。
+  - `--dry-run` 走同一条计算（`build_ext` 的 `Mode.plan`：同一份 manifest / snapshot / 查找，写之前停手、也不拿 lease），所以它与真跑不可能对同一个 draft 说两样话。
   - `--seed` = 先跑一次 `ext seed [--user]`（不带 `--force`），再照常 sync；`--dry-run` 两步都 dry。
-- **`nulya ext prune [--user] [<id>] [--dry-run]`** = 删这个 root 下**不是 `current`** 的版本目录（持同一个 `<id>/.lock`）。**`current` 缺失的 id 一个都不删**——没有指针就没有"该留哪个"的依据。代价直说：冻在被删版本上的旧 session 无法 resume；恢复路径是 draft 还在（同源码重 build 得同一个 version id）。**不扫 session header 保护被引用的版本**（等真实需要）。
+- **`nulya ext prune [<id>] [--dry-run]`** = 删 store 里**这里没有任何 `current` 指着**的版本目录（持同一个 `<id>/.lock`）。"这里"= 这个 workspace 的指针 + store 自己的那份；**别的 workspace 的指针看不见**。**两层都没有指针的 id 一个都不删**——没有指针就没有"该留哪个"的依据。代价直说：冻在被删版本上的旧 session 无法 resume；恢复路径是 draft 还在（同源码重 build 得同一个 version id）。**不扫 session header 保护被引用的版本**（等真实需要）。
 
 ### 7.2.1 目录与 manifest（`nulya.extension/v2`）
 
@@ -543,7 +554,7 @@ manifest 讲给三种听众，字段按哪个听众读它分成三层，每层�
 | **前端声明** | 形状由 kernel 检查，**值是开放词表**——认不出的词是**读的人**的选择（退回朴素卡、warn-and-skip），永远不是 build 拒绝 |
 
 ```
-<store root>/<id>/               ← draft（可变）
+<workspace>/.nulya/extensions/<id>/   ← draft（可变；`--user` 的 draft 在 store 里同形）
 ├── extension.json
 ├── src/…                        ← 有 runtime 时；`bin/` 前缀是编译产物，其余是脚本，按平台可以是多个文件
 └── skills/<name>/SKILL.md       ← 声明的 skill 目录
@@ -693,19 +704,19 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
 
 #### 落点与目录
 
-**落点由 manifest id + store root 决定，不由 draft 路径决定**：`nulya ext build <path> [--user]` 把版本写进 `<store root>/<manifest.id>/versions/<v>`。root 的选择：`--user` → user root；否则 draft 若在某个 store root 之内 → 该 root；否则 → workspace root。这让 draft 可以待在任意路径（`extensions/…`、`modes/…`）而不在源码旁留下孤儿 `versions/`。编译进程的 cwd 就是 dest root。
+**落点由 manifest id 决定，不由 draft 路径决定，而且只有一个**：`nulya ext build <path>` 把版本写进 `<NULYA_HOME | ~/.nulya>/store/<manifest.id>/versions/<v>`，draft 在哪都一样（`extensions/…`、`modes/…`、`.nulya/extensions/…`）。源码旁边永远不留孤儿 `versions/`。编译进程的 cwd 就是 store。
 
 版本目录冻结 snapshot：编译 extension 得 `versions/v-…/{extension.json, package/src/**, package/skills/**, bin/<entry><exe>}` + seal（含 `binary_digest`），**编译从 frozen `package/src/main.zig` 进行**，不读 mutable draft；脚本 extension 得 `versions/v-…/{extension.json, package/src/**, …}` + seal（`binary_digest` = null），运行入口 = `package/<本机那个 entry 变体>`。同源码再 build = 同 version，`already_built`。
 
-**build 先在别的 root 找，找不到才调编译器**（`buildExtensionReusing` 的 `donors`，是内容寻址的直接推论）：某个 root 若持有**同一份 snapshot**（seal 的 `package_digest`）、**同一个 target**、且**同一个 compiler identity**，就整树复制进 dest root、**再验一次 `.sealed`**。stdout 多一种状态 `(built, copied from <root spec>, in <dest>)`。复制发生在**本机 `ext build` 内**，所以 §9 的出生地信任规则一字不变。
+**build 先问 store"这份 snapshot 建过没有"，建过就是 `already_built`**（内容寻址的直接推论，`findMatchingVersion`）：store 若持有**同一份 snapshot**（seal 的 `package_digest`）、**同一个 target**、且**同一个 compiler identity** 的版本，这次 build 一个字节都不写。
 
-**匹配键是 seal 的三元组而不是"算好的 `v`"，为的是编译器缺席时也能匹配**：compiled 版本的 id 含 compiler identity，没有 zig 就算不出 `v`。所以 `compilerIdentity` 不提前失败——**问得到**就把 compiler 也算进匹配（等价于按 `v` 精确找），**问不到**就只按 `(package_digest, target)` 找（候选按 version id 排序取第一个，不依赖目录顺序）。真要编译时才报 `ZigVersionUnreadable`。这是"一台没有工具链的机器也能装上 user store 里已有的 compiled 能力"的全部机制。
+**匹配键是 seal 的三元组而不是"算好的 `v`"，为的是编译器缺席时也能匹配**：compiled 版本的 id 含 compiler identity，没有 zig 就算不出 `v`。所以 `compilerIdentity` 不提前失败——**问得到**就把 compiler 也算进匹配（等价于按 `v` 精确找），**问不到**就只按 `(package_digest, target)` 找（候选按 version id 排序取第一个，不依赖目录顺序）。真要编译时才报 `ZigVersionUnreadable`。这是"一台没有工具链的机器，只要 store 里已经有那个版本（`ext push` 送来的，或另一个 workspace 建的），就能照常装上它"的全部机制。
 
 #### `--target <arch>-<os>`：为另一台机器编译
 
 产出的就是同一个包的**另一个版本**（`extension/target.zig`）。**内核里什么都不用加**：`target` 从第一天起就在 compiled 版本的 id 与 seal 里，所以不改 store 布局、不改 seal schema、不加 manifest 字段。
 
-- **词形是两个词，不是 zig triple**：闭集 `x86_64|aarch64` × `linux|windows|macos`，与 seal 那一列**逐位相同**——它是 donor 匹配与 `exec_version` 反查（§8.2）共用的那把键。abi 因此是**这里选的**：`linux → musl`（静态） · `windows → gnu` · `macos → none`（zig 自带的 libSystem stub）。认不出的词整个拒绝并列出词表。
+- **词形是两个词，不是 zig triple**：闭集 `x86_64|aarch64` × `linux|windows|macos`，与 seal 那一列**逐位相同**——它是 build 复用与 `exec_version` 反查（§8.2）共用的那把键。abi 因此是**这里选的**：`linux → musl`（静态） · `windows → gnu` · `macos → none`（zig 自带的 libSystem stub）。认不出的词整个拒绝并列出词表。
 - **两个词决定编译 invocation，不只是描述它**（`target.effectiveTriple`，唯一一处）：记同样两个词的两次 build 必须是**同一条编译命令**，所以 **host build 也显式传 `-target`**（同一个 abi、同一个 baseline cpu）。**例外只有一个**：本机那两个词若不在闭集词表里（如 `riscv64-linux`）保持 native——`--target` 拼不出它的词，不存在能与它相撞的交叉产物。
   - 必须收口的理由：`ext push` 的 `store-stat` **只按 id** 答 `held`，而 `exec_version`（§3.4）指定的正是"这个 id 就是那台机器上服务这次调用的实现"。不收口则远端本机建的（glibc、动态链接）与 host 交叉建的（musl、静态）可以同 id、不同字节、行为不同。
   - **id 不变、零 churn**：id 哈希的是**两个词**不是 triple，既有版本的 id 一个都没变。变的只是**新产出**的字节（linux 从 glibc 变 musl；显式 `-target` 把 cpu 从 native 特性降到 baseline）。老 store 里已存的 glibc 版本会被 `findMatchingVersion` 继续复用；要一个干净的 store 就 `ext prune` + 重 build。
@@ -719,16 +730,16 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
 
 | Level | 判据 | 用在哪 |
 |---|---|---|
-| `.sealed`（全量摘要） | 这些字节要被**运行**，或要被**冻进一场 session** | session composition 冻结成员版本（§7.5）· `ext run` 执行前 · `ext activate` / `rollback` · `skill load` 的 frozen ref · donor 复制之后的复验 |
-| `.structural`（只 stat，代价与包大小无关） | **只读投影**：不许凭空说出一个不存在的 extension，但不运行任何东西 | `ext list` 的 `[tools skills prompt]` 列 · `skill list` catalog · `session list --json` 的 `system_prompts` 投影 · `ext build` / `ext sync`（含 `--dry-run`）找"这份 snapshot 建过没有"的候选校验 · `activate --user` 的越界提示与能力宣告 note 文本 |
+| `.sealed`（全量摘要） | 这些字节要被**运行**，或要被**冻进一场 session** | session composition 冻结成员版本（§7.5）· `ext run` 执行前 · `ext activate` · `skill load` 的 frozen ref · `ext push` 两头 |
+| `.structural`（只 stat，代价与包大小无关） | **只读投影**：不许凭空说出一个不存在的 extension，但不运行任何东西 | `ext list` 的 `[tools skills prompt]` 列 · `skill list` catalog · `session list --json` 的 `system_prompts` 投影 · `ext build` / `ext sync`（含 `--dry-run`）找"这份 snapshot 建过没有"的候选校验 · 能力宣告 note 文本 |
 
 于是被篡改的二进制**过得了 `.structural`、过不了 `.sealed`**：列表照列它，而那一版进不了 composition、跑不起来、也 activate 不了。**缺失**的文件两层都拒——`.structural` 问的是完整，不是可信。`Store.readManifest` 从校验里直接拿回已 parse 的 manifest，不把同一个文件读两遍。
 
-#### `nulya ext push`：donor 复制跨了一台机器
+#### `nulya ext push`：把一个版本送到另一台机器的 store
 
-`nulya ext push <id>@<v> --env remote:<spec>`（`cli/ext_push.zig` + `cli/remote.zig` 的三个 `store-*` 动词，§8.2）与上面那条 donor 路径是同一件事，只是第二个目录句柄换成了一条通道：本机先按 `.sealed` 验自己那一份，逐文件过通道，**对面按 `.sealed` 再验一次才让它可见**。
+`nulya ext push <id>@<v> --env remote:<spec>`（`cli/ext_push.zig` + `cli/remote.zig` 的三个 `store-*` 动词，§8.2）：本机先按 `.sealed` 验自己那一份，逐文件过通道，**对面按 `.sealed` 再验一次才让它可见**。
 
-- **落点是那台机器的 user store，由那台机器自己解析**（host 绝不为远端拼路径）。user store 而不是 workspace store：后者是随 checkout 到达的那一个、§9 的门正为它而设。
+- **落点是那台机器的 store，由那台机器自己解析**（host 绝不为远端拼路径）——那台机器上的版本字节也只有那一处。
 - **staging → 验 → 原子 rename**：字节先进 `<id>/.push-<version>/`（在 `<id>/` 底下所以被该 id 的 writer lease 盖住，**不在 `versions/` 底下**所以 `listVersions` 看不见），验过才 rename 成 `versions/<v>`。通道半途死掉留下的是一个 staging 目录（下一次 push 同一个 id 时清掉），**绝不会是一个看起来完整的版本**。
 - **幂等，而且 hash 就是校验**：`store-stat` 先问对面持不持有这个版本（用 `.sealed` 而不是 `.structural`——否则一份坏掉的副本会挡住那次本可以修好它的 push），持有就 no-op 并说出来。
 - **`store-put` 带一个 `exec` 位**：文件拷贝会带 mode，负载不会。host 按 store 布局定它（`bin/` 下就是那个编译入口），对面没有这个位的平台忽略它。
@@ -748,7 +759,7 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
 
 `SessionComposition.init()` 解析成员 extension，冻住每个的版本，一次冻结 tools / skills / system prompts。上模型面的每个 extension tool 在此刻冻的是一个**身份**——`(包 id, 服务这次调用的冻结版本, tool 名)`（`extension/tools.zig` 的 `Binding`）——运行期按这个身份 spawn，**绝不二次读 `current`**。
 
-**冻的是版本，不是路径。** 一个绝对路径是纯 host 事实，而"这个版本在这台机器上是哪个文件"取决于**执行方**（按它的 OS 选 entry 变体、按它自己的 `.sealed` 复验、拼它自己的 store root）。所以 `environment.ExtensionRequest` 带的是身份，解析住在 `extension/exec.zig`，由**两个执行侧共用**：local backend 与远端的 `nulya remote serve`（§8.2）。**`.sealed` 每个 (id, version) 每进程付一次**（resolver 记住已验过的），保证仍是"跑它之前这个进程验过"。
+**冻的是版本，不是路径。** 一个绝对路径是纯 host 事实，而"这个版本在这台机器上是哪个文件"取决于**执行方**（按它的 OS 选 entry 变体、按它自己的 `.sealed` 复验、拼它自己的 store 路径）。所以 `environment.ExtensionRequest` 带的是身份，解析住在 `extension/exec.zig`，由**两个执行侧共用**：local backend 与远端的 `nulya remote serve`（§8.2）。**`.sealed` 每个 (id, version) 每进程付一次**（resolver 记住已验过的），保证仍是"跑它之前这个进程验过"。
 
 一个直接后果：**"这个包在这台机器上没有可用的 entry 变体"是一次失败的调用，不是开不了场。** composition 不替执行方回答这个问题（它对一场跑在别处的 session 答不了），于是 `session new` 照常开场，模型在调用时读到点名包与主机的那句话（`exec.isUnrunnableHere` → `invoke.zig` 的失败调用）。
 
@@ -814,9 +825,9 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 ### 7.8 随仓库带的 extension（顶层 `extensions/`）
 
-都是普通 extension，走 §7.4 同一条 build → activate 路，**没有一个是内核层**；六个有 runtime 的都按 §7.3 那一种 wire 被调用。**没有一个包能让自己进任何一场**：装上之后仍要有人往成员表里写一行（§5.1）。随 checkout 到达的 store 照过 §9 的 trust gate。
+都是普通 extension，走 §7.4 同一条 build → activate 路，**没有一个是内核层**；六个有 runtime 的都按 §7.3 那一种 wire 被调用。**没有一个包能让自己进任何一场**：装上之后仍要有人往成员表里写一行（§5.1）。
 
-**分发**：这些 draft 的源码被 build.zig `@embedFile` 进二进制（`src/bundled.zig` 投影），`nulya ext seed` 把它们写进任一 store root（§7.2）——拿到二进制就拿到了它们，不需要这个 checkout 在场；seed 之后走的路与手放源码毫无区别。**升级也走同一个动词**：`.seed` 记录让它认得出"这份 draft 是我写的、之后没人动过"。
+**分发**：这些 draft 的源码被 build.zig `@embedFile` 进二进制（`src/bundled.zig` 投影），`nulya ext seed` 把它们写进 workspace 或 store 目录（§7.2）——拿到二进制就拿到了它们，不需要这个 checkout 在场；seed 之后走的路与手放源码毫无区别。**升级也走同一个动词**：`.seed` 记录让它认得出"这份 draft 是我写的、之后没人动过"。
 
 | id | kind | contribute | 谁消费 / 怎么进 session |
 |---|---|---|---|
@@ -865,7 +876,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 **persona 不是 extension**：它走 `session new --prompt <file>`（§5.6），字节冻进 header，什么都不安装、什么都没有版本。`agent-` 前缀**只是这个包自己的写/读约定**——`render` 写这个文件名，`wornPersona` 从 header 的 `composition.prompts[].source` 剥它；内核对这个标签一无所知。（曾经每次委派把正文冻成一个 `agent-<name>` data extension：那把一段 per-session 文本做成了安装物，`ext list` 长出一排派生包，而 `ext prune` 能删掉某一场赖以 resume 的身份文本。）
 
-**定义分三层，规则是 store roots 那一条**：`.nulya/agents/*.md`（workspace）> `<NULYA_HOME | ~/.nulya>/agents/*.md`（user）> **包自带的 `explore` / `plan` / `general` / `orchestrator`**（`src/builtin/*.md`，`@embedFile` 进这个 extension 自己的二进制）。**首个持有者胜，输的那个照样列出来并标 `shadowed`**。四个 persona 移植自 tcode，**nulya 没有的概念是删掉而不是翻译**（`ask_user`、`gatesOutput` / `tools: []` / `questionPolicy`）；`orchestrator` 是唯一带 `agents` 白名单的，其余三个都是 leaf。于是**什么都不写就有四个能用的**。
+**定义分三层，规则与 extension 的指针层同形**：`.nulya/agents/*.md`（workspace）> `<NULYA_HOME | ~/.nulya>/agents/*.md`（user）> **包自带的 `explore` / `plan` / `general` / `orchestrator`**（`src/builtin/*.md`，`@embedFile` 进这个 extension 自己的二进制）。**首个持有者胜，输的那个照样列出来并标 `shadowed`**。四个 persona 移植自 tcode，**nulya 没有的概念是删掉而不是翻译**（`ask_user`、`gatesOutput` / `tools: []` / `questionPolicy`）；`orchestrator` 是唯一带 `agents` 白名单的，其余三个都是 leaf。于是**什么都不写就有四个能用的**。
 
 **成员直接传**：委派把定义的 `with` 原样交给 `session new --with`，一个词都不派生；解析不到时说话的是 `session new` 自己。
 
@@ -1039,11 +1050,11 @@ Environment { runShell(cmd, dialect) / runExtension(id, version, tool, request_j
 
 **两半分开：名字在 host claim，命令在它该跑的机器上跑。** `environment.claimTaskSlot`（独占 mkdir 取第一个空 `t<N>`）与 `environment.spawnSupervisor` 是两个共用件：local backend 与 `nulya remote serve` 用的是**同一段** spawn，而名字**永远**由 host 分配——它是 ledger、回执与每个 `task` 动词说的那个东西，而 ledger 在 host。`SupervisorSpawn` 上 `--session <file>` 与 `--task <sid>/t<N>` **恰好二选一**，这个选择就是"报告投进那个 session 的 inbox"与"报告留在 log 旁边等 host 来取"的分界（§8.2）。
 
-`LocalOptions.session`（`SessionRef{session_path, tasks_dir}`）与 `LocalOptions.extension_roots` **两半都由壳层算好再交下来**（`launch.localEnvironment` / `launch.sessionTasksDir` / `launch.extensionRoots`），与 `StepContext.scratch_dir` 同一条分工：内核只往里写，"放哪儿"与"哪些目录可以供出代码"是壳层的决定（内核不读 config）。root 是**懒开**的，相对 spec 对着**那次调用点名的 workspace** 解析——这正是同一份 spec 在远端 agent 上也对的原因。
+`LocalOptions.session`（`SessionRef{session_path, tasks_dir}`）与 `LocalOptions.extension_store` **两半都由壳层算好再交下来**（`launch.localEnvironment` / `launch.sessionTasksDir` / `launch.storePath`），与 `StepContext.scratch_dir` 同一条分工：内核只往里写，"放哪儿"是壳层的决定（内核不读 config）。store 是**懒开**的，路径是绝对的——每一侧算的都是**它自己那台机器**的那一个，这正是同一段代码在远端 agent 上也对的原因。
 
 **`putWorkspaceFile` 的唯一 consumer 是 `emit`**（§8.2）：把一段字节写进**这一场 session 的工作区**，路径是 workspace 相对、`/` 分隔的——**正是 footer 里给模型看的那个字符串**。买到的不变量就是这一句：字节落在哪、模型被指去哪，是**同一个字符串**在同一台机器上。它**不收 allocator**，建父目录是实现这一侧的承诺（`emit` 自己一个目录都不建）。`emit` 那侧的接口是 `emit.FileSink`（住在 `emit.zig` 里——`emit` 必须谁都能 import 且不知道进程是什么），而**两者之间没有 adapter**：`Environment.fileSink()` 直接把 `{ptr, vtable.putWorkspaceFile}` 交出去。**全仓库把字节变成文件只有一处实现** `LocalEnvironment.putWorkspaceFileImpl`；远端那侧不是第二份——`nulya remote serve` 收到 `put-file` 帧后调的就是它。
 
-**`runExtension` 收的是身份，不是路径**（§7.5）：`(id, version, tool)` + 参数 JSON。把 `(id, version)` 变成一个可以 spawn 的文件是**执行这一侧**的事（按自己的 OS 选 entry 变体、按自己的 `.sealed` 复验、拼自己的 store root），住在 `extension/exec.zig`，由 local backend 与 `nulya remote serve` 共用。
+**`runExtension` 收的是身份，不是路径**（§7.5）：`(id, version, tool)` + 参数 JSON。把 `(id, version)` 变成一个可以 spawn 的文件是**执行这一侧**的事（按自己的 OS 选 entry 变体、按自己的 `.sealed` 复验、拼自己的 store 路径），住在 `extension/exec.zig`，由 local backend 与 `nulya remote serve` 共用。
 
 **这里曾经还有一个 `WorkspaceFs`**（`readFileAlloc` / `atomicWriteFile` 的 vtable，只为 builtin `edit` 存在）。`edit` 搬进 `extensions/std` 之后它一个读者都没有了——extension 子进程本来就自己开文件（authority 上与 shell 同级，§9）。`ToolContext` 现在是 `{environment, cwd}`。真要 sandbox / remote backend 时，能拦住文件访问的是那一层本身。
 
@@ -1062,7 +1073,7 @@ spec 语法    local | wsl | wsl:<distro>
 
 **`ssh:<destination>` 这个拼法已删除**：它只搬 `shell` 而工作区、extension、每个 spill 文件全留 host——一旦有什么超出 `shell` 本身，这条边界就是裂脑的。想搬 `shell` 到一台 ssh 机器上、工作区跟着一起搬，写 `--env remote:ssh:<destination>`（外加 `--workspace`）；只想搬命令、不搬工作区，`wsl` 仍然是那个答案（WSL 经 `/mnt/` 本来就与 host 共享文件系统）。老 header 里冻着这个拼法的场 resume 时**响亮失败**，refusal 里带上指向 `remote:ssh:` 与 `--workspace` 的那句话（`launch.legacySshHint`），绝不静默改跑别处。
 
-**只有 `shell` 的命令搬走。** extension 子进程、task supervisor、extension store、三条 journal、`emit` 的 spill 文件——全部留在 host（这些是 harness 自己的机器，它们是为这个 host 编译的）。
+**只有 `shell` 的命令搬走。** extension 子进程、task supervisor、extension store、两条 journal、`emit` 的 spill 文件——全部留在 host（这些是 harness 自己的机器，它们是为这个 host 编译的）。
 
 **为什么冻进 header**（`Header.environment`，可空、老 header 读回 `""`，§3.4）：与 `model_identity` 同一个理由，且**不是**缓存理由（它从不进模型的 prompt）。一份转录只在产出它的那台机器上才有意义：路径、模型以为自己在什么平台上、下一步还看得见哪些文件，全从这里来。所以 `session new --env` 决定一次，`session step` 不认这个 flag、只读 header；resume 时目标不可达就**响亮失败**（与 `MissingCredential` 对称）。同理 `nulya task run` 读的是那一场的 header——**任务跑在它那场 session 跑的地方**。
 
@@ -1097,15 +1108,13 @@ argv  wsl.exe [-d D] -e nulya remote serve  /  ssh -o BatchMode=yes <dest> nulya
 
 `runShell` / `runExtension` / `putWorkspaceFile` / `startShellTask` 全部过通道。
 
-**`runExtension` 过通道，才是裂脑真正终结的地方**：在它搬走之前，`ext:std/read` 是 host 上的一个进程、读的是 host 的盘，而同一场的 `shell` 读的是对面的盘。帧里过去的是**身份**（`(id, version, tool)`）与参数 JSON；对面按自己的 OS 选 entry 变体、按自己的 `.sealed` 复验、拼自己的 store root，并从同一份参数派生 `NULYA_TOOL` / `NULYA_ARG_<k>`（`extension/exec.zig` + `extension/protocol.zig`，**一份实现两台机器**）。`presentation_file` **不下传**。**对面没有这个版本**时答一句点名 `nulya ext push` 的拒绝，host 把它答成一次**失败的调用**——模型读得到、usage journal 记下一个真实的 `ok=false`，而不是让整个 step 死掉。
-
-**远端那台机器的 workspace store 由它自己的门管**（§9 的 trust gate 在那台机器上的实例）：`.nulya/extensions` 在对面同样是 checkout 内容、同样是第一优先 root，所以一个随 clone 到达远端的 store 本可以 shadow 掉 host 明确 `ext push` 进那台机器 user store 的版本。于是 `remote serve` 在解析任何东西**之前**，对这次调用的 cwd 跑与 host 逐位相同的判据（`launch.occupiedWorkspaceStore` + 那台机器**自己**的 trust journal）——**判据与记录都在持有字节的那一侧**。不同的只是**拒绝的形状**：这里没有一场 session 可以拒掉，所以是**一次失败的调用**（点名 store 路径 + 指路在那台机器上 `nulya ext trust`），与"对面没有这个版本"逐位同形——通道不死、session 照常。答案按 cwd 在一个 serve 进程内记一次，寿命就是那个进程，所以对面跑完 `ext trust` 之后**下一条通道**即生效。门只管 workspace root；`run-shell` 不过门，与 host 上 `shell` 从不过门一致。
+**`runExtension` 过通道，才是裂脑真正终结的地方**：在它搬走之前，`ext:std/read` 是 host 上的一个进程、读的是 host 的盘，而同一场的 `shell` 读的是对面的盘。帧里过去的是**身份**（`(id, version, tool)`）与参数 JSON；对面按自己的 OS 选 entry 变体、按自己的 `.sealed` 复验、拼自己的 store 路径，并从同一份参数派生 `NULYA_TOOL` / `NULYA_ARG_<k>`（`extension/exec.zig` + `extension/protocol.zig`，**一份实现两台机器**）。`presentation_file` **不下传**。**对面没有这个版本**时答一句点名 `nulya ext push` 的拒绝，host 把它答成一次**失败的调用**——模型读得到、usage journal 记下一个真实的 `ok=false`，而不是让整个 step 死掉。
 
 #### `exec_version`：哪一份字节服务这一场，创建时就冻死
 
 一个 compiled 包的 version id 含 target（§7.4），所以"给远端 linux 建的 std"天生是**同一个包的另一个版本**。于是 header 冻两列（§3.4）：**成员**是 `(id, v_host)`（manifest / prompt / skills / `ext run` 说的都是它），**服务调用的**是 `exec_version`；data / script 包两者相等，那一列恒空。
 
-host 从**自己的 store** 按 `(package_digest, target)` 反查（`Roots.resolveForTarget` → `Store.findSealed`，正是 donor 复制已经在用的那把键），反查不到就**响亮拒绝**并指路 `ext build --target` + `ext push`，什么都不创建。resume 从 header 读回，**不重反查**。usage journal 的 `version` 列在远端场上记的也是 `exec_version`——那一列问的是"这条证据是关于哪个实现的"。
+host 从**自己的 store** 按 `(package_digest, target)` 反查（`Site.resolveForTarget` → `Store.findSealed`，正是 build 复用已经在用的那把键），反查不到就**响亮拒绝**并指路 `ext build --target` + `ext push`，什么都不创建。resume 从 header 读回，**不重反查**。usage journal 的 `version` 列在远端场上记的也是 `exec_version`——那一列问的是"这条证据是关于哪个实现的"。
 
 （收敛成一个 package digest、把 per-target 二进制降格成派生产物的那条备选被否掉了：它要改 store 布局、seal 与 composition 的 schema，代价是溶掉"一个 version id 恰好命名一份可执行字节"——那条性质正是 `.sealed` 与 usage journal 的 `version` 列赖以成立的东西。）
 
@@ -1135,7 +1144,7 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Roots.resol
 
 **`NULYA_SESSION` 不下传**（那是 host 上一个文件的路径，发过去就是一句假话）；**下传的是 `NULYA_SESSION_ID`**。这两个变量从前是一个：远端化只是把它掰开，于是**只要 id 的读者**（`extensions/std` 的 freshness 门、`session outcome` 的 `by:`、usage journal 的 `session` 列、`nulya task` 动词的缺省场次）在对面照常工作，而**真要一个文件的**那些（`ext activate` 投能力宣告 note）仍然只在 host 上拿得到路径。
 
-**`.nulya/` 的归属按"谁读它"切**：session 文件、三条 journal、extension store 的宿主面全部留 host；工作树在对面。**`emit` 的 spill 跟着工作区走**——它经 `putWorkspaceFile`（§8）落在对面，路径就是 footer 里那个 workspace 相对的字符串，所以模型下一条命令就能打开它；而 `tool-presentation/` 下那个文件的读者是**前端**（TUI 在 host 上读它），所以它**不走**这个动词、照旧由 `loop.zig` 用本机 io 写在 host。同一个 step 里两个文件去两台机器，是因为它们各自的读者在那两台机器上。
+**`.nulya/` 的归属按"谁读它"切**：session 文件、两条 journal、extension store 的宿主面全部留 host；工作树在对面。**`emit` 的 spill 跟着工作区走**——它经 `putWorkspaceFile`（§8）落在对面，路径就是 footer 里那个 workspace 相对的字符串，所以模型下一条命令就能打开它；而 `tool-presentation/` 下那个文件的读者是**前端**（TUI 在 host 上读它），所以它**不走**这个动词、照旧由 `loop.zig` 用本机 io 写在 host。同一个 step 里两个文件去两台机器，是因为它们各自的读者在那两台机器上。
 
 **cwd 不翻译**：模型面上的路径从来都是工作区相对的（`ToolContext.cwd` 恒为 `"."`、`emit.joinRel` 全平台 `/`），所以每一侧把 `.` 理解成自己那个工作区就够了。远端工作区由 `session new --workspace` 冻进 header（可空列 `remote_workspace`），调用方传下来的 cwd 被**故意忽略**。
 
@@ -1173,20 +1182,16 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Roots.resol
 - **driver 手上有一票否决**（§4 的 gate，`session step --gate`）：每个 tool call 执行前问一次，拒绝作为该 call 的 `tool_results` 回给模型。这**不是** sandbox：它拦的是"这一次要不要发生"，不是"发生时能碰什么"——一个被允许的 call 照旧与 shell 同权。manifest 的 `readonly` 同理是**给答题人的提示**，driver 有权不信。
 - OS 强制（sandbox）见 PLAN §3.8。
 
-#### workspace store 的 trust gate
+#### workspace 里没有可执行的字节
 
-**workspace store 是 checkout 内容，却是第一优先 root——所以它要被信任一次。** §9.5 把 project 层的 `extensions.paths` 挡在门外，理由是 checkout 不该决定哪些目录供给 `current`；但 `.nulya/extensions` 本身就在 checkout 里，且首个持有者胜（§7.2）。clone 一个带 store 的 repo，从前 `session new` 会机械地把其中 active 版本合进 composition——system_prompts 进 system blocks、tools 经 CLI 可调、配合 project 层允许的成员表还能上 native 面——中间没有任何人的确认。
+**一个 checkout 能带的只有 draft 源码**（§7.2）：built 版本的字节只住在
+`<NULYA_HOME | ~/.nulya>/store`，那是 checkout 碰不到的地方。所以 clone 一个仓库不会
+把任何**预先建好**的版本带进这台机器，也就没有"随 checkout 到达的 store"这件事要门。
+从前那道一次性的 workspace-store trust gate、`nulya ext trust` 与 `trusted-stores.jsonl`
+因此一起删掉了。
 
-- **信任的对象是 store 本身，不是它内容的 hash。** 内容 hash 是错的抽象：agent 每造一个能力、每 activate 一次新版本都会改它，一道每轮都重问的门会把自演化循环卡死。要判的是**出生地**：这个 store 是在本机长出来的，还是随 checkout 到达的。
-- **本机 `ext build` 填满一个空 store = 生于本地，自动记一条信任**（`cli/ext.zig` 的 `recordBirthTrust`；只对非 `--user` 且落点是 workspace root 的成功 build，且只在 build **之前**该 store 什么都没有时）。所以 `ext init → ext build → ext activate` 这条自演化主路一句提示都没有。
-- **"持有"的定义**：某个 `<id>/` 有 `current` 或有至少一个 built 版本——即 session 能 compose 或 CLI 能执行的东西。光有 draft、或一次失败 build 在 `<id>/.lock` 周围留下的空壳，**不算持有**。判据只有一处实现（`launch.occupiedWorkspaceStore`），所以门、`ext trust`、auto-trust 三方不可能互相矛盾。
-- **有内容却无信任记录 = 随 checkout 到达 → 硬拒。** `session new` 与 `session step` 启动时过门（`launch.ensureWorkspaceStoreTrusted` → `WorkspaceStoreUntrusted`）：stderr 点名 store 绝对路径、列出它持有的 `id@version` 及 `[tools skills prompt]` 标注、指路 `nulya ext trust`，exit 1。**硬拒而不是静默剔除该 root**（与 §7.5 对坏 active 版本同一条规矩）。`step` 也过门（不只创建时）：composition 冻在 header 里，但 extension 的**字节**每次 resume 都从 store 读。
-- **`nulya ext trust`** = 显式信任本 workspace 的 store：先把要信任的东西打印出来再记录。什么都不持有 → `nothing to trust`（不记录）；已信任 → `already trusted`（幂等）。**没有 `untrust`**：撤销 = 手删那一行。
-- **记录在 user 层**：`<NULYA_HOME | ~/.nulya>/trusted-stores.jsonl`，一行 `{"v":1,"store":"<绝对 realpath>","at":"<RFC3339>"}`（`journals/trust.zig`）。project 层记不算数——否则 checkout 自己给自己签名。key 是 store 目录的 realpath（从打开的句柄解析，不是拼字符串）；重复行无害。整条 journal 读不动（完整行 malformed）就**拒**而不是答。
-- **范围**：只门 workspace root（user root 与 `extensions.paths` 定义上可信，checkout 都碰不到）。**只读投影一律不门**（`ext list` / `ext inspect` / `skill list` / `skill load`）——它们正是"决定要不要信任"所需的工具；`ext run` 也不门。
-- **远端 session 里，那台机器的 workspace root 由它自己门**（§8.2）。
-- **门在壳层，不在内核**：`composition.zig` / `session.zig` 不知道 trust 存在，`AgentSession.init` 这条库路径也不过门（trust 是 CLI 的 policy，不是 physics）。
-- 仍然诚实的剩余面：checkout 里的一个 **draft**，一旦有人在本机 `ext build` 它，就既进了 store 又带来了信任——那与 `shell` 已有的权限同级。门管的是"**预先建好**的版本随 clone 到达、无声进 composition"这一件事。
+剩下的仍然诚实：checkout 里的一个 draft，一旦有人在本机 `ext build` 它就进了 store——
+那与 `shell` 已有的权限同级，是一次**人或 agent 的动作**，不是 clone 的副作用。
 
 ### 9.5 配置链（`config.zig` / `default.toml`）
 
@@ -1199,7 +1204,7 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Roots.resol
 
 `nulya config show` 打印三条路径（JSON `paths`），前端写 key 时写的就是它读的。标量 set 即胜，列表按 key 合并。
 
-**project 层可以更严不能更松**：可点名常驻成员（`extensions.with`——它只花自己的 `max_tools` 槽与前缀 token，且只能在这台机器已持有且已信任的包里挑，不拓宽权限）、选 profile、调小 `max_tools`、把 backend 从 local 收紧到 sandbox；**不可**把 backend 从 sandbox 降级 local、注入 `api_key_env` 名字外泄 host env、加 store root（单测覆盖）。这与 `extension_permissions ⊆ session_authority` 是同一个不变量的两面。
+**project 层可以更严不能更松**：可点名常驻成员（`extensions.with`——它只花自己的 `max_tools` 槽与前缀 token，且只能在这台机器 store 已有的包里挑，不拓宽权限）、选 profile、调小 `max_tools`、把 backend 从 local 收紧到 sandbox；**不可**把 backend 从 sandbox 降级 local、注入 `api_key_env` 名字外泄 host env（单测覆盖）。这与 `extension_permissions ⊆ session_authority` 是同一个不变量的两面。
 
 承载：
 
@@ -1210,7 +1215,7 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Roots.resol
 | `models[]` | `{id, label, efforts[], default_effort?, context_window?, vision?}`——按 `id` 合并、**只认 trusted 层**（project 层不能改一个 model id 的含义或让 session 静默换 effort） |
 | `registry` | `{max_tools}`（§5.1）；没有排序权重——内核不排序 |
 | `environment` | `{backend, shell}` |
-| `extensions` | **两个键，两条相反的规矩**：`paths`（§7.2 的第三档 store root）**只认 trusted 层**（它决定哪些**目录**可以供出 `current`，checkout 加一条就是拓宽权限）；`with`（§5.1 的常驻成员名单，一串裸 id，按 `current` 解析）**project 层也读**——它只能在这台机器**已经持有且已经信任**的包里挑，引不进任何代码，而"这个项目的每一场都戴上这段 house style"正是它的用例 |
+| `extensions` | 只有 `with`（§5.1 的常驻成员名单，每项 `<id>[@<version>][:<tool>,…]`，不带版本就按 `current` 解析），**project 层也读**——它只能在这台机器 store 里**已经有的**包里挑，引不进任何代码，而"这个项目的每一场都戴上这段 house style"正是它的用例。**没有第二个键**：store 只有一个，没有"哪些目录可以供出版本"这个问题 |
 
 `default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目；其中收图片的那些（claude 四个、gpt-5.6 三个、codex 的 gpt-5.5）写了 `vision = true`——**这一列是主张不是猜测**，自带目录只替它查得准的模型说话，别的 id 由用户在自己那层加一条（§14 的 `--image` 门）。
 
@@ -1253,7 +1258,7 @@ resume 时按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDe
   1. `NULYA_ZIG`（显式覆盖，**原样取用、不做存在性检查**）；
   2. **managed 目录** `<data>/toolchains/zig/0.16.0/`（`toolchain.managed_rel`；内嵌了就往里解压，**没内嵌也认里面已有的**——发布版早先解压的、或人手动解开 / junction 进去的都算，扁平 `zig[.exe]` 与 `zig-<target>-<ver>/zig[.exe]` 两种布局都收；目录是 nulya 自己的、版本是钉死的，谁放的字节不改变它是什么）；
   3. **PATH 上的 `zig`**（给开发版的：一个没内嵌工具链的 build 否则在一台装着编译器的机器上也 `ext build` 不了任何 compiled extension）。走到这一档时往 stderr 说一句 `note: using zig from PATH (<path>); set NULYA_ZIG or use an embedded build for a pinned toolchain`——**不拦，但不悄悄**：compiled version 的 id 把 compiler identity 算进 hash（§7.4），所以换一个 zig 得到的是**另一个 version**，绝不会是同一个 id 底下不同的二进制。
-- 三档都没有才报 "no zig toolchain" + 出路（`cli_toolchain.noZigHint` 是钉死的两条：`set NULYA_ZIG to a zig 0.16.0 executable, or unpack zig 0.16.0 into <managed 目录绝对路径>`；"根本没有 zig"的场合前面再加一句 `put zig on PATH`）。`ext build` / `ext sync` 撞墙时打的是**同一句**，目录写在句子里，前端原样转述就够。`ext sync` 另外区分"有 zig 但它在 store root 里答不出 `zig version`"（版本管理器 shim 从 cwd 往上找 `build.zig.zon`），点名那个 zig 的路径、不再建议 PATH，**并原样引一句探测自己的说法**（§7.4 的三堵墙）。
+- 三档都没有才报 "no zig toolchain" + 出路（`cli_toolchain.noZigHint` 是钉死的两条：`set NULYA_ZIG to a zig 0.16.0 executable, or unpack zig 0.16.0 into <managed 目录绝对路径>`；"根本没有 zig"的场合前面再加一句 `put zig on PATH`）。`ext build` / `ext sync` 撞墙时打的是**同一句**，目录写在句子里，前端原样转述就够。`ext sync` 另外区分"有 zig 但它在那个目录里答不出 `zig version`"（版本管理器 shim 从 cwd 往上找 `build.zig.zon`），点名那个 zig 的路径、不再建议 PATH，**并原样引一句探测自己的说法**（§7.4 的三堵墙）。
 - AI 不直接 `zig build`，走 `nulya ext build`（nulya 统一 optimize=ReleaseSafe / target / cache）→ 可复现构建。`nulya toolchain zig <args>` 供 scratch。
 
 ---
@@ -1420,14 +1425,15 @@ nulya ext init [--zig] [--user] <id> [tool]     ← 缺省是脚本骨架（§7.
                                                   认不出即拒并列出词表；data / script 包写它是 exit 1；`ext sync` 不认它，也不动 `current`
           | push <id>@<version> --env remote:<spec>
                                                 ← 把该版本整树复制进**那台机器的 user store**（§7.4/§8.2）；`@version` 必给；非 `remote:` 的 spec 拒
-          | sync [--user] [--activate] [--seed] [--dry-run]   ← build 这个 root 下的每个 draft（§7.2）
-          | seed [--user] [<id>…] [--force] [--dry-run]       ← 把二进制内嵌的自带 draft 写进/更新到该 root（§7.2/§7.8）
+          | sync [--user] [--activate] [--seed] [--dry-run]   ← build 那个目录下的每个 draft，产物进 store（§7.2）
+          | seed [--user] [<id>…] [--force] [--dry-run]       ← 把二进制内嵌的自带 draft 写进/更新到该目录（§7.2/§7.8）
           | run <id>[@<version>] <tool> [<json-args> | --arg k=v …] [--timeout-ms N]
                                                 ← tool 必填，json 可省（= `{}`）；缺省不套 timeout（§7.3）
           | activate [--user] <id> <version> | deactivate [--user] <id>   ← 回滚 = activate 旧版本，没有第二个动词
-          | prune [--user] [<id>] [--dry-run]   ← 删非 `current` 的版本目录（§7.2）
-          | list | inspect (<id>[@<version>] | <path>) | trust | api [protocol|manifest|examples]
-                                                ← `inspect <id>` = **生效中版本**的冻结 manifest（`Roots.firstActive`），没有即拒（无 draft 回退）
+          | prune [<id>] [--dry-run]            ← 删这里没有 `current` 指着的版本目录（§7.2）
+          | migrate [--dry-run]                 ← 一次性把老布局的 `versions/` 搬进 store（§7.2）
+          | list | inspect (<id>[@<version>] | <path>) | api [protocol|manifest|examples]
+                                                ← `inspect <id>` = **生效中版本**的冻结 manifest，没有即拒（无 draft 回退）
                                                   `inspect <id>@<version>` = **点名那个版本**（session header 记的正是这个形状）
                                                   `inspect <path>` = 那份 draft，未建未冻
 nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<version>][:<tool>,…]]…
@@ -1490,7 +1496,7 @@ nulya                                            ← 无参数：同 `nulya help
 ### 自描述与文本纪律
 
 - **`nulya help` 与上面这张表逐动词对齐是约定。** `cli/common.zig` 把 usage 拆成**按动词族**的常量（`ext_usage` / `session_usage` / `config_usage` / `skill_usage` / `src_usage` / `toolchain_usage`），`help` 拼成一屏，**bare `nulya ext` / `session` / `skill` / `config` / `toolchain` 各印自己那块**（`common.usageSection`）——同一份文本，两处不可能对同一个动词说两样话。加动词/加 flag 就同时改这张表和那几个常量。未知命令 → stderr `unknown command '<x>'; run \`nulya help\`` + exit 1（stdout 保持空）。**整屏一屏以内是硬约束**（模型每次读都在付 token；当前 52 行，e2e 钉预算，动它要有真能力到场）。
-- **`nulya ext api` 三个 topic**：`protocol`（缺省）= 真实 `extension/protocol.zig` 源码（`nulya src` 的特例，wire ABI 与实现零漂移）；**`manifest`** = 今天的 authority 与今天的 manifest（与 shell 同权、无 sandbox；子进程 env 净化后**加** `NULYA_EXE` / session 内 `NULYA_SESSION`；tool 拿不到对话；§7.2.1 那三层各说一次纪律，含 `surface` 三个词与它的 `auto` 缺省、`commands[].action` 的对象形式与按宿主键的 `ui`；extension tool 默认 30s / `timeout_ms` 上限 600s **且只在模型面生效**、`shell` 默认 120s / 上限 600s；workspace store 的 trust gate）；`examples` = 一条完整路径（`ext init` → `build` → `run <id>@<v> --arg k=v` → `activate` → **`session new --with`** → 写了 `surface: "manual"` 的 tool 用 `--with <id>:<tool>` → 故意不 activate 的包用 `--with <id>@<v>` → 想常驻就写进 `[extensions] with` → `--user` → `ext trust` → `session outcome`）。
+- **`nulya ext api` 三个 topic**：`protocol`（缺省）= 真实 `extension/protocol.zig` 源码（`nulya src` 的特例，wire ABI 与实现零漂移）；**`manifest`** = 今天的 authority 与今天的 manifest（与 shell 同权、无 sandbox；子进程 env 净化后**加** `NULYA_EXE` / session 内 `NULYA_SESSION`；tool 拿不到对话；§7.2.1 那三层各说一次纪律，含 `surface` 三个词与它的 `auto` 缺省、`commands[].action` 的对象形式与按宿主键的 `ui`；extension tool 默认 30s / `timeout_ms` 上限 600s **且只在模型面生效**、`shell` 默认 120s / 上限 600s；版本字节住在哪、workspace 的指针层为什么压过它）；`examples` = 一条完整路径（`ext init` → `build` → `run <id>@<v> --arg k=v` → `activate` → **`session new --with`** → 写了 `surface: "manual"` 的 tool 用 `--with <id>:<tool>` → 故意不 activate 的包用 `--with <id>@<v>` → 想常驻就写进 `[extensions] with` → `--user` → `session outcome`）。
 - **model-facing 文本零文档引用**：kernel prompt（§7.5）、`usage`、`ext api` 的 `manifest` / `examples`、随仓库带的 `SKILL.md`——模型读得到的字只写行为与用法，**不出现 `DESIGN §x` / `PLAN §x` / 文件名**（模型读不到 docs，extension 还可能装到别的 workspace）。文档引用只待在代码注释与 docs 里；e2e 断言这几处不含 `DESIGN` / `PLAN`。
 - **`nulya src`**：build.zig 把整个 `src/**` `@embedFile` 进二进制（源码 ~200KB，紧挨 ~90MB 工具链，恒开无 gate）；`nulya src <path>` 按 `src/` 相对路径打印，**默认剥 top-level `test` 块**，`--tests` / `--raw` 打印原样。剥离靠 zig-fmt 不变量（顶层 decl 的收尾 `}` 在第 0 列），无需 tokenizer（`source.zig`）；改的只是**投影**不是**存储**。
 
@@ -1541,7 +1547,7 @@ nulya                                            ← 无参数：同 `nulya help
 
 **正文必须是合法 UTF-8**（`--file` 与 argv 同一道门，在投递之前）：不是就点名拒绝、一字不写。与 `--prompt` 同一条理由，只是一条 user turn 是人自己的话，只能拒绝、不能像工具输出那样修复。
 
-**`--image <path>`（可重复）把 png / jpeg 内联进这条 user turn**（§3.1）。三道门全在壳层（`cli/session.zig`，与 trust gate 同一先例——`composition.zig` / `session.zig` / `prompt.zig` 都不知道它存在），**任何一道拒绝都在投递之前**：
+**`--image <path>`（可重复）把 png / jpeg 内联进这条 user turn**（§3.1）。三道门全在壳层（`cli/session.zig`——`composition.zig` / `session.zig` / `prompt.zig` 都不知道它存在），**任何一道拒绝都在投递之前**：
 
 1. **vision**：读 header 冻结的 `model_identity.model`（不是今天的 active profile；实际读的是 `ledger.scanSession`，所以一条还在 inbox 里等的 rebind 也算数），去 `[[models]]` 找那个 id，`vision = true` 才放行——**没有条目 = 不主张 = 拒绝**，文案指路要写的 config 键与 `nulya config show`（目录只认 trusted 层，checkout 自己主张不了）。
 2. **类型**：按**魔数**认 png（`\x89PNG`）/ jpeg（`\xFF\xD8\xFF`），扩展名不作数。
@@ -1665,19 +1671,19 @@ nulya                                            ← 无参数：同 `nulya help
 
 ### `nulya ext *` 的输出形态与落点
 
-- **`--user`**：`init|build|sync|prune|activate|rollback|deactivate` 都接受，写端落到 user root（需要时创建）。`activate|rollback --user` **在 session 里跑**时先往 stderr 说一句这件事跨出了本 workspace（§7.2），照做不拦。不给 `--user` 时，`activate|rollback|deactivate` 都作用于**该 id 生效中的那个 root**（`Roots.firstActive`）——版本不在那里就失败并指路；只有该 id 无 active 副本时 `activate|rollback` 才落到首个持有该 built 版本的 root。操作后按生效结果决定要不要投能力宣告 note、要不要打印 `not in effect`。
-- **`ext list`** 打印 `id / version / root`，第二列的语义就是 `current`（没有就打 `(no current)`）；有版本的行多打一列 `[tools skills prompt]`（读冻结 manifest，贡献了什么就打什么；读不到就不打，绝不让整个列表失败）。再多一列 `[with]` 当这个 id 在合并后 config 的 `[extensions] with` 里。**两列一起才答得出「这一场会不会有它」**：`prompt` 说这个包**带什么**，`[with]` 说它**进不进来**。被遮蔽的 active 行标 `(shadowed)`；**既无 `current` 又无任何 built 版本的目录直接跳过**（`<id>/.lock` 的 lease 在校验与编译之前就把 `<id>/` 建出来了，所以一次编译失败的 `ext build` 会留下只装着锁的空壳——那是锁的位置，不是 extension）。
-- **`ext run <id>[@<version>] <tool>`**：`<id>` 跑生效中的版本；`<id>@<version>` 跑**恰好那个** built 版本（active 与否无关，按 root 顺序找首个持有者）——这是 `--with <id>@<version>` 带进 session 的 runtime tool 的调用形式，也是**故意不 activate 的 driver 包**的调用形式。不让 `ext run` 在 `NULYA_SESSION` 下自动读 header，否则"同 session 内 activate 后 CLI 形式立即用新 current"这条语义就变了。usage 记的仍是 version-free 的 `ext:<id>/<tool>`。
+- **`--user`**：`init|seed|sync` 接受它作为**draft 写去哪**（store 目录而不是 workspace），`activate|deactivate` 接受它作为**指针写哪一层**。`build` 不接受：版本只有一个落点。`activate --user` **在 session 里跑**时先往 stderr 说一句这件事跨出了本 workspace（§7.2），照做不拦。不给 `--user` 时：`activate` 按"这个 workspace 有没有 `<id>/`"选层，`deactivate` 删**生效中**的那一层。操作后按生效结果决定要不要投能力宣告 note、要不要打印 `not in effect`。
+- **`ext list`** 打印 `id / version / layer`，第二列的语义就是 `current`（没有就打 `(no current)`），第三列是**哪一层的指针在生效**（`workspace` / `user`，没有指针打 `-`）；有生效版本的行多打一列 `[tools skills prompt]`（读冻结 manifest，贡献了什么就打什么；读不到就不打，绝不让整个列表失败）。再多一列 `[with]` 当这个 id 在合并后 config 的 `[extensions] with` 里。**两列一起才答得出「这一场会不会有它」**：`prompt` 说这个包**带什么**，`[with]` 说它**进不进来**。**既无指针又无任何 built 版本的目录直接跳过**（`<id>/.lock` 的 lease 在校验与编译之前就把 `<id>/` 建出来了，所以一次编译失败的 `ext build` 会留下只装着锁的空壳——那是锁的位置，不是 extension）。
+- **`ext run <id>[@<version>] <tool>`**：`<id>` 跑生效中的版本；`<id>@<version>` 跑**恰好那个** built 版本（active 与否无关，store 里有就行）——这是 `--with <id>@<version>` 带进 session 的 runtime tool 的调用形式，也是**故意不 activate 的 driver 包**的调用形式。不让 `ext run` 在 `NULYA_SESSION` 下自动读 header，否则"同 session 内 activate 后 CLI 形式立即用新 current"这条语义就变了。usage 记的仍是 version-free 的 `ext:<id>/<tool>`。
 - **`ext activate`** 在 `NULYA_SESSION` 存在时向该 session 的 inbox 投一条 `note{source:"ext"}`（§5.3）；另有 §5.1 那句「激活不等于组合」的提示。
-- **`ext trust`** = workspace store 的一次性信任（§9）：打印本 workspace store 持有的 `id@version`（带 `[tools skills prompt]` 标注）再往 `trusted-stores.jsonl` 记一行。什么都不持有 → `nothing to trust`（不记录）；已信任 → `already trusted`（幂等）；没有 home → exit 1。没有 `untrust`。
+- **`ext migrate [--dry-run]`** = 一次性搬家（§7.2）：每搬一个版本打一行 `<id>@<v>: moved from <老目录> -> the store`，每搬一个指针打一行；结尾 `N version(s) moved into <store>, M pointer(s) moved`。什么都没有 → `nothing to migrate: no version directories outside <store>`。
 
 **`sync` / `seed` / `prune` 的输出形态**（语义在 §7.2）：
 
 | 命令 | 每行 | 结尾 |
 |---|---|---|
 | `seed` | 四种之一：`<id>: seeded (<N> files) into <root>` · `<id>: updated (<N> files) into <root>`（`--force` 覆盖别人的东西时作 `replaced`）· `<id>: up to date in <root>` · ``<id>: differs from this build, left alone (<root>) — `nulya ext seed[ --user] --force <id>` replaces it``（dry-run 三个动词作 `would seed` / `would update` / `would replace`） | `N seeded, M updated, K up to date, J left alone`；写过东西再补一行指路 `` `nulya ext sync[ --user]` builds them ``；点名不存在的 id → stderr 列内嵌清单，exit 1 |
-| `sync` | `<id>: <version> <state>[ (copied from <root>)][ <激活尾巴>]`。`state ∈ built \| already built \| not built`（`not built` 只出现在 `--dry-run`，那时 `copied from` 改说 `available from`）；激活尾巴 ∈ `(active)` \| `-> current` \| `(current stays <v-old>)`。拿不到版本的两种写法：`<id>: needs zig (<§10 的那句三条出路>)` 与 `<id>: failed: <一句原因>`，两者都计进 failed | `N built, M already built, K failed`（dry-run 首列作 `not built`），有 failed → exit 1（前端按 `needs zig` 前缀识别，括号里的话原样转述） |
-| `prune` | `<id>@<v> removed (<N> KB)`（`--dry-run` 作 `would be removed`）；无 `current` 的 id 打一行说明它为什么一个都不删 | 汇总之外**固定再打一行代价**（旧 session 无法 resume / 重 build 同源码得同 id） |
+| `sync` | `<id>: <version> <state>[ <激活尾巴>]`。`state ∈ built \| already built \| not built`（`not built` 只出现在 `--dry-run`）；激活尾巴 ∈ `(active)` \| `-> current (<layer>)` \| `(current stays <v-old>)`。拿不到版本的两种写法：`<id>: needs zig (<§10 的那句三条出路>)` 与 `<id>: failed: <一句原因>`，两者都计进 failed | `N built, M already built, K failed`（dry-run 首列作 `not built`），有 failed → exit 1（前端按 `needs zig` 前缀识别，括号里的话原样转述） |
+| `prune` | `<id>@<v> removed (<N> KB)`（`--dry-run` 作 `would be removed`）；两层都无指针的 id 打一行说明它为什么一个都不删 | 汇总之外**固定再打一行代价**（旧 session 无法 resume / 重 build 同源码得同 id） |
 
 `-> current` 每落在一个 id 上，stderr 就多一句与 `ext activate` 相同的「激活不等于组合」提示（stdout 那一行不变——它是给机器读的表）。
 
@@ -1701,7 +1707,7 @@ AgentSession 编排 + interrupted-batch repair     session.zig
 cancellation 语义（step 边界消化）               loop.zig / session.zig
 shell 永久 builtin（唯一那个）                     tools/
 immutable package + 内容寻址版本                  extension/store.zig, integrity.zig
-store root 搜索顺序（首个 active 持有者胜）        extension/roots.zig
+一个 store + 两层指针（workspace 压 user）        extension/site.zig
 build / activate / rollback / integrity           extension/build/build_ext.zig, store.zig
 extension wire（只有一种）                          extension/protocol.zig, invoke.zig
 SessionComposition 版本冻结（成员解析一律硬失败）    composition.zig

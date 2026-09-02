@@ -529,7 +529,9 @@ test "bundled std read of a 200 KB file caps itself under the host budget: throu
         const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
         defer alloc.free(spath);
 
-        var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_roots = support.workspace_store_roots });
+        const store_abs = try support.storePath(alloc, io, tmp.dir);
+        defer alloc.free(store_abs);
+        var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_store = store_abs });
         defer lenv.deinit();
         // What `session step` gives every child: the session's file (for the
         // things that need a file) and its id (for the things that need a name
@@ -542,6 +544,7 @@ test "bundled std read of a 200 KB file caps itself under the host budget: throu
                 .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
                 .scratch_dir = ".nulya/scratch",
             },
+            .extension_store = support.store_rel,
         }, .{ .workspace = tmp.dir, .session_path = spath });
         defer sess.deinit();
         try std.testing.expect(sess.composition.tools.lookup("read") != null);

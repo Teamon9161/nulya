@@ -168,11 +168,7 @@ test "the wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned s
             std.mem.startsWith(u8, run.stdout, "hello from greeter, name="));
     }
 
-    {
-        var ext_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
-        defer ext_root.close(io);
-        try store.Store.init(io, ext_root).activate(alloc, "greeter", version);
-    }
+    try support.activateInStore(alloc, io, ws, "greeter", version);
 
     // On the model's tool face: a real session, a real step, and the tool result
     // the model reads is the script's stdout, byte for byte. `--with` and nothing
@@ -184,7 +180,9 @@ test "the wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned s
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
     defer alloc.free(id);
 
-    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_roots = support.workspace_store_roots });
+    const store_abs = try support.storePath(alloc, io, ws);
+    defer alloc.free(store_abs);
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_store = store_abs });
     defer lenv.deinit();
     var model = OneToolModel{ .tool_name = "greet", .args = "{\"name\":\"world\"}" };
     const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
@@ -195,6 +193,7 @@ test "the wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned s
             .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
+        .extension_store = support.store_rel,
     }, .{ .workspace = ws, .session_path = spath });
     defer sess.deinit();
 
@@ -351,11 +350,7 @@ test "per-platform entry: one version, this host's script — and a version with
     try std.testing.expectEqual(@as(u8, 0), away_built.code);
     const away_version = try extractVersion(alloc, away_built.stdout);
     defer alloc.free(away_version);
-    {
-        var ext_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
-        defer ext_root.close(io);
-        try store.Store.init(io, ext_root).activate(alloc, "elsewhere", away_version);
-    }
+    try support.activateInStore(alloc, io, ws, "elsewhere", away_version);
 
     // `ext run`: a FAILED CALL naming the package, the version and this host —
     // not a host fault. Which entry variant a version has is a question only the
@@ -391,12 +386,14 @@ test "per-platform entry: one version, this host's script — and a version with
             alloc,
             io,
             ws_path,
-            &.{".nulya/extensions"},
+            support.store_rel,
             .{ .with = &.{.{ .id = "elsewhere", .tools = .{ .named = &.{"t"} } }} },
         );
         defer comp.deinit(alloc);
         const t = comp.tools.lookup("t") orelse return error.TestUnexpectedResult;
-        const result = try support.callNative(alloc, io, t, ws_path);
+        const store_abs = try support.storePath(alloc, io, ws);
+        defer alloc.free(store_abs);
+        const result = try support.callNative(alloc, io, t, ws_path, store_abs);
         defer alloc.free(result.output);
         try std.testing.expect(!result.ok);
         try std.testing.expect(std.mem.indexOf(u8, result.output, "elsewhere") != null);
