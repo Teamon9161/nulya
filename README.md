@@ -17,22 +17,36 @@ based on real usage — not baked into the core.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — **what exists**: the implemented
   architecture and invariants, kept in sync with `src/`.
 - [`docs/PLAN.md`](docs/PLAN.md) — **what's next**: direction, roadmap, and
-  designs not yet implemented (durable ledger, session CLI, script extensions,
-  evolution layer, drivers, slow loop).
+  designs not yet implemented (sandbox, policy hooks, evolution layer,
+  watcher protocol).
+- [`docs/tui.md`](docs/tui.md) — the Bun + OpenTUI frontend, the first full driver.
 - [`docs/base-tools.md`](docs/base-tools.md) — the `emit` primitive and output discipline.
 - [`docs/agents-and-review.md`](docs/agents-and-review.md) — subagent and
   review-gate design (not yet implemented; see PLAN).
 
 ## Status
 
-v0.1 self-evolution core is frozen and proven end-to-end (`tests/e2e.zig`, real
-binaries, no mocks): a session exposing only `shell` builds and activates
-its own extension via the `nulya` CLI, usage is journaled, and the next session
-promotes that extension into the native tool set at zero cache cost.
+A session is a durable append-only ledger file (one file = one generation =
+one prompt-cache scope); the kernel projects it into a PromptIR whose turns
+are a stable prefix, runs one step at a time (batched tool calls, one
+`tool_results` turn back, cancellable, every call optionally gated), and
+freezes the whole capability surface at `session new`. Changing model, tools or system
+prompt means forking with history: `session new --parent <id>:<seq> --carry`.
 
-Not yet: durable ledger / resume, interactive frontend (bare `nulya` runs a
-fixed-prompt demo), compaction, subagents, sandbox, Anthropic provider, script
-extensions. See `docs/PLAN.md`.
+Everything above `shell` is an extension: content-addressed immutable versions
+in one per-machine store, a `current` pointer per layer, and one wire
+(stdin/stdout/exit code). Ten extensions ship inside the binary (`nulya ext
+seed`), including `std` (file tools), `agent` (delegation to nulya / codex /
+claude / pi / another extension), `compact`, `handoff`, `plan`, `ask`,
+`ground`, `coding`, `evolution`, `guide`. Providers: `openai`, `anthropic`,
+`codex` (ChatGPT subscription) and an offline `scripted` stand-in; real cache
+hits are measured by `zig build integration`. A workspace can live on another
+machine (`--env remote:wsl|ssh|exec`). Drivers talk to it through the CLI only:
+the TUI in `tui/`, and `drivers/goal.{sh,ps1}` in under 70 lines each.
+
+Not yet: OS-enforced sandbox, policy hooks, the reactive-extension watcher
+protocol, automatic compaction triggers, persistent extension runtimes. See
+`docs/PLAN.md`.
 
 ## Build
 
@@ -40,7 +54,7 @@ Requires Zig 0.16.
 
 ```sh
 zig build test    # unit tests
-zig build e2e     # extension closed-loop end-to-end tests
+zig build e2e     # end-to-end tests against real built binaries (five suites)
 zig build run     # fixed-prompt demo (scripted provider without an API key)
 ```
 

@@ -43,9 +43,9 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 **Provider**：`openai` / `anthropic`（两个 cache_control breakpoint）/ `codex`（ChatGPT 订阅 OAuth）/ `scripted`（离线替身，九档）。三个真实 provider 的 prompt cache 命中由 `zig build integration` 实测。
 
-**执行环境**：`--env local | remote:{wsl,ssh,exec}`。`remote:` 那族把整个工作区搬到别的机器——shell、extension（`ext build --target` + `ext push` 送过去）、spill、后台任务都在那边跑，报告被取回来翻成 inbox 事件。远端那个常驻进程就是 `nulya remote serve`，同一个二进制。曾经有一根只搬 `shell` 命令的轴（`wsl[:distro]`，更早还有 `ssh:<dest>`）已退役：老 header 里冻着它们 resume 时响亮拒绝并指路对应的 `remote:` 拼法。
+**执行环境**：`--env local | remote:{wsl,ssh,exec}`。`remote:` 那族把整个工作区搬到别的机器——shell、extension（`ext build --target` + `ext push` 送过去）、spill、后台任务都在那边跑，报告被取回来翻成 inbox 事件。远端那个常驻进程就是 `nulya remote serve`，同一个二进制。老 header 里冻着退役拼法（`wsl[:distro]` / `ssh:<dest>`）的场 resume 时响亮拒绝并指路对应的 `remote:` 写法。
 
-**Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|note|step|events|cancel|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *`（含一次性的 `ext migrate`） · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step --stream` 是行协议，`--gate` 是每个 tool call 的一票否决。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
+**Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|note|step|events|cancel|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *`（含一次性的 `ext migrate`） · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step` 的 stdout 一律是行协议（`--stream` 是留一个版本期的无操作别名），`--gate` 是每个 tool call 的一票否决。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
 
 **两条 journal**（append-only，持 `<file>.lock` 写、读端忽略残尾）：`tool-usage`（证据——耗时与场外调用，session 内的调用计数已经能从 ledger 派生，内核零读者）· `session-outcomes`（评判，没有行 = unknown ≠ failure）。
 
@@ -53,7 +53,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 ### 没做的
 
-自动压缩触发（何时压是 driver 的 policy，所以内核里没有、也不会有对应的 config 键）；沿 parent 链把 fork 出来的对话呈现成连续的一条（`session list --json` 的 `root` 已经算好，前端还没连）；handoff 的 driver 守卫（context 阈值 / brief 长度——`drivers/goal.*` 故意一条都没做，等真实使用证据）；TUI 的 `/goal`；policy hook；反应式扩展行为的 watcher 协议（**内核批次钩子已明确拒绝，别再想它**）；sandbox（`permissions` 那组字段已经删掉了，形状等它自己定）；first-party Anthropic key 上的实测；`session new --budget-tokens`；persistent extension runtime。去向都在 [docs/PLAN.md](docs/PLAN.md)。
+自动压缩触发（何时压是 driver 的 policy，所以内核里没有、也不会有对应的 config 键）；沿 parent 链把 fork 出来的对话呈现成连续的一条（`session list --json` 的 `root` 已经算好，前端还没连）；handoff 的 driver 守卫（context 阈值 / brief 长度——`drivers/goal.*` 故意一条都没做，等真实使用证据）；TUI 的 `/goal`；policy hook；反应式扩展行为的 watcher 协议（**内核批次钩子已明确拒绝，别再想它**）；sandbox（形状等它自己定，manifest 里没有任何声明它的字段）；first-party Anthropic key 上的实测；`session new --budget-tokens`；persistent extension runtime。去向都在 [docs/PLAN.md](docs/PLAN.md)。
 
 ## 模块表（`src/`，扣掉同文件测试约 6k 行）
 
@@ -108,7 +108,7 @@ zig build run       # nulya demo：固定 prompt 的一场 session（无 API key
 NULYA_INTEGRATION_PROFILE=deepseek-anthropic zig build integration
 ```
 
-四组共享 `.zig-cache/nulya-e2e-prebuilt` 那个"编译一次、到处复制"的缓存（`tests/e2e/support.zig`）；并发写由 store 自己的 `<id>/.lock` 排他 lease 串起来（与两个 `nulya ext build` 进程同一条路，DESIGN §7.4）。新增 e2e 文件时挑一组挂进去——**不要再回到一个二进制**（一个二进制只用得上一个核）。
+五组共享 `.zig-cache/nulya-e2e-prebuilt` 那个"编译一次、到处复制"的缓存（`tests/e2e/support.zig`）；并发写由 store 自己的 `<id>/.lock` 排他 lease 串起来（与两个 `nulya ext build` 进程同一条路，DESIGN §7.4）。新增 e2e 文件时挑一组挂进去——**不要再回到一个二进制**（一个二进制只用得上一个核）。
 
 Zig 0.16（新 `std.Io` API）。发布版加 `-Dembed-toolchain -Dzig-archive=<path>` 内嵌工具链。
 

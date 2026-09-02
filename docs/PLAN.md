@@ -48,7 +48,7 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 - 目标：session 可被任何进程驱动；extension 制造无需编译。
 - **M2a ✅ 已落地 → DESIGN §14：** `session new|append|step|events|cancel`（`step --max-steps N` 由 kernel 夹到 `session.max_steps_ceiling`）；`main.zig` demo 已改走 durable session 路径。e2e：shell 脚本 driver 完成 `/goal` 循环、`--max-steps` 被 kernel 强制。review 后收紧（DESIGN §3.4/§4/§14）：只有 `step` 写主文件——`append` 走 inbox、`cancel` 是 `<id>.cancel` 标记且由 kernel 在 step 边界消费（mid-run 也能停）、`events` 只读 tail；`close` 因无语义删除；`persist` 加第二写者守卫。
 - **M2b ✅ 已落地 → DESIGN §7.1/§7.4：** `runtime.entry` 前缀区分编译/脚本，脚本不编译、version = hash(snapshot)（不含 compiler）；`nulya ext init --script`；`ext run --arg k=v`。e2e：`run.ps1`/`run.sh` extension 走完 init → build(seal) → activate → run → 被选上模型面并经 interpreter 执行；version 不含 compiler identity、rebuild 稳定。
-- **M2c · Compaction / handoff（§3.4）✅ 已落地 → DESIGN §11：** fork 原语（`session new --parent`）+ driver 主动的 `/compact [focus]`（TUI，tui.md T7）+ **模型主动的 handoff**：随仓库带的 `extensions/handoff`（只 propose、落盘 `.nulya/handoffs/<session>-<n>.md`、缺节 / 不在 session 里都不落盘）· `compact` 的 `brief_file` 分支（只 fork，旧文件逐字节不变）+ 两条路径都由代码追加父指针 footer · `drivers/goal.sh` / `goal.ps1`（第一个 driver，`--with handoff@<v>` 一个 flag 带入；stdout 只有控制行、stderr 原样透传 `session step --stream`）。**内核零改动**，只给 `launch.ScriptedProvider` 加了第四档离线替身（DESIGN §13）。验收：`zig build test` / `e2e` 在 Windows 全绿，e2e 新增四条（compact 的 `brief_file`、handoff 的拒绝与落盘、`--with` 的 native 执行、真实 driver 脚本跑完两阶段）。
+- **M2c · Compaction / handoff（§3.4）✅ 已落地 → DESIGN §11：** fork 原语（`session new --parent`）+ driver 主动的 `/compact [focus]`（TUI，tui.md T7）+ **模型主动的 handoff**：随仓库带的 `extensions/handoff`（只 propose、一个字节都不写、缺节即拒）· `compact` 的 `brief_file` 分支（只 fork，旧文件逐字节不变）+ 两条路径都由代码追加父指针 footer · `drivers/goal.sh` / `goal.ps1`（第一个 driver，`--with handoff@<v>` 一个 flag 带入；stdout 只有控制行、stderr 原样透传 `session step` 的行协议）。**内核零改动**，只给 scripted provider 加了一档离线替身（DESIGN §13）。验收：`zig build test` / `e2e` 在 Windows 全绿，e2e 新增四条（compact 的 `brief_file`、handoff 的拒绝与落盘、`--with` 的 native 执行、真实 driver 脚本跑完两阶段）。
   - **落地时改了三处措辞**（理由已在 DESIGN §11 / goals/M2c.md §3）：① `handoff` 是 **compiled** extension 而不是 §3.4.1 说的 script——tool 要读 JSON-RPC、回同一个 `id`、校验分节，而一个 manifest 只有一个 `interpreter`，随仓库带的东西没法 ps1 + sh 各一份还共用一个 version（PLAN §0.1 #3 给 Zig 留的正是这种情况）；② 父指针 footer 由 **compact 的代码**追加，不靠模型记得写（driver 经 `session append` 投一条 user turn，仍是 propose→append 的正统用法）；③ `/goal` 是**脚本对**而不是 extension——一个 driver 一跑几十分钟，而 `ext run` 强制 manifest 的 `timeout_ms`（上限 600s），driver 不是一次 tool call；信号因此走文件与行协议，两份脚本都不解析 JSON（这也是它们各能压在 70 行内的原因）。
 
 ### M3 · `nulya src` + 文档（§3.10）✅ 已落地 → DESIGN §14
@@ -61,7 +61,7 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 - **仍未验的一处**：DeepSeek 的 anthropic 口做的是 implicit prefix cache（`cache_creation_input_tokens` 恒 0），所以「`cache_control` breakpoint 被真正采纳」只在 first-party Anthropic key 上才能确认，现在只证明了「这个序列化不破坏缓存」。
 
 ### M5 · 慢速回路的 substrate + 第一个 evolution extension（§3.7）✅ 已落地 → DESIGN §3.1/§3.3/§7.2/§7.4/§9.5/§14
-- 已做（执行契约 [goals/M5.md](goals/M5.md) 逐条对上）：**outcome journal** `.nulya/session-outcomes.jsonl` + `nulya session outcome`（第二条 journal 而不是 ledger 事件；没有行 = unknown ≠ failure；不碰 session 文件，所以正在跑的场也能评）· **per-step usage** 落 `assistant.usage`（不投影，与 `reasoning` 同地位）· **多 store root**（workspace → user → `extensions.paths`，首个持有者胜；**2026-09-02 由 core-review Lane B 收成一个 store + 两层指针**，见 DESIGN §7.2）· **`ext build` 按 manifest id 落 store**（draft 可以待在仓库任意路径）· **`session new --with <id>[@<version>]`**（composition membership；fork 不继承）· **`nulya session list [--json]`** 与 header 开始写 `created` · **`extensions/evolution/`**（仓库带的 data extension：identity prompt + skill，不 activate、`--with` 带入、无特权）。
+- 已做（执行契约 [goals/M5.md](goals/M5.md) 逐条对上）：**outcome journal** `.nulya/session-outcomes.jsonl` + `nulya session outcome`（第二条 journal 而不是 ledger 事件；没有行 = unknown ≠ failure；不碰 session 文件，所以正在跑的场也能评）· **per-step usage** 落 `assistant.usage`（不投影，与 `reasoning` 同地位）· **store 布局**（今天是一个 store + 两层指针，DESIGN §7.2）· **`ext build` 按 manifest id 落 store**（draft 可以待在仓库任意路径）· **`session new --with <id>[@<version>]`**（composition membership；fork 不继承）· **`nulya session list [--json]`** 与 header 开始写 `created` · **`extensions/evolution/`**（仓库带的 data extension：identity prompt + skill，不 activate、`--with` 带入、无特权）。
 - 验收：`zig build test` / `zig build e2e` 在 Windows 全绿，e2e 新增七例（outcome journal、usage 行、多 root 与遮蔽、build 落点、`--with`、`session list`、bundled evolution）；真实 evolution session 的报告在 [goals/M5.md](goals/M5.md) §6。
 - 相对原计划的两处修正（已定，理由见 DESIGN §3.3 / §14）：`session_outcome` **不是** ledger 事件；`--skill` 被更通用的 `--with` 吸收。
 
@@ -107,7 +107,7 @@ fork / compaction（新文件 + `parent` 指针，前端沿 parent 链呈现连�
 
 ✅ **`nulya session new|append|step|events|cancel` 已实现**，现状见 [DESIGN §14](DESIGN.md)。`step --max-steps N` 由 kernel（`AgentSession.run`，`session.max_steps_ceiling`）强制；每次调用是对 durable session 文件的独立进程，且只有 `step` 写主文件（`append` 走 inbox、`cancel` 是标记、`events` 只读 tail）；`step` stdout 一律是行协议（`--stream` 是无操作别名）；`cancel` 由 kernel 在 step 边界消费；bare `nulya` demo 已改走同一 durable 路径。
 
-**尚未落地的子项：** `--budget-tokens`；`events --follow` 只做了轮询骨架。`--pin` 家族（`--pin` / `[registry] pinned_native_tools` / manifest 的 `recommended` 与 `apply`）**已整体删除**（core-review Lane C → DESIGN §5.1）：composition 只有成员一根轴，`surface: "manual"` 的 tool 由那一行的工具选择点名（`--with std:read,grep`）。`--system-file` / `--skill` **已被 `session new --with <id>[@<version>]` 吸收**（M5e → DESIGN §14）：把一个 built 的 data extension 带进这一场，system_prompt 与 skill 一起进——比两个各管一半的 flag 更小，也让 mode 这件事不需要新机制。**2026-08-21 修正：吸收的论证只对"制品"成立，对"参数"不成立。** T32 的 agent persona 是 per-session 的正文（每次委派现渲染、没有独立于一场 session 的生命周期），被迫材料化成 `agent-<name>` data extension 走 `--with`，结果 store 与 `/ext` 长出不该按的派生包，且 persona 场的 resume 与 `ext prune` 耦合（persona 每改一次就多一个非 current 版本，prune 掉就 resume 不出来）。`--system-file` 因此以正确形式回来：**`session new --prompt <file>`（✅ 已落地，DESIGN §3.4 / §5.6 / §14）**——创建时读字节冻进 header（`ModelDescriptor` 的同一先例：冻解析结果不冻引用），resume 从 header 读、不经 store。尺子：文本有独立生命周期（evolution / handoff / plan）→ extension；没有 → `--prompt`。第一个 consumer 是 `extensions/agent`：`materialize` 改名 `render`（只渲染正文到 `.nulya/scratch/agents/`、什么都不安装），委派与 `/agent` 都改传 `--prompt`，`agent-` 前缀降级成那个包自己的写/读约定（DESIGN §7.8、tui.md T44）。执行契约见 [goals/session-prompt.md](goals/session-prompt.md)。`--skill` 仍被 `--with` 吸收（skill 是制品）。下面的 subagent / 编排用法等第一个真实 consumer 出现再写实（它们是**用法**，不改 kernel）：
+**尚未落地的子项：** `--budget-tokens`；`events --follow` 只做了轮询骨架。composition 只有成员一根轴（DESIGN §5.1）：`surface: "manual"` 的 tool 由那一行的工具选择点名（`--with std:read,grep`）。`--system-file` / `--skill` **已被 `session new --with <id>[@<version>]` 吸收**（M5e → DESIGN §14）：把一个 built 的 data extension 带进这一场，system_prompt 与 skill 一起进——比两个各管一半的 flag 更小，也让 mode 这件事不需要新机制。**2026-08-21 修正：吸收的论证只对"制品"成立，对"参数"不成立。** T32 的 agent persona 是 per-session 的正文（每次委派现渲染、没有独立于一场 session 的生命周期），被迫材料化成 `agent-<name>` data extension 走 `--with`，结果 store 与 `/ext` 长出不该按的派生包，且 persona 场的 resume 与 `ext prune` 耦合（persona 每改一次就多一个非 current 版本，prune 掉就 resume 不出来）。`--system-file` 因此以正确形式回来：**`session new --prompt <file>`（✅ 已落地，DESIGN §3.4 / §5.6 / §14）**——创建时读字节冻进 header（`ModelDescriptor` 的同一先例：冻解析结果不冻引用），resume 从 header 读、不经 store。尺子：文本有独立生命周期（evolution / handoff / plan）→ extension；没有 → `--prompt`。第一个 consumer 是 `extensions/agent`：`materialize` 改名 `render`（只渲染正文到 `.nulya/scratch/agents/`、什么都不安装），委派与 `/agent` 都改传 `--prompt`，`agent-` 前缀降级成那个包自己的写/读约定（DESIGN §7.8、tui.md T44）。执行契约见 [goals/session-prompt.md](goals/session-prompt.md)。`--skill` 仍被 `--with` 吸收（skill 是制品）。下面的 subagent / 编排用法等第一个真实 consumer 出现再写实（它们是**用法**，不改 kernel）：
 
 ```
 nulya session new   [--prompt f]… [--with id[@v][:tool,…]]… [--profile p] [--model id] [--parent s:seq]  → 打印 session-id
@@ -136,7 +136,7 @@ loop until objective / swarm           → 脚本
 
 ✅ **已实现，现状见 [DESIGN §7.1 / §7.3 / §7.4](DESIGN.md)。** `runtime.entry` 的前缀区分编译（`bin/`）与脚本（`src/`）；脚本带可选 `runtime.interpreter`（`powershell` / `sh` / `python3` …），无 `src/main.zig` 就不编译，version = `hash(snapshot)`（compiler 为空串、不含 identity、跨机器稳定），seal / integrity / activate / rollback / usage 完全共用。`nulya ext run --arg k=v` 按 manifest schema 类型生成 JSON（`'<json>'` 仍可用）。
 
-✅ **"脚本默认"这句话也已兑现**（ext-review Lane A）：M2b 之后随仓库带的六个有 runtime 的包一个脚本都没有，原因全是 wire——JSON-RPC 要在 stdin 上解析 JSON（`sh` 没有、Windows 没 `jq`）、要回同一个 `id`，而一个 manifest 只有一个 `interpreter` 所以 `sh` + `ps1` 共用不了一个版本。三处收口：**`runtime.wire: "plain"`**（stdin = arguments 对象、env 多 `NULYA_TOOL` 与顶层标量的 `NULYA_ARG_<k>`、stdout 原样即结果、退出码即成败；与 kind 正交，编译的 Zig 也能声明）· **按 OS 的 `entry` / `interpreter`**（对象形式，宿主 → `default` → 没有；只许 script kind，一个版本装下所有平台，本机没有入口 = `EntryUnsupportedOnHost` 点名硬失败）· **`ext init` 缺省脚本、`--zig` 才编译**（两个模板都不再写 `permissions`）。
+✅ **"脚本默认"这句话也已兑现**（ext-review Lane A）：M2b 之后随仓库带的六个有 runtime 的包一个脚本都没有，原因全是 wire——JSON-RPC 要在 stdin 上解析 JSON（`sh` 没有、Windows 没 `jq`）、要回同一个 `id`，而一个 manifest 只有一个 `interpreter` 所以 `sh` + `ps1` 共用不了一个版本。三处收口：**只有一种 wire**（stdin = arguments 对象、env 多 `NULYA_TOOL` 与顶层标量的 `NULYA_ARG_<k>`、stdout 原样即结果、退出码即成败；manifest 里没有选它的字段）· **按 OS 的 `entry` / `interpreter`**（对象形式，宿主 → `default` → 没有；只许 script kind，一个版本装下所有平台，本机没有入口 = `EntryUnsupportedOnHost` 点名硬失败）· **`ext init` 缺省脚本、`--zig` 才编译**。
 
 - 能力谱：**shell 一行 → 脚本 extension（`ext init`，五行 `sh`）→（实测有需要）native Zig** 成立。
 - persistent runtime（warm worker 池、LRU、TTL）仍是**先测量再做**的后期加法。
@@ -179,7 +179,7 @@ loop until objective / swarm           → 脚本
 
 **守卫（都是 driver policy，不进内核；第一版 driver 一条都没做，等真实使用证据）：** 模型判断"阶段完了"不可靠、也可能拿 handoff 逃避难题——`/goal` 已经让用户给阶段计划（"explore → design → implement → verify，阶段间 handoff"，缺省也是这四段）；还没做的是 context 太小时忽略提议（fork 没意义）、brief 太短退回 `/compact` 再要一次。两种触发共存——边界优先 handoff、压力兜底 compact——已经是一条代码路径了。
 
-**前端跟随（归 tui.md T10，未做）：** `/goal` 作为脚本跑时 TUI 是 observer，driver handoff 后 tab 要切到子 session。落地后前端不必猜：driver 的 stdout 就是控制行（`session` / `handoff <old> -> <new>` / `done`），stderr 是 `--stream` 行协议原样透传，喂给已有的解析器即可。
+**前端跟随（归 tui.md T10，未做）：** `/goal` 作为脚本跑时 TUI 是 observer，driver handoff 后 tab 要切到子 session。落地后前端不必猜：driver 的 stdout 就是控制行（`session` / `handoff <old> -> <new>` / `done`），stderr 是行协议原样透传，喂给已有的解析器即可。
 
 ### 3.5 能力演化 evidence（原 v0.2 Phase A–E）`[写实 · M6]`
 
@@ -282,13 +282,13 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 **3.7.8 触发、递归、地板。** 三档触发，每档 threshold 是 policy：① 用户 `nulya session new --with evolution@<version>`（最先，✅ M5）② 主 driver 任务结束时 `if enough new evidence` ③ 每 N 个 episode。Evolution skill 自己也可演化（`evolution v1 → v2`，复用同一套 candidate → verify → trial → rollback）。**递归的地板 = 八条 physics 不可自改**——正是这块不可自改的地板让上面一切可以放心试错。Driver 演化的真实来源多半是**重复的人类 correction 结晶**（"先写 plan""找 reviewer 看"连说十次），不是凭空花样。
 
-**3.7.9 mode = 贡献 system_prompt 的 data extension + 成为成员。** ✅ 机制已在（M5e/M5g；2026-08-23 ext-review-2 Lane K 收口，2026-08-25 ext-syntax 补第三种投放）。同一个包两种投放：写进 config `[extensions] with` = 这个 workspace 每场都有；`session new --with` = 按场（DESIGN §5.1）。两种都是人的决定。`activate` 只说 `<id>` 指哪个版本，一场都不组合。2026-09 的 core-review Lane C 删掉了曾经的第三种（manifest 顶层 `apply: "auto"`）：包自述 reach 与 `activation` 是同一个错误的两种拼法。evolution 是第一个 mode；`handoff`（§3.4.1）是第二个形状（tool 而非 prompt，同样"随仓库带、按需带入"）。**不为 mode 造别的机制**：一个"模式"就是一个 extension 加一句点名或一个 `apply`，没有 mode 注册表、没有 mode 生命周期。曾经有过一个反方向的半机制——manifest 的 `activation`（fresh 路一趟 discovery 把每个有 `current` 的包都收进来，包想不进要自己写 `on_request`）——已删：那给的是**否决权**，而 reach 是人的决定（DESIGN §7.2.1）。
+**3.7.9 mode = 贡献 system_prompt 的 data extension + 成为成员。** ✅ 机制已在（M5e/M5g；2026-08-23 ext-review-2 Lane K 收口，2026-08-25 ext-syntax 补第三种投放）。同一个包两种投放：写进 config `[extensions] with` = 这个 workspace 每场都有；`session new --with` = 按场（DESIGN §5.1）。两种都是人的决定。`activate` 只说 `<id>` 指哪个版本，一场都不组合。evolution 是第一个 mode；`handoff`（§3.4.1）是第二个形状（tool 而非 prompt，同样"随仓库带、按需带入"）。**不为 mode 造别的机制**：一个"模式"就是一个 extension 加一句点名，没有 mode 注册表、没有 mode 生命周期。**没有任何 manifest 字段能决定 reach**：reach 是人的决定（DESIGN §7.2.1）。
 
 ### 3.8 Authority / sandbox `[占位 · M7]`
 
-- `sandbox` backend 上线后才有 OS 强制的"边界"。manifest 曾经有一个 `permissions`（`{fs, network, process}`）先把形状占下了，2026-08-23 删掉了（DESIGN §7.2.1）：它零读者，而一条没人执行的声明放久了会被读成保证；**要什么形状由沙箱自己定**，不继承一个在它之前猜出来的。**执行前的那一票否决已经有了**（§3.8.1 的 gate），它是另一件事：拦的是"这一次要不要发生"，不是"发生时能碰什么"。
+- `sandbox` backend 上线后才有 OS 强制的"边界"。**要什么形状由沙箱自己定**：manifest 里没有任何声明权限的字段，一条没人执行的声明放久了会被读成保证（DESIGN §7.2.1）。**执行前的那一票否决已经有了**（§3.8.1 的 gate），它是另一件事：拦的是"这一次要不要发生"，不是"发生时能碰什么"。
 - 不变量：**capability 绝不因被生成或被晋升而自动获得 authority**；始终 `capability authority ⊆ session authority`。
-- 与 config 项目层"只能收窄"是同一不变量的两面：checkout 一个 repo 不该能拓宽机器权限。第三面**已由布局本身答掉**（core-review Lane B → DESIGN §7.2/§9）：built 版本的字节只住在 `<NULYA_HOME | ~/.nulya>/store`，checkout 里只有 draft 源码，所以 clone 带不进任何**预先建好**的版本，那道一次性的 trust gate 连同 `nulya ext trust` 与 `trusted-stores.jsonl` 一起删掉了。
+- 与 config 项目层"只能收窄"是同一不变量的两面：checkout 一个 repo 不该能拓宽机器权限。第三面**已由布局本身答掉**（DESIGN §7.2/§9）：built 版本的字节只住在 `<NULYA_HOME | ~/.nulya>/store`，checkout 里只有 draft 源码，所以 clone 带不进任何**预先建好**的版本。
 - read-only subagent（reviewer）在 sandbox 之前不给 unrestricted shell（`local` 下无法区分 `cat` 与 `rm`）。
 - **exec target（DESIGN §8.1）不属于这一节，别把它读成半个 sandbox。** `--env remote:…` 换的是"命令与工作区在哪台机器上跑"，不是"跑的时候能碰什么"——WSL 经 `/mnt/` 看得见整个工作区，ssh 那侧是对方账号的全部权限。它与 backend 是两根轴：backend 有"只能更严"的排序，target 没有（别处不是更严）。
 
@@ -308,7 +308,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 - **内核只长了一个原语，与 cancellation 同类**（physics #7 的同一形状）：`loop.StepContext.gate` 每个 tool call 执行前问一次，答案只有 `allow` / `deny{note?}` 两种；deny 就是那个 call 的 `tool_results`（`ok=false` + marker + 人的原话），**没有新事件种类、没有新 policy 键、batch 不变量不动**。kernel 里没有任何"该不该问"的判断——那正是它不该有的东西（physics #8）。`session step --gate` 把这个问题接到 stdout 一行 + stdin 一行上（stdout 一律是行协议，不再要求 `--stream` 同用；EOF / 认不出的答案 = fail closed）。
 - **判断在 driver**，今天第一个 consumer 是 TUI（tui.md §5.7）：两档 mode（`ask` / `unsafe`，T31 之前叫 `auto`）+ 三张规则表（`deny` / `ask` / `allow`，条目是 tool id 或 shell 命令前缀）+ 本场的 always 集合。它是**可替换的**：另一个 driver 完全可以只答 `allow`（等于今天不带 `--gate`），或者把每个请求转给一个人的手机。内核不知道也不需要知道。
-- **`manifest.contributes.tools[].readonly` 是声明不是边界**（DESIGN §7.2.1）：包自己说这个 tool 只读，kernel 解析、冻结、**不强制**；driver 的 policy 可以信它（TUI 默认信，一个键可关）。要等 §3.8 的 OS 强制才谈得上"边界"（已删的 `permissions` 字段曾经也是这一类声明，见上）。同一类的第二个问题（这个 tool 是给模型的还是给 driver 的）**已落地**，但它不是一个声明而是内核强制的 `surface`（`auto` / `manual` / `internal`）→ DESIGN §7.2.1；中间那个叫 `audience` 的字段已删。
+- **`manifest.contributes.tools[].readonly` 是声明不是边界**（DESIGN §7.2.1）：包自己说这个 tool 只读，kernel 解析、冻结、**不强制**；driver 的 policy 可以信它（TUI 默认信，一个键可关）。要等 §3.8 的 OS 强制才谈得上"边界"。同一类的第二个问题（这个 tool 是给模型的还是给 driver 的）**已落地**，但它不是一个声明而是内核强制的 `surface`（`auto` / `manual` / `internal`）→ DESIGN §7.2.1；中间那个叫 `audience` 的字段已删。
 - **与 §3.12 的 policy hook 是两扇门，不合并**：这一扇在**每个 call 执行前**（谁都在跑的那条快路径上，答的人是当场的驱动者）；那一扇在 **promote-to-native**（往成员表里写一行的时候，答的人是 reviewer 或人，一场 session 只发生一次）。合成一个"权限系统"会把每步都要答的问题和一辈子答一次的问题塞进同一套配置。
 - **占位：classifier-as-extension。** tcode 的 auto 档背后有个安全分类器（模型判断这一步是否 destructive）。在 nulya 里那**天然是一个 extension**：driver 在 `ask` 之前调它一次，它答"这条命令属于哪一类"，driver 决定信不信。不进内核（是 intelligence，§0.1）、也不必进 TUI（TUI 只要能 spawn 它）。等有人真被问烦了再做——现在连"哪些规则最常被写进 `allow`"的证据都还没有。
 
@@ -330,7 +330,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 ### 3.11 前端 / ACP / MCP `[占位 · M8]`
 
 - 前端（CLI 交互 / TUI / app / ACP）都是 core 之上的薄客户端：tail ledger 文件 + append user 事件。**前端是长期进程，re-spawn 的只是 worker，UI 状态不丢。**
-- **TUI 已有设计契约与里程碑：[tui.md](tui.md)**（Bun + OpenTUI，仓库顶层 `tui/`；内核改动两处：`session step --stream` 纯观测、`session step --gate` 每个 call 问一次，§3.8.1）。
+- **TUI 已有设计契约与里程碑：[tui.md](tui.md)**（Bun + OpenTUI，仓库顶层 `tui/`；内核改动两处：`session step` 的行协议纯观测、`session step --gate` 每个 call 问一次，§3.8.1）。
 - ACP：`session/new|prompt|cancel` 直接翻译成 `nulya session *`。
 - MCP client：一个 extension，把 MCP tools 适配成 `tool.Tool` 进 ToolSetSnapshot（同构）。
 - 唯一需要常驻进程的是"子 agent 与真人持续流式对话跨多轮"——persistent mode，纯后期加法。
@@ -346,7 +346,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 base-tools.md §4 当年留下的 "later hardening：`run_in_background`"。执行契约在 [goals/background.md](goals/background.md)（内核事实 / B1–B5 / 已定决策 D1–D10），这里只记分界：
 
 - **内核只长两块 substrate**：① `shell {background:true}` 经 `Environment.startShellTask` 起一个**活得过 step 进程**的 supervisor（`NULYA_EXE task supervise`，外壳代码，用现成的 `Tree` / `emit` / `depositEvent`），调用立刻返回回执；② 一条 **`note{source:"task", meta:{task, exit_code}}`**——supervisor 结束时投进 session 的 inbox，step 边界排干、投影成 user-role 文本。与能力宣告同一种事件（跨进程到达的机器事实，DESIGN §3.1），**不是** `tool_results`（那个 call 已经有结果；batch 不变量与 wire 都不允许迟到的 tool_result），也不是 `user_text` + sentinel（ledger 不说谎）。
-- **不进内核的**：何时再 step（TUI 的判据是 "driver + idle + `<id>.inbox/` 非空"；`goal.*` 用 `task wait --any`）· fork 带不带任务（`session new --parent` 不动，**compact** 把在跑的任务 `task retarget` 给子场并在 carried 文本里代码追加一行）· 退出杀不杀（不杀）· 后台的缺省 timeout（没有）· 任务注册表（status.json 是真相，`task list` 只是投影）· `--stream` 新事件（ledger 行够了）。
+- **不进内核的**：何时再 step（TUI 的判据是 "driver + idle + `<id>.inbox/` 非空"；`goal.*` 用 `task wait --any`）· fork 带不带任务（`session new --parent` 不动，**compact** 把在跑的任务 `task retarget` 给子场并在 carried 文本里代码追加一行）· 退出杀不杀（不杀）· 后台的缺省 timeout（没有）· 任务注册表（status.json 是真相，`task list` 只是投影）· 行协议新事件（ledger 行够了）。
 - **注入只加卫生不加边界**：kernel prompt 一句关于 ledger 角色的事实（内核自己把机器事件投成 user role，它得说清）+ 任务报告模板自带分隔框 + `tool_results` 不包装；边界仍是 §3.8.1 的 gate 与 §3.8 的 sandbox。
 - **分界一句话**：core 只动 `ledger` / `prompt` / 三 provider / `tools/shell` / `environment` / kernel prompt 那一句；supervisor 与 `nulya task list|status|wait|kill|run|retarget` 在 `cli/task.zig`；retarget 的调用者是 `extensions/compact`；唤醒、显示、kill UI、退出提示全在 TUI（tui.md T29）。
 
@@ -358,10 +358,10 @@ base-tools.md §4 当年留下的 "later hardening：`run_in_background`"。执�
 
 **该做的形状是 driver 中立的 watcher 协议**（不违反任何一条 physics，内核核心零改动）：
 
-- manifest 声明 `contributes.watcher{entry}`——一个进程，说行协议：stdin 喂 `--stream` 那套**已经存在**的行，stdout 吐 append 提案。
+- manifest 声明 `contributes.watcher{entry}`——一个进程，说行协议：stdin 喂**已经存在**的那套行协议，stdout 吐 append 提案。
 - driver 只对**戴着的包**（成员）的 watcher 喂流；提案经普通 `session append` 落成带 `<ext-note pkg="…">` 出处的 user turn。跑不跑是两次人的同意（activate / `--with` + driver 决定喂它），与 gate 的"该不该问是 driver 的 policy"同构。
 - 写者仍可枚举、每句话进 ledger 可回放；成本只在 opt-in 时发生（每步 spawn 一次、活过整步被流式喂，不是每 call 冷启动）。
-- 落点是 driver 之间的**约定**（像 `--stream` 行协议本身），最多在 `cli/` 壳层长一个便利；`composition` / `loop` 不知道它存在——`--image` 那三道门的同一层级。比 TUI plugin 好在一份协议对所有 driver（`goal.*` 原则上也接得上），比内核钩子好在权力故事完整。
+- 落点是 driver 之间的**约定**（像行协议本身），最多在 `cli/` 壳层长一个便利；`composition` / `loop` 不知道它存在——`--image` 那三道门的同一层级。比 TUI plugin 好在一份协议对所有 driver（`goal.*` 原则上也接得上），比内核钩子好在权力故事完整。
 
 **触发条件**：转录里出现真实失效——模型在 prompt 纪律下确实漏掉了这类反应（如漏读深层 `AGENTS.md` 造成实际错误）。在那之前不做：nulya 在这里与 tcode 压的是相反的注——模型本身就是反应层，纪律进 prompt、事实留盘上，这个赌注随模型变强升值、机械层贬值。另外两条已否决的落点也别再走：把发现塞进 `std` 的 tool（goals/ground.md §4 撤过一版：策略抄两份、分界无执行者、拓宽 read 契约）；中性 territory 信号（"首触新目录"每个目录都响，噪音与探索量成正比、收益与约定文件在场成正比，两者不相关）。
 
@@ -380,5 +380,5 @@ base-tools.md §4 当年留下的 "later hardening：`run_in_background`"。执�
 - ~~provider cache breakpoint 各厂商差异核实（Anthropic / OpenAI / 兼容端点）。~~ 已测（M4）：openai / anthropic / codex 三条真实链路都拿到单调不减的 `cache_read`；剩下的是 first-party Anthropic key 上确认 `cache_control` 真被采纳（兼容端点是 implicit cache，看不出来）。
 - ~~codex 的 thinking：不回放 reasoning item 对多轮 tool 使用到底损失多少？~~ 已回放（DESIGN §3.1、§13），不再是问题；剩下的验收项是 first-party Anthropic key 上跑通 integration 第三条。
 - ~~是否给 `nulya src` 剥 test 块 vs 拆文件~~ 已定（M3）：测试留在文件里，`nulya src` 默认剥、`--tests` 保留——剥离是投影层的事，不动存储（DESIGN §14）。
-- ~~**workspace store 的首用 ack**：`.nulya/extensions` 在 checkout 里、又是第一优先 root，clone 一个 repo 就等于让它的 active 版本无声进 composition。候选方案是 direnv 式的内容 hash 确认。~~ **问题被布局删掉了 → DESIGN §7.2**（core-review Lane B，2026-09-02）。中间做过一版 trust gate（整个 store 一条记录、判据是"出生地"、拒绝时硬拒整场、落在 `journals/trust.zig` + `nulya ext trust`），它答的是对的问题，但那个问题只在"workspace 里可以有 built 版本"时存在。字节收进一台机器一个 store 之后，checkout 能带的只剩 draft 源码，**要把它变成能跑的东西必须有人在本机 `ext build`**——那是一次人或 agent 的动作，与 `shell` 已有的权限同级。门、journal、动词因此一起删掉。
+- ~~**workspace store 的首用 ack**：clone 一个 repo 不该让它的 active 版本无声进 composition。~~ **问题被布局删掉了 → DESIGN §7.2**：checkout 能带的只剩 draft 源码，要把它变成能跑的东西必须有人在本机 `ext build`——那是一次人或 agent 的动作，与 `shell` 已有的权限同级。
 - ~~**一个 tool 是给模型看的还是给 driver 看的，只有它自己的包知道——今天却由前端按名字猜**（`tui/src/extensions.ts` 的 `bundled_driver_only`）。~~ **已落地 → DESIGN §7.2.1 的 `contributes.tools[].surface`**（`auto` / `manual` / `internal`，闭合词表、内核强制；缺省 `auto`）。中间经过一个叫 `audience` 的两词声明字段（`"model" | "driver"`，不强制），2026-08-25 与旧的三个 surface 词一起删掉：这个问题的答案要么改变内核行为、要么不该占一个字段。TUI 侧四张硬编码名单随之消失（tui.md §11 T34）。当初留的两个判断都成立：**两半确实要分开**——工具面那一半由 `surface` 答，`autoActivatable`（开屏该不该 activate）那一半仍只用通则 `contributes.system_prompts`，没有第二个字段；而"按需带入哪个包"仍是 driver 自己的知识，现在是 `tui.toml` 的 `[extensions] session_with` 一个列表键，不是 manifest 说的话。
