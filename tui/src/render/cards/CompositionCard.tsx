@@ -39,12 +39,9 @@ const label_width = 9
  * record (`ui/Welcome.tsx`).
  *
  * The model row answers to a click when `onPickModel` is given: it opens
- * `/model`, which on a started session now MOVES it (`session rebind`,
- * goals/model-rebind.md). What this row keeps saying is the header's identity —
- * the model that answered the turns directly beneath this card. A later switch
- * is a rule drawn in the transcript where it happened (`RebindCard`), and the
- * bottom line is where "right now" is said; a record whose top line silently
- * renamed itself would misattribute every turn under it. Rendered without the
+ * `/model`, which on a started session continues the conversation in a new one.
+ * What this row says is the header's identity, and that is the whole file's
+ * answer — every turn beneath this card was answered by it. Rendered without the
  * callback (a test, a card on its own) the row is inert and does not light up: a
  * highlight on a row that does nothing when pressed would be a lie.
  */

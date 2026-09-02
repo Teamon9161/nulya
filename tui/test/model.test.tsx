@@ -35,7 +35,7 @@ import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { createSessionState, runningModel } from "../src/state/session.ts"
 import { sessionExists } from "../src/nulya/files.ts"
-import { CliError, sessionList, sessionNew, sessionRebind } from "../src/nulya/cli.ts"
+import { CliError, sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { App } from "../src/ui/App.tsx"
 import type { ModelPick } from "../src/state/tui_state.ts"
 import {
@@ -576,7 +576,7 @@ test("a guide opens the picker first, with the reason on screen and the composer
   )
   try {
     // The guide's own reason is the signal that the picker is up: the title
-    // depends on whether this tab has a session (it does — Enter would rebind
+    // depends on whether this tab has a session (it does — Enter would fork
     // it), and that is not what this test is about.
     await until(() => setup.captureCharFrame().includes("openai has no API key"), 15_000)
     const frame = await settle(setup, 3)
@@ -625,20 +625,20 @@ test("a guide can open on /provider instead, when there is no model anywhere to 
   }
 }, 60_000)
 
-// --- rebind: /model on a session that already exists ----------
+// --- /model on a session that already exists: a carry fork ----------
 //
-// The kernel grew `session rebind`: a `model_rebind`
-// event is deposited into the inbox, drained at the next step boundary, and the
-// identity in force from then on is the one it names. What is tested here is the
-// front end's half — that Enter on a live tab MOVES that session instead of
-// opening a draft, that the kernel's own sentences reach the screen, and that
-// the chips read the model that is actually answering.
+// A session's model is frozen for its whole file, so changing what a
+// conversation runs on means continuing it in a NEW file that carries the
+// history (`session new --parent <id>:<seq> --carry`). What is tested here is
+// the front end's half — that Enter on a live tab forks and goes there instead
+// of opening a draft, that the kernel's own sentences reach the screen, and
+// that the chips read the model that is actually answering.
 
 /**
- * A session frozen on a real provider, so there is somewhere to move it FROM.
+ * A session frozen on a real provider, so there is somewhere to fork FROM.
  * `deepseek` needs a key at creation and at every step's handle construction —
- * never on the wire, because nothing here talks to it: the rebind puts the
- * session on the offline stand-in, and that is what any step runs.
+ * never on the wire, because nothing here talks to it: the fork lands on the
+ * offline stand-in, and that is what any step runs.
  */
 async function deepseekSession(): Promise<{ id: string; restore: () => void }> {
   const had = process.env["DEEPSEEK_API_KEY"]
@@ -653,7 +653,7 @@ async function deepseekSession(): Promise<{ id: string; restore: () => void }> {
   }
 }
 
-test("a model_rebind event moves what the session runs on, and draws a rule where it happened", () => {
+test("what a session runs on is its header's model, for the whole file", () => {
   const state = createSessionState("s-1")
   state.setHeader({
     kind: "header",
@@ -668,79 +668,50 @@ test("a model_rebind event moves what the session runs on, and draws a rule wher
     composition: { active: [], native_tools: [], prompts: [] },
   })
   expect(runningModel(state.snapshot)).toEqual({ profile: "deepseek", model: "deepseek-v4-pro" })
-
-  state.applyEvents([
-    {
-      seq: 1,
-      kind: "model_rebind",
-      profile: "anthropic",
-      identity: { provider: "anthropic", model: "claude-opus-5", base_url: "", api_key_env: "" },
-    },
-  ])
-  expect(runningModel(state.snapshot)).toEqual({ profile: "anthropic", model: "claude-opus-5" })
-  const rule = state.snapshot.items.filter((item) => item.kind === "rebind")
-  expect(rule.length).toBe(1)
-  expect(rule[0]).toMatchObject({ seq: 1, provider: "anthropic", model: "claude-opus-5" })
 })
 
-test("the announcement made when the switch was asked for is replaced by its own ledger event", () => {
-  const state = createSessionState("s-2")
-  state.noteRebind({ profile: "scripted", model: "scripted-demo", provider: "" }, "a cost the kernel named")
-  expect(runningModel(state.snapshot)).toEqual({ profile: "scripted", model: "scripted-demo" })
-  expect(state.snapshot.items.filter((item) => item.kind === "rebind").length).toBe(1)
-
-  state.applyEvents([
-    {
-      seq: 7,
-      kind: "model_rebind",
-      profile: "scripted",
-      identity: { provider: "scripted", model: "scripted-demo", base_url: "", api_key_env: "" },
-    },
-  ])
-  const rule = state.snapshot.items.filter((item) => item.kind === "rebind")
-  expect(rule.length).toBe(1)
-  expect(rule[0]!.seq).toBe(7)
-})
-
-test("sessionRebind carries the kernel's own words out — the confirmation and both costs", async () => {
+test("a carry fork gives the child the parent's turns on another model, and leaves the parent alone", async () => {
   const { id, restore } = await deepseekSession()
   try {
-    const moved = await sessionRebind(ws, id, { profile: "scripted" })
-    expect(moved.said).toContain(id)
-    // Two costs on stderr: a cold prefix cache (the provider changed) and the
-    // reasoning recorded before now no longer being replayed.
-    expect(moved.costs.length).toBe(2)
+    const child = await sessionNew(ws, {
+      parent: { session: id, seq: 0 },
+      carry: true,
+      profile: "scripted",
+    })
+    expect(child).not.toBe(id)
+    expect(sessionExists(ws, id)).toBe(true)
+    const rows = await sessionList(ws)
+    expect(rows.find((row) => row.id === child)?.model).toBe("scripted")
+    // The parent is still on what its own header froze.
+    expect(rows.find((row) => row.id === id)?.model).toBe("deepseek")
   } finally {
     restore()
   }
 }, 60_000)
 
-test("a rebind the kernel refuses throws with its whole sentence, and nothing is moved", async () => {
+test("a carry the kernel refuses throws with its whole sentence, and nothing is created", async () => {
   const { id, restore } = await deepseekSession()
+  const before = (await sessionList(ws)).length
   try {
-    restore()
-    delete process.env["DEEPSEEK_API_KEY"]
-    const failed = await sessionRebind(ws, id, { profile: "deepseek", model: "deepseek-v4-pro" }).then(
+    // A cut point past the parent's last event: the kernel refuses rather than
+    // guessing how much history there is.
+    const failed = await sessionNew(ws, { parent: { session: id, seq: 99 }, carry: true, profile: "scripted" }).then(
       () => null,
       (error: unknown) => error,
     )
     expect(failed).toBeInstanceOf(CliError)
-    expect((failed as CliError).detail).toContain("deepseek")
-    // The refusal is the whole of it: no event was deposited, so the session is
-    // still on what its header froze.
-    const listed = (await sessionList(ws)).find((row) => row.id === id)
-    expect(listed?.model).toBe("deepseek")
+    expect((failed as CliError).detail).toContain(id)
+    expect((await sessionList(ws)).length).toBe(before)
   } finally {
     restore()
   }
 }, 60_000)
 
-test("/model on a started session rebinds it: no second session, and the chips follow", async () => {
+test("/model on a started session continues it in a new one, and the chips follow", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nulya-tui-state-"))
   const statePath = join(dir, "tui-state.json")
   const { id, restore } = await deepseekSession()
   const state = createSessionState(id)
-  const before = (await sessionList(ws)).length
   const setup = await testRender(
     () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} created statePath={statePath} />,
     { width: 120, height: 24 },
@@ -749,28 +720,20 @@ test("/model on a started session rebinds it: no second session, and the chips f
     await settle(setup, 3)
     await setup.mockInput.typeText("/model")
     setup.mockInput.pressEnter()
-    await until(() => setup.captureCharFrame().includes("model · what this session runs on"), 15_000)
+    await until(() => setup.captureCharFrame().includes("model · what this conversation runs on"), 15_000)
     // Down to the last row: `scripted` is the last profile in default.toml and
     // the one provider that always runs.
     for (let i = 0; i < 40; i++) setup.mockInput.pressKey("j")
     await settle(setup, 2)
     setup.mockInput.pressEnter()
 
-    await until(() => state.snapshot.rebind?.model === "scripted-demo", 20_000)
-    // A rebind is not a new session — that was the old answer to "switch model".
-    expect((await sessionList(ws)).length).toBe(before)
-    // And the bottom line names what is answering now, not what the header froze.
+    // Another session, forked from this one, and the tab in front is on it:
+    // the bottom line names what is answering now.
+    await until(
+      async () => (await sessionList(ws)).some((row) => row.id !== id && row.parent?.session === id),
+      20_000,
+    )
     await until(() => statusLine(setup).includes("scripted-demo"), 20_000)
-
-    // Step it: the deposited event is drained at the boundary and the rule in
-    // the transcript becomes the ledger's own, exactly once.
-    await setup.mockInput.typeText("probe")
-    setup.mockInput.pressEnter()
-    await until(() => state.snapshot.lastStopped !== null, 60_000)
-    expect(state.snapshot.error).toBeNull()
-    const rule = state.snapshot.items.filter((item) => item.kind === "rebind")
-    expect(rule.length).toBe(1)
-    expect(rule[0]!.seq).not.toBeNull()
   } finally {
     setup.renderer.destroy()
     restore()
@@ -778,9 +741,10 @@ test("/model on a started session rebinds it: no second session, and the chips f
   }
 }, 120_000)
 
-test("a refused rebind is shown as the kernel wrote it, and the session stays where it was", async () => {
+test("a refused pick is shown as the kernel wrote it, and no session is created", async () => {
   const { id, restore } = await deepseekSession()
   const state = createSessionState(id)
+  const before = (await sessionList(ws)).length
   const setup = await testRender(
     () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} created />,
     { width: 120, height: 24 },
@@ -789,7 +753,7 @@ test("a refused rebind is shown as the kernel wrote it, and the session stays wh
     await settle(setup, 3)
     await setup.mockInput.typeText("/model")
     setup.mockInput.pressEnter()
-    await until(() => setup.captureCharFrame().includes("model · what this session runs on"), 15_000)
+    await until(() => setup.captureCharFrame().includes("model · what this conversation runs on"), 15_000)
     // The picker read the config once, on mount, with the key in place. Taking
     // it away now is exactly the case this front end must not try to answer for
     // itself: the row still looks runnable here, and the kernel is the one that
@@ -802,13 +766,13 @@ test("a refused rebind is shown as the kernel wrote it, and the session stays wh
 
     // The kernel's sentence, not one of ours: the assertion is taken from what
     // the CLI itself says, so a reworded refusal moves both halves together.
-    const refusal = await sessionRebind(ws, id, { profile: "deepseek" }).then(
+    const refusal = await sessionNew(ws, { parent: { session: id, seq: 0 }, carry: true, profile: "deepseek" }).then(
       () => "",
       (error: unknown) => (error instanceof CliError ? error.detail : String(error)),
     )
-    const longest = refusal.split(/[\s'`]+/).reduce((a, b) => (b.length > a.length ? b : a), "")
+    const longest = refusal.split(/[\s'`]+/).reduce((a: string, b: string) => (b.length > a.length ? b : a), "")
     await until(() => setup.captureCharFrame().includes(longest), 20_000)
-    expect(state.snapshot.rebind).toBeNull()
+    expect((await sessionList(ws)).length).toBe(before)
   } finally {
     setup.renderer.destroy()
     restore()

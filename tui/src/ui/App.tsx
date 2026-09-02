@@ -129,7 +129,6 @@ import {
   isVerdict,
   remoteCheck,
   sessionOutcome,
-  sessionRebind,
   verdicts,
   type ModelView as ModelParams,
   type ProfileView,
@@ -1977,11 +1976,8 @@ export function App(props: AppProps) {
 
   /**
    * The model the front tab talks to: chosen on a draft, and on a session the
-   * one IN FORCE — its header's, or whatever the last `model_rebind` moved it
-   * to (`runningModel`, the single place that answers this). A frozen identity
-   * is still frozen; there is simply a chain of freeze points now, and reading
-   * only the header would leave this line naming a model that has stopped
-   * answering.
+   * one its header froze (`runningModel`, the single place that answers this) —
+   * which is the whole file's answer, since nothing moves a session's identity.
    */
   const modelName = (): string => {
     const here = tab()
@@ -2138,14 +2134,18 @@ export function App(props: AppProps) {
   }
 
   /**
-   * What `/model` does with the row somebody pressed Enter on (BUGS.md #12,
-   * goals/model-rebind.md).
+   * What `/model` does with the row somebody pressed Enter on (BUGS.md #12).
    *
    * Two answers, because there are two things in front of a person. A DRAFT has
    * no session yet, so the pick is simply what its first message will freeze.
-   * A session that already exists is MOVED: `session rebind` deposits a
-   * `model_rebind` event and everything from the next step on is answered by
-   * the new model, with this conversation's whole history intact.
+   * A session that already exists CONTINUES IN A NEW ONE: a session's identity
+   * is frozen for its whole file, so the conversation is carried into a file of
+   * its own that runs on the model just picked, and the tab goes there — the
+   * same move `/sessions <id>` makes, since one conversation still belongs in
+   * one tab. The parent keeps every byte and can be opened by id.
+   *
+   * Composed fresh, like every other `session new`: whatever `/ext` says today
+   * is what the continuation wears. That is the other half of what this is for.
    *
    * The effort dial rides along either way: it is a per-step generation option,
    * never frozen, so it takes hold on the tab in front of us with no ceremony.
@@ -2155,26 +2155,22 @@ export function App(props: AppProps) {
     if (!here) return startDraft(pick)
     setRefusal(null)
     try {
-      const moved = await sessionRebind(here.ws, here.id, { profile: pick.profile, ...(pick.model ? { model: pick.model } : {}) })
-      here.setEffort(pick.effort)
-      // The event is in the inbox, not yet in the ledger — the kernel drains it
-      // at the next step boundary. Echoing it here is the same move a just-sent
-      // user turn gets: the chips read the new model straight away, and
-      // the announcement carries the kernel's own words about what the switch
-      // costs until its `model_rebind` event arrives and replaces it.
-      here.state.noteRebind(
-        { profile: pick.profile, model: pick.model ?? modelOf(pick), provider: "" },
-        moved.costs.join("\n"),
-      )
+      const extras = await sessionExtras(here.ws)
+      // What this tab has actually seen. A step running right now may add more
+      // after this line, and those turns stay in the parent: the cut point is
+      // the conversation as it is on screen.
+      const at = here.state.lastSeq()
+      const child = await tabs.carryFork(here, at, pick, extras)
       rememberModel(pick, props.statePath)
       closeOverlay()
       setGuide(null)
-      setNotice(moved.said || `${here.id} · ${modelOf(pick)} from its next step`)
+      void enterWorkspace(child.ws)
+      setNotice(`${child.id} · ${modelOf(pick)} · ${at} turns carried over · cold prompt cache, and the old reasoning stays behind`)
     } catch (error) {
-      // Verbatim, and with room to be read: the kernel's three gates
-      // (credential, vision, already-there) each answer with the config key or
-      // the command that fixes it, and nothing here re-decides or re-words any
-      // of them.
+      // Verbatim, and with room to be read: the kernel's gates (credential,
+      // vision when the carried turns hold images, a cut point past the tail)
+      // each answer with the config key or the command that fixes it, and
+      // nothing here re-decides or re-words any of them.
       closeOverlay()
       setRefusal(error instanceof CliError ? error.detail : error instanceof Error ? error.message : String(error))
       setNotice(error instanceof Error ? error.message : String(error))
@@ -4518,7 +4514,7 @@ export function App(props: AppProps) {
       <ModelView
         // The tab's directory: config has a project layer, so which profiles
         // and models exist is a question about a checkout, and the pick lands
-        // on this tab — as its draft, or as a rebind of its session.
+        // on this tab — as its draft, or as the session it continues into.
         ws={ws()}
         current={currentPick()}
         live={live() !== null}

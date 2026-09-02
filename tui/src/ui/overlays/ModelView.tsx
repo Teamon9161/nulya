@@ -4,13 +4,12 @@
  * Two things can be in front of a person, and Enter means the same sentence for
  * both — "run on that from here". On a DRAFT tab, "from here" is its first
  * message: nothing is created, the pick is what will be frozen. On a tab that
- * already has a session, `App.chooseModel` runs `nulya session rebind` and THIS
- * session moves — history intact, from its next step on.
+ * already has a session, `App.chooseModel` continues the conversation in a new
+ * session on that model — history carried, the old file untouched.
  *
- * What it does NOT do is re-decide any of the kernel's three gates (credential,
- * vision when the transcript already holds images, already-on-it). Their words
- * name the config key or the command that fixes them, and they reach the screen
- * verbatim.
+ * What it does NOT do is re-decide any of the kernel's gates (credential,
+ * vision when the carried turns hold images). Their words name the config key
+ * or the command that fixes them, and they reach the screen verbatim.
  *
  * `/model` is a list of models and an effort dial; `/provider` (F6) is where
  * credentials and endpoints live. Enter on a ready provider over there comes
@@ -188,7 +187,7 @@ export function ModelView(props: {
   /** What the front tab runs on, so the list can mark it and start its dial there. */
   current: ModelPick | null
   /**
-   * The front tab already has a session, so Enter MOVES it (`session rebind`)
+   * The front tab already has a session, so Enter CONTINUES it in a new one
    * rather than settling what its first message will start. The only thing this
    * changes here is the wording: one screen, one gesture, and the difference is
    * whose "from here" it is.
@@ -272,13 +271,13 @@ export function ModelView(props: {
    */
   const footer = (): { brief: string; more: string[] } => {
     if (empty()) return { brief: "Enter · p opens /provider · Esc close", more: ["r reload"] }
-    const enter = props.live ? "Enter moves this session" : "Enter starts a session"
+    const enter = props.live ? "Enter continues this here" : "Enter starts a session"
     return {
       brief: `↑↓ model · ←→ effort · ${enter} · Esc close`,
       more: [
         "j/k and h/l do the same · r reload · /provider (F6) is where keys and endpoints are",
         props.live
-          ? "the history comes along; the prompt cache starts cold when the provider changes"
+          ? "the history comes along in a new session; the old reasoning does not, and the prompt cache starts cold"
           : "the effort dial is per step, not frozen · click a row to select it, again to start on it",
       ],
     }
@@ -437,7 +436,7 @@ export function ModelView(props: {
     <box flexDirection="column" width="100%" flexGrow={1} flexShrink={1} paddingLeft={1} paddingRight={1}>
       <text fg={style.theme.accent.evolve} height={1}>
         {fit(
-          `${style.glyphs.picker} model · what ${props.live ? "this session runs on from here" : "the next session runs on"}`,
+          `${style.glyphs.picker} model · what ${props.live ? "this conversation runs on from here" : "the next session runs on"}`,
           inner(),
         )}
       </text>

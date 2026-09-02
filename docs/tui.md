@@ -1,7 +1,7 @@
 # Nulya TUI — 设计与计划
 
 > **状态：T0–T115 全部落地**（T10 `/goal` 仍是占位）。前端在仓库顶层 `tui/`（见 [`../tui/README.md`](../tui/README.md)）；本文是它的设计契约（§1–§10）+ 实施日志（§11，T0–T114 已归档到 [`history/tui-implementation-log.md`](history/tui-implementation-log.md)）。`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文，不进 DESIGN.md。
-> **内核为它长的东西**（都在 [DESIGN.md](DESIGN.md) 里）：`session step --stream`（纯观测的行协议）· `session step --gate`（每个 tool call 执行前的一票否决，§4/§14）· `session new --parent` 的 fork 语义（§11/§14）· `NULYA_EXE`（子进程 env 里的本二进制路径，§7.6）。其余每一样（`--prompt` / `--with` / `--bare` / `--env` / `--workspace` / `session rebind` / `task *` / `remote *`）都是内核为**每个** driver 长的动词，前端只是第一个 consumer。
+> **内核为它长的东西**（都在 [DESIGN.md](DESIGN.md) 里）：`session step --stream`（纯观测的行协议）· `session step --gate`（每个 tool call 执行前的一票否决，§4/§14）· `session new --parent` 的 fork 语义（§11/§14）· `NULYA_EXE`（子进程 env 里的本二进制路径，§7.6）。其余每一样（`--prompt` / `--with` / `--carry` / `--bare` / `--env` / `--workspace` / `task *` / `remote *`）都是内核为**每个** driver 长的动词，前端只是第一个 consumer。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -58,8 +58,8 @@
 
 | 面 | TUI 用法 |
 |---|---|
-| `nulya session new [--profile p] [--model id] [--with <id>[@<v>][:<tool>,…]] [--prompt f] [--bare] [--env spec] [--workspace dir]` | **一场 session 唯一的出生点，只在 draft tab 收到第一条消息时跑**（`tabs.materialize`，D11）；`/new` `/model` 的 Enter 只改 draft，不 spawn。这一行 argv 是 draft 上每个选择的落点：成员与它们的工具选择（§5.3）· `session_prompts` 渲染出来的开场文本（§5.11、T66）· exec target 与远端工作区（§5.11）。stdout = id |
-| `nulya session rebind <id> [--profile p] [--model id]` | 已经开始的 session 上的 `/model`：本场从下一步起换模型（第六种 ledger 事件 `model_rebind`，DESIGN §3.1/§9.5）。三道门（凭据 · 已有图片时新模型要主张 vision · 已经在这个模型上）都在内核，前端只把它的话原样显示 |
+| `nulya session new [--profile p] [--model id] [--with <id>[@<v>][:<tool>,…]] [--prompt f] [--bare] [--env spec] [--workspace dir]` | **一场 session 唯一的出生点，只在 draft tab 收到第一条消息时跑**（`tabs.materialize`，D11）；`/new` 的 Enter 只改 draft，不 spawn。这一行 argv 是 draft 上每个选择的落点：成员与它们的工具选择（§5.3）· `session_prompts` 渲染出来的开场文本（§5.11、T66）· exec target 与远端工作区（§5.11）。stdout = id |
+| `nulya session new --parent <id>:<seq> --carry …` | 已经开始的 session 上的 `/model`：把这场对话带进一个新 session（`tabs.carryFork`），composition 现解、tab 换过去（`replace`，与 `/sessions <id>` 同一条路）。父文件一个字节不变。内核的门（凭据 · 带过去的 turn 里有图时新模型要主张 vision · 切点超过 tail）前端原样显示 |
 | `nulya session step <id> --effort e` | 每个 step 按本 tab 的 effort 传（`/model` 选的、`/effort` 改的）；不传 = kernel 默认 |
 | `nulya config show --json` | `/model` 的行、启动时判断隐式选择能不能跑（`launch.planLaunch`）、draft 的 model id（profile 只给了名字时取它的默认 model）与 `registry`（`max_tools`）、`extensions.with`（合并后的成员表，draft 的工具面 = 它选中的 tool ∪ `tui-state.json` 的 `session_with` 选中的）；只报 env var 名与 credential 布尔 |
 | `nulya session append <id> --file f` | 发送：写 `.nulya/scratch/tui-<nonce>.txt` 再 `--file`（多行 / Windows 引号安全）；投进 inbox，**下一 step 边界才进 ledger**（PLAN §4 边角）→ TUI 乐观回显、标 `queued`，见到对应 `user_text` 事件后转正——那条事件行现在在 `model started` **之前**就到（DESIGN §14，T27），所以 `queued` 只在真正还排着队的时候挂着，而不是整整一个 step |
@@ -198,7 +198,6 @@ tui/
 | call `ext:*` | ExtToolCard | `⌘ tool_name · 参数摘要  (N lines) ▸`（**第一个参数不写键名**——工具的第一个参数就是它的主语：路径、模式、命令，T26） | 输出 | 折叠 |
 | shell 命令前缀 `nulya src` / `nulya ext init\|build\|activate\|deactivate\|run` / `nulya skill load` / `nulya session new\|append\|step\|events` | EvolveCard / SubSessionCard | 见 §5.2 / §5.5 | 原始输出可展开 | 折叠但头行信息量大 |
 | `note` · `source:"ext"` + `meta.id` | CapabilityBanner | `⚡ capability · id@version · tools: …` | note 全文 | 展开 |
-| `model_rebind` | RebindCard | 一条朴素的分隔线 + 换到了哪个模型 | — | 展开；**对模型不可见、对人可见**（内核不给它 Turn），线上面和线下面是两个模型说的话 |
 | `note` · 其它 source | UserTurn + badge | 正文 + `· <source>`（插件的那条 badge 是 `meta.pkg · meta.kind`） | 原文 | 与 user turn 同形，badge 说它从哪来 |
 | sentinel user turn | 包的 user-turn renderer / SkillEcho | 由**声明它的那个包**折回原话并带 badge（`<approval-note>` / `<task-stopped>` / `<user-skill>`；`<ext-note>` 是老 session 里的形态，现在是一条 `note`） | 原文 | 折叠；没装那个包时它就是一条普通 user turn，原文照样读得到 |
 | canceled marker | CanceledCard | `⊘ tool · canceled (side effects unknown)` 三种文案对应三种 marker | — | 展开 |
@@ -255,7 +254,7 @@ tui/
 
 （**驱动侧的失败不在这一行**：`error · see transcript` 写在上面那一行（§4.4b），原文整段在 transcript 末尾，§4.2 `ErrorNotice`。）
 
-**权限 mode**（`ask` / `unsafe`，**行首**，可点 → mode picker（再点一下收起），§5.7；`unsafe` 是 warn 色——它是屏幕上每个 tool call 被裁决的立场，该在 model 之前读到） · `<model-id> [(effort)]`（**主语**，`muted`，可点 → `/model`；已开场的读 `state/session.ts` 的 `runningModel`（`snapshot.rebind ?? header`），draft 读它的 pick；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`，可点 → `/ext`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config `[extensions] with` 选中的 tool ∪ `tui-state.json` 的 `session_with` 选中的 ∪ **每一场都被组合进来的那些包（config `[extensions] with` / `tui.toml` `session_with`）active 版本的 `surface: "auto"` tool**，再 ∪ 那几个包声明的 `surface: "manual"` tool（由 `sessionExtras` 在 `session new` 那一刻写进同一条 `--with`））。**token 累计不在这一行**——它在 §4.4b，只在跑着的时候写（`state/session.ts` 的 `usageLabel`，来源是 ledger 的 `assistant.usage`；`/usage` 里是全部账）。右：**context ring**（`◕ 72%`，可点 → `/context` 面板） · `↓ N more below` · **`◈ <id>`**（这一场戴着的、contribute 了 system prompt 的包，`accent.evolve`，可点 → `/ext`；draft 读 `--with` 的 ref，已开场的读冻结 `contributions` 与 header 的 inline prompt——顶上那张卡默认折着，不写这一格就一个字都没有） · **`⇥ <spec>`**（shell 跑在哪，warn 色，可点 → `/env`；local 就整格不写，§5.11） · **workspace chip**（只在屏幕上开着第二个 workspace、或这个 tab 是 `no project` 时才占列，§5.11） · `step n`（**跑过步才写**）· `observer · driven elsewhere`（§5.6；**只有例外说自己**——当写者是常态，`driver` 那个词在每个人的每一场里都一模一样，一格恒定的东西不是信息）。离开底部时插入 `↓ 3 new`。
+**权限 mode**（`ask` / `unsafe`，**行首**，可点 → mode picker（再点一下收起），§5.7；`unsafe` 是 warn 色——它是屏幕上每个 tool call 被裁决的立场，该在 model 之前读到） · `<model-id> [(effort)]`（**主语**，`muted`，可点 → `/model`；已开场的读 `state/session.ts` 的 `runningModel`（header 那一列，整场不变），draft 读它的 pick；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`，可点 → `/ext`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config `[extensions] with` 选中的 tool ∪ `tui-state.json` 的 `session_with` 选中的 ∪ **每一场都被组合进来的那些包（config `[extensions] with` / `tui.toml` `session_with`）active 版本的 `surface: "auto"` tool**，再 ∪ 那几个包声明的 `surface: "manual"` tool（由 `sessionExtras` 在 `session new` 那一刻写进同一条 `--with`））。**token 累计不在这一行**——它在 §4.4b，只在跑着的时候写（`state/session.ts` 的 `usageLabel`，来源是 ledger 的 `assistant.usage`；`/usage` 里是全部账）。右：**context ring**（`◕ 72%`，可点 → `/context` 面板） · `↓ N more below` · **`◈ <id>`**（这一场戴着的、contribute 了 system prompt 的包，`accent.evolve`，可点 → `/ext`；draft 读 `--with` 的 ref，已开场的读冻结 `contributions` 与 header 的 inline prompt——顶上那张卡默认折着，不写这一格就一个字都没有） · **`⇥ <spec>`**（shell 跑在哪，warn 色，可点 → `/env`；local 就整格不写，§5.11） · **workspace chip**（只在屏幕上开着第二个 workspace、或这个 tab 是 `no project` 时才占列，§5.11） · `step n`（**跑过步才写**）· `observer · driven elsewhere`（§5.6；**只有例外说自己**——当写者是常态，`driver` 那个词在每个人的每一场里都一模一样，一格恒定的东西不是信息）。离开底部时插入 `↓ 3 new`。
 
 **没有的东西不占列**：没跑过步就不写 `step 0`，是写者就不写 `driver`。**键位提示也不在这里**：一个永远在那儿的提醒过了第一个小时就没人再读，而它占的是屏幕上最挤的一行；它在开屏那一屏，一次一条 tip（§4.1、`Welcome.tips`）。
 
@@ -698,7 +697,7 @@ T0–T115 全部落地，逐条经过与验收标准在归档的实施日志里�
 - **后台任务**：唯一的新 policy 是「driver + 本进程驱动过 + idle + inbox 非空 → 再 step」，其余全是把 `task list --json` 画出来——状态栏的 `N background`（点开是输入框上面的任务面板，能停）、`/tasks`（F7 全屏，看 log、`k`/`K` kill）、两张按任务全名连起来的卡。远端任务多一个 `unreachable` 状态与一列 `machine`，log 在那台机器上。
 - **委派**：`.nulya/agents/*.md`（workspace > user > 包自带三层）一个定义就是一组 `session new` 参数；`/agent <name> <task…>` 开一张看得见的新 tab，裸 `/agent` 是只把命令写进输入框、不启动任何东西的 picker。模型自己调 `agent{…}` 时前端只画：委派卡说的是「派了谁、在干什么」而不是它的编号，`↗ watch here` 在**当前 tab 内部**开一块只读的 sub-agent pane。
 - **plugin 层**：声明位（`commands` / `policy` / `tools[].ui` / `contributes.ui.tui`）与代码层（`plugin-api.d.ts`：行渲染、五个注册面、只有人已有的动词）都已接通，`tui.toml` 的 `[extensions] plugins = false` 一键退回纯声明层。compact / handoff / plan / ask 的界面全住在各自的包里——宿主不认识它们的包名、tool 名与 marker。
-- **一场 session 的边界**：开屏是 draft tab，第一条消息才 `session new`，那一刻现读 pin、成员（`session_with`）、开场文本（`session_prompts`）、目录、exec target 与模型。已经开始的 session 只有一样东西还能换：模型——`/model` 走 `nulya session rebind`，transcript 里画成一条对模型不可见、对人可见的分隔线。
+- **一场 session 的边界**：开屏是 draft tab，第一条消息才 `session new`，那一刻现读 pin、成员（`session_with`）、开场文本（`session_prompts`）、目录、exec target 与模型。已经开始的 session 什么都不能就地换（身份与 composition 冻在它那个文件里）——`/model` 于是走 `session new --parent <id>:<seq> --carry`：同一条对话带着历史进新 session，模型与今天的成员表一起现解，tab 换过去。
 - **目录与远端**：tab = (workspace, session)；`/cwd` 换 draft 的目录，`no project` 落在 `<NULYA_HOME | ~/.nulya>/home/`；`/env` 选下一场的 shell 跑在哪，remote 档还要在那台机器上选一个目录，`/ext` 上的 `r` 把选中的包 push 过去。
 - **人写的与程序写的分开**：`tui.toml` 是人写的设定（`/settings` 只做最小编辑——换掉一行、绝不重排、绝不删注释），`tui-state.json` 与 `tui-recents.json` 是程序写给自己的便条（上次的模型 / 档 / 目录 / exec target / pin / tab / 最近的 workspace）。
 
