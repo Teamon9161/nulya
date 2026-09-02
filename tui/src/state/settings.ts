@@ -165,12 +165,12 @@ export interface Settings {
   }
   /**
    * Per exec-target-KIND overrides of `session_with` / `session_prompts` /
-   * pins (`tui.toml` `[env.local]` / `[env.wsl]` / `[env.remote]`,
+   * pins (`tui.toml` `[env.local]` / `[env.remote]`,
    * `state/envprofile.ts`). A table for a kind that never gets a
    * session (nobody uses `/env`) costs nothing and is never read.
    *
    * Kept apart from `extensions` above rather than nested inside it: those
-   * fields ARE the `local`/`wsl` default (`envprofile.ts`'s
+   * fields ARE the `local` default (`envprofile.ts`'s
    * `defaultProfile`), so folding this table into that one would make a
    * setting read itself.
    */
@@ -291,7 +291,7 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
   }
   const envTable = record["env"] as Record<string, unknown> | undefined
   if (envTable) {
-    for (const kind of ["local", "wsl", "remote"] as const) {
+    for (const kind of ["local", "remote"] as const) {
       const table = envTable[kind] as Record<string, unknown> | undefined
       if (!table) continue
       const target = { ...(into.env[kind] ?? {}) }
@@ -371,8 +371,8 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
  *
  * A closed list is chosen from, a number and a list are typed. A field with no
  * `edit` is one this screen will not write — `keys.*`, whose names are an open
- * set, and the `env.<kind>` rows, whose one line stands for three tables
- * (`local`/`wsl`/`remote`) and so has no single value to put anywhere.
+ * set, and the `env.<kind>` rows, whose one line stands for two tables
+ * (`local`/`remote`) and so has no single value to put anywhere.
  */
 export type SettingEdit =
   | { kind: "choice"; values: readonly string[]; boolean?: true }
@@ -450,7 +450,7 @@ const yesno = "true | false"
 const shown = (xs: readonly string[]) => (xs.length === 0 ? "—" : xs.join(", "))
 /** Which `[env.<kind>]` tables set this key, since which one applies is per session. */
 const envSet = (settings: Settings, has: (table: EnvProfileOverride) => boolean) => {
-  const kinds = (["local", "wsl", "remote"] as const).filter((kind) => {
+  const kinds = (["local", "remote"] as const).filter((kind) => {
     const table = settings.env[kind]
     return table !== undefined && has(table)
   })
@@ -519,10 +519,10 @@ export const setting_fields: readonly SettingField[] = [
     note: "read just before the next `session new`",
     value: (s) => shown(s.extensions.session_prompts),
   },
-  { key: "env.<local|wsl|remote>.bare", accepts: yesno, value: (s) => envSet(s, (t) => t.bare !== undefined) },
-  { key: "env.<local|wsl|remote>.with", accepts: "<id>[:<tool>,…]", value: (s) => envSet(s, (t) => t.with !== undefined) },
+  { key: "env.<local|remote>.bare", accepts: yesno, value: (s) => envSet(s, (t) => t.bare !== undefined) },
+  { key: "env.<local|remote>.with", accepts: "<id>[:<tool>,…]", value: (s) => envSet(s, (t) => t.with !== undefined) },
   {
-    key: "env.<local|wsl|remote>.session_prompts",
+    key: "env.<local|remote>.session_prompts",
     accepts: "package ids",
     value: (s) => envSet(s, (t) => t.session_prompts !== undefined),
   },

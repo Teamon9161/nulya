@@ -217,10 +217,9 @@ export interface NewSessionOptions {
   prompt?: readonly string[]
   /**
    * `--env <spec>`: where this session's `shell` commands run — `local` (or
-   * absent), `wsl`, `wsl:<distro>`, or a `remote:…` spec (§8.2)
-   * that moves the whole workspace. Frozen in the header, so there is no
-   * per-step twin: a resume runs the commands where the session says or
-   * refuses to run them at all.
+   * absent), or a `remote:…` spec (§8.2) that moves the whole workspace.
+   * Frozen in the header, so there is no per-step twin: a resume runs the
+   * commands where the session says or refuses to run them at all.
    *
    * The spec is passed through unvalidated on purpose. The kernel already
    * refuses a bad one before creating anything, and its refusal names both the

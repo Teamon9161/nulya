@@ -933,7 +933,7 @@ plugins = false
 session_with = ["handoff"]
 session_prompts = []
 
-[env.wsl]
+[env.local]
 bare = true
 with = ["agent"]
 pins = ["ext:std/read"]
@@ -981,7 +981,7 @@ test("session_with is one list, replaced rather than merged by a nearer layer", 
   }
 })
 
-test("[env.wsl] parses field by field, leaving fields it did not mention at the default", async () => {
+test("[env.local] parses field by field, leaving fields it did not mention at the default", async () => {
   expect(default_settings.env).toEqual({})
 
   const layer = tempWorkspace()
@@ -989,27 +989,26 @@ test("[env.wsl] parses field by field, leaving fields it did not mention at the 
     mkdirSync(join(layer.dir, ".nulya"), { recursive: true })
     writeFileSync(
       join(layer.dir, ".nulya", "tui.toml"),
-      '[env.wsl]\nwith = ["ops", "std:read"]\n',
+      '[env.local]\nwith = ["ops", "std:read"]\n',
     )
     const settings = await loadSettings(layer.dir, {})
-    expect(settings.env.wsl).toEqual({ with: ["ops", "std:read"] })
-    // Nothing under `[env.local]` or `[env.remote]` — a table for one kind
-    // must not leak a field into another.
-    expect(settings.env.local).toBeUndefined()
+    expect(settings.env.local).toEqual({ with: ["ops", "std:read"] })
+    // Nothing under `[env.remote]` — a table for one kind must not leak a
+    // field into another.
     expect(settings.env.remote).toBeUndefined()
 
     // `bare` is a plain boolean; overwriting the file with just that field
     // must not carry the previous layer's list fields forward — this is one
     // `loadSettings` call over one fresh file, so it is `mergeLayer`'s own
     // per-field behaviour under test, not layering across files.
-    writeFileSync(join(layer.dir, ".nulya", "tui.toml"), "[env.wsl]\nbare = false\n")
-    expect((await loadSettings(layer.dir, {})).env.wsl).toEqual({ bare: false })
+    writeFileSync(join(layer.dir, ".nulya", "tui.toml"), "[env.local]\nbare = false\n")
+    expect((await loadSettings(layer.dir, {})).env.local).toEqual({ bare: false })
   } finally {
     layer.cleanup()
   }
 })
 
-test("[env.remote] parses the same way, and does not leak into [env.wsl] / [env.local]", async () => {
+test("[env.remote] parses the same way, and does not leak into [env.local]", async () => {
   const layer = tempWorkspace()
   try {
     mkdirSync(join(layer.dir, ".nulya"), { recursive: true })
@@ -1019,7 +1018,6 @@ test("[env.remote] parses the same way, and does not leak into [env.wsl] / [env.
     )
     const settings = await loadSettings(layer.dir, {})
     expect(settings.env.remote).toEqual({ bare: false, with: ["agent"], session_prompts: ["ground"] })
-    expect(settings.env.wsl).toBeUndefined()
     expect(settings.env.local).toBeUndefined()
   } finally {
     layer.cleanup()
@@ -1030,12 +1028,28 @@ test("[env.ssh] is an unrecognised key now that the exec-target ssh: spelling is
   // `session new --env ssh:<dest>` itself is refused (`launch.legacySshHint`
   // points at `remote:ssh:` instead), so a `[env.ssh]` table in `tui.toml`
   // would never apply to any session this screen could actually start — it is
-  // simply not one of the three kinds `envprofile.ts` iterates, same as any
+  // simply not one of the two kinds `envprofile.ts` iterates, same as any
   // other unknown table name.
   const layer = tempWorkspace()
   try {
     mkdirSync(join(layer.dir, ".nulya"), { recursive: true })
     writeFileSync(join(layer.dir, ".nulya", "tui.toml"), '[env.ssh]\nwith = ["ops"]\nbare = false\n')
+    const settings = await loadSettings(layer.dir, {})
+    expect(settings.env).toEqual({})
+  } finally {
+    layer.cleanup()
+  }
+})
+
+test("[env.wsl] is an unrecognised key now that the exec-target wsl spelling is retired", async () => {
+  // `session new --env wsl[:<distro>]` itself is refused
+  // (`launch.legacyWslHint` points at `remote:wsl` instead), so a `[env.wsl]`
+  // table in `tui.toml` would never apply to any session this screen could
+  // actually start — same treatment as `[env.ssh]` above.
+  const layer = tempWorkspace()
+  try {
+    mkdirSync(join(layer.dir, ".nulya"), { recursive: true })
+    writeFileSync(join(layer.dir, ".nulya", "tui.toml"), '[env.wsl]\nwith = ["ops"]\nbare = false\n')
     const settings = await loadSettings(layer.dir, {})
     expect(settings.env).toEqual({})
   } finally {

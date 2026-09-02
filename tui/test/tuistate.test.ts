@@ -38,10 +38,10 @@ test("switching to a spec with no workspace clears a stale one — the pair trav
   const state = statePath()
   try {
     rememberExecEnv("remote:ssh:box", state.path, "/srv/app")
-    // Retyping `/env wsl` (no workspace argument at all) must not leave
-    // `/srv/app` paired with a spec that was never chosen with it.
-    rememberExecEnv("wsl", state.path)
-    expect(execEnv(state.path)).toBe("wsl")
+    // Retyping `/env remote:wsl:Ubuntu` (no workspace argument at all) must
+    // not leave `/srv/app` paired with a spec that was never chosen with it.
+    rememberExecEnv("remote:wsl:Ubuntu", state.path)
+    expect(execEnv(state.path)).toBe("remote:wsl:Ubuntu")
     expect(execWorkspace(state.path)).toBe("")
   } finally {
     state.cleanup()
@@ -75,6 +75,26 @@ test("a remembered bare ssh: exec target (retired 2026-08-30) is dropped back to
     // shell) — dropping must never silently upgrade one into the other.
     writeFileSync(state.path, JSON.stringify({ exec_env: "remote:ssh:box" }))
     expect(execEnv(state.path)).toBe("remote:ssh:box")
+  } finally {
+    state.cleanup()
+  }
+})
+
+test("a remembered bare wsl exec target (retired 2026-09-02) is dropped back to local, not rewritten", () => {
+  const state = statePath()
+  try {
+    // Written directly, not through `rememberExecEnv`: state left behind by
+    // an OLDER build, from before `wsl[:<distro>]` was refused as an exec
+    // target.
+    writeFileSync(state.path, JSON.stringify({ exec_env: "wsl" }))
+    expect(loadTuiState(state.path).exec_env).toBeUndefined()
+    expect(execEnv(state.path)).toBe("")
+    writeFileSync(state.path, JSON.stringify({ exec_env: "wsl:Ubuntu" }))
+    expect(execEnv(state.path)).toBe("")
+    // `remote:wsl:` is a DIFFERENT spec (moves the workspace too) — dropping
+    // must never silently upgrade one into the other.
+    writeFileSync(state.path, JSON.stringify({ exec_env: "remote:wsl:Ubuntu" }))
+    expect(execEnv(state.path)).toBe("remote:wsl:Ubuntu")
   } finally {
     state.cleanup()
   }

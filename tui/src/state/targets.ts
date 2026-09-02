@@ -10,19 +10,18 @@
  * exists only in DNS, an `Include`d config fragment — is why the dialog keeps a
  * row that hands the typing back.
  *
- * Two sources feed two different things: `wsl -l` also seeds `wsl:` (moves
- * only the SHELL); both sources seed the `remote:wsl:`/
- * `remote:ssh:` rows, which move the whole WORKSPACE too — picking one of
- * those is the first half of a two-part choice, the
+ * Both sources feed the `remote:wsl:`/`remote:ssh:` rows, which move the whole
+ * WORKSPACE — picking one of those is the first half of a two-part choice, the
  * second being WHICH directory on that machine (`ui/App.tsx`'s remote-browse
- * flow, `dirsource.ts`'s `remoteDirSource`). There is no bare `ssh:` row:
- * `remote:ssh:` is the only ssh-shaped spec `session new` accepts.
+ * flow, `dirsource.ts`'s `remoteDirSource`). There is no bare `wsl:` or `ssh:`
+ * row: `remote:wsl:`/`remote:ssh:` are the only such specs `session new`
+ * accepts — the exec-target spellings that moved only the shell are retired.
  *
- * NOTHING HERE DECIDES ANYTHING. The kernel parses the spec
- * (`environment.parseExecTarget`) and refuses a bad one with the vocabulary in
- * the message; this only shortens the walk to a spelling that already works. So
- * a probe that fails is one fewer row and never an error: a machine with no WSL
- * and no ssh config still gets `local`, which is the answer it has.
+ * NOTHING HERE DECIDES ANYTHING. The kernel refuses a bad spec with the
+ * vocabulary in the message; this only shortens the walk to a spelling that
+ * already works. So a probe that fails is one fewer row and never an error: a
+ * machine with no WSL and no ssh config still gets `local`, which is the
+ * answer it has.
  */
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
@@ -30,7 +29,7 @@ import { join } from "node:path"
 
 /** One row of the picker: what would be remembered, and what it is. */
 export interface ExecChoice {
-  /** Exactly what `session new --env` takes (`environment.exec_target_syntax`). */
+  /** Exactly what `session new --env` takes: `local`, or a `remote:…` spec. */
   spec: string
   /** One line, in this machine's terms. */
   what: string
@@ -58,16 +57,9 @@ export async function execChoices(probe: TargetProbe = hostProbe): Promise<ExecC
   ])
   return [
     here,
-    // `wsl:<name>` rather than a bare `wsl` row for the default distribution:
-    // the spec is frozen into a session header, and a name still means the same
-    // distribution after somebody runs `wsl --set-default`.
-    ...distros.map((name) => ({ spec: `wsl:${name}`, what: "a WSL distribution · the workspace as /mnt/…" })),
-    // The `remote:` family: the WORKSPACE moves,
-    // not just the shell — `extensions/std`, `ground`, everything that reads
-    // files reads THAT machine's, over a channel this harness itself opens
-    // (no ssh/wsl config of its own to read, so these ride the same two
-    // sources the rows above already asked). Same names, same source data —
-    // the sentence is what tells the two families apart.
+    // The `remote:` family: the WORKSPACE moves — `extensions/std`, `ground`,
+    // everything that reads files reads THAT machine's, over a channel this
+    // harness itself opens.
     ...distros.map((name) => ({
       spec: `remote:wsl:${name}`,
       what: "a WSL distribution · the WORKSPACE moves there too",

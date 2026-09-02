@@ -47,13 +47,13 @@ export interface TuiState {
    * Where the NEXT session's `shell` commands run (`/env`) — the
    * spec verbatim, `""`/absent meaning this host.
    *
-   * Program state for the model pick's reason: a person working inside a WSL
-   * distribution today should not have to type `--env wsl` for every new tab.
-   * It is not `tui.toml` and deliberately not the kernel's config either — the
-   * kernel has no such key, because "is wsl narrower or wider than local" has
-   * no honest answer in a config chain whose project layer may only narrow
-   *. Remembering a choice is a front end's job; ranking targets
-   * would not be.
+   * Program state for the model pick's reason: a person working against a
+   * remote machine today should not have to type `--env remote:…` for every
+   * new tab. It is not `tui.toml` and deliberately not the kernel's config
+   * either — the kernel has no such key, because "is this target narrower or
+   * wider than local" has no honest answer in a config chain whose project
+   * layer may only narrow. Remembering a choice is a front end's job; ranking
+   * targets would not be.
    *
    * The spelling is never checked here. `session new` refuses a bad one with
    * the vocabulary in the message, and that refusal already reaches the screen.
@@ -194,15 +194,22 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
       state.session_with = sessionWithList.filter((s): s is string => typeof s === "string")
     }
     const execEnv = record["exec_env"]
-    // The bare `ssh:<destination>` exec target was retired 2026-08-30
-    // — `session new` refuses it outright now, so a
-    // value remembered from before that would make every session this front
-    // end starts fail at creation. This file is a convenience, not the
-    // header, so a spec it can no longer use is simply DROPPED back to
-    // "nothing remembered" (= local) rather than rewritten into the
-    // similarly-spelled `remote:ssh:` — that word moves the whole workspace,
-    // not just the shell, which is a choice only a person should make.
-    if (typeof execEnv === "string" && execEnv.length > 0 && !execEnv.startsWith("ssh:")) {
+    // The bare `ssh:<destination>` exec target was retired 2026-08-30, and
+    // bare `wsl`/`wsl:<distro>` followed 2026-09-02 — `session new` refuses
+    // both outright now, so a value remembered from before that would make
+    // every session this front end starts fail at creation. This file is a
+    // convenience, not the header, so a spec it can no longer use is simply
+    // DROPPED back to "nothing remembered" (= local) rather than rewritten
+    // into the similarly-spelled `remote:ssh:`/`remote:wsl:` — that word
+    // moves the whole workspace, not just the shell, which is a choice only
+    // a person should make.
+    if (
+      typeof execEnv === "string" &&
+      execEnv.length > 0 &&
+      !execEnv.startsWith("ssh:") &&
+      execEnv !== "wsl" &&
+      !execEnv.startsWith("wsl:")
+    ) {
       state.exec_env = execEnv
     }
     const execWorkspaceValue = record["exec_workspace"]

@@ -62,7 +62,7 @@ export const commands: Command[] = [
     name: "/env",
     args: "[<target>]",
     what:
-      "where the next session's shell runs: local | wsl | wsl:<distro> · no argument lists what this machine can reach · only shell moves, this harness stays here",
+      "where the next session's shell runs: local | remote:… · no argument lists what this machine can reach · remote:… moves the whole workspace there too",
   },
   {
     name: "/new",
