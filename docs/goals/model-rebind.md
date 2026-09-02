@@ -1,5 +1,14 @@
 # model rebind：一场 session 中途换模型
 
+> **已被 carry fork 取代（2026-09-02，`docs/goals/core-review.md` Lane A）。**
+> `model_rebind` 事件、`scanSession` 那套两趟扫描、`effectiveIdentity` /
+> `reasoningFloor` / `identityEqual`、`session rebind` 动词，全部删除。今天换模型、
+> 换工具、换 system prompt 是同一个原语：`session new --parent <id>:<seq> --carry`
+> ——带着历史开一个新文件，`reasoning` 置空，父文件一个字节不变（DESIGN §11）。
+> 一场 session 的模型身份因此整个文件只有一个，`header.model_identity`。
+> 下面留的是当时的判断与三轮 review，作为归档：其中 §7–§11 关于 inbox 投递锁、
+> exactly-once 与 `prune` 的结论仍然成立，只是不再有 rebind 这个 consumer。
+
 BUGS.md #12：「就算冻结了也要允许换模型，可以提醒一下。」
 
 今天 `model_identity` 在 `session new` 时由 `resolveDescriptor` 一次解析、冻进 header，

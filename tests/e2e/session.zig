@@ -2041,7 +2041,7 @@ test "session new: a profile whose credential resolves nowhere refuses instead o
     try std.testing.expectEqual(@as(u8, 0), scripted.code);
 }
 
-const rebind_config =
+const carry_config =
     \\[provider]
     \\active_profile = "scripted"
     \\
@@ -2055,20 +2055,51 @@ const rebind_config =
     \\kind = "scripted"
     \\model = "demo-3"
     \\
-    \\[[provider.profiles]]
-    \\name = "keyless"
-    \\kind = "openai"
-    \\model = "keyless-1"
-    \\base_url = "https://keyless.example/v1"
-    \\api_key_env = "NULYA_E2E_ABSENT_KEY"
-    \\
 ;
 
-test "session cli: rebind moves the rest of a session onto another model, and refuses what it cannot honour" {
-    // The header still freezes one identity and is never rewritten — the change
-    // is an appended event, deposited like a user turn and drained at the next
-    // step boundary, so the transcript continues in the same file on a different
-    // model.
+/// A workspace with `carry_config` as its user config, and the env every test
+/// below runs the CLI with. Caller frees the returned home path.
+fn carryHome(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir) ![]u8 {
+    try ws.createDirPath(io, "home");
+    try ws.writeFile(io, .{ .sub_path = "home/config.toml", .data = carry_config });
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    return std.fs.path.join(alloc, &.{ ws_path, "home" });
+}
+
+/// The `seq` values and the per-kind payload of every event line, in order —
+/// what "the child's turns are the parent's turns" is asked about. Caller frees
+/// each entry and the slice.
+fn eventLines(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8) ![][]u8 {
+    const bytes = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(bytes);
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (out.items) |l| alloc.free(l);
+        out.deinit(alloc);
+    }
+    var lines = std.mem.tokenizeAny(u8, bytes, "\r\n");
+    _ = lines.next(); // the header
+    while (lines.next()) |line| try out.append(alloc, try alloc.dupe(u8, line));
+    return out.toOwnedSlice(alloc);
+}
+
+fn freeLines(alloc: std.mem.Allocator, lines: [][]u8) void {
+    for (lines) |l| alloc.free(l);
+    alloc.free(lines);
+}
+
+/// Everything of one event line except the envelope columns a new file assigns
+/// itself (`seq`) or never inherits (`origin` / `origins`): the `"kind":…` tail.
+fn payloadOf(line: []const u8) []const u8 {
+    const at = std.mem.indexOf(u8, line, "\"kind\":") orelse return line;
+    return line[at..];
+}
+
+test "session cli: --carry forks a conversation into a file of its own, on another model" {
+    // The one primitive for changing model, tools or system prompt mid
+    // conversation: the child is a NEW generation carrying the parent's turns,
+    // and the parent is not touched.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -2081,12 +2112,7 @@ test "session cli: rebind moves the rest of a session onto another model, and re
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const ws = tmp.dir;
-
-    try ws.createDirPath(io, "home");
-    try ws.writeFile(io, .{ .sub_path = "home/config.toml", .data = rebind_config });
-    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
-    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
-    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    const home_abs = try carryHome(alloc, io, ws);
     defer alloc.free(home_abs);
     const env: []const EnvPair = &.{
         .{ .key = "NULYA_HOME", .value = home_abs },
@@ -2099,6 +2125,132 @@ test "session cli: rebind moves the rest of a session onto another model, and re
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
     defer alloc.free(id);
 
+    for ([_][]const u8{ "one", "two", "three" }) |turn| {
+        const appended = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "append", id, turn }, env);
+        defer alloc.free(appended.stdout);
+        try std.testing.expectEqual(@as(u8, 0), appended.code);
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", id }, env);
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(u8, 0), stepped.code);
+    }
+
+    // The offline stand-in emits no reasoning, so one turn that DOES carry some
+    // is appended as a line: `reasoning` is the one payload a carry must drop,
+    // and a fixture without any could not tell whether it did.
+    {
+        const parent_before = try eventLines(alloc, io, ws, id);
+        defer freeLines(alloc, parent_before);
+        const line = try std.fmt.allocPrint(
+            alloc,
+            "{{\"seq\":{d},\"kind\":\"assistant\",\"reasoning\":\"[{{\\\"type\\\":\\\"thinking\\\"}}]\",\"text\":\"thought about it\",\"calls\":[]}}\n",
+            .{parent_before.len + 1},
+        );
+        defer alloc.free(line);
+        const path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+        defer alloc.free(path);
+        const existing = try ws.readFileAlloc(io, path, alloc, .unlimited);
+        defer alloc.free(existing);
+        const grown = try std.mem.concat(alloc, u8, &.{ existing, line });
+        defer alloc.free(grown);
+        try ws.writeFile(io, .{ .sub_path = path, .data = grown });
+    }
+
+    const parent_lines = try eventLines(alloc, io, ws, id);
+    defer freeLines(alloc, parent_lines);
+    try std.testing.expect(parent_lines.len >= 4);
+
+    const parent_before = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(parent_before);
+
+    const parent_ref = try std.fmt.allocPrint(alloc, "{s}:{d}", .{ id, parent_lines.len });
+    defer alloc.free(parent_ref);
+    const forked = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", parent_ref, "--carry", "--profile", "scripted-alt" }, env);
+    defer alloc.free(forked.stdout);
+    try std.testing.expectEqual(@as(u8, 0), forked.code);
+    const child = try alloc.dupe(u8, std.mem.trim(u8, forked.stdout, " \r\n"));
+    defer alloc.free(child);
+
+    // Block by block the child's turns ARE the parent's, renumbered from 1,
+    // with the delivery ids and the reasoning left behind.
+    const child_lines = try eventLines(alloc, io, ws, child);
+    defer freeLines(alloc, child_lines);
+    try std.testing.expectEqual(parent_lines.len, child_lines.len);
+    for (parent_lines, child_lines, 1..) |parent_line, child_line, seq| {
+        const want_seq = try std.fmt.allocPrint(alloc, "{{\"seq\":{d},", .{seq});
+        defer alloc.free(want_seq);
+        try std.testing.expect(std.mem.startsWith(u8, child_line, want_seq));
+        if (std.mem.indexOf(u8, parent_line, "\"reasoning\"") == null) {
+            try std.testing.expectEqualStrings(payloadOf(parent_line), payloadOf(child_line));
+        }
+        try std.testing.expect(std.mem.indexOf(u8, child_line, "\"reasoning\"") == null);
+        try std.testing.expect(std.mem.indexOf(u8, child_line, "\"origin") == null);
+    }
+
+    // The child's header is the new decision; the parent's file is unchanged.
+    const child_header = try readSessionFile(alloc, io, ws, child);
+    defer alloc.free(child_header);
+    try std.testing.expect(std.mem.indexOf(u8, child_header, "\"model\":\"scripted-alt\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, child_header, "demo-3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, child_header, "\"parent\":{\"session\":\"") != null);
+
+    const parent_after = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(parent_after);
+    try std.testing.expectEqualStrings(parent_before, parent_after);
+
+    // And it is an ordinary session: it steps.
+    {
+        const appended = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "append", child, "carry on" }, env);
+        defer alloc.free(appended.stdout);
+        try std.testing.expectEqual(@as(u8, 0), appended.code);
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", child }, env);
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(u8, 0), stepped.code);
+    }
+}
+
+test "session cli: a carry resolves composition fresh, so a tool joins a conversation already under way" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    const home_abs = try carryHome(alloc, io, ws);
+    defer alloc.free(home_abs);
+    const env: []const EnvPair = &.{
+        .{ .key = "NULYA_HOME", .value = home_abs },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const windows = builtin.os.tag == .windows;
+    const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "carry.demo";
+    try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "src");
+    try ws.writeFile(io, .{
+        .sub_path = draft ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ (if (windows) "run.ps1" else "run.sh"),
+        .data = if (windows) "[Console]::Out.Write('ok')\n" else "#!/bin/sh\nprintf ok\n",
+    });
+    try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data = if (windows)
+        \\{"schema":"nulya.extension/v2","id":"carry.demo","runtime":{"entry":"src/run.ps1","interpreter":"powershell"},"contributes":{"tools":[{"name":"ping","surface":"manual","description":"a tool","input":{"type":"object"}}]}}
+    else
+        \\{"schema":"nulya.extension/v2","id":"carry.demo","runtime":{"entry":"src/run.sh","interpreter":"sh"},"contributes":{"tools":[{"name":"ping","surface":"manual","description":"a tool","input":{"type":"object"}}]}}
+    });
+    const built = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", draft }, env);
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+
+    const new = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" }, env);
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
     {
         const appended = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "append", id, "hello" }, env);
         defer alloc.free(appended.stdout);
@@ -2108,71 +2260,34 @@ test "session cli: rebind moves the rest of a session onto another model, and re
         try std.testing.expectEqual(@as(u8, 0), stepped.code);
     }
 
-    // A profile whose credential does not resolve cannot take the conversation
-    // over: the same refusal `session new` gives, and nothing is deposited.
-    {
-        const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "rebind", id, "--profile", "keyless" }, env);
-        defer alloc.free(refused.stdout);
-        try std.testing.expectEqual(@as(u8, 1), refused.code);
-        const bytes = try readSessionFile(alloc, io, ws, id);
-        defer alloc.free(bytes);
-        try std.testing.expect(std.mem.indexOf(u8, bytes, "model_rebind") == null);
-    }
+    const parent_before = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(parent_before);
+    try std.testing.expect(std.mem.indexOf(u8, parent_before, "\"native_tools\":[]") != null);
 
-    // Naming a model this profile can serve is accepted — and lands in the
-    // INBOX, not the session file: the one writer is still the only writer.
-    {
-        const ok = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "rebind", id, "--model", "demo-2" }, env);
-        defer alloc.free(ok.stdout);
-        try std.testing.expectEqual(@as(u8, 0), ok.code);
-        const bytes = try readSessionFile(alloc, io, ws, id);
-        defer alloc.free(bytes);
-        try std.testing.expect(std.mem.indexOf(u8, bytes, "model_rebind") == null);
-    }
+    const parent_ref = try std.fmt.allocPrint(alloc, "{s}:2", .{id});
+    defer alloc.free(parent_ref);
+    const with_arg = try std.fmt.allocPrint(alloc, "carry.demo@{s}:ping", .{version});
+    defer alloc.free(with_arg);
+    const forked = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", parent_ref, "--carry", "--with", with_arg }, env);
+    defer alloc.free(forked.stdout);
+    try std.testing.expectEqual(@as(u8, 0), forked.code);
+    const child = try alloc.dupe(u8, std.mem.trim(u8, forked.stdout, " \r\n"));
+    defer alloc.free(child);
 
-    // The next step drains it, keeps every earlier turn, and goes on.
-    const before = try readSessionFile(alloc, io, ws, id);
-    defer alloc.free(before);
-    {
-        const appended = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "append", id, "again" }, env);
-        defer alloc.free(appended.stdout);
-        try std.testing.expectEqual(@as(u8, 0), appended.code);
-        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", id }, env);
-        defer alloc.free(stepped.stdout);
-        try std.testing.expectEqual(@as(u8, 0), stepped.code);
-    }
-    const after = try readSessionFile(alloc, io, ws, id);
-    defer alloc.free(after);
-    try std.testing.expect(std.mem.startsWith(u8, after, before));
-    try std.testing.expect(std.mem.indexOf(u8, after, "\"kind\":\"model_rebind\"") != null);
-    // The header still says what this session was CREATED on…
-    try std.testing.expect(std.mem.indexOf(u8, after, "\"model\":\"demo-1\"") != null);
+    const child_bytes = try readSessionFile(alloc, io, ws, child);
+    defer alloc.free(child_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, child_bytes, "\"native_tools\":[\"ext:carry.demo/ping\"]") != null);
+    // Naming no profile inherits the parent's frozen identity.
+    try std.testing.expect(std.mem.indexOf(u8, child_bytes, "demo-1") != null);
+    // The history came along.
+    try std.testing.expect(std.mem.indexOf(u8, child_bytes, "\"seq\":1,\"kind\":\"user_text\"") != null);
 
-    // …and the projection every reader uses says what it runs on NOW.
-    {
-        const listed = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" }, env);
-        defer alloc.free(listed.stdout);
-        try std.testing.expectEqual(@as(u8, 0), listed.code);
-        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "demo-2") != null);
-    }
-
-    // Asking for the model it is already on changes nothing, and says so.
-    {
-        const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "rebind", id, "--model", "demo-2" }, env);
-        defer alloc.free(again.stdout);
-        try std.testing.expectEqual(@as(u8, 0), again.code);
-        const bytes = try readSessionFile(alloc, io, ws, id);
-        defer alloc.free(bytes);
-        try std.testing.expectEqual(after.len, bytes.len);
-    }
+    const parent_after = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(parent_after);
+    try std.testing.expectEqualStrings(parent_before, parent_after);
 }
 
-test "session cli: every rebind after the first is another fact, and a fork continues on the model in force" {
-    // Three ways the second freezing point can be silently lost, all of them
-    // ending in "the user asked for B and something else answered":
-    // a delivery id that collapses into the first rebind, a decision made
-    // against the committed events while another rebind waits in the inbox,
-    // and a fork that reads the header instead of what is in force.
+test "session cli: a carry names a definite cut point, and a ledger from the rebind era says how to go on" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -2185,12 +2300,7 @@ test "session cli: every rebind after the first is another fact, and a fork cont
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const ws = tmp.dir;
-
-    try ws.createDirPath(io, "home");
-    try ws.writeFile(io, .{ .sub_path = "home/config.toml", .data = rebind_config });
-    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
-    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
-    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    const home_abs = try carryHome(alloc, io, ws);
     defer alloc.free(home_abs);
     const env: []const EnvPair = &.{
         .{ .key = "NULYA_HOME", .value = home_abs },
@@ -2202,75 +2312,59 @@ test "session cli: every rebind after the first is another fact, and a fork cont
     try std.testing.expectEqual(@as(u8, 0), new.code);
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
     defer alloc.free(id);
-
-    const Local = struct {
-        fn rebind(a: std.mem.Allocator, i: std.Io, w: std.Io.Dir, exe: []const u8, sid: []const u8, e: []const EnvPair, flag: []const u8, value: []const u8) ![]u8 {
-            const r = try runCliEnvs(a, i, w, &.{ exe, "session", "rebind", sid, flag, value }, e);
-            try std.testing.expectEqual(@as(u8, 0), r.code);
-            return r.stdout;
-        }
-        fn step(a: std.mem.Allocator, i: std.Io, w: std.Io.Dir, exe: []const u8, sid: []const u8, e: []const EnvPair) !void {
-            const appended = try runCliEnvs(a, i, w, &.{ exe, "session", "append", sid, "go" }, e);
-            defer a.free(appended.stdout);
-            try std.testing.expectEqual(@as(u8, 0), appended.code);
-            const stepped = try runCliEnvs(a, i, w, &.{ exe, "session", "step", sid }, e);
-            defer a.free(stepped.stdout);
-            try std.testing.expectEqual(@as(u8, 0), stepped.code);
-        }
-    };
-
-    // Two rebinds with a drain in between. The second one must reach the ledger
-    // too: a fixed delivery id would make it look like the first one all over
-    // again, and the drain would delete it unread.
     {
-        const first = try Local.rebind(alloc, io, ws, exe_abs, id, env, "--model", "demo-2");
-        defer alloc.free(first);
-        try Local.step(alloc, io, ws, exe_abs, id, env);
-        const second = try Local.rebind(alloc, io, ws, exe_abs, id, env, "--model", "demo-3");
-        defer alloc.free(second);
-        try Local.step(alloc, io, ws, exe_abs, id, env);
-        const bytes = try readSessionFile(alloc, io, ws, id);
-        defer alloc.free(bytes);
-        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model\":\"demo-3\"") != null);
+        const appended = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "append", id, "hello" }, env);
+        defer alloc.free(appended.stdout);
+        try std.testing.expectEqual(@as(u8, 0), appended.code);
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", id }, env);
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(u8, 0), stepped.code);
     }
 
-    // A rebind still in the inbox is what the next step will run on, so the
-    // NEXT rebind is judged against it: going back to demo-3 while demo-4 is
-    // pending is a real change, not "already runs on demo-3".
+    // Past the tail: refused, and nothing is created.
     {
-        const pending = try Local.rebind(alloc, io, ws, exe_abs, id, env, "--model", "demo-4");
-        defer alloc.free(pending);
-        const back = try Local.rebind(alloc, io, ws, exe_abs, id, env, "--model", "demo-3");
-        defer alloc.free(back);
-        try std.testing.expect(std.mem.indexOf(u8, back, "will run on") != null);
-        try Local.step(alloc, io, ws, exe_abs, id, env);
+        const before = try countSessions(io, ws);
+        const ref = try std.fmt.allocPrint(alloc, "{s}:99", .{id});
+        defer alloc.free(ref);
+        const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", ref, "--carry" }, env);
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        try std.testing.expectEqual(before, try countSessions(io, ws));
     }
 
-    // Same model, same wire, different profile — a different credential reaches
-    // it, so this moves too.
+    // A session file from the era when changing model was an appended event.
+    const path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+    defer alloc.free(path);
     {
-        const moved = try Local.rebind(alloc, io, ws, exe_abs, id, env, "--profile", "scripted-alt");
-        defer alloc.free(moved);
-        try std.testing.expect(std.mem.indexOf(u8, moved, "will run on") != null);
-        try Local.step(alloc, io, ws, exe_abs, id, env);
-        const listed = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" }, env);
+        const existing = try ws.readFileAlloc(io, path, alloc, .unlimited);
+        defer alloc.free(existing);
+        var lines = std.mem.tokenizeAny(u8, existing, "\r\n");
+        var events: usize = 0;
+        _ = lines.next();
+        while (lines.next()) |_| events += 1;
+        const line = try std.fmt.allocPrint(
+            alloc,
+            "{{\"seq\":{d},\"kind\":\"model_rebind\",\"profile\":\"scripted-alt\",\"identity\":{{\"provider\":\"scripted\",\"model\":\"demo-3\"}}}}\n",
+            .{events + 1},
+        );
+        defer alloc.free(line);
+        const grown = try std.mem.concat(alloc, u8, &.{ existing, line });
+        defer alloc.free(grown);
+        try ws.writeFile(io, .{ .sub_path = path, .data = grown });
+    }
+
+    // `session list` reads raw lines, so such a session is still listed.
+    {
+        const listed = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "list" }, env);
         defer alloc.free(listed.stdout);
-        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "scripted-alt") != null);
+        try std.testing.expectEqual(@as(u8, 0), listed.code);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, id) != null);
     }
 
-    // A fork continues the conversation, so it continues with whoever is having
-    // it — not with the identity the parent's header froze and left behind.
+    // Stepping it does not: the refusal points at the carry fork.
     {
-        const parent_ref = try std.fmt.allocPrint(alloc, "{s}:1", .{id});
-        defer alloc.free(parent_ref);
-        const forked = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", parent_ref }, env);
-        defer alloc.free(forked.stdout);
-        try std.testing.expectEqual(@as(u8, 0), forked.code);
-        const child = std.mem.trim(u8, forked.stdout, " \r\n");
-        const bytes = try readSessionFile(alloc, io, ws, child);
-        defer alloc.free(bytes);
-        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model\":\"scripted-alt\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, bytes, "demo-3") != null);
-        try std.testing.expect(std.mem.indexOf(u8, bytes, "demo-1") == null);
+        const said = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "step", id }, env);
+        defer alloc.free(said);
+        try std.testing.expect(std.mem.indexOf(u8, said, "--carry") != null);
     }
 }

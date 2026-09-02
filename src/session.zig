@@ -77,37 +77,11 @@ pub const AgentSession = struct {
     /// cross-process inbox each step.
     durable: ?DurableRef = null,
     total_usage: provider.Usage = .{},
-    /// How to build a handle for an identity the ledger names, and which
-    /// identity `model` was built for. Both empty for a session that never
-    /// rebinds — `model` is then whatever the shell handed in, forever.
-    rebind: ?ModelResolver = null,
-    built: ledger.Identity = .{ .profile = "", .identity = .{} },
-
-    /// How to build a running model handle for an identity the ledger names.
-    ///
-    /// The kernel decides WHEN a session is running on the wrong model — a fact
-    /// it reads off the ledger — and knows nothing about constructing one, which
-    /// needs config, credentials and a provider table from the shell. So the
-    /// shell hands in a callback, called at exactly the two moments the answer
-    /// can change: opening a session whose ledger already rebound, and draining
-    /// a rebind at a step boundary.
-    ///
-    /// The returned handle has to outlive the session; the shell owns it.
-    pub const ModelResolver = struct {
-        ptr: *anyopaque,
-        /// The whole `(profile, identity)` the ledger recorded: the descriptor
-        /// says what to run, the profile name says which credential reaches it.
-        build: *const fn (ptr: *anyopaque, wanted: ledger.Identity) anyerror!provider.Model,
-    };
 
     pub const Options = struct {
         model: provider.Model,
         step_ctx: loop.StepContext,
         model_options: provider.Options = .{},
-        /// Set by a shell that supports `session rebind`. Without it a rebind
-        /// event still applies to the PROJECTION (reasoning behind it stops
-        /// being replayed) but the handle stays as built.
-        rebind: ?ModelResolver = null,
         /// Store roots to search, in order. The default is the workspace root
         /// alone; a CLI adds the user root and any trusted `extensions.paths`.
         extension_roots: []const []const u8 = &.{store.workspace_root_rel},
@@ -222,8 +196,6 @@ pub const AgentSession = struct {
             .model_options = opts.model_options,
             .extension_roots = opts.extension_roots,
             .durable = .{ .workspace = d.workspace, .session_path = owned_path },
-            .rebind = opts.rebind,
-            .built = .{ .profile = d.model_profile, .identity = d.model_identity },
         };
     }
 
@@ -239,7 +211,7 @@ pub const AgentSession = struct {
         const owned_path = try alloc.dupe(u8, d.session_path);
         errdefer alloc.free(owned_path);
 
-        var s: AgentSession = .{
+        return .{
             .alloc = alloc,
             .l = l,
             .composition = comp,
@@ -248,15 +220,7 @@ pub const AgentSession = struct {
             .model_options = opts.model_options,
             .extension_roots = opts.extension_roots,
             .durable = .{ .workspace = d.workspace, .session_path = owned_path },
-            .rebind = opts.rebind,
-            // What the shell built from: the header's identity, which is the
-            // only one it could have known before reading the events.
-            .built = .{ .profile = hdr.model, .identity = hdr.model_identity },
         };
-        // A session that rebound in an earlier process resumes on the model it
-        // rebound TO, never on the one its header froze.
-        try s.applyRebind();
-        return s;
     }
 
     pub fn deinit(self: *AgentSession) void {
@@ -423,29 +387,7 @@ pub const AgentSession = struct {
             // consumed here, at the boundary, and this step reports `.canceled`.
             if (try consumeCancel(self.alloc, io, d.workspace, d.session_path)) return error.Canceled;
             try ledger.drainInbox(self.alloc, io, &self.l, d.workspace, d.session_path);
-            // A drained rebind takes effect for THIS step: the boundary is
-            // where the identity may change, and nothing has been asked yet.
-            try self.applyRebind();
         }
-    }
-
-    /// Run on the model the ledger names, not the one the shell happened to
-    /// build. Called at the two moments the answer can change — reopening a
-    /// session whose ledger already rebound, and draining one at a step boundary
-    /// — so both paths are one rule.
-    ///
-    /// Without a resolver the handle stays as built: the projection's half
-    /// (reasoning from before the rebind is no longer replayed) always applies,
-    /// while swapping a running handle needs a caller that can make one.
-    fn applyRebind(self: *AgentSession) !void {
-        const wanted = ledger.lastRebind(self.l.view()) orelse return;
-        // The whole identity, profile included: a rebind that only moves to
-        // another profile reaches the same model through a different credential,
-        // and skipping the rebuild would keep using the old one.
-        if (ledger.identityEqual(wanted, self.built)) return;
-        const resolver = self.rebind orelse return;
-        self.model = try resolver.build(resolver.ptr, wanted);
-        self.built = wanted;
     }
 
     /// Append one usage event per completed tool call in this step's ledger

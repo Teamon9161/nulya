@@ -35,7 +35,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 ## 现状（2026-09）
 
-**内核**：durable ledger（一文件 = 一 generation；header 冻结 composition + 模型身份 + inline prompts，其后是 `seq` JSONL；单写者由 `<id>.lock` 排他 advisory 锁强制，别的进程经 inbox 投递、写者在 step 边界排干、按 `origin` 去重做到 exactly-once）→ PromptIR 纯投影 → 一次 step（批量 tool call、串行执行、**一条** tool_results 回传、可取消、每个 call 可过 gate）。五种事件：`user_text` / `assistant` / `tool_results` / `note`（从 step 之外到达的机器事实，`source` 开放词表）/ `model_rebind`。
+**内核**：durable ledger（一文件 = 一 generation；header 冻结 composition + 模型身份 + inline prompts，其后是 `seq` JSONL；单写者由 `<id>.lock` 排他 advisory 锁强制，别的进程经 inbox 投递、写者在 step 边界排干、按 `origin` 去重做到 exactly-once）→ PromptIR 纯投影 → 一次 step（批量 tool call、串行执行、**一条** tool_results 回传、可取消、每个 call 可过 gate）。四种事件：`user_text` / `assistant` / `tool_results` / `note`（从 step 之外到达的机器事实，`source` 开放词表），每一条都是一个 turn。换模型 / 换工具 / 换 system prompt 只有一个原语：`session new --parent <id>:<seq> --carry`，带着历史开一个新文件（父文件一个字节不变）。
 
 **工具面**：唯一 builtin 是 `shell`（前台带超时、`background:true` 起活得过 step 进程的任务）。其余能力都是 extension——内容寻址的不可变版本 + `current` 指针，`activate` 只移指针、一场都不组合。上模型面只有一条路：成为这一场的成员，并由那一行的工具选择决定带哪些 tool（`auto` 随成员上，`manual` 要点名，`internal` 永不上）。
 
@@ -45,7 +45,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 **执行环境**：`--env local | wsl[:distro] | remote:{wsl,ssh,exec}`。`wsl` 只搬 `shell` 的命令；`remote:` 那族把整个工作区搬到别的机器——shell、extension（`ext build --target` + `ext push` 送过去）、spill、后台任务都在那边跑，报告被取回来翻成 inbox 事件。远端那个常驻进程就是 `nulya remote serve`，同一个二进制。
 
-**Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|note|step|events|cancel|rebind|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *` · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step --stream` 是行协议，`--gate` 是每个 tool call 的一票否决。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
+**Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|note|step|events|cancel|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *` · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step --stream` 是行协议，`--gate` 是每个 tool call 的一票否决。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
 
 **三条 journal**（append-only，持 `<file>.lock` 写、读端忽略残尾）：`tool-usage`（证据，内核零读者）· `session-outcomes`（评判，没有行 = unknown ≠ failure）· `trusted-stores`（授权，user 层）。
 
@@ -62,8 +62,8 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | 文件 | 职责 | 最容易写错的那条 |
 |---|---|---|
 | `main.zig` `cli.zig` | 入口与 dispatch | 一个动词族一个 `cli/<verb>.zig`；共用件在 `cli/common.zig`（stdout 只放数据，拒绝与警告一律 stderr） |
-| `ledger.zig` | 5 种事件、deep-copy 所有权、durable 文件（typed header + `seq` JSONL）、跨进程 inbox | 唯一写口是 `append`；一文件 = 一 generation = 一缓存域；单写者由 `<id>.lock` 独家强制；投递 id 就是 exactly-once 键；`.deposit.lock` + `<id>.lock` 两把一起才是 session 的 **lifetime 冻结**（`SessionLeases`）——投递、起后台任务、prune 在它们下面串行 |
-| `prompt.zig` | `Ledger → PromptIR` 纯投影 | 一个事件一个 turn，turn 不拆散；`usage` / `stop_reason` / `origin` 在类型里**没有字段**，所以不可能被投影 |
+| `ledger.zig` | 4 种事件、deep-copy 所有权、durable 文件（typed header + `seq` JSONL）、跨进程 inbox、carry fork 的读半边（`readCarry`） | 唯一写口是 `append`；一文件 = 一 generation = 一缓存域 = 一个模型身份；单写者由 `<id>.lock` 独家强制；投递 id 就是 exactly-once 键；`.deposit.lock` + `<id>.lock` 两把一起才是 session 的 **lifetime 冻结**（`SessionLeases`）——投递、起后台任务、prune 在它们下面串行 |
+| `prompt.zig` | `Ledger → PromptIR` 纯投影 | 一个事件一个 turn（没有例外），turn 不拆散；`usage` / `stop_reason` / `origin` 在类型里**没有字段**，所以不可能被投影 |
 | `loop.zig` | 一次 step：freeze → collect → 串行执行 batch → 一条 tool_results | 取消与截断都要补齐整批（marker），ledger 永远处于合法状态 |
 | `session.zig` | ledger 生命周期 + step 边界（补残尾 → 消费 cancel → 排干 inbox）+ 预算 + usage 记账 | 排干在补残尾之后、模型跑之前，所以排干的事件永远不落在 tool batch 中间 |
 | `composition.zig` | session 开始冻结 tools / skills / system prompts / 成员版本 | 成员一根轴，工具选择挂在成员上；成员或选择解析失败一律硬失败并点名 |

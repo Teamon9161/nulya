@@ -126,24 +126,6 @@ export type LedgerEvent =
    */
   | { seq: number; origin?: string; kind: "note"; source: string; text: string; meta?: string }
   /**
-   * From here on this conversation runs on a different model. The ONLY event
-   * that is not a turn: the model never
-   * sees it, and what it changes is which reasoning items may still be replayed.
-   *
-   * `identity` is the RESOLVED descriptor, frozen exactly the way the header's
-   * is — so "what is running" is the last one of these, or the header when
-   * there is none (`state/session.ts`'s `runningModel`, the one place that
-   * answers it here).
-   */
-  | {
-      seq: number
-      origin?: string
-      kind: "model_rebind"
-      /** The provider PROFILE name, as the header's `model` field is. */
-      profile: string
-      identity: ModelDescriptor
-    }
-  /**
    * A kind this build does not know. New event kinds must survive: the reader
    * keeps them, and the render registry decides what (if anything) to draw.
    */

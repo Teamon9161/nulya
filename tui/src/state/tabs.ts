@@ -248,6 +248,19 @@ export interface TabStore {
    */
   materialize(draft: DraftTab, extra?: SessionExtras): Promise<SessionTab>
   /**
+   * Continue the session in `from` as a NEW one that carries its history:
+   * `session new --parent <id>:<at> --carry`, composed fresh the way
+   * `materialize` composes a draft, and put in `from`'s place in the strip.
+   *
+   * The one way a conversation already under way changes what it runs on — its
+   * model, and with it whatever `/ext` says today. A session's identity and
+   * composition are frozen for its whole file, so this is a different file; the
+   * parent keeps every byte and stays openable by id.
+   *
+   * `at` is the cut point: how many of the parent's events come along.
+   */
+  carryFork(from: SessionTab, at: number, pick?: ModelPick, extra?: SessionExtras): Promise<SessionTab>
+  /**
    * Open `id` in place of the tab keyed `oldKey`: same position, the old
    * attachment released (and the old session un-created if this process made it
    * and it is still empty).
@@ -536,6 +549,23 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
       setTabs([...tabs(), tab])
       setActiveIndex(tabs().length - 1)
       return tab
+    },
+    async carryFork(from, at, pick, extra = {}) {
+      const members = [...sessionMembers(statePath), ...(extra.with ?? [])]
+      const id = await sessionNew(from.ws, {
+        parent: { session: from.id, seq: at },
+        carry: true,
+        ...(pick ? { profile: pick.profile, model: pick.model } : {}),
+        ...(members.length > 0 ? { with: members } : {}),
+        ...(extra.bare ? { bare: true } : {}),
+        ...((extra.prompt?.length ?? 0) > 0 ? { prompt: extra.prompt } : {}),
+        ...(extra.execEnv ? { execEnv: extra.execEnv } : {}),
+        ...(extra.workspace ? { workspace: extra.workspace } : {}),
+        ...(extra.sshPassword ? { sshPassword: extra.sshPassword } : {}),
+      })
+      // Not `created`: this session has the parent's turns in it from birth, so
+      // "nobody ever said anything in it" is false and nothing may prune it.
+      return replace(from.key, id, { ws: from.ws, effort: pick?.effort ?? from.effort() })
     },
     async materialize(draft, extra = {}) {
       const pick = draft.pick()

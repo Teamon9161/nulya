@@ -237,7 +237,7 @@ Store and scope:
   user turn. `step` runs to the end of a turn or its budget. `events` tails the
   log. `cancel` asks it to stop at the next step boundary. `outcome` records a
   verdict. `list` projects them all.
-- Only `step` writes the session file. `append`, `cancel` and `rebind` deposit
+- Only `step` writes the session file. `append`, `note` and `cancel` deposit
   into sibling files that the next step boundary drains, so all three work on a
   session another process is currently running.
 - `nulya session prune <id> [--force]` is the only verb that REMOVES a session.
@@ -251,17 +251,6 @@ Store and scope:
   What goes with it: the session file, its siblings, and `.nulya/scratch/<id>/`.
   What stays: the journal rows (a verdict is evidence about something that
   happened), and any session forked from it with `--parent`.
-- `nulya session rebind <id> [--profile P] [--model ID]` runs the REST of a
-  session on a different model. The header still freezes one identity and is
-  still never rewritten — the change is an appended event, and the identity in
-  force is the last one appended. The transcript is kept in full; what is not
-  replayed afterwards is the `reasoning` recorded before the rebind, because
-  that is opaque and belongs to the model that produced it. Two costs worth
-  knowing: a different provider means a cold prompt cache, and it refuses
-  outright if the credential does not resolve, or if the session already holds
-  images and the new model's `[[models]]` entry does not say `vision = true`.
-  Which models are worth switching between is your call, not the kernel's: it
-  holds no compatibility table.
 - `nulya session new --parent <id>:<seq>` forks: a new file continuing an
   existing one. Compaction and handover are both this. Composition is not
   inherited — pass `--with` again if the fork needs it. `--env`
@@ -272,6 +261,21 @@ Store and scope:
   (even `local`) to opt out and take a fresh machine from argv instead; naming
   only `--workspace` on an inherited `--env` just picks a different directory
   on the same machine.
+- `nulya session new --parent <id>:<seq> --carry` is how a conversation already
+  under way changes model, tools or system prompt: it is the same fork, and
+  `--carry` copies the parent's events 1..seq into the child, which then runs
+  under whatever `--profile` / `--model` / `--with` / `--prompt` this command
+  resolves. A session's own identity and composition are frozen for its whole
+  file — this is the primitive, and there is no verb that changes them in
+  place. Naming no `--profile` / `--model` inherits the parent's. The parent is
+  not modified: it stays on disk, steppable, as it was.
+  What does not come along: the `reasoning` of every copied turn (it is opaque
+  and belongs to the model that produced it) — so expect the child's first step
+  to pay for the whole prefix again on a cold prompt cache. It refuses, and
+  creates nothing, if `seq` is past the parent's last event, or if the copied
+  turns hold images and the child's model has no `[[models]]` entry saying
+  `vision = true`. Which models are worth switching between is your call, not
+  the kernel's: it holds no compatibility table.
 - `nulya session new --env <spec>` chooses WHERE this session's `shell` commands
   run: `local` (the default), `wsl`, or `wsl:<distro>`. It is frozen in the
   header, so `step` takes no such flag and a resume that cannot reach the
