@@ -45,7 +45,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 **执行环境**：`--env local | remote:{wsl,ssh,exec}`。`remote:` 那族把整个工作区搬到别的机器——shell、extension（`ext build --target` + `ext push` 送过去）、spill、后台任务都在那边跑，报告被取回来翻成 inbox 事件。远端那个常驻进程就是 `nulya remote serve`，同一个二进制。曾经有一根只搬 `shell` 命令的轴（`wsl[:distro]`，更早还有 `ssh:<dest>`）已退役：老 header 里冻着它们 resume 时响亮拒绝并指路对应的 `remote:` 拼法。
 
-**Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|note|step|events|cancel|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *` · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step --stream` 是行协议，`--gate` 是每个 tool call 的一票否决。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
+**Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|note|step|events|cancel|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *` · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step` 的 stdout 一律是行协议（`--stream` 是保留一个版本期的无操作别名），`--gate` 是每个 tool call 的一票否决、不需要别的 flag 同用；`session append` 打印它投递的名字，供匹配后续的 `user_text` 事件；`session events --follow` 轮询到 session 被 `prune` 就 exit 0。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
 
 **三条 journal**（append-only，持 `<file>.lock` 写、读端忽略残尾）：`tool-usage`（证据——耗时与场外调用，session 内的调用计数已经能从 ledger 派生，内核零读者）· `session-outcomes`（评判，没有行 = unknown ≠ failure）· `trusted-stores`（授权，user 层）。
 

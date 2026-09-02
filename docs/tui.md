@@ -1,7 +1,7 @@
 # Nulya TUI — 设计与计划
 
 > **状态：T0–T115 全部落地**（T10 `/goal` 仍是占位）。前端在仓库顶层 `tui/`（见 [`../tui/README.md`](../tui/README.md)）；本文是它的设计契约（§1–§10）+ 实施日志（§11，T0–T114 已归档到 [`history/tui-implementation-log.md`](history/tui-implementation-log.md)）。`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文，不进 DESIGN.md。
-> **内核为它长的东西**（都在 [DESIGN.md](DESIGN.md) 里）：`session step --stream`（纯观测的行协议）· `session step --gate`（每个 tool call 执行前的一票否决，§4/§14）· `session new --parent` 的 fork 语义（§11/§14）· `NULYA_EXE`（子进程 env 里的本二进制路径，§7.6）。其余每一样（`--prompt` / `--with` / `--carry` / `--bare` / `--env` / `--workspace` / `task *` / `remote *`）都是内核为**每个** driver 长的动词，前端只是第一个 consumer。
+> **内核为它长的东西**（都在 [DESIGN.md](DESIGN.md) 里）：`session step` 的行协议（纯观测，`--stream` 现在是无操作别名）· `session step --gate`（每个 tool call 执行前的一票否决，§4/§14）· `session new --parent` 的 fork 语义（§11/§14）· `NULYA_EXE`（子进程 env 里的本二进制路径，§7.6）。其余每一样（`--prompt` / `--with` / `--carry` / `--bare` / `--env` / `--workspace` / `task *` / `remote *`）都是内核为**每个** driver 长的动词，前端只是第一个 consumer。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -88,7 +88,7 @@
 | 取消标记文本 | `loop.zig` 四种 marker（interrupted / canceled executing / recording canceled / not executed）→ 识别成 canceled 卡片 |
 | `emit` 溢出 | `tool_results[].spill_path` → 卡片尾部 "full output → path"，`o` 打开（`$EDITOR` / 展开读文件） |
 
-### 2.2 内核改动之一：`nulya session step <id> --stream` `[已落地 · T0 → DESIGN §14]`
+### 2.2 内核改动之一：`nulya session step` 的行协议 `[已落地 · T0 → DESIGN §14]`
 
 **协议与机制的真相在 [DESIGN.md](DESIGN.md) §14**（`loop.StepContext.observer` 纯观测钩子 + 行协议）。这里只留 TUI 侧的消费约定：
 

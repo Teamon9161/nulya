@@ -254,8 +254,9 @@ test "session step: a session frozen onto a retired wsl exec target refuses loud
     // The property this whole axis exists for: a session frozen onto a target
     // this binary no longer moves commands to must NEVER run them here instead
     // — that would look like success in every other way. `step` refuses before
-    // touching the model or the tool at all, and names the replacement.
-    const err = try runCliStderr(alloc, io, ws, &.{ exe, "session", "step", "s-wsl-legacy", "--max-steps", "1" }, &.{});
-    defer alloc.free(err);
-    try std.testing.expect(std.mem.indexOf(u8, err, "remote:wsl") != null);
+    // touching the model or the tool at all, and names the replacement — on
+    // stdout now, as the line protocol's own `run error` line (§14).
+    const run = try runCli(alloc, io, ws, &.{ exe, "session", "step", "s-wsl-legacy", "--max-steps", "1" });
+    defer alloc.free(run.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, run.stdout, "remote:wsl") != null);
 }

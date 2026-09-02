@@ -1216,23 +1216,18 @@ pub fn stoppedReason(last_status: loop.StepStatus, last_stop: provider.StopReaso
     return if (turn_done) "end_turn" else "budget";
 }
 
-/// A `session step` diagnostic. Plain text on stderr without `--stream`, so
-/// stdout stays the event JSONL and nothing else; with `--stream` it is a
-/// `run error` line, which is part of the protocol and therefore on stdout.
+/// A `session step` diagnostic: a `{"stream":"run","event":"error"}` line on
+/// stdout — the line protocol is the only output shape now, so a refusal is
+/// never a bare line a driver has to special-case.
 fn stepFail(
     alloc: std.mem.Allocator,
-    io: std.Io,
-    stream: ?*StepStream,
+    stream: *StepStream,
     comptime fmt: []const u8,
     args: anytype,
 ) !u8 {
     const msg = try std.fmt.allocPrint(alloc, fmt, args);
     defer alloc.free(msg);
-    if (stream) |s| {
-        try s.runError(msg);
-    } else {
-        try printErrFmt(alloc, io, "{s}\n", .{msg});
-    }
+    try stream.runError(msg);
     return 1;
 }
 
@@ -1268,27 +1263,24 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         try printErr(io, "invalid session id\n");
         return 1;
     }
-    const streaming = sliceHasFlag(args[1..], "--stream");
-    // `--gate` asks the caller before every tool call on the same wire the
-    // stream uses: a request line on stdout, a verdict line on stdin. Without
-    // `--stream` there is no such wire, so the combination is refused rather
-    // than silently running ungated.
+    // Accepted and ignored for one release: the line protocol below is now
+    // stdout's only shape, with or without this flag.
+    _ = sliceHasFlag(args[1..], "--stream");
+    // `--gate` asks the caller before every tool call on the wire the line
+    // protocol always opens now: a request line on stdout, a verdict line on
+    // stdin.
     const gating = sliceHasFlag(args[1..], "--gate");
-    if (gating and !streaming) {
-        try printErr(io, "--gate requires --stream: the approval request is a line of that protocol\n");
-        return 1;
-    }
     var out_buf: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(io, &out_buf);
     var stream_state: StepStream = .{ .alloc = alloc, .out = &stdout.interface };
-    const stream: ?*StepStream = if (streaming) &stream_state else null;
+    const stream: *StepStream = &stream_state;
     // One buffer for the whole run: a verdict line is short, and `deny <note>`
     // longer than this is a note nobody typed.
     var in_buf: [4097]u8 = undefined;
     var stdin = std.Io.File.stdin().readerStreaming(io, &in_buf);
     const ssh_password = if (sliceHasFlag(args[1..], "--ssh-password-stdin"))
         remote.readSshPassword(alloc, &stdin.interface) catch |err|
-            return stepFail(alloc, io, stream, "--ssh-password-stdin: {s}", .{@errorName(err)})
+            return stepFail(alloc, stream, "--ssh-password-stdin: {s}", .{@errorName(err)})
     else
         null;
     defer if (ssh_password) |secret| {
@@ -1320,21 +1312,21 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // header, but the extension BYTES are read from the store on each resume,
     // so a store that arrived between two steps must not be executed either.
     if (!try storeTrusted(alloc, io, &host, cwd_path)) {
-        return stepFail(alloc, io, stream, "the workspace extension store is not trusted (see the lines above); run `nulya ext trust` after reviewing it", .{});
+        return stepFail(alloc, stream, "the workspace extension store is not trusted (see the lines above); run `nulya ext trust` after reviewing it", .{});
     }
 
     var hdr = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch |err| {
         // A file this binary is too old to read is not a missing session: say
         // which format it reads, so upgrading is the obvious answer.
         if (err == error.UnsupportedLedgerVersion) {
-            return stepFail(alloc, io, stream, "session '{s}' was written by a newer nulya; this binary reads ledger v{d}", .{ id, ledger.format_version });
+            return stepFail(alloc, stream, "session '{s}' was written by a newer nulya; this binary reads ledger v{d}", .{ id, ledger.format_version });
         }
-        return stepFail(alloc, io, stream, "no such session '{s}': {s}", .{ id, @errorName(err) });
+        return stepFail(alloc, stream, "no such session '{s}': {s}", .{ id, @errorName(err) });
     };
     defer hdr.deinit();
     try warnKernelDrift(alloc, io, id, hdr.value.nulya);
     if (ssh_password != null and !remote.isSshSpec(hdr.value.environment))
-        return stepFail(alloc, io, stream, "--ssh-password-stdin applies only to a remote:ssh: session", .{});
+        return stepFail(alloc, stream, "--ssh-password-stdin applies only to a remote:ssh: session", .{});
 
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
@@ -1355,26 +1347,26 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         .tasks_dir = tasks_dir,
     }, hdr.value.environment, hdr.value.remote_workspace, ext_roots, ssh_password) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
-            return stepFail(alloc, io, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
+            return stepFail(alloc, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
         },
         error.InvalidExecTarget, error.InvalidRemoteSpec, error.RemoteSpecUnsupportedOnHost => {
             // A header frozen with a retired exec-target spelling (`ssh:…` or
             // `wsl…`) gets the same specific pointer a fresh `--env` naming
             // it would — never a silent re-interpretation as `remote:…`.
             if (launch.legacyExecHint(environment.normalizeExecSpec(hdr.value.environment))) |hint| {
-                return stepFail(alloc, io, stream, "session '{s}' runs its commands in '{s}', which this binary on this host cannot reach; refusing to run them here instead ({s})", .{ id, hdr.value.environment, hint });
+                return stepFail(alloc, stream, "session '{s}' runs its commands in '{s}', which this binary on this host cannot reach; refusing to run them here instead ({s})", .{ id, hdr.value.environment, hint });
             }
-            return stepFail(alloc, io, stream, "session '{s}' runs its commands in '{s}', which this binary on this host cannot reach; refusing to run them here instead", .{ id, hdr.value.environment });
+            return stepFail(alloc, stream, "session '{s}' runs its commands in '{s}', which this binary on this host cannot reach; refusing to run them here instead", .{ id, hdr.value.environment });
         },
         // Named and reachable in principle, but it did not answer — a
         // different fix from "this host has no way to get there" above. The
         // transport's own diagnostic already went to stderr unmodified; this
         // only says which session it stopped.
         error.RemoteChannelLost, error.RemoteChannelStalled => {
-            return stepFail(alloc, io, stream, "session '{s}' runs its commands on '{s}', which did not answer; nothing was run here instead", .{ id, hdr.value.environment });
+            return stepFail(alloc, stream, "session '{s}' runs its commands on '{s}', which did not answer; nothing was run here instead", .{ id, hdr.value.environment });
         },
         error.RemoteVersionMismatch => {
-            return stepFail(alloc, io, stream, "session '{s}' reached '{s}', but the nulya there speaks a different remote protocol; install a matching build on that machine", .{ id, hdr.value.environment });
+            return stepFail(alloc, stream, "session '{s}' reached '{s}', but the nulya there speaks a different remote protocol; install a matching build on that machine", .{ id, hdr.value.environment });
         },
         else => return err,
     };
@@ -1409,10 +1401,10 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var holder = launch.buildFromDescriptor(alloc, io, hdr.value.model_identity, &host, .{ .cache_key = id, .inline_key = inline_key }) catch |err| switch (err) {
         error.MissingCredential => {
             const credential = if (hdr.value.model_identity.api_key_env.len != 0) hdr.value.model_identity.api_key_env else "codex login";
-            return stepFail(alloc, io, stream, "session '{s}' is a '{s}' session but its credential (profile '{s}' api_key, or {s}) is not available; refusing to run (no silent fallback)", .{ id, hdr.value.model_identity.provider, hdr.value.model, credential });
+            return stepFail(alloc, stream, "session '{s}' is a '{s}' session but its credential (profile '{s}' api_key, or {s}) is not available; refusing to run (no silent fallback)", .{ id, hdr.value.model_identity.provider, hdr.value.model, credential });
         },
         error.ProviderUnavailable => {
-            return stepFail(alloc, io, stream, "session '{s}' was created with provider '{s}', which this build cannot construct", .{ id, hdr.value.model_identity.provider });
+            return stepFail(alloc, stream, "session '{s}' was created with provider '{s}', which this build cannot construct", .{ id, hdr.value.model_identity.provider });
         },
         else => return err,
     };
@@ -1435,72 +1427,58 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
             .tool_context = .{ .environment = lenv.handle(), .cwd = cwd_path },
             .scratch_dir = scratch,
             .retry = cfg.provider.retry,
-            .observer = if (stream) |s| s.observer() else null,
+            .observer = stream.observer(),
             .gate = if (gate) |g| g.gate() else null,
         },
         .extension_roots = ext_roots,
     }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath }) catch |err| switch (err) {
-        error.LegacyModelRebind => return stepFail(alloc, io, stream, legacy_rebind_refusal, .{ id, id }),
-        else => return stepFail(alloc, io, stream, "session open failed: {s}", .{@errorName(err)}),
+        error.LegacyModelRebind => return stepFail(alloc, stream, legacy_rebind_refusal, .{ id, id }),
+        else => return stepFail(alloc, stream, "session open failed: {s}", .{@errorName(err)}),
     };
     defer sess.deinit();
 
     sess.model_options = .{ .effort = effort_flag orelse cfg.defaultEffort(hdr.value.model, hdr.value.model_identity.model) };
 
-    const before = sess.l.len();
-    if (stream) |s| {
-        s.printed = before;
-        // Read-only, and only so a drained inbox turn reaches the reader when
-        // it lands rather than at the end of the step it opened.
-        s.ledger_view = &sess.l;
-    }
+    stream.printed = sess.l.len();
+    // Read-only, and only so a drained inbox turn reaches the reader when it
+    // lands rather than at the end of the step it opened.
+    stream.ledger_view = &sess.l;
     const steps = sess.run(max_steps) catch |err| {
         // Whatever this run did append before it faulted is still fact; report
         // those lines, then the error.
-        if (stream) |s| s.flushEvents(sess.l.view()) catch {};
+        stream.flushEvents(sess.l.view()) catch {};
         // Not a fault but a state: the last reply was cut off, and stepping it
         // again would send it back as a prefill.
         if (err == error.LegacyModelRebind) {
-            return stepFail(alloc, io, stream, legacy_rebind_refusal, .{ id, id });
+            return stepFail(alloc, stream, legacy_rebind_refusal, .{ id, id });
         }
         if (err == error.TruncatedTurnNeedsInput) {
-            return stepFail(alloc, io, stream, "the last reply was cut off at its output cap; append a message before stepping again", .{});
+            return stepFail(alloc, stream, "the last reply was cut off at its output cap; append a message before stepping again", .{});
         }
-        return stepFail(alloc, io, stream, "session step failed: {s}", .{@errorName(err)});
+        return stepFail(alloc, stream, "session step failed: {s}", .{@errorName(err)});
     };
 
-    if (stream) |s| {
-        // Every event was already flushed at its step boundary; only the run
-        // verdict is left.
-        try s.runDone(steps, stoppedReason(s.last_status, sess.lastStopReason(), sess.lastAssistantDone()));
-        // A dropped observation is not a broken step, but the reader's picture
-        // is incomplete: say so on stderr (stdout stays pure JSON) and exit
-        // non-zero.
-        if (s.err) |e| {
-            try printErr(io, "stream write failed: ");
+    // Every event was already flushed at its step boundary; only the run
+    // verdict is left.
+    try stream.runDone(steps, stoppedReason(stream.last_status, sess.lastStopReason(), sess.lastAssistantDone()));
+    // A dropped observation is not a broken step, but the reader's picture is
+    // incomplete: say so on stderr (stdout stays pure JSON) and exit non-zero.
+    if (stream.err) |e| {
+        try printErr(io, "stream write failed: ");
+        try printErr(io, @errorName(e));
+        try printErr(io, "\n");
+        return 1;
+    }
+    // Same for a broken approval channel: the step is legal (everything it
+    // could not ask about was denied), the caller's picture is not. Reaching
+    // the end of stdin is not a failure and sets nothing.
+    if (gate) |g| {
+        if (g.err) |e| {
+            try printErr(io, "gate channel failed: ");
             try printErr(io, @errorName(e));
             try printErr(io, "\n");
             return 1;
         }
-        // Same for a broken approval channel: the step is legal (everything it
-        // could not ask about was denied), the caller's picture is not.
-        // Reaching the end of stdin is not a failure and sets nothing.
-        if (gate) |g| {
-            if (g.err) |e| {
-                try printErr(io, "gate channel failed: ");
-                try printErr(io, @errorName(e));
-                try printErr(io, "\n");
-                return 1;
-            }
-        }
-        return 0;
-    }
-
-    // stdout is the events this invocation appended, as one JSONL line each.
-    for (sess.l.view()[before..], before..) |ev, i| {
-        const line = try ledger.encodeEventLine(alloc, ev, i + 1);
-        defer alloc.free(line);
-        try printRaw(io, line);
     }
     return 0;
 }
@@ -1854,15 +1832,14 @@ test "a run stopped by the step budget reports stopped=budget, a canceled step r
     try std.testing.expectEqualStrings("max_tokens", stoppedReason(.completed, .max_tokens, false));
 }
 
-test "under --stream a diagnostic is a run error line, never a bare text line" {
+test "a `session step` diagnostic is a run error line, never a bare text line" {
     const alloc = std.testing.allocator;
-    const io = std.testing.io;
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     var stream: StepStream = .{ .alloc = alloc, .out = &out.writer };
 
-    const code = try stepFail(alloc, io, &stream, "session open failed: {s}", .{"SessionBusy"});
+    const code = try stepFail(alloc, &stream, "session open failed: {s}", .{"SessionBusy"});
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expectEqualStrings(
         "{\"stream\":\"run\",\"event\":\"error\",\"message\":\"session open failed: SessionBusy\"}\n",

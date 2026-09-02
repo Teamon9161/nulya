@@ -1120,11 +1120,10 @@ test "cli: a workspace store that arrived with a checkout is refused until `ext 
         const stepped = try runCli(alloc, io, ws, &.{ exe_abs, "session", "step", "s-nope" });
         defer alloc.free(stepped.stdout);
         try std.testing.expectEqual(@as(u8, 1), stepped.code);
-        const stderr = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "step", "s-nope" }, &.{});
-        defer alloc.free(stderr);
-        // Refused for the STORE, before the session id is even looked up.
-        try std.testing.expect(std.mem.indexOf(u8, stderr, "is not trusted") != null);
-        try std.testing.expect(std.mem.indexOf(u8, stderr, "no such session") == null);
+        // Refused for the STORE, before the session id is even looked up — and
+        // on stdout, as the line protocol's own `run error` line (§14).
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "is not trusted") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "no such session") == null);
     }
 
     // The read-only projections are NOT gated: they are the review tools, and

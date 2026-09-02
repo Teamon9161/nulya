@@ -976,17 +976,24 @@ test "session cli: --gate asks stdin before every tool call, denies with the cal
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
     defer alloc.free(exe_abs);
 
-    // `--gate` without `--stream` has no wire to ask on, and a step that quietly
-    // ran ungated is the one thing this flag exists to prevent.
+    // `--gate` needs nothing else alongside it now: the line protocol (and its
+    // stdin wire) is stdout's only shape, with or without `--stream`.
     {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const id = try newSessionWithTurn(alloc, io, tmp.dir, exe_abs);
         defer alloc.free(id);
-        const bad = try runCli(alloc, io, tmp.dir, &.{ exe_abs, "session", "step", id, "--gate" });
-        defer alloc.free(bad.stdout);
-        try std.testing.expectEqual(@as(u8, 1), bad.code);
-        try std.testing.expectEqualStrings("", bad.stdout); // the refusal is on stderr
+        const bare = try runCliStdin(
+            alloc,
+            io,
+            tmp.dir,
+            &.{ exe_abs, "session", "step", id, "--gate" },
+            "allow\n",
+            &.{.{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" }},
+        );
+        defer alloc.free(bare.stdout);
+        try std.testing.expectEqual(@as(u8, 0), bare.code);
+        try std.testing.expect(std.mem.indexOf(u8, bare.stdout, "\"stream\":\"gate\",\"event\":\"request\"") != null);
     }
 
     // ── deny, with a note the model can read ────────────────────────────────
@@ -1080,7 +1087,7 @@ test "session cli: --gate asks stdin before every tool call, denies with the cal
     try std.testing.expect(std.mem.indexOf(u8, closed_file, "hello-from-nulya\\n[exit 0]") == null);
 }
 
-test "session cli: --stream emits the transient line protocol and leaves the ledger identical" {
+test "session cli: the line protocol is stdout's only shape, with or without --stream" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1106,7 +1113,8 @@ test "session cli: --stream emits the transient line protocol and leaves the led
         try std.testing.expectEqual(@as(u8, 0), ap.code);
     }
 
-    const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", id, "--stream" }, "NULYA_SCRIPTED_MODE", "finish");
+    // No `--stream`: this is the one output protocol now, not the bare form.
+    const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", id }, "NULYA_SCRIPTED_MODE", "finish");
     defer alloc.free(step.stdout);
     try std.testing.expectEqual(@as(u8, 0), step.code);
 
@@ -1157,11 +1165,10 @@ test "session cli: --stream emits the transient line protocol and leaves the led
         last,
     );
 
-    // The ledger a streamed run writes is exactly the ledger a plain run writes:
-    // the observer is pure observation, so the file is the same history.
-    const streamed = try readSessionFile(alloc, io, ws, id);
-    defer alloc.free(streamed);
-
+    // `--stream` is a no-op alias, not a second shape: an identical run on an
+    // identical fixture produces byte-identical stdout with it given, seq for
+    // seq (the two sessions differ only by id and creation time, neither of
+    // which reaches stdout).
     var tmp2 = std.testing.tmpDir(.{});
     defer tmp2.cleanup();
     const ws2 = tmp2.dir;
@@ -1174,23 +1181,23 @@ test "session cli: --stream emits the transient line protocol and leaves the led
         defer alloc.free(ap.stdout);
         try std.testing.expectEqual(@as(u8, 0), ap.code);
     }
-    const plain = try runCliEnv(alloc, io, ws2, &.{ exe_abs, "session", "step", id2 }, "NULYA_SCRIPTED_MODE", "finish");
-    defer alloc.free(plain.stdout);
-    try std.testing.expectEqual(@as(u8, 0), plain.code);
-    const unstreamed = try readSessionFile(alloc, io, ws2, id2);
-    defer alloc.free(unstreamed);
+    const streamed = try runCliEnv(alloc, io, ws2, &.{ exe_abs, "session", "step", id2, "--stream" }, "NULYA_SCRIPTED_MODE", "finish");
+    defer alloc.free(streamed.stdout);
+    try std.testing.expectEqual(@as(u8, 0), streamed.code);
+    try std.testing.expectEqualStrings(step.stdout, streamed.stdout);
 
-    // Compare from the assistant turn on: the header differs by session id and
-    // creation time, and seq 1 carries the inbox delivery name it was drained
-    // from. Everything the model and the tools produced must be identical.
-    const streamed_turns = streamed[std.mem.indexOf(u8, streamed, "{\"seq\":2,").?..];
-    const unstreamed_turns = unstreamed[std.mem.indexOf(u8, unstreamed, "{\"seq\":2,").?..];
-    try std.testing.expectEqualStrings(unstreamed_turns, streamed_turns);
-
-    // And a plain `step` still prints exactly its own event lines: the streamed
-    // run's ledger lines appear verbatim in the streamed stdout too.
-    try std.testing.expect(std.mem.indexOf(u8, plain.stdout, "\"kind\":\"tool_results\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plain.stdout, "\"stream\":") == null);
+    // The ledger a `--stream` run writes is exactly the ledger a plain run
+    // writes: the observer is pure observation, so the file is the same
+    // history either way. Compare from the assistant turn on: the header
+    // differs by session id and creation time, and seq 1 carries the inbox
+    // delivery name it was drained from.
+    const plain_ledger = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(plain_ledger);
+    const streamed_ledger = try readSessionFile(alloc, io, ws2, id2);
+    defer alloc.free(streamed_ledger);
+    const plain_turns = plain_ledger[std.mem.indexOf(u8, plain_ledger, "{\"seq\":2,").?..];
+    const streamed_turns = streamed_ledger[std.mem.indexOf(u8, streamed_ledger, "{\"seq\":2,").?..];
+    try std.testing.expectEqualStrings(plain_turns, streamed_turns);
 }
 
 // ── M5c: multiple extension store roots ───────────────────────
@@ -2348,10 +2355,11 @@ test "session cli: a carry names a definite cut point, and a ledger from the reb
         try std.testing.expect(std.mem.indexOf(u8, listed.stdout, id) != null);
     }
 
-    // Stepping it does not: the refusal points at the carry fork.
+    // Stepping it does not: the refusal points at the carry fork — on stdout
+    // now, as the line protocol's own `run error` line (§14).
     {
-        const said = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "step", id }, env);
-        defer alloc.free(said);
-        try std.testing.expect(std.mem.indexOf(u8, said, "--carry") != null);
+        const said = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", id }, env);
+        defer alloc.free(said.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, said.stdout, "--carry") != null);
     }
 }
