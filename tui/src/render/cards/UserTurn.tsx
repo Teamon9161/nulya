@@ -1,13 +1,13 @@
 import { For, createMemo } from "solid-js"
 import { useBodyWidth, useStyle } from "../theme.ts"
 import { hardWrapLines } from "../../ui/columns.ts"
-import type { UserItem } from "../../state/session.ts"
+import type { NoteItem, UserItem } from "../../state/session.ts"
 
 /**
  * A user turn. Markdown is deliberately off here: what the user
  * typed is shown as typed, newlines and all. A mid-task message (midtask.ts)
- * renders through here too — `text` is then the folded body and `badge` says
- * how it arrived, while the ledger keeps the full sentinel.
+ * and a plugin's note (extnote.ts) render through here too — `text` is then the
+ * folded body and `badge` says how it arrived.
  *
  * THE WRAP WIDTH IS THE PANE'S, NOT THE TERMINAL'S (`useBodyWidth`, BUGS.md
  * #10/#17). Each wrapped row here is painted by its own `height={1}` box, so a
@@ -19,12 +19,15 @@ import type { UserItem } from "../../state/session.ts"
  * wraps at, and the two cards have to agree or one exchange draws in two
  * different columns.
  */
-export function UserTurn(props: { item: UserItem; text?: string; badge?: string }) {
+export function UserTurn(props: { item: UserItem | NoteItem; text?: string; badge?: string }) {
   const style = useStyle()
   const column = useBodyWidth()
   const body = () => {
-    const images = props.item.imageCount ? `${props.item.imageCount} image${props.item.imageCount === 1 ? "" : "s"}` : null
-    const suffix = [props.badge, images, props.item.queued ? "queued" : null].filter(Boolean).join(" · ")
+    // A note renders in this same shape with a badge for where it came from,
+    // and has neither of the two things only a typed turn can have.
+    const turn = props.item.kind === "user" ? props.item : null
+    const images = turn?.imageCount ? `${turn.imageCount} image${turn.imageCount === 1 ? "" : "s"}` : null
+    const suffix = [props.badge, images, turn?.queued ? "queued" : null].filter(Boolean).join(" · ")
     const text = props.text ?? props.item.text
     return suffix.length > 0 ? (text.length > 0 ? `${text} · ${suffix}` : suffix) : text
   }

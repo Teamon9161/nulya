@@ -64,7 +64,7 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
           transcript is the one place that distinction survives a replay. */}
       <Match when={extNoteOf(props.item) !== null}>
         <UserTurn
-          item={props.item as Extract<TranscriptItem, { kind: "user" }>}
+          item={props.item as Extract<TranscriptItem, { kind: "user" | "note" }>}
           text={extNoteOf(props.item)!.text}
           badge={extNoteBadge(extNoteOf(props.item)!)}
         />
@@ -125,6 +125,14 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
           and the call that started it has already said what it is. */}
       <Match when={props.item.kind === "task"}>
         <TaskFinishedCard item={props.item as Extract<TranscriptItem, { kind: "task" }>} />
+      </Match>
+      {/* A machine fact the screen has no card of its own for: shown in the
+          shape of a turn, badged with the label its depositor wrote. */}
+      <Match when={props.item.kind === "note"}>
+        <UserTurn
+          item={props.item as Extract<TranscriptItem, { kind: "note" }>}
+          badge={(props.item as Extract<TranscriptItem, { kind: "note" }>).source}
+        />
       </Match>
       {/* Not a turn at all: the boundary between two models answering the same
           conversation. */}

@@ -3,8 +3,7 @@
  * (tasks panel).
  *
  * The kernel already says a background task was killed: the supervisor writes
- * `· killed` into that task's `task_finished` text (`cli/task.zig`, DESIGN
- * §6.1). What it cannot say is who asked for it — `nulya task kill` looks the
+ * `· killed` into that task's report note (`cli/task.zig`). What it cannot say is who asked for it — `nulya task kill` looks the
  * same whether the model ran it through `shell` or a person clicked a button
  * on screen, and only the screen knows which one just happened.
  *
@@ -32,7 +31,7 @@ const close = "</task-stopped>"
 /** The contract, in the shape `approvalnote.ts` and `extnote.ts` use. */
 export const task_stopped_contract =
   "The message above records that the user stopped this background task from " +
-  "the TUI. Its task_finished report, if one has arrived or still arrives, is " +
+  "the TUI. Its own report, if one has arrived or still arrives, is " +
   "the process's own exit; this note says who asked for it."
 
 export function wrapTaskStoppedNote(task: string, withContract = true): string {

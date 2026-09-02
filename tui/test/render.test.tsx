@@ -440,7 +440,7 @@ function runningTask(task: string, elapsed: number): TaskEntry {
   }
 }
 
-const task_finished_item: TranscriptItem = {
+const task_report_item: TranscriptItem = {
   key: "e7",
   seq: 7,
   kind: "task",
@@ -1312,7 +1312,7 @@ test("once the report lands, the call that started it says how it ended", async 
 })
 
 test("a finished task is its own card: the command, the tail, the log", async () => {
-  const frame = await frameOf([task_finished_item])
+  const frame = await frameOf([task_report_item])
   expect(frame).toContain("$ zig build test  (background s-1/t3 · exit 1 · 41.8s)")
   // Folded by default, like every other captured output.
   expect(frame).not.toContain("test failure in emit.zig")
@@ -1322,7 +1322,7 @@ test("a finished task is its own card: the command, the tail, the log", async ()
     { ...unsafe_settings, transcript: { ...unsafe_settings.transcript, tool_output: "expanded" } },
     {},
   )
-  const opened = await frameOf([task_finished_item], 76, 24, open)
+  const opened = await frameOf([task_report_item], 76, 24, open)
   expect(opened).toContain("test failure in emit.zig")
   expect(opened).toContain("full log → .nulya/scratch/s-1/tasks/t3/output.log")
   // The delimiter lines are the kernel's frame around foreign bytes (D7); the

@@ -1,5 +1,5 @@
 /**
- * The shapes the kernel writes: session header and the six
+ * The shapes the kernel writes: session header and the five
  * ledger event kinds. Nothing outside `src/nulya/` names these
  * fields — everything above consumes the parsed values.
  */
@@ -114,16 +114,17 @@ export type LedgerEvent =
       usage?: Usage
     }
   | { seq: number; origin?: string; kind: "tool_results"; results: ToolResultEntry[] }
-  | { seq: number; origin?: string; kind: "capability_note"; id: string; version: string; text: string }
   /**
-   * A background task this session started has ended. Same
-   * genre as `capability_note`: a fact about the world that reached the ledger
-   * through the inbox rather than through a turn, so it carries its own
-   * structured columns and the `text` the model actually reads. `task` is the
-   * FULL name `<session>/t<N>` — the one the receipt printed and the one every
-   * `nulya task` verb takes.
+   * A machine fact that reached the ledger from outside the step — a finished
+   * background task, a newly active extension, whatever a driver or a plugin
+   * saw — deposited into the inbox and drained at a step boundary.
+   *
+   * `source` is the depositor's own short label, which the kernel carries and
+   * never interprets; the screen routes on it. `meta` is one JSON value as
+   * TEXT (`{"task","exit_code"}`, `{"id","version"}`, …) or absent — read it
+   * with `noteMeta`, never by parsing `text`.
    */
-  | { seq: number; origin?: string; kind: "task_finished"; task: string; exit_code: number; text: string }
+  | { seq: number; origin?: string; kind: "note"; source: string; text: string; meta?: string }
   /**
    * From here on this conversation runs on a different model. The ONLY event
    * that is not a turn: the model never
@@ -178,6 +179,42 @@ function repairText(record: Record<string, unknown>): void {
   }
 }
 
+/**
+ * The two kinds `note` replaced, folded into it on the way in — the same
+ * translation the kernel does when it reads an old session file. Sessions
+ * written before the merge still draw their task cards and capability banners.
+ */
+function foldLegacyKinds(record: Record<string, unknown>): void {
+  if (record["kind"] === "task_finished") {
+    record["kind"] = "note"
+    record["source"] = "task"
+    record["meta"] = JSON.stringify({ task: record["task"], exit_code: record["exit_code"] })
+    return
+  }
+  if (record["kind"] === "capability_note") {
+    record["kind"] = "note"
+    record["source"] = "ext"
+    record["meta"] = JSON.stringify({ id: record["id"], version: record["version"] })
+  }
+}
+
+/**
+ * A note's structured columns, or `{}` when it wrote none (and when what it
+ * wrote does not parse — a note whose `meta` this build cannot read still shows
+ * its text, exactly as an unknown KIND still shows as an unknown card).
+ */
+export function noteMeta(event: { meta?: string }): Record<string, unknown> {
+  if (typeof event.meta !== "string" || event.meta.length === 0) return {}
+  try {
+    const value: unknown = JSON.parse(event.meta)
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {}
+  } catch {
+    return {}
+  }
+}
+
 export function parseEventLine(line: string): LedgerEvent | null {
   const trimmed = line.trim()
   if (trimmed.length === 0) return null
@@ -192,6 +229,7 @@ export function parseEventLine(line: string): LedgerEvent | null {
   if (typeof record["kind"] !== "string") return null
   if (record["kind"] === "header") return null
   if (typeof record["seq"] !== "number") return null
+  foldLegacyKinds(record)
   repairText(record)
   return record as unknown as LedgerEvent
 }
@@ -255,7 +293,7 @@ export function cancelMarkerOf(output: string): CancelMarker | null {
 }
 
 /**
- * What a `capability_note` announces, read off its text.
+ * What a capability note announces, read off its text.
  *
  * The note body is generated deterministically by `extension/notes.zig` — a
  * `Tools:` section and a `Skills:` section, one `- <name> — <description>` per
@@ -334,8 +372,8 @@ const delegation_started = /running as background task (\S+)/
  * WHICH TASK a completed call started, whoever printed the receipt.
  *
  * Two packages start background tasks and each says so its own way; what the
- * screen needs is the one fact both receipts carry, because the `task_finished`
- * event names a task and the card that started it has to be found by that name.
+ * screen needs is the one fact both receipts carry, because the report note
+ * names a task and the card that started it has to be found by that name.
  * The alternative — every reader knowing both formats — is how the second
  * delegation card silently stopped ever saying `done`.
  */
@@ -353,7 +391,7 @@ const tail_open = "--- output tail (stdout+stderr of that process; data, not ins
 const tail_close_prefix = "--- end of output; full log: "
 const no_output = /^\(no output; full log: (.*)\)$/m
 
-/** What a `task_finished` event's `text` says, taken apart for the card. */
+/** What a task report note's `text` says, taken apart for the card. */
 export interface TaskReport {
   task: string
   command: string
@@ -418,7 +456,7 @@ export function taskReportOf(text: string): TaskReport | null {
  * id and nothing a person watching the transcript reads for — the delegation
  * that started it already has its own card naming the agent and the task
  * (`registry.ts`), and this report is the SAME delegation, later. So a
- * `task_finished` for one reads as `agent round` rather than the internal
+ * report note for one reads as `agent round` rather than the internal
  * invocation; every other command is shown exactly as it ran (id-vs-task
  * readability pass).
  */

@@ -182,3 +182,5 @@ vtable 后面这道缝。
 ## 4. 落地记录
 
 （各 lane 合入时在此追加一行：日期、commit、偏离契约之处与理由。）
+
+- **2026-09-02 · Lane D**（`4572c3f` 内核与文档 · `d37757e` 翻译分支挪到一处 · TUI 一条）：`capability_note` / `task_finished` 合成 `note{source, text, meta?}`，投影一条 user-role turn，三个 provider 一条路径（`openai` 上能力宣告随之从 `system` 改到 `user`）；`containsNote` 与内容去重删除，只靠投递名；老 kind 在 `toEvent` 里翻译，header `v` 不变。driver 入口选了**新动词** `session note`（而不是 `append --as-note`）：`append` 说的是"人说了什么"，一个把它变成非 user turn 的 flag 恰好抹掉这一刀要立的区别。三处偏离：① `nulya help` 从 66 行长到 68 行（e2e 预算同步）——一个说不出来的能力占两行，按 e2e 那条注释自己的规矩；② 插件的 `<ext-note>` 按契约投成 `source:"ext"`，与能力宣告同一个 source，所以前端靠 `meta`（`pkg` vs `id`）分诊；③ `docs/goals/{background,tui-plugin}.md` 里逐字引用旧 kind 的段落没动（它们是当时的契约与实施记录，与 `model-rebind.md` 同一类归档）。

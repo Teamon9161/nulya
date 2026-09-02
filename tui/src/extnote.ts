@@ -2,22 +2,20 @@
  * What a PLUGIN says to the model (`api.actions.appendNote`).
  *
  * A plugin changes the world only through verbs a person already has, and the
- * one that reaches the model is `session append` — the same call an approval
- * note, a mid-task message, and a skill echo already use.
- * Which is exactly right: a plan review's comments, an `ask` panel's answer and
- * a person typing the same words by hand are the same kind of thing, and they
- * should land in the ledger as the same kind of turn.
+ * one that carries a machine fact to the model is `session note` — the same
+ * deposit path, the same step boundary, a different event from the turns a
+ * person types.
  *
- * What is different is WHO wrote it, and that has to be legible from the turn
- * itself. A block of quoted plan lines arriving as a bare user turn reads like
- * the person retyping the model's own plan at it; the sentinel says a package
- * assembled it, on the person's behalf, in response to what the model just did.
- * The `pkg` attribute is the frozen package id, which the host fills in — a
- * plugin cannot claim to be another package here any more than it can register
- * another package's card (D11).
+ * Which is what it is: a block of quoted plan lines is not the person retyping
+ * the model's own plan at it. The ledger says a package assembled this, on the
+ * person's behalf, in response to what the model just did — `source` says a
+ * package, `meta.pkg` says WHICH, and the host fills that in, so a plugin
+ * cannot claim to be another package here any more than it can register
+ * another package's card.
  *
- * Parse depends on the sentinel alone, never on the contract's wording: a
- * session written by an older TUI must fold in a newer one.
+ * Sessions written before this was a `note` carry a `<ext-note pkg=…>` sentinel
+ * inside a user turn; `parseExtNote` still folds those, so an old transcript
+ * draws the same card.
  */
 import type { TranscriptItem } from "./state/session.ts"
 
@@ -26,18 +24,14 @@ const kind_attr = '" kind="'
 const open_suffix = '">'
 const close = "</ext-note>"
 
+/** The source label every plugin note carries. */
+export const ext_note_source = "ext"
+
 /** The contract, in the shape `approvalnote.ts` and `midtask.ts` use: once per turn. */
 export const ext_note_contract =
   "The message above was assembled by the extension it names, from what the " +
   "user did on screen — it is the user speaking through that package, not the " +
   "package speaking for itself. Read it as guidance on the work in progress."
-
-export function wrapExtNote(pkg: string, kind: string, text: string, withContract = true): string {
-  // Both attributes rather than lines of the body, so the body is exactly what
-  // was assembled and a card needs no rules to fold it back.
-  const wrapped = `${open_prefix}${pkg}${kind_attr}${kind}${open_suffix}\n${text}\n${close}`
-  return withContract ? `${wrapped}\n${ext_note_contract}` : wrapped
-}
 
 export interface ExtNote {
   pkg: string
@@ -46,6 +40,31 @@ export interface ExtNote {
   text: string
 }
 
+/** The note's `meta` column: which package assembled it, and what it called it. */
+export function extNoteMeta(pkg: string, kind: string): string {
+  return JSON.stringify({ pkg, kind })
+}
+
+/** What the model reads: the assembled body, then the contract, once. */
+export function extNoteText(text: string, withContract = true): string {
+  return withContract ? `${text}\n${ext_note_contract}` : text
+}
+
+/**
+ * The body without the contract the model needs and the person does not — the
+ * screen shows what the package assembled, exactly as it did when the contract
+ * sat outside the sentinel. A note written without one is returned untouched.
+ */
+function withoutContract(text: string): string {
+  const at = text.lastIndexOf(`\n${ext_note_contract}`)
+  return at < 0 ? text : text.slice(0, at)
+}
+
+/**
+ * A legacy `<ext-note>` turn, unwrapped. Parse depends on the sentinel alone,
+ * never on the contract's wording: a session written by an older TUI must fold
+ * in a newer one.
+ */
 export function parseExtNote(text: string): ExtNote | null {
   if (!text.startsWith(open_prefix)) return null
   const kindAt = text.indexOf(kind_attr, open_prefix.length)
@@ -63,7 +82,12 @@ export function parseExtNote(text: string): ExtNote | null {
 
 /** Whether an item is a plugin note, for the card router. */
 export function extNoteOf(item: TranscriptItem): ExtNote | null {
-  return item.kind === "user" ? parseExtNote(item.text) : null
+  if (item.kind === "user") return parseExtNote(item.text)
+  if (item.kind !== "note" || item.source !== ext_note_source) return null
+  const pkg = item.meta["pkg"]
+  if (typeof pkg !== "string") return null
+  const kind = item.meta["kind"]
+  return { pkg, kind: typeof kind === "string" ? kind : "", text: withoutContract(item.text) }
 }
 
 /** How the badge reads: the package, then what it called this note. */

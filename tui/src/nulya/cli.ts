@@ -1075,6 +1075,32 @@ async function appendNow(ws: Workspace, id: string, text: string, images: readon
   if (result.code !== 0) fail("session append failed", result)
 }
 
+/**
+ * `nulya session note` — a machine fact, not a user turn: what a plugin, a
+ * driver or a watcher observed. Same scratch-file route as `sessionAppend`
+ * (multi-line text never goes through argv) and the same inbox, so it enters
+ * the ledger at the next step boundary.
+ *
+ * `meta` is one JSON value the kernel stores verbatim for readers; the CLI
+ * refuses anything else, so a caller building it by hand fails loudly here
+ * rather than writing an unreadable column.
+ */
+export async function sessionNote(
+  ws: Workspace,
+  id: string,
+  source: string,
+  text: string,
+  meta?: string,
+): Promise<void> {
+  const nonce = Math.random().toString(36).slice(2, 10)
+  const textPath = `.nulya/scratch/tui-${Date.now().toString(36)}-${nonce}.txt`
+  await Bun.write(`${ws.dir}/${textPath}`, text)
+  const args = ["session", "note", id, "--source", source, "--file", textPath]
+  if (meta !== undefined && meta.length > 0) args.push("--meta", meta)
+  const result = await run(ws, args)
+  if (result.code !== 0) fail("session note failed", result)
+}
+
 /** `nulya session events` — the whole tail, already parsed, for open/resume. */
 export async function sessionEvents(ws: Workspace, id: string, since = 0): Promise<LedgerEvent[]> {
   const args = ["session", "events", id]

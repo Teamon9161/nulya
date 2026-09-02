@@ -43,7 +43,7 @@ export const scripted_loop_env = { NULYA_SCRIPTED_MODE: "loop" }
 export const scripted_batch_env = { NULYA_SCRIPTED_MODE: "batch" }
 /**
  * One `shell {background: true}`, then end of turn — and `background done` only
- * once a `task_finished` turn is in the transcript (`launch.ScriptedProvider`).
+ * once a note turn is in the transcript (`launch.ScriptedProvider`).
  * That last part is what makes the wake-up testable: it tells "was stepped
  * again" apart from "was stepped again AND read the report".
  */

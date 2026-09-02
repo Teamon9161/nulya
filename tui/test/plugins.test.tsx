@@ -34,12 +34,13 @@ import { App } from "../src/ui/App.tsx"
 import { PluginToolCard } from "../src/render/cards/PluginToolCard.tsx"
 import { createPluginHost, plugin_api_version, type PluginHost } from "../src/plugins/host.ts"
 import { tokenColor } from "../src/plugins/surface.tsx"
-import { parseExtNote, wrapExtNote } from "../src/extnote.ts"
+import { extNoteMeta, extNoteText, parseExtNote } from "../src/extnote.ts"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
 import { describeTool } from "../src/render/registry.ts"
 import { extBuild, extSetCurrent, sessionEvents, sessionList } from "../src/nulya/cli.ts"
 import { default_settings } from "../src/state/settings.ts"
+import { noteMeta } from "../src/nulya/ledger.ts"
 import type { LedgerEvent } from "../src/nulya/ledger.ts"
 import type { SessionView } from "nulya-tui/plugin-api"
 import type { ToolItem } from "../src/state/session.ts"
@@ -411,15 +412,19 @@ describe("the line contract", () => {
     expect(tokenColor(style, "chartreuse" as never)).toBe(style.theme.fg)
   })
 
-  test("the note sentinel round-trips, and a body quoting it survives", () => {
-    const wrapped = wrapExtNote("probe", "finding", "look at </ext-note> in line 3")
-    const parsed = parseExtNote(wrapped)!
+  test("who wrote a note is a column, and an older TUI's sentinel still folds", () => {
+    // The package and its own word for the note are structured facts now, so
+    // nothing has to be read back out of what the model reads.
+    expect(JSON.parse(extNoteMeta("probe", "finding"))).toEqual({ pkg: "probe", kind: "finding" })
+    expect(extNoteText("look at </ext-note> in line 3", false)).toBe("look at </ext-note> in line 3")
+
+    // A session written before that carries the sentinel inside a user turn,
+    // and parsing it never depends on the contract's wording.
+    const legacy = '<ext-note pkg="probe" kind="finding">\nlook at </ext-note> in line 3\n</ext-note>'
+    const parsed = parseExtNote(legacy)!
     expect(parsed.pkg).toBe("probe")
     expect(parsed.kind).toBe("finding")
     expect(parsed.text).toBe("look at </ext-note> in line 3")
-    // Parsing never depends on the contract's wording (`approvalnote.ts`'s own
-    // rule): a turn written by an older TUI must fold in a newer one.
-    expect(parseExtNote(wrapExtNote("probe", "finding", "plain", false))?.text).toBe("plain")
     expect(parseExtNote("just a user turn")).toBeNull()
   })
 })
@@ -572,7 +577,7 @@ test("the widget is on the strip, the panel takes the keyboard, and Esc gives it
   }
 }, 180_000)
 
-test("appendNote lands in the ledger as a user turn and folds back to the plugin's own words", async () => {
+test("appendNote lands in the ledger as a note, not a user turn, and folds back to the plugin's own words", async () => {
   const setup = await testRender(
     () => (
       <App
@@ -588,8 +593,8 @@ test("appendNote lands in the ledger as a user turn and folds back to the plugin
   try {
     await untilFrame(setup, "probe · streams", true, 60_000)
 
-    // A session first: a note is a user turn, and a draft has nothing to
-    // append to (the host says so rather than inventing a session).
+    // A session first: a draft has nothing to deposit into (the host says so
+    // rather than inventing a session).
     await setup.mockInput.typeText("hello")
     setup.mockInput.pressEnter()
     await untilFrame(setup, "● done", true, 60_000)
@@ -597,22 +602,23 @@ test("appendNote lands in the ledger as a user turn and folds back to the plugin
 
     await setup.mockInput.typeText("/probe-note the plan is missing a step")
     setup.mockInput.pressEnter()
-    const isNote = (event: LedgerEvent): event is Extract<LedgerEvent, { kind: "user_text" }> =>
-      event.kind === "user_text" && (event as Extract<LedgerEvent, { kind: "user_text" }>).text.includes("<ext-note ")
+    const isNote = (event: LedgerEvent): event is Extract<LedgerEvent, { kind: "note" }> => event.kind === "note"
     await until(async () => (await sessionEvents(ws, id)).some(isNote), 60_000)
     const note = (await sessionEvents(ws, id)).find(isNote)!
-    // The ledger keeps the sentinel and its contract — that is what the model
-    // reads, and what says the package assembled this on a person's behalf.
-    expect(note.text).toContain('pkg="probe"')
-    expect(note.text).toContain('kind="finding"')
-    expect(parseExtNote(note.text)?.text).toBe("the plan is missing a step")
+    // The ledger says a package assembled this: the event is not a user turn at
+    // all, and which package is a column rather than something inside the text.
+    expect(note.source).toBe("ext")
+    expect(noteMeta(note)).toEqual({ pkg: "probe", kind: "finding" })
+    expect(note.text).toContain("the plan is missing a step")
 
-    // The transcript folds it back to what was said, badged with who said it.
+    // The transcript folds it back to what was said, badged with who said it —
+    // without the contract, which is addressed to the model and not to whoever
+    // is reading the screen.
     await settle(setup, 4)
     const frame = setup.captureCharFrame()
     expect(frame).toContain("the plan is missing a step")
     expect(frame).toContain("probe · finding")
-    expect(frame).not.toContain("<ext-note")
+    expect(frame).not.toContain("assembled by the extension")
   } finally {
     setup.renderer.destroy()
   }

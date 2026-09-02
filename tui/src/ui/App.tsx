@@ -165,7 +165,7 @@ import { PluginWidgets } from "./PluginWidgets.tsx"
 import { panelItemsOf, withoutSuperseded } from "../state/panels.ts"
 import { createPluginHost, pluginKeyOf } from "../plugins/host.ts"
 import { PluginContext } from "../plugins/context.ts"
-import { wrapExtNote } from "../extnote.ts"
+import { extNoteMeta, extNoteText, ext_note_source } from "../extnote.ts"
 import { renderSessionPrompt } from "../sessionprompt.ts"
 import { formatWithRef, parseWithRef, type WithRef } from "../with.ts"
 import { builtin_tools, orphanPins, resolvableStandingPins, toolId } from "../pins.ts"
@@ -2467,10 +2467,11 @@ export function App(props: AppProps) {
     appendNote: async (pkg, kind, text) => {
       const here = live()
       if (!here) throw new Error(`${pkg}: this tab has no session yet · nothing to append to`)
-      // Framed by us, so the driver does not ALSO wrap it as a mid-task
-      // message: this turn already says how it got there (`extnote.ts`), and
-      // two sentinels on one turn is one card the transcript cannot fold.
-      await here.attach.send(wrapExtNote(pkg, kind, text), true)
+      // A note, not a turn: the ledger records which package assembled it, so
+      // nothing has to be read back out of the text (`extnote.ts`). Mid-task
+      // framing does not apply either — that framing is for a person
+      // interrupting.
+      await here.attach.note(ext_note_source, extNoteText(text), extNoteMeta(pkg, kind))
     },
     openTab: (sessionId, options) => {
       tabs.open(sessionId, { driven: options?.wakePending ?? false })

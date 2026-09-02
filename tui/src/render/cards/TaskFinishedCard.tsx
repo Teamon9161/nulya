@@ -5,7 +5,7 @@ import { friendlyTaskCommand, taskReportOf } from "../../nulya/ledger.ts"
 import type { TaskItem } from "../../state/session.ts"
 
 /**
- * A `task_finished` event: the background command the model started has ended,
+ * A task report note: the background command the model started has ended,
  * and this is the report it read.
  *
  * The same glyph as the call that started it — it is still that command, and a

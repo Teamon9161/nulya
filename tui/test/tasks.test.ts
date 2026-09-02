@@ -82,7 +82,7 @@ test("an idle driver steps when a finished task left its report in the inbox", a
       60_000,
     )
     const events = await sessionEvents(ws, id)
-    expect(events.filter((event) => event.kind === "task_finished").length).toBe(1)
+    expect(events.filter((event) => event.kind === "note").length).toBe(1)
 
     // The shell card that started it now says how it ended, matched by name.
     const card = state.snapshot.items.find((item) => item.kind === "tool" && item.taskResult !== null) as {
@@ -338,9 +338,9 @@ test("a report finds its own shell card by the full task name, and only that one
     },
     {
       seq: 3,
-      kind: "task_finished",
-      task: "s-1/t2",
-      exit_code: 3,
+      kind: "note",
+      source: "task",
+      meta: JSON.stringify({ task: "s-1/t2", exit_code: 3 }),
       text: "[background task s-1/t2 finished] echo 2 · exit 3 · 0.4s\n(no output; full log: x)",
     },
   ])
@@ -357,6 +357,6 @@ test("a report finds its own shell card by the full task name, and only that one
 
 test("an event kind this build knows is not drawn as an unknown one", () => {
   const state = createSessionState("s-1")
-  state.applyEvent({ seq: 1, kind: "task_finished", task: "s-1/t1", exit_code: 0, text: "…" })
+  state.applyEvent({ seq: 1, kind: "note", source: "task", meta: '{"task":"s-1/t1","exit_code":0}', text: "…" })
   expect(state.snapshot.items.map((item) => item.kind)).toEqual(["task"])
 })

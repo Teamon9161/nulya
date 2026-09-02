@@ -371,6 +371,12 @@ Store and scope:
   same package bytes built for it — so build for that target BEFORE creating
   the session, or creation stops and tells you the two commands above. Data and
   script packages need none of this: they are the same version everywhere.
+- `nulya session note <id> --source <label> [--meta <json>] <text>` queues a
+  MACHINE fact rather than a user turn — what a driver, a watcher or a plugin
+  observed. It reaches the model at the next step boundary exactly as an append
+  does; what differs is that the log does not claim a person said it. `--source`
+  is your own short label, carried and never interpreted; `--meta` is one JSON
+  value kept verbatim for readers that should not parse the text.
 - `nulya session step <id> --stream` adds a line protocol: transient
   `{"stream":…}` lines while it runs, interleaved with the same event lines the
   log receives. Behaviour is otherwise identical to a plain step.

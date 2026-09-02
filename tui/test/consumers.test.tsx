@@ -32,7 +32,7 @@ import { createStyle, type Style } from "../src/render/theme.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { createPluginHost, type PluginHost } from "../src/plugins/host.ts"
 import { sessionKind } from "../src/ui/overlays/SessionsView.tsx"
-import { parseExtNote, wrapExtNote } from "../src/extnote.ts"
+import { extNoteMeta, extNoteText } from "../src/extnote.ts"
 import { rememberModel } from "../src/state/tui_state.ts"
 import { bundledDraftPath, pinsOf } from "../src/extensions.ts"
 import { readContributions } from "../src/nulya/files.ts"
@@ -40,11 +40,13 @@ import {
   extBuild,
   extSetCurrent,
   sessionAppend,
+  sessionNote,
   sessionEvents,
   sessionList,
   sessionNew,
   sessionStep,
 } from "../src/nulya/cli.ts"
+import { noteMeta } from "../src/nulya/ledger.ts"
 import type { LedgerEvent, ToolResultEntry } from "../src/nulya/ledger.ts"
 import type { PluginKey, SessionView } from "nulya-tui/plugin-api"
 import { scripted_env, settle, tempWorkspace, unsafe_settings, until, type TempWorkspace } from "./support.ts"
@@ -119,12 +121,12 @@ function benchFor(sessionId: string): Bench {
     statePath: join(ws.dir, `tui-state-${sessionId}.json`),
     session: () => bench.session,
     tasks: () => [],
-    // The real verb, and the whole of it: `session append` deposits into the
+    // The real verb, and the whole of it: `session note` deposits into the
     // inbox, and only a STEP drains it into the ledger — which is
-    // what `attach.send` does for a tab that is driving, so a seam that only
-    // appended would be testing half the path.
+    // what `attach.note` does for a tab that is driving, so a seam that only
+    // deposited would be testing half the path.
     appendNote: async (pkg, kind, text) => {
-      await sessionAppend(ws, sessionId, wrapExtNote(pkg, kind, text))
+      await sessionNote(ws, sessionId, "ext", extNoteText(text), extNoteMeta(pkg, kind))
       await stepOnce(sessionId)
     },
     openTab: (id, options) => {
@@ -189,8 +191,9 @@ function toolCall(host: PluginHost, session: string, callId: string, tool: strin
   }, session)
 }
 
-function isExtNote(event: LedgerEvent): event is Extract<LedgerEvent, { kind: "user_text" }> {
-  return event.kind === "user_text" && (event as Extract<LedgerEvent, { kind: "user_text" }>).text.includes("<ext-note ")
+/** A note a package assembled: the event kind, plus the column naming it. */
+function isExtNote(event: LedgerEvent): event is Extract<LedgerEvent, { kind: "note" }> {
+  return event.kind === "note" && typeof noteMeta(event as { meta?: string })["pkg"] === "string"
 }
 
 
@@ -501,13 +504,12 @@ test.skipIf(!has_zig)(
     bench.host.handleKey(key("return"))
     expect(panelText(bench.host)).toContain("1 comment")
 
-    // ③ `r` sends every comment as ONE user turn, quoting what it is about.
+    // ③ `r` sends every comment as ONE note, quoting what it is about.
     bench.host.handleKey(key("r"))
     await until(async () => (await sessionEvents(ws, id)).some(isExtNote), 60_000)
     const note = (await sessionEvents(ws, id)).find(isExtNote)!
-    expect(note.text).toContain('pkg="plan"')
-    expect(note.text).toContain('kind="plan-comments"')
-    const said = parseExtNote(note.text)!.text
+    expect(noteMeta(note)).toMatchObject({ pkg: "plan", kind: "plan-comments" })
+    const said = note.text
     expect(said).toContain("> ## Phase 1 — read")
     expect(said).toContain("say which files")
     expect(said).toContain("line 3")
@@ -601,7 +603,7 @@ test.skipIf(!has_zig)("plan: a session wearing it cannot run shell, and the note
 
 // ── ask ────────────────────────────────────────────────────────────────────
 
-test.skipIf(!has_zig)("ask: the question opens a panel, and the option chosen there becomes a user turn", async () => {
+test.skipIf(!has_zig)("ask: the question opens a panel, and the option chosen there comes back as one note", async () => {
   const id = await sessionNew(ws, { profile: "scripted", with: [`ask@${ask_version}`] })
   const bench = benchFor(id)
   await bench.host.load()
@@ -628,9 +630,8 @@ test.skipIf(!has_zig)("ask: the question opens a panel, and the option chosen th
   bench.host.handleKey(key("return"))
   await until(async () => (await sessionEvents(ws, id)).some(isExtNote), 60_000)
   const note = (await sessionEvents(ws, id)).find(isExtNote)!
-  expect(note.text).toContain('pkg="ask"')
-  expect(note.text).toContain('kind="answer"')
-  const said = parseExtNote(note.text)!.text
+  expect(noteMeta(note)).toMatchObject({ pkg: "ask", kind: "answer" })
+  const said = note.text
   expect(said).toContain("the ledger")
   // The question travels with the answer: a bare "the ledger" arriving several
   // turns later is not an answer to anything the model can find again.
@@ -653,5 +654,5 @@ test.skipIf(!has_zig)("ask: an answer in your own words is typed into the same p
 
   await until(async () => (await sessionEvents(ws, id)).some(isExtNote), 60_000)
   const note = (await sessionEvents(ws, id)).find(isExtNote)!
-  expect(parseExtNote(note.text)!.text).toContain("call it propose")
+  expect(note.text).toContain("call it propose")
 }, 300_000)

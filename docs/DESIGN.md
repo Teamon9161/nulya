@@ -85,7 +85,7 @@ Ledger ──projection──▶ PromptIR { system_blocks, turns }
 user_text        { text, images: []Image{media_type, data} }   ← images 空 = 纯文本 turn
 assistant        { reasoning, text, calls: []ToolCall{id, tool, args_json}, usage?, stop_reason }
 tool_results     []ToolResultEntry{call_id, ok, output, spill_path?, presentation?}
-note             { source, text, meta? }                        ← 从 step 之外到达的一条机器事实（§3.1 下节）
+note             { source, text, meta? }                        ← 从 step 之外到达的一条机器事实（下节）
 model_rebind     { profile, identity: ModelDescriptor }         ← 从这里起换一个模型跑（§9.5）
 ```
 
@@ -106,7 +106,7 @@ model_rebind     { profile, identity: ModelDescriptor }         ← 从这里起
 
 多出的可选列不改变已有列的含义，所以 header `v` 仍是 1。
 
-**`assistant.reasoning` 是不透明的，不是第五种事件。** provider 原样吐出的本轮 reasoning item JSON 数组（Anthropic 带 signature 的 `thinking` / `redacted_thinking` block、Responses 带 `encrypted_content` 的 `reasoning` item）。kernel 从不解析，只按序交回，provider 认得（`ProviderCapabilities.thinking_replay`）才回放。它**绑在产出它的模型上**。为什么必须存：Anthropic 在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（400），Responses 端点不带则模型每步重推上一步的计划——前者是正确性，后者是质量与 token。
+**`assistant.reasoning` 是不透明的，不是单独一种事件。** provider 原样吐出的本轮 reasoning item JSON 数组（Anthropic 带 signature 的 `thinking` / `redacted_thinking` block、Responses 带 `encrypted_content` 的 `reasoning` item）。kernel 从不解析，只按序交回，provider 认得（`ProviderCapabilities.thinking_replay`）才回放。它**绑在产出它的模型上**。为什么必须存：Anthropic 在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（400），Responses 端点不带则模型每步重推上一步的计划——前者是正确性，后者是质量与 token。
 
 **`calls[].args_json` 是模型实际产出的那些字节**，包括被 `max_tokens` 切断的半截 JSON。把它变成可发给 provider 的东西是投影的事（§4）。
 

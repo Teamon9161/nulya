@@ -24,7 +24,7 @@
  */
 import { createSignal, type Accessor } from "solid-js"
 import { wrapMidTask } from "../midtask.ts"
-import { sessionAppend, sessionCancel, sessionFollow, type FollowHandle, type ImageInput } from "../nulya/cli.ts"
+import { sessionAppend, sessionCancel, sessionFollow, sessionNote, type FollowHandle, type ImageInput } from "../nulya/cli.ts"
 import { probeWriterLease } from "../nulya/files.ts"
 import { createDriver, reportFailure, type Driver, type DriverOptions, type DriverStatus } from "./driver.ts"
 import type { Workspace } from "../nulya/bin.ts"
@@ -41,6 +41,13 @@ export interface Attachment {
   takeoverReady: Accessor<boolean>
   /** `framed`: the text already carries its own framing (`Driver.send`). */
   send(text: string, framed?: boolean, images?: readonly ImageInput[]): Promise<void>
+  /**
+   * Deposit a machine fact rather than a turn (`nulya session note`). No role
+   * split and no framing: a note is not a person interrupting, so nothing here
+   * wraps it — but as a driver it is a reason to step, exactly like anything
+   * else that lands in the inbox while we sit idle.
+   */
+  note(source: string, text: string, meta?: string): Promise<void>
   step(): Promise<void>
   cancel(): Promise<void>
   kill(): void
@@ -213,6 +220,24 @@ export function createAttachment(
     }
   }
 
+  async function note(source: string, text: string, meta?: string): Promise<void> {
+    const trimmed = text.trim()
+    if (trimmed.length === 0) return
+    state.setError(null)
+    try {
+      await sessionNote(ws, id, source, trimmed, meta)
+    } catch (error) {
+      reportFailure(state, "attach", error)
+      return
+    }
+    // An observer must not step: the other writer drains this at its own next
+    // boundary. A driver wakes only when it is idle — a run already going drains
+    // the inbox itself.
+    if (role() !== "driver") return
+    driven = true
+    await driver.wake()
+  }
+
   async function step(): Promise<void> {
     if (role() === "observer") return
     driven = true
@@ -275,6 +300,7 @@ export function createAttachment(
     status: () => (role() === "observer" ? (sending() ? "sending" : "idle") : driver.status()),
     startedAt: () => (role() === "observer" ? queuedAt() : driver.startedAt()),
     send,
+    note,
     step,
     cancel,
     kill,
