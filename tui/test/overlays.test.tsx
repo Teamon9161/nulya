@@ -36,6 +36,17 @@ import { unsafe_settings, frameLines, scripted_env, settle, tempWorkspace, until
 
 const style: Style = createStyle(unsafe_settings, {})
 
+/**
+ * Take one extension out of this file's world again: the draft in the
+ * workspace AND the versions in the store, which is where a build puts them
+ * and where they outlive any one workspace. Several tests below share a
+ * fixture that counts on `lint` being the only extension.
+ */
+function forgetExtension(where: TempWorkspace, id: string) {
+  rmSync(join(where.dir, ".nulya", "extensions", id), { recursive: true, force: true })
+  rmSync(join(process.env["NULYA_HOME"] ?? "", "store", id), { recursive: true, force: true })
+}
+
 let ws: TempWorkspace
 let first: string
 let second: string
@@ -333,7 +344,7 @@ test("/ext at eighty columns: visible panes cut to their columns, the version id
   } finally {
     setup.renderer.destroy()
     // The other tests in this file count on `lint` being the only extension.
-    rmSync(join(ws.dir, ".nulya", "extensions", long_id), { recursive: true, force: true })
+    forgetExtension(ws, long_id)
   }
 }, 120_000)
 
@@ -452,7 +463,7 @@ test("the tools pane folds the internal half away and says how much it folded", 
     setup.renderer.destroy()
     // The rest of this file counts on `lint` being the only extension.
     run(["ext", "deactivate", "patrol"])
-    rmSync(join(ws.dir, ".nulya", "extensions", "patrol"), { recursive: true, force: true })
+    forgetExtension(ws, "patrol")
   }
 }, 120_000)
 
@@ -482,8 +493,7 @@ test("an internal tool is listed with no checkbox: there is no pin for it to be 
     systemPrompts: [],
     commands: [],
     ui: null,
-    root: "",
-    shadowed: false,
+    layer: "user" as const,
   })
   const rows = toolRows(
     [
@@ -654,7 +664,7 @@ test("/ext lists an id that is only source, says what is missing, and refuses to
     expect(await settle(setup, 4)).toContain("built · Enter turns it on")
   } finally {
     setup.renderer.destroy()
-    rmSync(join(ws.dir, ".nulya", "extensions", only_source), { recursive: true, force: true })
+    forgetExtension(ws, only_source)
   }
 }, 120_000)
 

@@ -11,7 +11,6 @@ import {
   readDelegationRecord,
   readToolUsage,
   sessionExists,
-  storeRoots,
   type LeaseState,
 } from "../src/nulya/files.ts"
 import { sessionAppend, sessionList, sessionNew, sessionPrune, sessionStep } from "../src/nulya/cli.ts"
@@ -96,12 +95,9 @@ test("listExtensions reads the version line, the current pointer and the manifes
   expect(lint.autoTools).toEqual(lint.tools)
   expect(lint.manualTools).toEqual([])
   expect(lint.internalTools).toEqual([])
-  // Which root it came from is the kernel's answer, not ours, and
-  // the only copy here is the workspace one, so nothing shadows anything.
-  expect(lint.root).toBe(".nulya/extensions")
-  expect(lint.shadowed).toBe(false)
-  // The workspace root is always first in the search order.
-  expect((await storeRoots(ws))[0]).toBe(join(ws.dir, ".nulya", "extensions"))
+  // Which layer's pointer names it is the kernel's answer, not ours: the draft is
+  // in this workspace, so the activate landed on the workspace layer.
+  expect(lint.layer).toBe("workspace")
 }, 120_000)
 
 test("a system prompt entry projects its path in either form, bare or with a position", async () => {

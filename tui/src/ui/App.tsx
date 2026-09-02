@@ -147,7 +147,6 @@ import {
   seedBundled,
   sessionMember,
   summarize,
-  syncRoot,
   type SessionMember,
 } from "../extensions.ts"
 import { builtin_names } from "../commands.ts"
@@ -198,7 +197,6 @@ import {
   planCheckout,
   planProjectStore,
   samePath,
-  storeTrusted,
   workspaceStorePath,
   type CheckoutAction,
   type CheckoutPlan,
@@ -807,7 +805,7 @@ export function App(props: AppProps) {
       )
       setComposedWithTools(
         listed
-          .filter((entry) => entry.current && !entry.shadowed && named.has(entry.id))
+          .filter((entry) => entry.current && named.has(entry.id))
           .flatMap((entry) => entry.autoTools.map((tool) => toolId(entry.id, tool))),
       )
     } catch {
@@ -1129,7 +1127,6 @@ export function App(props: AppProps) {
             const { outcome, built } = await activateUnattended(where, {
               id: line.id,
               version: line.version,
-              root: syncRoot(where, root.user),
               user: root.user,
             })
             if (outcome === "activated") {
@@ -1285,10 +1282,6 @@ export function App(props: AppProps) {
    * plans themselves are the same pure functions `main` uses (`planProjectStore`,
    * `planProjectAgents`, `planCheckout`); what differs is only where the answer
    * is typed, and that difference is why this exists at all.
-   *
-   * The kernel's own gate is untouched and still has the last word: a store
-   * this refuses to trust makes `session new` fail in that tab, with the
-   * kernel's paragraph shown in full where the draft is (`refusal`).
    */
   const enterWorkspace = (where: Workspace) =>
     entered.enter(where.dir, async () => {
@@ -1299,11 +1292,10 @@ export function App(props: AppProps) {
           return planProjectStore(
             store,
             await inventory(where, false),
-            storeTrusted(store),
             loadTuiState(props.statePath).asked_stores ?? [],
           )
         } catch {
-          // No store, no binary answer — the session's own gate still speaks.
+          // No drafts, or no binary to ask.
           return { kind: "none" as const }
         }
       })()
@@ -1369,15 +1361,15 @@ export function App(props: AppProps) {
     // get to grant them anything on the strength of a store answer.
     noteAgentsTrust(asked.ws, trustAfter(asked.agentsPlan, action.agentsTrust))
     const where = workspaceLabel(asked.ws.dir)
-    if (!action.store.trust && !action.store.sync) {
-      setNotice(`${where} · left alone · \`nulya ext trust\` whenever you mean to`)
+    if (!action.store.sync) {
+      setNotice(`${where} · left alone · /ext builds them whenever you mean to`)
       return
     }
     try {
       setSyncing({ what: `installing ${where}`, done: 0, total: 0, since: Date.now() })
       const report = await applyStoreAction(asked.ws, action.store)
       setSyncing(null)
-      setNotice(report ? summarize(where, report) : `${where} · trusted`)
+      setNotice(report ? summarize(where, report) : `${where} · left alone`)
       setPlanTick((tick) => tick + 1)
       void refreshComposedMembership()
     } catch (error) {
@@ -3270,7 +3262,7 @@ export function App(props: AppProps) {
     let listed: Wearable[] = []
     try {
       listed = (await listExtensions(ws()))
-        .filter((entry) => entry.current !== null && !entry.shadowed && entry.systemPrompts.length > 0)
+        .filter((entry) => entry.current !== null && entry.systemPrompts.length > 0)
         .map((entry) => ({
           id: entry.id,
           version: entry.current!,

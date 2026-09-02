@@ -1,24 +1,22 @@
 /**
  * Installing what is already on disk, at start-up.
  *
- * The store layout has always been "a draft lives at `<root>/<id>/`, its frozen
- * versions beside it", and `nulya ext sync` builds every draft in a root. So the
- * front end's whole job here is WHEN to run it, and that splits along the one
- * line the kernel draws between code a person put on this machine themselves
- * and code that arrived with someone else's checkout:
+ * `nulya ext sync` builds every draft in one directory into this machine's one
+ * store. So the front end's whole job here is WHEN to run it, and that splits
+ * along who put the source there:
  *
- *  - the USER store is the person's own directory. Nothing arrives in it without
- *    them putting it there, so syncing it needs no permission — it runs in the
- *    background, and the status bar says it is happening.
- *  - the PROJECT store came with a checkout. It is the first root searched, so
- *    what it holds would enter every session composed here — which is exactly
- *    the thing the kernel refuses until someone has looked once. So it is asked
- *    about, before any session exists, and only a keypress moves it.
+ *  - the drafts beside the STORE are the person's own. Nothing arrives there
+ *    without them putting it there, so syncing needs no permission — it runs in
+ *    the background, and the status bar says it is happening.
+ *  - the drafts in `.nulya/extensions` came with a checkout. Building one runs
+ *    a compiler over somebody else's source and can put a tool in front of the
+ *    model, so it is asked about, before any session exists, and only a
+ *    keypress does it.
  *
- * The question is put once per store (remembered in `tui-state.json`); saying
- * "not now" is not a permanent no — `nulya ext trust` is always there.
+ * The question is put once per workspace (remembered in `tui-state.json`);
+ * saying "not now" is not a permanent no — `/ext` builds a row any time.
  */
-import { existsSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, realpathSync } from "node:fs"
 import { join } from "node:path"
 import {
   configShow,
@@ -27,12 +25,11 @@ import {
   extSeed,
   extSetCurrent,
   extSync,
-  extTrust,
   type SeedReport,
   type SyncLine,
   type SyncReport,
 } from "./nulya/cli.ts"
-import { readContributions, rootsOf, type Contributions, type PackageCommand } from "./nulya/files.ts"
+import { readContributions, storePath, type Contributions, type PackageCommand } from "./nulya/files.ts"
 import { builtin_tools, toolId } from "./face.ts"
 import { parseWithRef, selectedToolIds } from "./with.ts"
 import { userConfigDir } from "./state/settings.ts"
@@ -40,39 +37,35 @@ import { rememberSessionSelection, sessionSelection } from "./state/tui_state.ts
 import type { Workspace } from "./nulya/bin.ts"
 import type { AgentTrustPlan } from "./agents.ts"
 
-/** What the answer to the trust question does. */
-export type StoreAnswer = "trust" | "build" | "skip"
+/** What the answer to the start-up question does. */
+export type StoreAnswer = "install" | "build" | "skip"
 
 export interface StoreAction {
-  /** `nulya ext trust` first: the store may take part in sessions from now on. */
-  trust: boolean
-  /** Build every draft it holds. */
+  /** Build every draft the workspace holds. */
   sync: boolean
   /** Move `current` onto what was built. */
   activate: boolean
 }
 
 /**
- * The three keys, and what each one does. `t` is the whole answer — trust,
- * build, use. `s` builds without granting anything: on a store that held only
- * source this still ends up trusted, because a local build IS the trust,
- * which is why the two are offered separately only where they
- * differ — a checkout shipping already-built versions. `n` does nothing at all.
+ * The three keys, and what each one does. `i` is the whole answer — build the
+ * drafts and point `current` at them, so the next session can wear them. `s`
+ * builds without turning anything on. `n` does nothing at all.
  */
 export function answerFor(key: string): StoreAnswer | null {
-  if (key === "t") return "trust"
+  if (key === "i") return "install"
   if (key === "s") return "build"
   if (key === "n" || key === "escape" || key === "return") return "skip"
   return null
 }
 
 export function actionFor(answer: StoreAnswer): StoreAction {
-  if (answer === "trust") return { trust: true, sync: true, activate: true }
-  if (answer === "build") return { trust: false, sync: true, activate: false }
-  return { trust: false, sync: false, activate: false }
+  if (answer === "install") return { sync: true, activate: true }
+  if (answer === "build") return { sync: true, activate: false }
+  return { sync: false, activate: false }
 }
 
-/** The absolute path of this workspace's extension store, resolved. */
+/** The absolute path of this workspace's draft directory, resolved. */
 export function workspaceStorePath(ws: Workspace): string {
   const path = join(ws.dir, ".nulya", "extensions")
   try {
@@ -80,29 +73,6 @@ export function workspaceStorePath(ws: Workspace): string {
   } catch {
     return path
   }
-}
-
-/**
- * Whether this machine has recorded trust for `store`, by reading the kernel's
- * own journal (`<user dir>/trusted-stores.jsonl`). A read, never a
- * write: the TUI never records trust — `nulya ext trust` does, after printing
- * what it is about to trust.
- */
-export function storeTrusted(store: string, env: Record<string, string | undefined> = process.env): boolean {
-  const path = join(userConfigDir(env), "trusted-stores.jsonl")
-  if (!existsSync(path)) return false
-  try {
-    for (const line of readFileSync(path, "utf8").split("\n")) {
-      const trimmed = line.trim()
-      if (trimmed.length === 0) continue
-      const record = JSON.parse(trimmed) as { store?: unknown }
-      if (typeof record.store === "string" && samePath(record.store, store)) return true
-    }
-  } catch {
-    // An unreadable journal is not a trust record; the kernel's own gate will
-    // have the last word when a session is created.
-  }
-  return false
 }
 
 /** Two paths naming the same place, as far as a remembered answer is concerned. */
@@ -114,42 +84,26 @@ export function samePath(a: string, b: string): boolean {
 }
 
 /**
- * What a store root has in it, in the two forms that matter: source waiting to
- * be built, and versions already there.
- *
- * The second is the one the trust gate is about — a checkout that
- * ships BUILT extensions is what the kernel refuses to compose until somebody
- * has looked. Both come from the kernel's own commands rather than a directory
- * walk here: `ext sync --dry-run` decides what a draft is, `ext list` decides
- * what "holding" means.
+ * What a draft directory has in it: source waiting to be built, as the kernel
+ * itself decides what a draft is (`ext sync --dry-run`) rather than a directory
+ * walk here.
  */
 export interface StoreInventory {
   drafts: SyncReport
-  holds: string[]
 }
 
-const workspace_root_spec = ".nulya/extensions"
-
 export async function inventory(ws: Workspace, user: boolean): Promise<StoreInventory> {
-  const [drafts, listed] = await Promise.all([planStore(ws, user), user ? Promise.resolve([]) : extList(ws)])
-  const root = user ? "" : workspace_root_spec
-  return { drafts, holds: listed.filter((entry) => entry.root === root).map((entry) => entry.id) }
+  return { drafts: await planStore(ws, user) }
 }
 
 /** One line per thing the store holds, for the prompt. */
 export function describeDrafts(store: StoreInventory): string[] {
-  const lines = store.drafts.lines.map((line) => {
+  return store.drafts.lines.map((line) => {
     if (line.state === "failed") return `${line.id} · does not build (${line.detail ?? "?"})`
     if (line.state === "needs zig") return `${line.id} · needs a toolchain`
     if (line.state === "already built") return `${line.id} · ${line.version} built`
-    if (line.copiedFrom) return `${line.id} · ${line.version} ready to copy`
     return `${line.id} · ${line.version ?? "?"} not built yet`
   })
-  const drafted = new Set(store.drafts.lines.map((line) => line.id))
-  for (const id of store.holds) {
-    if (!drafted.has(id)) lines.push(`${id} · already built here, no source`)
-  }
-  return lines
 }
 
 /**
@@ -260,23 +214,19 @@ export interface ProjectStoreReady {
 export type ProjectStorePlan = ProjectStoreDecision | ProjectStoreAsk | ProjectStoreReady
 
 /**
- * What to do about the workspace store, from what it holds and whether this
- * machine trusts it. Pure, so the decision is readable without a filesystem.
+ * What to do about the drafts a checkout ships. Pure, so the decision is
+ * readable without a filesystem.
  *
- * An empty store is nothing at all — no question, nothing to install. Anything
- * else needs trust before it can take part in a session, so an untrusted one is
- * asked about, once; a trusted one is simply built. Note that BOTH halves of
- * the inventory can trigger the question: source to build, and versions that
- * arrived already built — the second is the case the kernel's gate exists for.
+ * No drafts is nothing at all — no question, nothing to install. Otherwise it
+ * is asked about once per workspace, because building somebody else's source
+ * runs a compiler and can put a tool in front of the model.
  */
 export function planProjectStore(
   store: string,
   what: StoreInventory,
-  trusted: boolean,
   alreadyAsked: readonly string[],
 ): ProjectStorePlan {
-  if (what.drafts.lines.length === 0 && what.holds.length === 0) return { kind: "none" }
-  if (trusted) return { kind: "ready", store }
+  if (what.drafts.lines.length === 0) return { kind: "none" }
   if (alreadyAsked.some((asked) => samePath(asked, store))) return { kind: "none" }
   return { kind: "ask", store, drafts: describeDrafts(what) }
 }
@@ -295,19 +245,19 @@ export function choicesText(question: string, choices: ReadonlyArray<[key: strin
 
 /** The keys `promptText`'s question offers — reused, unchanged, by the merged question below. */
 const store_choices: ReadonlyArray<[key: string, what: string]> = [
-  ["t", "trust + build + activate"],
+  ["i", "build + activate"],
   ["s", "build only"],
   ["n", "not now"],
 ]
 
 export function promptText(plan: ProjectStoreAsk): string {
-  const lines = [`this checkout ships extensions in ${plan.store}:`, ...plan.drafts.map((line) => `  ${line}`)]
-  return `${lines.join("\n")}\n${choicesText("trust & install?", store_choices)}`
+  const lines = [`this checkout ships extension drafts in ${plan.store}:`, ...plan.drafts.map((line) => `  ${line}`)]
+  return `${lines.join("\n")}\n${choicesText("build them?", store_choices)}`
 }
 
 /**
  * Run one answer. The commands are the CLI's own — nothing here decides what
- * trusting or building means.
+ * building means.
  */
 export async function applyAnswer(ws: Workspace, answer: StoreAnswer): Promise<SyncReport | null> {
   return applyStoreAction(ws, actionFor(answer))
@@ -322,7 +272,6 @@ export async function applyAnswer(ws: Workspace, answer: StoreAnswer): Promise<S
  * `StoreAnswer` at all).
  */
 export async function applyStoreAction(ws: Workspace, action: StoreAction): Promise<SyncReport | null> {
-  if (action.trust) await extTrust(ws)
   if (!action.sync) return null
   return extSync(ws, { activate: action.activate })
 }
@@ -335,13 +284,13 @@ const agents_choices: ReadonlyArray<[key: string, what: string]> = [
 ]
 
 const both_choices: ReadonlyArray<[key: string, what: string]> = [
-  ["t", "trust everything: extensions + agent definitions"],
-  ["s", "build the extensions only, trust neither"],
+  ["i", "install the extensions and trust the agent definitions"],
+  ["s", "build the extensions only, trust nothing"],
   ["n", "not now"],
 ]
 
-/** What no store action at all looks like — the answer for a key that never touches the store. */
-const no_store_action: StoreAction = { trust: false, sync: false, activate: false }
+/** What no store action at all looks like — the answer for a key that never touches a draft. */
+const no_store_action: StoreAction = { sync: false, activate: false }
 
 /** What one answer to the merged (or single) start-up question does, in full. */
 export interface CheckoutAction {
@@ -424,7 +373,7 @@ export function planCheckout(store: ProjectStorePlan, agents: AgentTrustPlan): C
     text: bothPromptText(storeAsk!, agentsAsk!),
     choices: both_choices,
     apply: (key) => {
-      if (key === "t") return { store: actionFor("trust"), agentsTrust: true }
+      if (key === "i") return { store: actionFor("install"), agentsTrust: true }
       if (key === "s") return { store: actionFor("build"), agentsTrust: false }
       if (key === "n" || key === "escape" || key === "return") return { store: no_store_action, agentsTrust: false }
       return null
@@ -459,13 +408,13 @@ function bothPromptText(store: ProjectStoreAsk, agents: Extract<AgentTrustPlan, 
  */
 export function checkoutFollowUp(action: CheckoutAction, storeAsked: boolean, agentsAsked: boolean): string[] {
   const lines: string[] = []
-  const storeDidNothing = !action.store.trust && !action.store.sync && !action.store.activate
-  if (storeAsked && storeDidNothing) lines.push("left alone · `nulya ext trust` whenever you mean to")
+  const storeDidNothing = !action.store.sync && !action.store.activate
+  if (storeAsked && storeDidNothing) lines.push("left alone · /ext builds them whenever you mean to")
   if (agentsAsked && !action.agentsTrust) lines.push("left alone · /agent still lists them, and starts none")
   return lines
 }
 
-/** A store root's drafts, without writing anything. */
+/** One draft directory's contents, without writing anything. */
 export function planStore(ws: Workspace, user: boolean): Promise<SyncReport> {
   return extSync(ws, { user, dryRun: true })
 }
@@ -572,9 +521,9 @@ export type UnattendedOutcome =
  */
 export async function activateUnattended(
   ws: Workspace,
-  what: { id: string; version: string; root: string; user: boolean },
+  what: { id: string; version: string; user: boolean },
 ): Promise<{ outcome: UnattendedOutcome; built: Contributions | null }> {
-  const built = await builtContributions(ws, what.root, what.id, what.version)
+  const built = await builtContributions(ws, what.id, what.version)
   if (!built) return { outcome: "held", built }
   try {
     await extSetCurrent(ws, "activate", what.id, what.version, { user: what.user })
@@ -587,32 +536,25 @@ export async function activateUnattended(
 }
 
 /**
- * The store root `ext sync [--user]` acts on, as a directory on this disk.
- *
- * The kernel's two write verbs take one root each — the workspace's, or the
- * user's — so a caller that just ran one of them knows exactly where the
- * version it built landed, and needs no `ext list` to find it again.
+ * The directory `ext sync [--user]` reads drafts FROM, as a path on this disk.
+ * Where the versions land is not a choice: that is always the store.
  */
-export function syncRoot(ws: Workspace, user: boolean): string {
-  return user ? join(userConfigDir(), "extensions") : join(ws.dir, ".nulya", "extensions")
+export function draftRoot(ws: Workspace, user: boolean): string {
+  return user ? storePath() : join(ws.dir, ".nulya", "extensions")
 }
 
 /**
- * What one freshly built version in a KNOWN root contributes, or null when the
- * manifest is not there to be read.
- *
- * The root is known because the caller just ran `ext sync`/`ext build` on it
- * (`syncRoot`), so this reads one file rather than searching every root — and
- * `null` stays a first-class answer for every reader of it.
+ * What one freshly built version contributes, or null when the manifest is not
+ * there to be read. `null` stays a first-class answer for every reader of it.
  */
 export async function builtContributions(
   ws: Workspace,
-  root: string,
   id: string,
   version: string,
 ): Promise<Contributions | null> {
-  if (!existsSync(join(root, id, "versions", version, "extension.json"))) return null
-  return await readContributions(ws, id, version, [root])
+  const store = storePath()
+  if (!existsSync(join(store, id, "versions", version, "extension.json"))) return null
+  return await readContributions(ws, id, version, store)
 }
 
 /**
@@ -657,7 +599,6 @@ export async function adoptBundled(
   const active: string[] = []
   const held: string[] = []
   const installed: Contributions[] = []
-  const root = syncRoot(ws, true)
   for (const id of arrived) {
     const line = report.lines.find((entry) => entry.id === id)
     if (!line?.version || line.state === "failed" || line.state === "needs zig") continue
@@ -665,7 +606,7 @@ export async function adoptBundled(
       active.push(id)
       continue
     }
-    const { outcome, built } = await activateUnattended(ws, { id, version: line.version, root, user: true })
+    const { outcome, built } = await activateUnattended(ws, { id, version: line.version, user: true })
     if (outcome === "activated") {
       active.push(id)
       if (built && hadCurrent !== undefined && !hadCurrent.has(id)) installed.push(built)
@@ -806,7 +747,7 @@ async function buildBundledDraft(ws: Workspace, id: string): Promise<string | nu
  */
 export async function activeVersionOf(ws: Workspace, id: string): Promise<string | null> {
   try {
-    const entry = (await extList(ws)).find((e) => e.id === id && e.current !== null && !e.shadowed)
+    const entry = (await extList(ws)).find((e) => e.id === id && e.current !== null)
     return entry?.current ?? null
   } catch {
     return null
@@ -851,13 +792,11 @@ export async function packageCommands(
     // No binary, no store: an empty command table, never a crash.
     return []
   }
-  const trusted = storeTrusted(workspaceStorePath(ws), env)
-  const roots = rootsOf(ws, listed)
+  const store = storePath(env)
   const out: Array<{ id: string; command: PackageCommand }> = []
   for (const entry of listed) {
-    if (entry.current === null || entry.shadowed) continue
-    if (entry.root === workspace_root_spec && !trusted) continue
-    const contributions = await readContributions(ws, entry.id, entry.current, roots)
+    if (entry.current === null) continue
+    const contributions = await readContributions(ws, entry.id, entry.current, store)
     for (const command of contributions.commands) out.push({ id: entry.id, command })
   }
   return out
@@ -872,5 +811,5 @@ export async function packageCommands(
 export async function bundledDraftPath(ws: Workspace, id: string, repoRel: string): Promise<string> {
   if (existsSync(join(ws.dir, repoRel, "extension.json"))) return repoRel
   await extSeed(ws, { user: true, ids: [id] })
-  return join(userConfigDir(), "extensions", id)
+  return join(storePath(), id)
 }

@@ -209,9 +209,9 @@ export function orphanTools(selected: readonly string[], available: readonly str
 /**
  * Every tool id a STANDING member list may name, from a store listing.
  *
- * One condition is the kernel's: the extension has an active, un-shadowed
- * version — a member with no `current` does not open a session. The second is
- * the tool's manifest surface: only a `surface:"manual"` tool needs naming.
+ * One condition is the kernel's: the extension has a version in effect — a
+ * member with no `current` does not open a session. The second is the tool's
+ * manifest surface: only a `surface:"manual"` tool needs naming.
  * `surface:"auto"` tools arrive with membership, and `surface:"internal"` tools
  * are for `nulya ext run`; naming one of those refuses the whole session
  * (`WithToolNotDeclared`).
@@ -221,12 +221,11 @@ export function resolvableSelections(
     id: string
     manualTools: readonly string[]
     current: string | null
-    shadowed: boolean
   }[],
 ): string[] {
   const ids: string[] = []
   for (const entry of entries) {
-    if (!entry.current || entry.shadowed) continue
+    if (!entry.current) continue
     for (const tool of entry.manualTools) ids.push(toolId(entry.id, tool))
   }
   return ids

@@ -29,7 +29,6 @@ import {
   planCheckout,
   planProjectStore,
   samePath,
-  storeTrusted,
   summarize,
   workspaceStorePath,
   type CheckoutAction,
@@ -209,9 +208,9 @@ async function askAboutCheckout(
   let storePlan: ProjectStorePlan = { kind: "none" }
   if (syncOnStart) {
     try {
-      storePlan = planProjectStore(store, await inventory(ws, false), storeTrusted(store), loadTuiState().asked_stores ?? [])
+      storePlan = planProjectStore(store, await inventory(ws, false), loadTuiState().asked_stores ?? [])
     } catch {
-      storePlan = { kind: "none" } // no store, no binary answer — the session's own gate still speaks
+      storePlan = { kind: "none" } // no drafts, or no binary to ask
     }
   }
 

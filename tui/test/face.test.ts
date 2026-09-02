@@ -171,8 +171,6 @@ test("rows come only from extensions a selection could actually resolve through"
     entry("std", "v-1", ["read", "grep"]),
     // No `current`: `session new --with` would fail — there is nothing to resolve.
     { ...entry("mode", "v-1", ["nope"]), current: null },
-    // Shadowed by an earlier root: this copy never runs.
-    { ...entry("old", "v-1", ["stale"]), shadowed: true },
   ]
   const where = sources({ user: [toolId("std", "read")] })
   const rows = toolRows(entries, where, [{ toolId: toolId("std", "read"), uses: 4, ok: 3 }])
@@ -335,8 +333,7 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
     systemPrompts: [],
     commands: [],
     ui: null,
-    root: ".nulya/extensions",
-    shadowed: false,
+    layer: "user",
   }
 }
 

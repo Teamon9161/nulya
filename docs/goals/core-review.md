@@ -198,3 +198,6 @@ vtable 后面这道缝。
   ③ TUI 的 `ext list` `standing` 判据改成「某张常驻成员表点了名」。
   遗留：`tui/` 的 `bun test` 有一条红的（`/ext` 的 `r` 帮助行断言），是 worktree 路径过长把那行
   折成两行所致，`git stash` 后同样红。
+
+- **2026-09-02 · Lane B**（`b4efc52` 内核 + docs · 本 commit TUI）：built 版本的字节只住 `<NULYA_HOME | ~/.nulya>/store/<id>/versions/<v>/`，workspace 只剩 draft 与可选的 `current` 指针；`extension/site.zig` 的 `Site` 取代 roots 搜索（一个 store + 两层指针，workspace 压 user）。删掉：`roots.zig` 的多 root 搜索与 `(shadowed)`、donor 跨 root 复制、`journals/trust.zig` 与 `ext trust` / birth trust / 每步过门、`[extensions] paths`、`ext prune --user`、`ext build --user`（只有一个落点）。新增一次性搬家动词 `ext migrate [--dry-run]`。`extension_roots` plumbing 收成一个 `extension_store` 路径。TUI：`/ext` 的 root 列改成 `workspace` / `user` 指针层，`ext trust` 入口删除。验收：`zig build test` 591/591 · 五组 e2e 全绿 · `tui/` 下 `bun test` 769 pass，剩一条是各 lane 都记过的长路径换行断言。
+

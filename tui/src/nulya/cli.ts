@@ -587,14 +587,9 @@ export async function taskKill(ws: Workspace, task: string): Promise<string> {
  * version it sealed to. Content-addressed, so building an unchanged draft twice
  * yields the same version and no second copy (physics #5).
  */
-export async function extBuild(ws: Workspace, path: string, options: { user?: boolean } = {}): Promise<string> {
-  const args = ["ext", "build", path]
-  // `--user` decides the DESTINATION root, not the source: a draft staged
-  // anywhere can be frozen into the user store. Which is how a
-  // persona defined in `~/.nulya/agents` stays on this machine rather than
-  // accumulating in whatever workspace happened to run it (`agents.ts`).
-  if (options.user) args.push("--user")
-  const result = await run(ws, args)
+export async function extBuild(ws: Workspace, path: string): Promise<string> {
+  // No destination flag: a draft staged anywhere freezes into the ONE store.
+  const result = await run(ws, ["ext", "build", path])
   const version = /v-[0-9a-zA-Z]+/.exec(result.stdout)?.[0]
   if (result.code !== 0 || !version) fail("ext build failed", result)
   return version
@@ -678,12 +673,10 @@ export interface SyncLine {
   /**
    * `built` / `already built` are facts; `not built` only appears under
    * `--dry-run` and means "this pass would produce it". `needs zig` is a
-   * compiled draft this machine can neither compile nor copy; `failed` is a
-   * fault in the draft itself.
+   * compiled draft this machine cannot compile and whose version the store does
+   * not already hold; `failed` is a fault in the draft itself.
    */
   state: "built" | "already built" | "not built" | "needs zig" | "failed"
-  /** The store root the version came from (or would come from), if any. */
-  copiedFrom: string | null
   /**
    * What `current` says about this version: `active` (it is the pointer),
    * `activated` (this pass moved it), `kept` (`--activate` left an existing
@@ -758,16 +751,15 @@ export function parseSyncLine(line: string): SyncLine | null {
   const rest = line.slice(at + 2)
 
   if (rest.startsWith("needs zig")) {
-    return { id, version: null, state: "needs zig", copiedFrom: null, activation: null, detail: rest }
+    return { id, version: null, state: "needs zig", activation: null, detail: rest }
   }
   if (rest.startsWith("failed:")) {
-    return { id, version: null, state: "failed", copiedFrom: null, activation: null, detail: rest.slice(7).trim() }
+    return { id, version: null, state: "failed", activation: null, detail: rest.slice(7).trim() }
   }
   const version = /^(v-[0-9a-f]+)/.exec(rest)?.[1] ?? null
   if (!version) return null
   const tail = rest.slice(version.length)
   const state = tail.includes("already built") ? "already built" : tail.includes("not built") ? "not built" : "built"
-  const from = /\((?:copied|available) from ([^)]+)\)/.exec(tail)?.[1] ?? null
   const stays = /\(current stays (v-[0-9a-f]+)\)/.exec(tail)?.[1] ?? null
   const activation = tail.includes("(active)")
     ? "active"
@@ -776,11 +768,11 @@ export function parseSyncLine(line: string): SyncLine | null {
       : stays
         ? "kept"
         : null
-  return { id, version, state, copiedFrom: from, activation, detail: stays }
+  return { id, version, state, activation, detail: stays }
 }
 
 export interface SyncOptions {
-  /** The user store (`~/.nulya/extensions`) instead of this workspace's. */
+  /** Build the drafts kept beside the store instead of this workspace's. */
   user?: boolean
   /** Move `current` onto what this pass brought in (never over another pointer). */
   activate?: boolean
@@ -848,17 +840,6 @@ export async function extPrune(
 }
 
 /**
- * `nulya ext trust` — record, once, that this workspace's store may take part in
- * sessions. Only ever called after a person has been shown what the
- * store holds and pressed the key.
- */
-export async function extTrust(ws: Workspace): Promise<string> {
-  const result = await run(ws, ["ext", "trust"])
-  if (result.code !== 0) fail("ext trust failed", result)
-  return result.stdout.trim()
-}
-
-/**
  * `nulya ext run <id>@<version> <tool> <json>` — one oneshot extension call
  *. The version is named rather than implied: a package the
  * front end builds for a job of its own is deliberately never activated, so
@@ -899,25 +880,25 @@ export function toolSaid(result: { stdout: string; stderr: string }): string {
   return lines[at]?.trim() || lines[0]!.trim()
 }
 
-/** One line of `nulya ext list`: an extension directory, in the root that holds it. */
+/** Which `current` names an id's version: the workspace's, or the store's own. */
+export type PointerLayer = "workspace" | "user"
+
+/** One line of `nulya ext list`: an extension this machine holds. */
 export interface ExtStoreEntry {
   id: string
-  /** The `current` pointer, or null when the directory has no active version. */
+  /** The `current` pointer in effect, or null when neither layer has one. */
   current: string | null
-  /** The root spec it came from — `.nulya/extensions`, `~/.nulya/extensions`, … */
-  root: string
-  /** An earlier root already has this id active, so this copy is never used. */
-  shadowed: boolean
+  /** Which layer's pointer that was, or null when there is none. */
+  layer: PointerLayer | null
 }
 
 /**
- * `nulya ext list` — every extension directory in every store root, in SEARCH
- * order, with the shadowing already decided.
+ * `nulya ext list` — every extension this machine holds, with the pointer layer
+ * already decided.
  *
- * Root order and "first active holder wins" are kernel policy. The TUI reads
- * the roots it names rather than re-deriving them from a home directory and a
- * config chain, so a shadowed copy shows up here as exactly what the next
- * session will ignore.
+ * Version bytes live in one store and a workspace pointer wins over the
+ * store's: both are kernel policy, and the TUI reads the answer rather than
+ * re-deriving it from a home directory and a config chain.
  */
 export async function extList(ws: Workspace): Promise<ExtStoreEntry[]> {
   const result = await run(ws, ["ext", "list"])
@@ -926,19 +907,12 @@ export async function extList(ws: Workspace): Promise<ExtStoreEntry[]> {
   for (const line of result.stdout.split("\n")) {
     const fields = line.trimEnd().split("\t")
     if (fields.length < 3) continue
-    const [id, version, root] = fields as [string, string, string]
+    const [id, version, layer] = fields as [string, string, string]
     entries.push({
       id,
-      // `(no current)` is the kernel's word for "this id points at no version";
-      // `(inactive)` was the same column before K8 renamed it, and is still
-      // read so a newer TUI against an older binary does not report every
-      // unpointed package as one pointing at a version called `(inactive)`.
-      current: version === "(no current)" || version === "(inactive)" ? null : version,
-      root,
-      // A trailing column, not a fixed one: an active row also carries
-      // `[tools skills prompt]` and possibly `[with]`, so position would be the
-      // wrong test.
-      shadowed: fields.includes("(shadowed)"),
+      // `(no current)` is the kernel's word for "this id points at no version".
+      current: version === "(no current)" ? null : version,
+      layer: layer === "workspace" || layer === "user" ? layer : null,
     })
   }
   return entries

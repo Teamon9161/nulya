@@ -3,7 +3,7 @@
  * and a frame settler for renderables (markdown, diff) whose layout resolves
  * across real timer ticks rather than render passes alone.
  */
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { openWorkspace, type Workspace } from "../src/nulya/bin.ts"
@@ -22,10 +22,22 @@ export interface TempWorkspace extends Workspace {
  */
 export function tempWorkspace(): TempWorkspace {
   const dir = mkdtempSync(join(tmpdir(), "nulya-tui-"))
+  // A workspace here stands in for a MACHINE, and a machine has one extension
+  // store (`<NULYA_HOME>/store`). Without a home of its own, every test in the
+  // run would see every other test's built versions in `ext list`. Both the
+  // spawned binary and this process read `NULYA_HOME`, so setting it is what
+  // makes the two agree; `cleanup` puts back whatever was there, so nested
+  // workspaces unwind in the order they were made.
+  const home = join(dir, "home")
+  mkdirSync(home, { recursive: true })
+  const outer = process.env["NULYA_HOME"]
+  process.env["NULYA_HOME"] = home
   const ws = openWorkspace(dir)
   return {
     ...ws,
     cleanup() {
+      if (outer === undefined) delete process.env["NULYA_HOME"]
+      else process.env["NULYA_HOME"] = outer
       try {
         rmSync(dir, { recursive: true, force: true })
       } catch {
