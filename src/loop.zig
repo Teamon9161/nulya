@@ -26,32 +26,28 @@ const interrupted_tool_output =
     "previous tool execution was interrupted before Nulya recorded results; " ++
     "the real-world state is unknown, so inspect the workspace before retrying or assuming effects";
 
-// A tool that was mid-flight when the step was canceled: its executor ran (or
-// started to), so real side effects may already exist and be only partially
-// applied. Deliberately distinct from `tool_not_executed_output`.
+// Mid-flight when the step was canceled: its executor ran, so side effects may
+// exist and be partial. Distinct from `tool_not_executed_output`.
 const tool_canceled_executing_output =
     "tool execution was canceled; side effects may be partial or unknown";
 
-// A tool whose executor had ALREADY returned success when the step was canceled
-// mid-result-recording (a step-budget spill write). The tool may have fully
-// completed, so this is distinct from `tool_canceled_executing_output`: the
-// model must not conclude the side effects never happened.
+// The executor had ALREADY returned success when the step was canceled
+// mid-result-recording, so the model must not conclude nothing happened.
 const tool_result_recording_canceled_output =
     "tool execution completed, but result recording was canceled; " ++
     "side effects may have occurred and the result is unavailable";
 
-// A tool the loop never dispatched because an earlier call in the same batch was
-// canceled. Nulya guarantees this executor never ran, so nothing changed.
+// Never dispatched because an earlier call in the batch was canceled: this
+// executor provably never ran.
 const tool_not_executed_output =
     "not executed because the step was canceled";
 
-// A call a host gate refused before dispatch (`ToolGate`). Nothing about it
-// ran; the batch continues and the next call is asked on its own.
+// Refused before dispatch by a host gate; the batch continues.
 const tool_denied_output =
     "not executed: denied by the user; nothing ran and nothing changed";
 
-// A call inside a reply that ran out of `max_tokens`: its arguments were cut
-// off mid-generation, so the call is not what the model meant and never runs.
+// Inside a reply that ran out of `max_tokens`: the arguments were cut off
+// mid-generation, so the call is not what the model meant and never runs.
 const tool_truncated_output =
     "not executed: the reply hit its output cap (max_tokens) before this call was " ++
     "complete, so its arguments were cut off and nothing ran. Reasoning tokens count " ++
@@ -59,14 +55,12 @@ const tool_truncated_output =
     "enough to finish — fewer words, or one step at a time";
 
 /// Whether a step ran to completion or was canceled mid-flight. Cancellation is
-/// host *execution control*, not a model stop reason (`provider.StopReason`) and
-/// not a ledger event — the ledger stays a factual history either way.
+/// host *execution control*: not a model stop reason, not a ledger event.
 pub const StepStatus = enum { completed, canceled };
 
-/// The result of one step. `usage` is the reliably-known token cost, accumulated
-/// whether the step completed or was canceled; real faults (network, protocol,
-/// OOM) surface as errors, never as an outcome. `stop_reason` is why the MODEL
-/// stopped, orthogonal to `status`, which is why the HOST did.
+/// The result of one step. `usage` accumulates whether the step completed or was
+/// canceled; real faults surface as errors, never as an outcome. `stop_reason`
+/// is why the MODEL stopped, orthogonal to `status`, which is why the HOST did.
 pub const StepOutcome = struct {
     usage: provider.Usage = .{},
     status: StepStatus = .completed,
@@ -74,13 +68,11 @@ pub const StepOutcome = struct {
 };
 
 /// PURE OBSERVATION of one running step: provider stream events, tool dispatch,
-/// the step boundary, reported as they happen so a front end can show a step in
-/// flight instead of only its result.
+/// the step boundary, reported as they happen.
 ///
-/// An observer is powerless by construction: every callback returns `void` and
-/// takes read-only views, so it cannot append to the ledger, touch model-visible
-/// state, or fail a step. A step run with an observer behaves exactly like the
-/// same step run without one.
+/// Powerless by construction: every callback returns `void` and takes read-only
+/// views, so it cannot append to the ledger, touch model-visible state, or fail
+/// a step. A step with an observer behaves exactly like one without.
 pub const StepObserver = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -90,18 +82,15 @@ pub const StepObserver = struct {
         modelEvent: *const fn (ptr: *anyopaque, event: provider.StreamEvent) void,
         /// The model request failed transiently and will be sent again after
         /// `delay_ms`. Whatever `modelEvent` reported since the last `started`
-        /// belonged to the failed attempt and is discarded — the next attempt
-        /// streams from scratch.
+        /// belonged to the failed attempt: the next one streams from scratch.
         modelRetry: *const fn (ptr: *anyopaque, retry: RetryNotice) void,
         /// Just before a call is handed to its executor.
         toolBegin: *const fn (ptr: *anyopaque, call: ledger.ToolCall) void,
         /// Just after the executor returned; `ok` is the executor's own verdict.
-        /// Calls the loop never dispatched (a canceled batch's tail, a denied
-        /// call) get neither callback: nothing about them ran.
+        /// Calls the loop never dispatched get neither callback.
         toolEnd: *const fn (ptr: *anyopaque, call: ledger.ToolCall, ok: bool) void,
         /// One step boundary: the ledger as it now stands (read-only) and how
-        /// the step ended. Fired for canceled steps too, including one canceled
-        /// at its boundary before the model ran.
+        /// the step ended. Fired for canceled steps too.
         stepEnd: *const fn (ptr: *anyopaque, events: []const ledger.Event, outcome: StepOutcome) void,
     };
 
@@ -128,19 +117,16 @@ pub const StepObserver = struct {
 
 /// The one place a host may REFUSE a tool call before it runs.
 ///
-/// The observer's sister: same shape, opposite power. A gate's answer decides
-/// whether an executor is reached at all, but it can do nothing else — it cannot
-/// append to the ledger, touch model-visible state, or fail a step. A denial
-/// becomes an ordinary tool result, so the batch invariant (one assistant
-/// tool-call batch <-> exactly one matching `tool_results` batch) holds with a
-/// gate exactly as without one.
+/// A gate's answer decides whether an executor is reached at all, and nothing
+/// else: it cannot append to the ledger, touch model-visible state, or fail a
+/// step. A denial becomes an ordinary tool result, so the batch invariant (one
+/// assistant tool-call batch <-> exactly one matching `tool_results` batch)
+/// holds with a gate exactly as without one.
 ///
 /// Asked during the SERIAL EXECUTION phase, after `collectTurn` returned: the
 /// provider stream is closed by then, so an answerer waiting on a person may
-/// take as long as it likes.
-///
-/// Deciding WHICH calls need asking is policy above the kernel; the kernel only
-/// offers the question.
+/// take as long as it likes. Deciding WHICH calls need asking is policy above
+/// the kernel.
 pub const ToolGate = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -154,22 +140,18 @@ pub const ToolGate = struct {
     };
 
     /// One call, offered for approval, together with what this session FROZE
-    /// about the tool it names. The call carries only the model-facing name, and
-    /// a name is not an identity: which package it came from and whether it
-    /// claims to be read-only are the composition's answers (`ToolDefinition.id`
-    /// / `.readonly`), handed over so no answerer re-derives them from manifests.
+    /// about the tool it names — which package it came from and whether it
+    /// claims to be read-only — so no answerer re-derives that from manifests.
     pub const Request = struct {
         call: ledger.ToolCall,
-        /// Null when this session's frozen tool face has no such tool. The call
-        /// is still offered, but there is no frozen declaration to show; the
-        /// model gets the unknown-tool message from `execOne` either way.
+        /// Null when this session's frozen tool face has no such tool: the call
+        /// is still offered, with no frozen declaration to show.
         definition: ?*const tool.ToolDefinition,
     };
 
     pub const VTable = struct {
-        /// Asked once per call, in batch order, immediately before dispatch.
-        /// A denial stops that call and nothing else: every other call in the
-        /// batch is still asked on its own.
+        /// Asked once per call, in batch order, immediately before dispatch. A
+        /// denial stops that call and nothing else.
         review: *const fn (ptr: *anyopaque, request: Request) Decision,
     };
 
@@ -204,9 +186,8 @@ pub const StepContext = struct {
     gate: ?ToolGate = null,
 };
 
-/// Tees the provider stream: the observer (if any) sees each event first (so a
-/// front end renders deltas as they arrive), then the collector accumulates the
-/// turn as usual. Only the collector's outcome can fail the step.
+/// Tees the provider stream: the observer sees each event first, then the
+/// collector accumulates the turn. Only the collector's outcome can fail a step.
 const TeeSink = struct {
     collector: *provider.TurnCollector,
     observer: ?StepObserver,
@@ -222,13 +203,11 @@ const TeeSink = struct {
     }
 };
 
-/// One assistant turn from the provider, retrying transient faults
-/// (`provider.isTransient`) per `step_ctx.retry`. Each attempt collects into a
-/// FRESH collector, so a request that dropped mid-stream leaves nothing behind
-/// and a retry cannot duplicate what the failed attempt streamed; the observer
-/// is told, and must discard the failed attempt's deltas. The backoff sleep is a
-/// cancellation point. Nothing here touches the ledger, and only a complete turn
-/// is ever returned.
+/// One assistant turn from the provider, retrying transient faults per
+/// `step_ctx.retry`. Each attempt collects into a FRESH collector, so a retry
+/// cannot duplicate what a dropped attempt streamed; the observer is told and
+/// must discard those deltas. The backoff sleep is a cancellation point. Nothing
+/// here touches the ledger, and only a complete turn is ever returned.
 fn collectTurn(
     alloc: std.mem.Allocator,
     model: Model,
@@ -249,8 +228,7 @@ fn collectTurn(
                 .delay_ms = step_ctx.retry.backoffMs(attempt),
                 .err = err,
             };
-            // The observer is the reporting channel when there is one; otherwise
-            // stderr, next to the wire's own diagnostic for the cause.
+            // The observer is the reporting channel when there is one.
             if (step_ctx.observer) |obs| obs.modelRetry(notice) else std.debug.print(
                 "model request failed ({s}); retry {d}/{d} in {d} ms\n",
                 .{ @errorName(err), notice.attempt, notice.max_retries, notice.delay_ms },
@@ -264,16 +242,13 @@ fn collectTurn(
 
 /// Run exactly one step against `l` from an already-projected `prompt_ir`.
 /// Appends the assistant turn, and — if it carried tool calls — the single
-/// batched `tool_results` turn. The caller (`AgentSession`) projects, which is
-/// what folds in the session's system blocks.
+/// batched `tool_results` turn.
 ///
 /// `durations_ms`, when given, gets one entry per call the loop REACHED, in
 /// batch order, so on a completed step it is index-aligned with the assistant
 /// turn's `calls` and the appended `tool_results`. A `null` entry means no
-/// executor ran for that call (a gate denied it): nothing to measure, nothing to
-/// journal. Out-parameter rather than part of `StepOutcome` because a duration
-/// is journal evidence, not conversation fact; the caller owns the buffer, and
-/// passing null reads no clock at all.
+/// executor ran for that call. The caller owns the buffer; passing null reads no
+/// clock at all.
 pub fn runStepWithPrompt(
     alloc: std.mem.Allocator,
     l: *ledger.Ledger,
@@ -286,8 +261,8 @@ pub fn runStepWithPrompt(
 ) !StepOutcome {
     // seq base is the ledger position: deterministic across replays.
     const base_seq = l.len();
-    // Emptied whatever this step turns out to be, so the sink never carries a
-    // previous step's measurements into a step that dispatched nothing.
+    // Emptied first, so the sink never carries a previous step's measurements
+    // into a step that dispatched nothing.
     if (durations_ms) |d| d.clearRetainingCapacity();
 
     const tool_defs = try tool_snapshot.definitions(alloc);
@@ -299,28 +274,25 @@ pub fn runStepWithPrompt(
         .options = model_options,
         .stall_ms = step_ctx.retry.stall_timeout_ms,
     }, step_ctx) catch |err| switch (err) {
-        // Provider-phase cancellation: a complete assistant turn never formed.
-        // `collectTurn` already discarded the partial collector, so the ledger
-        // prefix is untouched. Usage is 0 because the streaming usage chunk
-        // arrives at the very end of the stream.
+        // Provider-phase cancellation: no complete assistant turn formed, and
+        // the ledger prefix is untouched. Usage is 0 because the streaming usage
+        // chunk arrives at the very end of the stream.
         error.Canceled => return .{ .usage = .{}, .status = .canceled },
         else => return err,
     };
     defer turn.deinit(alloc);
     // A reply cut off by `max_tokens`: every call is recorded EXACTLY as the
-    // model produced it (torn JSON arguments included — the ledger records the
-    // fact), none is executed, and the batch is closed with a marker result.
-    // Making those torn bytes safe to send again is the projection's job
-    // (`prompt.projectWithSystem` substitutes `{}`).
+    // model produced it (torn JSON arguments included), none is executed, and
+    // the batch is closed with a marker result. Making those bytes safe to send
+    // again is the projection's job.
     const truncated = turn.stop_reason == .max_tokens;
     try l.append(.{
         .assistant = .{
             .reasoning = turn.reasoning,
             .text = turn.text,
             .calls = turn.calls,
-            // Only when the provider reported a cost: all-zero means "this
-            // provider does not price turns", which is not the same fact as
-            // "this step cost zero", so the column is left off the line.
+            // All-zero means "this provider does not price turns", not "this
+            // step cost zero", so the column is left off the line.
             .usage = if (turn.usage.isZero()) null else turn.usage,
             .stop_reason = turn.stop_reason,
         },
@@ -349,19 +321,16 @@ pub fn runStepWithPrompt(
     // Execute the batch serially. On cancellation the batch is NOT abandoned:
     // one assistant tool-call batch <-> exactly one matching tool_results batch.
     // The cancellation is consumed here at the step boundary — per std.Io the
-    // *next* cancelation point is what re-signals, so building and appending
-    // this batch (pure memory ops) runs uninterrupted.
+    // *next* cancelation point re-signals, so appending runs uninterrupted.
     var i: usize = 0;
     var canceled = false;
     while (i < turn.calls.len) : (i += 1) {
         const call = turn.calls[i];
         // The host's veto, before anything is dispatched. A denial gets neither
-        // `toolBegin` nor `toolEnd` (no executor ran) and the batch goes on to
-        // the next call.
+        // `toolBegin` nor `toolEnd`, and the batch goes on.
         if (step_ctx.gate) |gate| {
-            // `lookup` returns a copy of the snapshot's entry, whose strings are
-            // the snapshot's own; the local outlives the call, which is all the
-            // life the borrow needs.
+            // `lookup` copies the snapshot's entry, whose strings are the
+            // snapshot's own; the local outlives the call.
             const declared = tool_snapshot.lookup(call.tool);
             switch (gate.review(.{
                 .call = call,
@@ -392,11 +361,9 @@ pub fn runStepWithPrompt(
         initialized_results += 1;
         if (durations_ms) |d| try d.append(alloc, executed.duration_ms);
         // The step-budget limiter can spill to disk, a cancelable I/O point; an
-        // escaping cancel here would strand the assistant-with-tool-calls tail
-        // without its matching batch. The executor already finished, so
-        // `results[i]` is a real result: allocate the marker FIRST (an OOM then
-        // leaves that valid result intact for cleanup), then replace it. The
-        // marker says recording-canceled, since the tool itself succeeded.
+        // escaping cancel here would strand the assistant tail without its
+        // matching batch. The executor already finished, so allocate the marker
+        // FIRST (an OOM then leaves the valid result intact) and replace after.
         step_output.apply(alloc, call.tool, i, &results[i].output, &results[i].spill_path) catch |err| switch (err) {
             error.Canceled => {
                 const marker = try alloc.dupe(u8, tool_result_recording_canceled_output);
@@ -412,8 +379,7 @@ pub fn runStepWithPrompt(
     }
 
     if (canceled) {
-        // Every call after the canceled one was never handed to any executor, so
-        // Nulya knows for certain nothing about them changed.
+        // Every later call was never handed to any executor.
         i += 1; // step past the canceled-while-executing entry filled above.
         while (i < turn.calls.len) : (i += 1) {
             results[i] = canceledResult(turn.calls[i].id, try alloc.dupe(u8, tool_not_executed_output));
@@ -428,15 +394,14 @@ pub fn runStepWithPrompt(
     return .{ .usage = turn.usage };
 }
 
-/// Build a synthetic tool result for a canceled call. `call_id` is BORROWED from
-/// the assistant turn (as `execOne` leaves it); `output` is caller-allocated and
-/// freed by the batch's cleanup path.
+/// A synthetic tool result for a canceled call. `call_id` is BORROWED from the
+/// assistant turn; `output` is caller-allocated and freed by the batch cleanup.
 fn canceledResult(call_id: []const u8, output: []const u8) ledger.ToolResultEntry {
     return .{ .call_id = call_id, .ok = false, .output = output };
 }
 
-/// The text a denied call carries back to the model: the fact first, then the
-/// person's own words if they said anything. Caller owns the result.
+/// The text a denied call carries back: the fact first, then the person's own
+/// words if they said any. Caller owns the result.
 fn deniedOutput(alloc: std.mem.Allocator, note: ?[]const u8) ![]u8 {
     const said = note orelse return alloc.dupe(u8, tool_denied_output);
     const trimmed = std.mem.trim(u8, said, " \t\r\n");
@@ -456,8 +421,7 @@ pub fn completeInterruptedToolBatch(alloc: std.mem.Allocator, l: *ledger.Ledger)
 }
 
 /// Close a call batch that never ran with one failed result per call, all
-/// carrying the same static `output` — the batch invariant holds whether the
-/// reason is an interrupted process or a truncated reply.
+/// carrying the same static `output`.
 fn appendMarkerBatch(alloc: std.mem.Allocator, l: *ledger.Ledger, calls: []const ledger.ToolCall, output: []const u8) !void {
     const results = try alloc.alloc(ledger.ToolResultEntry, calls.len);
     defer alloc.free(results);
@@ -466,7 +430,6 @@ fn appendMarkerBatch(alloc: std.mem.Allocator, l: *ledger.Ledger, calls: []const
 }
 
 /// Test-only convenience: project with no system prompt, then run one step.
-/// Real sessions project through `AgentSession`, which carries system blocks.
 fn runStepForTest(
     alloc: std.mem.Allocator,
     l: *ledger.Ledger,
@@ -480,8 +443,7 @@ fn runStepForTest(
 }
 
 /// A call to a name this session does not have. The tool face is frozen for the
-/// whole session, so naming what IS on it is the entire correction. Caller owns
-/// the result.
+/// whole session, so naming what IS on it is the entire correction.
 fn unknownToolMessage(alloc: std.mem.Allocator, tool_snapshot: registry.ToolSetSnapshot, name: []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
@@ -494,9 +456,7 @@ fn unknownToolMessage(alloc: std.mem.Allocator, tool_snapshot: registry.ToolSetS
 }
 
 /// One dispatched call: the batch entry the ledger will record, plus how long
-/// the EXECUTOR ran. Separate because the entry is what the conversation saw and
-/// the duration is journal evidence — `ledger.ToolResultEntry` has no field for
-/// it.
+/// the EXECUTOR ran (journal evidence; `ToolResultEntry` has no field for it).
 const Executed = struct {
     entry: ledger.ToolResultEntry,
     duration_ms: u64,
@@ -512,8 +472,7 @@ fn execOne(
 ) !Executed {
     const io = step_ctx.tool_context.environment.io;
     var ok = false;
-    // Zero when nothing ran: an unknown tool name never reaches an executor, and
-    // `AgentSession` keeps it out of the journal too.
+    // Zero when nothing ran: an unknown tool name never reaches an executor.
     var duration_ms: u64 = 0;
     var presentation_file: ?[]u8 = null;
     defer if (presentation_file) |p| alloc.free(p);
@@ -535,8 +494,7 @@ fn execOne(
         defer duration_ms = elapsedMs(io, started);
         const res = t.executor.call(alloc, .{ .args_json = call.args_json, .ctx = call_ctx }) catch |err| switch (err) {
             // Cancellation is host execution control, not a tool failure:
-            // propagate it to the step boundary, which records the whole batch
-            // as canceled. Ordinary executor errors still teach as text.
+            // propagate it to the step boundary. Other errors teach as text.
             error.Canceled => return error.Canceled,
             else => break :blk try std.fmt.allocPrint(alloc, "{s} failed: {s}", .{ call.tool, @errorName(err) }),
         };
@@ -546,9 +504,8 @@ fn execOne(
     defer alloc.free(raw_output);
 
     // The presentation file is DRIVER-facing: the front end reads it on the
-    // host, so it stays a host file and never travels the workspace verb. The
-    // spill below is the opposite case — the MODEL reads it, so it goes to
-    // whichever machine holds the workspace.
+    // host, so it never travels the workspace verb. The spill below is the
+    // opposite — the MODEL reads it, so it follows the workspace.
     const presentation = readPresentationFile(alloc, io, presentation_file) catch null;
     errdefer if (presentation) |p| alloc.free(p);
     const emitted = try emit.emit(alloc, step_ctx.tool_context.environment.fileSink(), raw_output, call.tool, event_seq, call_index, step_ctx.scratch_dir, step_ctx.budget);
@@ -582,8 +539,8 @@ fn readPresentationFile(alloc: std.mem.Allocator, io: std.Io, path: ?[]const u8)
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, p, alloc, .limited(max_presentation_bytes)) catch return null;
     errdefer alloc.free(bytes);
     const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-    // Stored in the ledger verbatim, so it owes valid UTF-8. Refused rather than
-    // repaired: unlike tool output, this is the package's own claim.
+    // Stored in the ledger verbatim, so it owes valid UTF-8. Refused rather
+    // than repaired: unlike tool output, this is the package's own claim.
     if (trimmed.len == 0 or !std.unicode.utf8ValidateSlice(trimmed)) {
         alloc.free(bytes);
         return null;
@@ -597,8 +554,7 @@ fn readPresentationFile(alloc: std.mem.Allocator, io: std.Io, path: ?[]const u8)
 }
 
 /// Milliseconds elapsed since `started` on the monotonic clock — never the wall
-/// clock, which an NTP step can move under a running tool. Clamped at zero:
-/// `.awake` does not go backwards, and a duration is a count either way.
+/// clock, which an NTP step can move under a running tool. Clamped at zero.
 fn elapsedMs(io: std.Io, started: std.Io.Timestamp) u64 {
     const ms = started.durationTo(.now(io, .awake)).toMilliseconds();
     return if (ms < 0) 0 else @intCast(ms);
@@ -694,8 +650,7 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     try std.testing.expect(std.mem.indexOf(u8, last.tool_results[0].output, "one") != null);
 }
 
-/// A two-`shell`-call turn, for the gate tests below: the same batch the test
-/// above uses, so "gated" and "ungated" differ in exactly one thing.
+/// A two-`shell`-call turn, so "gated" and "ungated" differ in one thing.
 const TwoCallModel = struct {
     fn name(_: *anyopaque) []const u8 {
         return "scripted";
@@ -717,8 +672,7 @@ const TwoCallModel = struct {
     const vtable: provider.Model.VTable = .{ .name = name, .modelName = modelName, .capabilities = capabilities, .stream = stream };
 };
 
-/// Records every command an executor was actually handed, so a test can assert
-/// that a denied call never reached one.
+/// Records every command an executor was actually handed.
 var gate_test_ran: std.ArrayList([]const u8) = .empty;
 
 const GateTestShell = struct {
@@ -731,8 +685,8 @@ const GateTestShell = struct {
     }
 };
 
-/// Answers a fixed verdict for a named call, allows everything else, and
-/// remembers the stable id it was shown for the last question.
+/// A fixed verdict for a named call, allowing everything else; remembers the
+/// stable id it was shown last.
 const ScriptedGate = struct {
     deny_call: []const u8,
     note: ?[]const u8 = null,
@@ -788,9 +742,7 @@ test "a gate denies one call, the batch keeps its shape, and the rest still run"
     _ = try runStepForTest(alloc, &allowed, handle, tools, ctx);
     try std.testing.expectEqual(@as(usize, 2), allow_all.asked);
     try std.testing.expectEqual(@as(usize, 2), gate_test_ran.items.len);
-    // The question carries the FROZEN definition, not just the model-facing
-    // name: the stable id, and a readonly claim that is `null` here because this
-    // fake declares none.
+    // The question carries the FROZEN definition, not just the name.
     try std.testing.expectEqualStrings("test.shell", allow_all.last_id.?);
     try std.testing.expect(allow_all.last_readonly == null);
     const allowed_results = allowed.view()[2].tool_results;
@@ -806,20 +758,20 @@ test "a gate denies one call, the batch keeps its shape, and the rest still run"
     ctx.gate = .{ .ptr = &gate, .vtable = &ScriptedGate.vtable };
     _ = try runStepForTest(alloc, &denied, handle, tools, ctx);
 
-    // Every call is asked on its own: one refusal is not a verdict on the rest.
+    // One refusal is not a verdict on the rest.
     try std.testing.expectEqual(@as(usize, 2), gate.asked);
-    // …and only the allowed one reached an executor.
+    // Only the allowed one reached an executor.
     try std.testing.expectEqual(@as(usize, 1), gate_test_ran.items.len);
     try std.testing.expectEqualStrings("echo two", gate_test_ran.items[0]);
 
-    // The batch invariant holds: one result per call, in call order.
+    // One result per call, in call order.
     try std.testing.expectEqual(@as(usize, 3), denied.len());
     const results = denied.view()[2].tool_results;
     try std.testing.expectEqual(@as(usize, 2), results.len);
     try std.testing.expectEqualStrings("c1", results[0].call_id);
     try std.testing.expect(!results[0].ok);
     try std.testing.expect(std.mem.indexOf(u8, results[0].output, "denied by the user") != null);
-    // The note is the one thing the model could not have inferred.
+    // The note is what the model could not have inferred.
     try std.testing.expect(std.mem.indexOf(u8, results[0].output, "not that one") != null);
     try std.testing.expect(results[1].ok);
     try std.testing.expect(std.mem.indexOf(u8, results[1].output, "echo two") != null);
@@ -830,7 +782,7 @@ test "a gate asked about a name this session does not have is shown no declarati
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
 
-    // An empty face: the model's `shell` calls name nothing this session froze.
+    // An empty face: `shell` names nothing this session froze.
     const tools: registry.ToolSetSnapshot = .{ .tools = &.{} };
     var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
     defer lenv.deinit();
@@ -846,8 +798,7 @@ test "a gate asked about a name this session does not have is shown no declarati
         .gate = .{ .ptr = &gate, .vtable = &ScriptedGate.vtable },
     });
 
-    // Still asked — the gate answers about the call, not the tool — but with
-    // nothing frozen to show.
+    // Still asked, but with nothing frozen to show.
     try std.testing.expectEqual(@as(usize, 2), gate.asked);
     try std.testing.expect(gate.last_id == null);
     try std.testing.expect(gate.last_readonly == null);
@@ -887,8 +838,7 @@ test "a denied call has no duration to journal, and the slots stay call-aligned"
         .gate = .{ .ptr = &gate, .vtable = &ScriptedGate.vtable },
     }, .{}, &durations);
 
-    // One slot per call, in call order — what `recordCompletedToolStats` asserts
-    // — and the denied one is `null`: nothing ran, so nothing to record.
+    // One slot per call, in call order; the denied one is `null`.
     try std.testing.expectEqual(@as(usize, 2), durations.items.len);
     try std.testing.expect(durations.items[0] == null);
     try std.testing.expect(durations.items[1] != null);
@@ -927,7 +877,7 @@ test "a transient model failure is retried with a fresh collector; a permanent o
         const vtable: provider.Model.VTable = .{ .name = name, .modelName = modelName, .capabilities = capabilities, .stream = stream };
     };
 
-    // Counts retries the loop reports; every other callback is noise here.
+    // Counts retries the loop reports.
     const Watch = struct {
         retries: u32 = 0,
         last_delay_ms: u64 = 0,
@@ -1073,10 +1023,9 @@ test "a capability note reaches the provider as a note turn" {
 // ── Cancellation test fixtures ──────────────────────────────────────────────
 //
 // Real std.Io cancellation: the step runs on a worker task via `io.async`, the
-// test thread waits for it to reach a cancelation point (a `std.Io.Event`), then
-// calls `Future.cancel`. There is no custom cancellation flag anywhere. Gate
-// waits must always be `try`ed, never swallowed: a timeout means the worker
-// never arrived, and canceling from an unknown state destroys the determinism.
+// test thread waits for it to reach a cancelation point, then calls
+// `Future.cancel`. Gate waits must always be `try`ed: a timeout means the worker
+// never arrived, and canceling from an unknown state destroys determinism.
 
 fn testDeadline(io: std.Io, ms: u32) std.Io.Timeout {
     return .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(ms) }) };
@@ -1119,8 +1068,7 @@ const RecordingTool = struct {
 
 /// A tool whose executor consumes the first cancelation at a deterministic gate,
 /// re-arms it via `io.recancel()`, then returns SUCCESS. `recancel` is test-only
-/// coordination and must never appear in production control flow, which consumes
-/// or propagates `error.Canceled` at each ownership boundary instead.
+/// coordination and must never appear in production control flow.
 const RecancelAndReturnTool = struct {
     ready: *std.Io.Event,
     release: *std.Io.Event,
@@ -1132,9 +1080,8 @@ const RecancelAndReturnTool = struct {
         self.release.wait(io) catch |err| switch (err) {
             error.Canceled => io.recancel(),
         };
-        // Long enough to overflow the tiny step budget PLUS the pointer-footer
-        // floor, so `StepOutputLimiter.apply` reaches its spill write — the
-        // cancellation point the test below depends on.
+        // Long enough to overflow the tiny step budget plus the pointer-footer
+        // floor, so `StepOutputLimiter.apply` reaches its spill write.
         return .{ .ok = true, .output = try a.dupe(u8, "over-step-budget " ** 20) };
     }
 
@@ -1148,9 +1095,8 @@ fn stubSuccess(a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToo
     return .{ .ok = true, .output = try a.dupe(u8, "first-real-output") };
 }
 
-/// Model that emits a fixed list of `{id, name}` tool calls (plus one usage
-/// chunk), then stops with `tool_use`. Nothing here blocks — the blocking, and
-/// hence the cancellation, happens in the tools.
+/// Emits a fixed list of `{id, name}` tool calls (plus one usage chunk), then
+/// stops with `tool_use`. Nothing here blocks; the tools do.
 const ScriptedCallModel = struct {
     calls: []const [2][]const u8,
     usage: provider.Usage = .{},
@@ -1201,9 +1147,8 @@ test "canceling provider streaming appends no partial assistant and leaves the l
     defer threaded.deinit();
     const io = threaded.io();
 
-    // A model that streams a partial assistant turn, signals `ready`, then blocks
-    // on `release` (a cancelation point) before it can finish. Cancellation must
-    // discard the partial turn entirely.
+    // Streams a partial assistant turn, then blocks before it can finish.
+    // Cancellation must discard the partial turn entirely.
     const BlockingModel = struct {
         io: std.Io,
         ready: *std.Io.Event,
@@ -1350,8 +1295,7 @@ test "a reply cut by max_tokens records the calls verbatim, runs nothing, and cl
     };
     const tools: registry.ToolSetSnapshot = .{ .tools = &tools_arr };
 
-    // Two calls in the cut reply, both with arguments torn mid-JSON — a prefix
-    // that would 400 forever if replayed raw as a provider `input`.
+    // Two calls in the cut reply, both with arguments torn mid-JSON.
     var model_impl = ScriptedCallModel{
         .calls = &.{ .{ "c1", "record" }, .{ "c2", "record" } },
         .args = "{\"path\":\"a.t",
@@ -1382,8 +1326,7 @@ test "a reply cut by max_tokens records the calls verbatim, runs nothing, and cl
     // The LEDGER records what the model emitted — torn JSON and all.
     try std.testing.expectEqualStrings("{\"path\":\"a.t", calls[0].args_json);
     try std.testing.expectEqualStrings("{\"path\":\"a.t", calls[1].args_json);
-    // The PROJECTION is what a provider may be sent, so there the torn
-    // arguments are complete JSON values.
+    // The PROJECTION is what a provider may be sent, so there they are whole.
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);
     try std.testing.expectEqualStrings("{}", ir.turns[1].assistant.calls[0].args_json);
@@ -1431,8 +1374,8 @@ test "a successful earlier tool is kept when a later tool is canceled" {
     var fut = io.async(runStepWithPrompt, .{
         alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{}, null,
     });
-    // `block` sets `ready` only after `probe` has already returned (serial batch),
-    // so the cancel deterministically targets the second call.
+    // `block` sets `ready` only after `probe` returned (serial batch), so the
+    // cancel deterministically targets the second call.
     try ready.waitTimeout(io, testDeadline(io, 5000));
     const outcome = try fut.cancel(io);
 
@@ -1457,11 +1400,9 @@ test "canceling a step-budget spill keeps the ledger complete and never runs lat
     defer threaded.deinit();
     const io = threaded.io();
 
-    // The first tool's executor consumes the cancel at a deterministic gate,
-    // re-arms it, and returns SUCCESS. Its output passes `emit` untouched but
-    // exceeds the tiny step budget, so the next cancelation point is the spill
-    // write inside `StepOutputLimiter.apply`: a cancel there must not strand the
-    // assistant-with-tool-calls tail without its matching batch.
+    // The first tool consumes the cancel at a gate, re-arms it, and returns
+    // SUCCESS; its output exceeds the tiny step budget, so the next cancelation
+    // point is the spill write, which must not strand the assistant tail.
     var ready: std.Io.Event = .unset;
     var release: std.Io.Event = .unset;
     var spill_tool = RecancelAndReturnTool{ .ready = &ready, .release = &release };
@@ -1497,8 +1438,7 @@ test "canceling a step-budget spill keeps the ledger complete and never runs lat
     var fut = io.async(runStepWithPrompt, .{
         alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{}, null,
     });
-    // Cancel only after the worker is known to sit at the gate; a timeout means
-    // it never arrived, so fail rather than proceed.
+    // Cancel only once the worker is known to sit at the gate.
     try ready.waitTimeout(io, testDeadline(io, 5000));
     const outcome = try fut.cancel(io);
 

@@ -24,10 +24,9 @@ const ext_store = @import("extension/store.zig");
 const Tree = process_tree.Tree;
 const waitBounded = process_tree.waitBounded;
 
-/// The host process environment. std 0.16 removed the ambient global environ
-/// (`.{ .block = .global }`): the OS block is handed to `main` via
-/// `std.process.Init` and to the test runner via `std.testing.environ`, and
-/// nowhere else. `main` registers its copy here once at startup.
+/// The host process environment. std 0.16 has no ambient global environ: the OS
+/// block reaches `main` via `std.process.Init` and the test runner via
+/// `std.testing.environ`. `main` registers its copy here once at startup.
 var host_environ: std.process.Environ = .empty;
 var host_environ_registered = false;
 
@@ -37,8 +36,8 @@ pub fn registerHostEnviron(env: std.process.Environ) void {
 }
 
 /// The host environment as a fresh `Map` (caller deinits). Test builds fall back
-/// to the test runner's environ; a production process whose main never
-/// registered gets the EMPTY environment, never a hidden global.
+/// to the test runner's environ; an unregistered production process gets the
+/// EMPTY environment, never a hidden global.
 pub fn hostEnvironMap(alloc: std.mem.Allocator) !std.process.Environ.Map {
     if (host_environ_registered) return host_environ.createMap(alloc);
     if (builtin.is_test) return std.testing.environ.createMap(alloc);
@@ -58,10 +57,8 @@ pub const Dialect = enum {
 };
 
 /// The spelling a session freezes: `local` and the empty string are the same
-/// answer, and the header records the ABSENCE rather than the word, so a header
-/// written before this column existed reads back identically. Everything else
-/// (a `remote:…` spec) is stored verbatim — the kernel does not rewrite what
-/// the operator typed.
+/// answer, and the header records the ABSENCE rather than the word. Everything
+/// else is stored verbatim.
 pub fn normalizeExecSpec(spec: []const u8) []const u8 {
     return if (std.mem.eql(u8, spec, "local")) "" else spec;
 }
@@ -99,22 +96,20 @@ pub const ShellRequest = struct {
 ///
 /// It names an IDENTITY, not a path. Which file to spawn, which entry variant
 /// this OS uses, which interpreter, and whether the version still matches its
-/// seal are all answers only the machine holding the bytes can give, so they are
-/// given there, by `extension/exec.zig`, on both sides of the seam. A host that
-/// resolved a path here would verify its own copy while a different one ran.
+/// seal are answers only the machine holding the bytes can give, so they are
+/// given there, by `extension/exec.zig`, on both sides of the seam.
 pub const ExtensionRequest = struct {
     /// The extension, and the FROZEN VERSION that serves this call — for a
     /// session whose tools run elsewhere that is the header's `exec_version`.
-    /// Chosen once at session freeze time and merely carried here.
     id: []const u8,
     version: []const u8,
     /// The tool name the frozen manifest declared; it reaches the child as
     /// `NULYA_TOOL`.
     tool: []const u8,
     cwd: []const u8,
-    /// The arguments for this call: one compact JSON object (`{}` when there
-    /// are none), written to stdin verbatim — and the sole source of the
-    /// `NULYA_ARG_<k>` variables the executing side derives (`protocol.callEnv`).
+    /// One compact JSON object (`{}` when there are none), written to stdin
+    /// verbatim — and the sole source of the `NULYA_ARG_<k>` variables the
+    /// executing side derives (`protocol.callEnv`).
     request_json: []const u8,
     max_output_bytes: usize,
     /// Wall-clock cap for the oneshot call (`tool.Timeouts`). `null` disables the
@@ -123,10 +118,9 @@ pub const ExtensionRequest = struct {
     /// Workspace-relative file the child may write UI-only presentation JSON
     /// into. It is not stdout and never reaches the model.
     ///
-    /// A remote environment deliberately does NOT forward it: who READS a file
-    /// decides which machine it lives on, and this one's reader is the front end,
-    /// on the host. A package asked to render over there sees no presentation
-    /// file and renders nothing, exactly as when the driver offers none.
+    /// A remote environment does NOT forward it: this file's reader is the
+    /// front end, on the host. A package asked to render over there sees no
+    /// presentation file and renders nothing.
     presentation_file: ?[]const u8 = null,
 };
 
@@ -143,10 +137,9 @@ pub const ExtensionOutcome = struct {
     }
 };
 
-/// A command to run DETACHED, outliving the step process that asked for it.
-/// Deliberately unlike `ShellRequest`: there is no capture cap (the whole output
-/// goes to the task's log file), and `timeout_ms` has no default and no ceiling
-/// — what ends such a task is `nulya task kill`.
+/// A command to run DETACHED, outliving the step process that asked for it. No
+/// capture cap (the whole output goes to the task's log file), and `timeout_ms`
+/// has no default and no ceiling — what ends such a task is `nulya task kill`.
 pub const TaskRequest = struct {
     command: []const u8,
     cwd: []const u8,
@@ -156,9 +149,8 @@ pub const TaskRequest = struct {
 /// What starting a task tells the caller, immediately: which task this is and
 /// where to watch it. Both strings are caller-owned.
 pub const TaskStart = struct {
-    /// The task's FULL name, `<session-id>/t<N>`. Full so that a task whose
-    /// report was retargeted to another session still names itself
-    /// unambiguously, and so no workspace-wide counter is needed.
+    /// The task's FULL name, `<session-id>/t<N>` — full so a retargeted task
+    /// still names itself unambiguously, with no workspace-wide counter.
     task_id: []u8,
     /// The log accumulating this task's stdout+stderr, relative to the workspace.
     log_path: []u8,
@@ -170,19 +162,17 @@ pub const TaskStart = struct {
 };
 
 /// The durable session an environment's background tasks belong to, when it has
-/// one. Both halves are decided by the shell layer and handed down:
-/// `session_path` is the file the supervisor deposits its report note into
+/// one. `session_path` is the file the supervisor deposits its report note into
 /// (and whose stem names the task), `tasks_dir` is where this workspace keeps
-/// that session's tasks (`launch.sessionTasksDir`). Absent means `startShellTask`
-/// has nowhere to report to, and says so instead of guessing a session.
+/// that session's tasks. Absent means `startShellTask` has nowhere to report to,
+/// and says so instead of guessing a session.
 pub const SessionRef = struct {
     session_path: []const u8,
     tasks_dir: []const u8,
 };
 
-/// The environment handle carried in every tool's `ToolContext`. The vtable
-/// covers process execution and dialect. Fixed-shape — nothing grows with the
-/// conversation, so it is safe in `ToolContext`.
+/// The environment handle carried in every tool's `ToolContext`. Fixed-shape —
+/// nothing grows with the conversation, so it is safe in `ToolContext`.
 pub const Environment = struct {
     io: std.Io,
     ptr: *anyopaque,
@@ -209,30 +199,24 @@ pub const Environment = struct {
     }
 
     /// Start `req` detached and return at once. The ONE entry point for a
-    /// background task: `shell {background:true}` and `nulya task run` both
-    /// arrive here. `error.NoDurableSession` when this environment belongs to no
-    /// session — there would be nowhere to report the result.
+    /// background task. `error.NoDurableSession` when this environment belongs
+    /// to no session — there would be nowhere to report the result.
     pub fn startShellTask(self: Environment, alloc: std.mem.Allocator, req: TaskRequest) !TaskStart {
         return self.vtable.startShellTask(self.ptr, alloc, req);
     }
 
     /// Write `bytes` into this session's workspace at `rel_path`, creating the
-    /// parent directories. The fourth verb, and the one `emit` spills through.
+    /// parent directories. The verb `emit` spills through.
     ///
-    /// `rel_path` is workspace-relative and spelled with `/` — it is the SAME
-    /// string the model reads in the footer that points at the file. Where the
-    /// bytes land and where the reader is sent are one string, on whichever
+    /// `rel_path` is workspace-relative and spelled with `/` — the SAME string
+    /// the model reads in the footer that points at the file, on whichever
     /// machine the workspace is.
-    ///
-    /// No allocator: an implementation that needs one has its own, and every
-    /// caller here is handing over bytes it already owns.
     pub fn putWorkspaceFile(self: Environment, rel_path: []const u8, bytes: []const u8) !void {
         return self.vtable.putWorkspaceFile(self.ptr, rel_path, bytes);
     }
 
-    /// This environment as the sink `emit` spills through. `emit.FileSink` is
-    /// the same shape as the vtable entry, so there is no adapter: if either
-    /// signature moves, the compiler says so at this line.
+    /// `emit.FileSink` is the same shape as the vtable entry, so there is no
+    /// adapter: if either signature moves, the compiler says so at this line.
     pub fn fileSink(self: Environment) emit.FileSink {
         return .{ .ptr = self.ptr, .writeFn = self.vtable.putWorkspaceFile };
     }
@@ -285,15 +269,13 @@ fn isWindowsBashLauncherDir(path: []const u8) bool {
 }
 
 /// The host environment as a child of this process may see it: every
-/// secret-shaped variable stripped (`isSecretKey`), plus the one thing children
-/// are ADDED (`NULYA_EXE`). Caller deinits.
+/// secret-shaped variable stripped (`isSecretKey`), plus `NULYA_EXE`. Caller
+/// deinits.
 ///
-/// One implementation, two callers: the local backend builds its children's
-/// environment from this, and so does the remote backend's transport — so a
-/// `wsl.exe` / `ssh` / `docker` process this harness starts can never be handed
-/// a key, whatever `WSLENV` or `SendEnv` is set to. The remote agent runs this
-/// same function on its own machine for its own children, so the denylist holds
-/// on both ends without a second implementation.
+/// The local backend builds its children's environment from this, and so does
+/// the remote backend's transport — so an `ssh` / `docker` process this harness
+/// starts can never be handed a key, whatever `SendEnv` is set to. The remote
+/// agent runs this same function for its own children.
 pub fn sanitizedChildEnv(alloc: std.mem.Allocator, io: std.Io) !std.process.Environ.Map {
     var host = try hostEnvironMap(alloc);
     defer host.deinit();
@@ -306,12 +288,9 @@ pub fn sanitizedChildEnv(alloc: std.mem.Allocator, io: std.Io) !std.process.Envi
         try sanitized.put(entry.key_ptr.*, entry.value_ptr.*);
     }
 
-    // Children get to find the harness that spawned them: a driver written as
-    // an extension has to run `nulya session append|step|new`, and it cannot
-    // assume a `nulya` on PATH — the one that matters is THIS binary, not
-    // whichever copy an installer left behind. An unknowable path (a deleted
-    // binary, an exotic OS) leaves it unset: building an environment must never
-    // fail over provenance.
+    // Children find the harness that spawned them: THIS binary, not whichever
+    // copy an installer left on PATH. An unknowable path (a deleted binary)
+    // leaves it unset — building an environment must never fail over this.
     if (std.process.executablePathAlloc(io, alloc)) |exe_path| {
         defer alloc.free(exe_path);
         try sanitized.put("NULYA_EXE", exe_path);
@@ -324,17 +303,14 @@ pub const LocalOptions = struct {
     /// Override the OS-derived shell dialect.
     dialect: ?Dialect = null,
     /// The durable session background tasks started here belong to, when there
-    /// is one. `session new`, `nulya demo` and the tests leave it null: nothing
-    /// they do can start a task.
+    /// is one. Null when nothing this environment does can start a task.
     session: ?SessionRef = null,
-    /// Where THIS machine keeps extension versions, in search order. Supplied by
-    /// the shell layer: which directories may supply code is a configuration
-    /// decision, and the kernel does not read config.
+    /// Where THIS machine keeps extension versions. Supplied by the shell
+    /// layer, since the kernel does not read config.
     ///
     /// Copied, and opened only when an extension is actually run — relative
-    /// specs resolve against the workspace the CALL names, which is the far
-    /// machine's workspace on a remote agent. Empty means this environment runs
-    /// no extensions and refuses if asked.
+    /// specs resolve against the workspace the CALL names. Empty means this
+    /// environment runs no extensions and refuses if asked.
     extension_store: []const u8 = "",
     /// Where the extension resolver says what an error cannot carry. Reports
     /// nothing by default.
@@ -359,17 +335,15 @@ pub const ShellCommandLine = struct {
 
 /// The `local` backend: runs in the host process with a sanitized child
 /// environment. Shell authority == session authority, so the *only* enforced
-/// boundary is that host secrets are stripped before they can reach a
-/// subprocess. OS-level confinement arrives with the `sandbox` backend.
+/// boundary is that host secrets are stripped before reaching a subprocess.
 pub const LocalEnvironment = struct {
     io: std.Io,
     alloc: std.mem.Allocator,
     dialect_val: Dialect,
     bash_exe: []const u8,
     env: std.process.Environ.Map,
-    /// The session this environment's background tasks belong to, copied so it
-    /// cannot outlive the caller's strings. Null = no session, so
-    /// `startShellTask` refuses (see `SessionRef`).
+    /// Copied so it cannot outlive the caller's strings. Null = no session, so
+    /// `startShellTask` refuses.
     session_path: ?[]u8 = null,
     tasks_dir: ?[]u8 = null,
     /// How `(id, version)` becomes something to spawn on this machine. Owned;
@@ -386,8 +360,7 @@ pub const LocalEnvironment = struct {
         const bash_exe = if (builtin.os.tag == .windows) findWindowsBash(io, &host) orelse default_bash_exe else default_bash_exe;
 
         const dialect_val = opts.dialect orelse defaultDialect(io, &host);
-        // Published so a package describing this session's environment does not
-        // have to duplicate the host/config detection logic.
+        // Published so a package does not duplicate the detection logic.
         try sanitized.put("NULYA_SHELL_DIALECT", dialect_val.label());
 
         var session_path: ?[]u8 = null;
@@ -425,8 +398,6 @@ pub const LocalEnvironment = struct {
     /// Publish the live session to everything this environment spawns.
     /// `NULYA_SESSION` is the session FILE's path — a fact about this machine —
     /// and `NULYA_SESSION_ID` is the session's IDENTITY, true on any machine.
-    /// They are two variables so a package that only wants the id (a scratch
-    /// key, a journal column) works when the workspace lives elsewhere.
     pub fn publishSession(self: *LocalEnvironment, session_path: []const u8, session_id: []const u8) !void {
         if (session_path.len != 0) try self.env.put("NULYA_SESSION", session_path);
         if (session_id.len != 0) try self.env.put("NULYA_SESSION_ID", session_id);
@@ -442,9 +413,8 @@ pub const LocalEnvironment = struct {
     }
 
     /// The argv that runs `command` in this environment's dialect — the ONE
-    /// place that decision is made. Two consumers: an in-process `shell` call
-    /// below, and `nulya task supervise`, which runs a BACKGROUND command and
-    /// must reach the same interpreter, with the same flags.
+    /// place that decision is made, shared with `nulya task supervise` so a
+    /// background command reaches the same interpreter with the same flags.
     ///
     /// `buf` backs the argv and must outlive the returned value; every form but
     /// plain bash additionally owns one heap string, released by `deinit`.
@@ -485,29 +455,22 @@ pub const LocalEnvironment = struct {
         const cmdline = try self.shellArgv(alloc, req.command, &argv_buf);
         defer cmdline.deinit(alloc);
         const argv = cmdline.argv;
-        // `argv[0]` is resolved via the *parent* PATH (std.process contract), so a
-        // stripped child env still finds `bash`/`powershell` when an absolute Git
-        // Bash path was not detected.
+        // `argv[0]` is resolved via the *parent* PATH (std.process contract), so
+        // a stripped child env still finds `bash`/`powershell`.
         //
-        // We spawn+drain by hand rather than calling `std.process.run` because that
-        // helper drains the child's stdout pipe with a *blocking* read, and on
-        // Windows such a read is not promptly interruptible by cancellation (nor by
-        // a timeout) — it only returns once the child produces output or exits. A
-        // canceled step would then hang until the command finished on its own (a
-        // `sleep 3600` would block the whole step for an hour). The only reliably
-        // cancelable wait is `child.wait` (an alertable wait on Windows, a
-        // signal-interrupted syscall on POSIX), so we make THAT the cancelation
-        // point and drain the pipes on a separate task.
+        // Spawn+drain by hand: `std.process.run` drains stdout with a *blocking*
+        // read, and on Windows such a read is not promptly interruptible by
+        // cancellation or timeout. The only reliably cancelable wait is
+        // `child.wait` (alertable on Windows, signal-interrupted on POSIX), so
+        // THAT is the cancelation point and the pipes drain on another task.
         //
-        // The read-ends are detached from `child` up front, so neither `child.wait`
-        // nor the kill ever closes a pipe the drain task is mid-read on
-        // (`child.wait` reaps only the process handle). That removes every race
-        // between draining and process cleanup; this code owns the read-ends and
-        // closes them once the drain has finished.
+        // The read-ends are detached from `child` up front, so neither
+        // `child.wait` nor the kill closes a pipe the drain task is mid-read on;
+        // this code owns them and closes them once the drain has finished.
         //
         // `Tree` rather than a bare spawn: a shell forks, and killing only the
-        // direct child would leave a grandchild holding these very write-ends, so
-        // the drain below would never reach EOF (see `Tree`).
+        // direct child would leave a grandchild holding these write-ends, so the
+        // drain below would never reach EOF.
         var tree = try Tree.spawn(self.io, .{
             .argv = argv,
             .cwd = .{ .path = req.cwd },
@@ -526,10 +489,9 @@ pub const LocalEnvironment = struct {
         defer out_file.close(self.io);
         defer err_file.close(self.io);
 
-        // `child.wait` reaps the process on the normal path. If we leave this scope
-        // any other way (cancel, StreamTooLong, allocation failure), the tree is
-        // still running, so terminate+reap it here. `child_reaped` guards against a
-        // double reap (a second `kill` after `child.id` was cleared would panic).
+        // `child.wait` reaps the process on the normal path; leaving this scope
+        // any other way leaves the tree running, so terminate+reap it here.
+        // `child_reaped` guards against a double reap, which would panic.
         var child_reaped = false;
         defer if (!child_reaped) tree.killAll(self.io);
 
@@ -539,21 +501,18 @@ pub const LocalEnvironment = struct {
         var multi_reader_live = true;
         defer if (multi_reader_live) multi_reader.deinit();
 
-        // Drain both pipes to EOF on a worker so a large writer cannot fill a pipe
-        // and stall the child. This task only ever touches the MultiReader, never
-        // `child`, so it cannot race process cleanup.
+        // Drain both pipes to EOF on a worker so a large writer cannot fill a
+        // pipe and stall the child. This task touches only the MultiReader,
+        // never `child`, so it cannot race process cleanup.
         var drain = self.io.async(drainShellOutput, .{ &multi_reader, req.max_output_bytes });
 
-        // The wall-clock budget races the child's own exit. `child.wait` stays
-        // the cancelation point either way — `waitBounded` just runs it as one
-        // of two tasks. If the io cannot give the pair their own units of
-        // concurrency, the wait runs unguarded: no false timeout, just no guard.
+        // The wall-clock budget races the child's own exit; `child.wait` stays
+        // the cancelation point either way. If the io cannot give the pair their
+        // own concurrency the wait runs unguarded: no false timeout, no guard.
         const waited = waitBounded(self.io, child, req.timeout_ms) catch |err| {
-            // Cancellation (or a wait failure): the tree is still alive. Terminate
-            // ALL of it so every write-end closes, which lets the blocked drain
-            // reach EOF and finish; only then is it safe to unwind the MultiReader
-            // and read-ends. Killing just the direct child would leave the drain
-            // blocked on a grandchild for the command's full duration.
+            // The tree is still alive. Terminate ALL of it so every write-end
+            // closes, letting the blocked drain reach EOF; only then is it safe
+            // to unwind the MultiReader and read-ends.
             tree.killAll(self.io);
             child_reaped = true;
             drain.await(self.io) catch {};
@@ -561,10 +520,9 @@ pub const LocalEnvironment = struct {
         };
 
         if (waited == .timed_out) {
-            // Same unwind as the cancel path, and for the same reason: kill the
-            // whole tree first so the pipes reach EOF, then join the drain, then
-            // take what it got. A timeout returns the output captured before the
-            // kill rather than an empty result.
+            // Same unwind as the cancel path: kill the whole tree so the pipes
+            // reach EOF, join the drain, take what it got. A timeout returns the
+            // output captured before the kill.
             tree.killAll(self.io);
             child_reaped = true;
             drain.await(self.io) catch {};
@@ -594,11 +552,10 @@ pub const LocalEnvironment = struct {
         return .{ .stdout = stdout, .stderr = stderr, .exit_code = exit_code };
     }
 
-    /// Read both of a child's pipes to EOF. Runs on its own task while the caller
-    /// waits on the child, so it must touch nothing but the MultiReader. Output is
-    /// capped at `max`: once a stream crosses it the buffers are tossed and reading
-    /// continues (so the child never blocks on a full pipe), and `StreamTooLong` is
-    /// reported at the end.
+    /// Read both of a child's pipes to EOF. Runs on its own task while the
+    /// caller waits on the child, so it must touch nothing but the MultiReader.
+    /// Past `max` the buffers are tossed and reading continues (so the child
+    /// never blocks on a full pipe); `StreamTooLong` is reported at the end.
     fn drainShellOutput(multi_reader: *std.Io.File.MultiReader, max: usize) anyerror!void {
         const stdout_reader = multi_reader.reader(0);
         const stderr_reader = multi_reader.reader(1);
@@ -622,15 +579,12 @@ pub const LocalEnvironment = struct {
 
         // WHICH FILE runs is decided here, on the machine that holds it: the
         // entry variant for THIS OS, the interpreter its frozen manifest names,
-        // and the version checked against its own seal (`extension/exec.zig`).
-        // The caller only ever named `(id, version, tool)`.
+        // and the version checked against its own seal.
         const entry = try self.resolver.resolve(req.id, req.version);
 
-        // Oneshot: spawn, feed one request, read one response, exit. Capture
-        // stderr too: when an AI-authored extension crashes before it can write
-        // a protocol error on stdout, stderr is the only repair signal.
-        // A script extension runs through its interpreter (argv = [interpreter,
-        // entry]); a compiled one runs directly (argv = [entry]).
+        // Oneshot: spawn, feed one request, read one response, exit. stderr is
+        // captured too: when an extension crashes before writing a protocol
+        // error on stdout, it is the only repair signal.
         var argv_buf: [2][]const u8 = undefined;
         const argv: []const []const u8 = if (entry.interpreter) |interp| blk: {
             argv_buf = .{ interp, entry.path };
@@ -639,11 +593,9 @@ pub const LocalEnvironment = struct {
             argv_buf[0] = entry.path;
             break :blk argv_buf[0..1];
         };
-        // Per-call variables (`NULYA_TOOL` / `NULYA_ARG_<k>`) are derived HERE,
-        // from the same arguments JSON that goes to stdin — one implementation
-        // of that rule, shared with the remote agent (`protocol.callEnv`). They
-        // go into a COPY of the sanitized map: the process-wide map belongs to
-        // every other spawn and must not be mutated for one call.
+        // Per-call variables are derived from the same arguments JSON that goes
+        // to stdin, by the one implementation the remote agent also uses. Into a
+        // COPY of the sanitized map: the process-wide one must not be mutated.
         var vars = try protocol.callEnv(alloc, req.tool, req.request_json, req.presentation_file);
         defer vars.deinit(alloc);
         var overlay: std.process.Environ.Map = .init(alloc);
@@ -655,8 +607,8 @@ pub const LocalEnvironment = struct {
         for (vars.list.items) |v| try overlay.put(v.name, v.value);
         const child_env: *const std.process.Environ.Map = &overlay;
 
-        // Same tree discipline as the shell (see `Tree`): an extension is free to
-        // spawn helpers of its own, and the timeout below has to end all of them.
+        // Same tree discipline as the shell: an extension may spawn helpers of
+        // its own, and the timeout below has to end all of them.
         var tree = try Tree.spawn(self.io, .{
             .argv = argv,
             .cwd = .{ .path = req.cwd },
@@ -670,9 +622,8 @@ pub const LocalEnvironment = struct {
         const child = &tree.child;
         errdefer tree.killAll(self.io);
 
-        // Write the arguments, then close stdin so the child sees EOF. They are
-        // a small JSON object (< pipe buffer), so writing before draining stdout
-        // cannot deadlock.
+        // Write the arguments, then close stdin so the child sees EOF. A small
+        // JSON object (< pipe buffer), so writing before draining cannot block.
         try child.stdin.?.writeStreamingAll(self.io, req.request_json);
         child.stdin.?.close(self.io);
         child.stdin = null;
@@ -729,23 +680,17 @@ pub const LocalEnvironment = struct {
         return .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, duration) };
     }
 
-    /// Start a detached background command and return the moment it is launched.
-    /// What is started is NOT the command itself but `nulya task supervise` —
-    /// the same binary, in its supervisor role: it holds the task's lease, runs
-    /// the real command under a `Tree` so `nulya task kill` ends the whole
-    /// subtree, and deposits the report note when it is over. Nothing
-    /// is waited on here.
-    ///
-    /// The slot is allocated with an exclusive `mkdir`: the first free `t<N>`
-    /// wins, so two callers racing cannot be handed the same name, and the name
-    /// is monotonic within a session.
+    /// Start a detached background command and return the moment it is
+    /// launched. What is started is `nulya task supervise`, the same binary in
+    /// its supervisor role: it holds the task's lease, runs the real command
+    /// under a `Tree` so `nulya task kill` ends the whole subtree, and deposits
+    /// the report note when it is over. Nothing is waited on here.
     fn startShellTaskImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: TaskRequest) anyerror!TaskStart {
         const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
         const session_path = self.session_path orelse return error.NoDurableSession;
         const tasks_dir = self.tasks_dir orelse return error.NoDurableSession;
-        // The supervisor IS this binary. `NULYA_EXE` is where every child of a
-        // nulya process learns which one that is; without it there is no honest
-        // way to start one.
+        // The supervisor IS this binary, and `NULYA_EXE` is where a child
+        // learns which one that is.
         const exe = self.env.get("NULYA_EXE") orelse return error.HarnessPathUnknown;
 
         const session_id = std.fs.path.stem(std.fs.path.basename(session_path));
@@ -766,17 +711,15 @@ pub const LocalEnvironment = struct {
         return claimed.intoStart(alloc);
     }
 
-    /// The ONE place in this repository where a workspace file is written from
-    /// bytes. A remote session does not get a second copy: its environment
+    /// The ONE place a workspace file is written from bytes: a remote session
     /// forwards the bytes over the channel and `nulya remote serve` on the other
-    /// side calls exactly this function (`cli/remote.zig`).
+    /// side calls exactly this function.
     fn putWorkspaceFileImpl(ptr: *anyopaque, rel_path: []const u8, bytes: []const u8) anyerror!void {
         const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
         const cwd = std.Io.Dir.cwd();
-        // `createDirPath` is idempotent (an existing directory answers
-        // `.existed`), so `try` only surfaces genuine failures — crucially
-        // `error.Canceled`, which has to reach the step boundary rather than be
-        // swallowed as "could not spill".
+        // `createDirPath` is idempotent, so `try` only surfaces genuine
+        // failures — crucially `error.Canceled`, which must reach the step
+        // boundary rather than be swallowed as "could not spill".
         if (std.fs.path.dirname(rel_path)) |dir| try cwd.createDirPath(self.io, dir);
         try cwd.writeFile(self.io, .{ .sub_path = rel_path, .data = bytes });
     }
@@ -791,13 +734,12 @@ pub const LocalEnvironment = struct {
 };
 
 /// The one file a task's stdout and stderr are appended to, in arrival order.
-/// Named here because both halves of the mechanism need it: the environment
-/// tells the caller where it is, and `nulya task supervise` writes it.
+/// The environment tells the caller where it is; `task supervise` writes it.
 pub const task_log_name = "output.log";
 
 /// One claimed `t<N>`: the directory, the full name, and the log the receipt
-/// points at. All three are workspace-relative and `/`-spelled, so the same
-/// three strings are true on whichever machine that workspace lives on.
+/// points at. All three are workspace-relative and `/`-spelled, so they are true
+/// on whichever machine that workspace lives on.
 pub const TaskSlot = struct {
     dir_rel: []u8,
     task_id: []u8,
@@ -809,8 +751,7 @@ pub const TaskSlot = struct {
         alloc.free(self.log_path);
     }
 
-    /// The receipt half, consuming the rest. `dir_rel` has done its job by the
-    /// time a task is started.
+    /// The receipt half, consuming the rest.
     pub fn intoStart(self: TaskSlot, alloc: std.mem.Allocator) TaskStart {
         alloc.free(self.dir_rel);
         return .{ .task_id = self.task_id, .log_path = self.log_path };
@@ -821,9 +762,8 @@ pub const TaskSlot = struct {
 /// `mkdir`: the first free name wins, so two callers racing cannot be handed the
 /// same one, and names are monotonic within a session.
 ///
-/// The claim always happens HERE, on the host, whichever machine the command
-/// will run on: the name is what the ledger, the receipt and every `task` verb
-/// speak, so the machine that owns the ledger is the one that hands it out.
+/// Always HERE, on the host, whichever machine the command will run on: the name
+/// is what the ledger, the receipt and every `task` verb speak.
 pub fn claimTaskSlot(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -857,18 +797,17 @@ pub fn claimTaskSlot(
     return .{ .dir_rel = dir_rel, .task_id = task_id, .log_path = log_path };
 }
 
-/// How `nulya task supervise` is started — the one shape, so the two machines
-/// that start one cannot drift.
+/// How `nulya task supervise` is started — one shape, so the two machines that
+/// start one cannot drift.
 pub const SupervisorSpawn = struct {
     /// This binary, on whichever machine is doing the spawning (`NULYA_EXE`).
     exe: []const u8,
     /// The task's directory, relative to `spawn_cwd`.
     dir_rel: []const u8,
     /// Exactly one of these two says who the task is and where its report goes:
-    /// `session_path` means "deposit it into that session file's inbox" (the
-    /// session is on this machine), `task_name` means "you are `<sid>/t<N>` and
-    /// there is no session file here — leave the report beside your log, for the
-    /// host to collect".
+    /// `session_path` = "deposit it into that session file's inbox";
+    /// `task_name` = "you are `<sid>/t<N>` and there is no session file here —
+    /// leave the report beside your log, for the host to collect".
     session_path: ?[]const u8 = null,
     task_name: ?[]const u8 = null,
     /// Where the watched COMMAND runs.
@@ -876,21 +815,17 @@ pub const SupervisorSpawn = struct {
     timeout_ms: ?u32 = null,
     command: []const u8,
     /// Where the SUPERVISOR process itself starts — the workspace, since
-    /// `--dir` is relative to it. Null inherits this process's directory, which
-    /// is what a host session wants; the far agent names the session's workspace
-    /// because it may not have been started in it.
+    /// `--dir` is relative to it. Null inherits this process's directory.
     spawn_cwd: ?[]const u8 = null,
 };
 
 /// Start a supervisor and return the moment it is launched.
 ///
-/// A PLAIN spawn, not a `Tree`: this call returns normally and kills nothing,
-/// and the supervisor must survive both this process and the terminal it was
-/// started from — hence its own process group on POSIX and no console on
-/// Windows. Its stdio is null because it inherits this process's pipes
-/// otherwise, and the caller's drain would then wait for a process designed to
-/// outlive it. On the far side that caller is the channel itself, so the same
-/// care keeps a background task from holding the host's reader open.
+/// A PLAIN spawn, not a `Tree`: the supervisor must survive both this process
+/// and the terminal it was started from — hence its own process group on POSIX
+/// and no console on Windows. Its stdio is null because it would otherwise
+/// inherit this process's pipes, and the caller's drain would then wait for a
+/// process designed to outlive it.
 pub fn spawnSupervisor(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -913,7 +848,7 @@ pub fn spawnSupervisor(
     var child = try std.process.spawn(io, .{
         .argv = argv.items,
         // The workspace, NOT the command's cwd: `--dir` and `--session` are
-        // workspace-relative, and where the COMMAND runs is `--cwd`'s job.
+        // workspace-relative; where the COMMAND runs is `--cwd`'s job.
         .cwd = if (s.spawn_cwd) |p| .{ .path = p } else .inherit,
         .environ_map = env,
         .stdin = .ignore,
@@ -922,9 +857,8 @@ pub fn spawnSupervisor(
         .create_no_window = true,
         .pgid = if (builtin.os.tag == .windows) null else 0,
     });
-    // Nothing is waited on: the supervisor outlives this call by design. On
-    // Windows the handle is ours to release; on POSIX the exiting parent hands
-    // the child to init.
+    // Nothing is waited on. On Windows the handle is ours to release; on POSIX
+    // the exiting parent hands the child to init.
     if (builtin.os.tag == .windows) {
         if (child.id) |handle| std.os.windows.CloseHandle(handle);
         std.os.windows.CloseHandle(child.thread_handle);
@@ -932,9 +866,8 @@ pub fn spawnSupervisor(
     }
 }
 
-/// The two kernel32 calls `DetachedStdio` needs, declared locally exactly as
-/// `environment/tree.zig` declares the job-object calls — std 0.16 ships
-/// neither. Analyzed lazily, so the externs never reach a POSIX link.
+/// The two kernel32 calls `DetachedStdio` needs; std 0.16 ships neither.
+/// Analyzed lazily, so the externs never reach a POSIX link.
 const win32 = struct {
     const windows = std.os.windows;
     const HANDLE_FLAG_INHERIT: windows.DWORD = 0x00000001;
@@ -945,13 +878,10 @@ const win32 = struct {
 /// Keep this process's own stdio out of a DETACHED child.
 ///
 /// Windows `CreateProcessW` is called with `bInheritHandles = TRUE` and no
-/// handle list, so a child inherits every INHERITABLE handle — not only the
-/// three the startup info names. When nulya itself was spawned with pipes (a
-/// driver running `session step`, a test running the CLI), those pipe write ends
-/// are exactly such handles: a supervisor that inherited a duplicate would hold
-/// them open for the task's whole life, and the caller's drain would not reach
-/// EOF until the background command finished — the task would be background in
-/// name only.
+/// handle list, so a child inherits every INHERITABLE handle. When nulya itself
+/// was spawned with pipes, a supervisor inheriting a duplicate would hold them
+/// open for the task's whole life and the caller's drain would not reach EOF
+/// until the background command finished.
 ///
 /// So the inherit flag is cleared on stdin/stdout/stderr across the spawn and
 /// restored right after. POSIX needs nothing: std opens its own descriptors
@@ -988,11 +918,9 @@ const DetachedStdio = struct {
 };
 
 /// Host secret-shaped environment variables must not reach an AI-authored
-/// subprocess. Matched case-insensitively as a substring so provider keys, cloud
-/// creds, and SSH agents are all covered without maintaining an exhaustive
-/// allowlist. Non-secret vars (PATH, HOME, …) pass through so commands keep
-/// working — the boundary is "no obvious secret env leakage", not full
-/// non-inheritance or filesystem confinement.
+/// subprocess. Matched case-insensitively as a substring, so provider keys,
+/// cloud creds and SSH agents are covered without an exhaustive allowlist. The
+/// boundary is "no obvious secret env leakage", not full non-inheritance.
 pub fn isSecretKey(key: []const u8) bool {
     const needles = [_][]const u8{
         "SECRET",     "TOKEN",         "PASSWORD",   "PASSWD",
@@ -1042,8 +970,7 @@ test "local environment sanitizes its child env map" {
 test "local environment tells its children where the harness is" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
-    // What the OS says this process is. If it cannot say (a deleted binary),
-    // the variable is deliberately absent and there is nothing to assert.
+    // If the OS cannot say (a deleted binary), the variable is absent.
     const exe = std.process.executablePathAlloc(io, alloc) catch return error.SkipZigTest;
     defer alloc.free(exe);
 
@@ -1054,8 +981,7 @@ test "local environment tells its children where the harness is" {
     const seen = lenv.env.get("NULYA_EXE").?;
     try std.testing.expect(std.fs.path.isAbsolute(seen));
     try std.testing.expectEqualStrings(exe, seen);
-    // Not secret-shaped, so sanitization keeps it (this is the pairing that
-    // makes the variable reach an extension at all).
+    // Not secret-shaped, so sanitization keeps it.
     try std.testing.expect(!isSecretKey("NULYA_EXE"));
 }
 
@@ -1111,15 +1037,13 @@ test "canceling a running shell surfaces cancellation and kills the child" {
     const root_len = try tmp.dir.realPath(io, &root_real);
     const cwd = root_real[0..root_len];
 
-    // The DEFAULT dialect, deliberately: cancellation terminates the command's
-    // whole process tree (`Tree`), so a launcher whose real shell is a
-    // grandchild (Git Bash) is killed with it.
+    // The DEFAULT dialect: cancellation terminates the whole process tree, so
+    // Git Bash's launcher (whose real shell is a grandchild) is fine.
     var lenv = try LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
-    // The child announces `started`, sleeps, then would write `done`. Killing the
-    // tree means the `done` step never runs — the observable proof that
-    // cancellation terminated the processes rather than waiting for them.
+    // The child announces `started`, sleeps, then would write `done`; killing
+    // the tree means the `done` step never runs.
     const command = switch (lenv.dialect_val) {
         .bash => "touch started; sleep 2; touch done",
         .powershell => "New-Item started -ItemType File -Force > $null; Start-Sleep -Seconds 2; New-Item done -ItemType File -Force > $null",
@@ -1130,12 +1054,9 @@ test "canceling a running shell surfaces cancellation and kills the child" {
     });
 
     // Wait until the child has actually launched, then cancel. The bound only
-    // exists so a broken spawn fails instead of hanging: it is not a statement
-    // about how fast a shell starts. A loaded machine — another nulya process,
-    // a parallel test run, a virus scanner opening the interpreter — can take
-    // seconds to get there, so give it far more room than it will ever need.
-    // The loop breaks the moment the marker appears, so an idle run pays
-    // nothing for the headroom.
+    // exists so a broken spawn fails instead of hanging; it says nothing about
+    // how fast a shell starts, and the loop breaks the moment the marker
+    // appears, so an idle run pays nothing for the headroom.
     const spawn_budget_ticks = 1500; // 30s at 20ms
     var waited: usize = 0;
     while (waited < spawn_budget_ticks) : (waited += 1) {
@@ -1144,16 +1065,14 @@ test "canceling a running shell surfaces cancellation and kills the child" {
     }
     try std.testing.expect(markerExists(io, tmp.dir, "started"));
 
-    // Cancellation surfaces AS cancellation — never a normal ShellOutcome — and
-    // the child is terminated promptly (the drain loop's checkCancel fires within
-    // one poll interval, then `errdefer child.kill` runs).
+    // Cancellation surfaces AS cancellation, never a normal ShellOutcome, and
+    // the child is terminated promptly.
     if (fut.cancel(io)) |ok| {
         ok.deinit(alloc);
         return error.TestExpectedCancellation;
     } else |err| try std.testing.expectEqual(error.Canceled, err);
 
-    // The child was killed mid-sleep, so it never reached the `done` step. Wait
-    // comfortably past its 2s sleep to make the absence conclusive.
+    // Wait comfortably past the child's 2s sleep to make the absence conclusive.
     var elapsed: usize = 0;
     while (elapsed < 180) : (elapsed += 1) {
         try std.testing.expect(!markerExists(io, tmp.dir, "done"));
@@ -1197,10 +1116,8 @@ test "a named version is resolved and spawned here, and both its streams are cap
     var root = try ext_store.openOrCreateRoot(io, root_path, "store");
     defer root.close(io);
 
-    // A real frozen SCRIPT version, because that is what the request now names:
-    // the environment picks the entry variant for this OS, finds the
-    // interpreter in the frozen manifest and checks the seal — none of which a
-    // loose file on disk could exercise.
+    // A real frozen SCRIPT version: the environment picks the entry variant for
+    // this OS, finds the interpreter in the manifest and checks the seal.
     const script = if (builtin.os.tag == .windows)
         "Write-Error 'stderr-marker'; Write-Output 'not-json'\n"
     else
@@ -1226,10 +1143,8 @@ test "a named version is resolved and spawned here, and both its streams are cap
         .cwd = root_path,
         .request_json = "{}",
         .max_output_bytes = 1024,
-        // This test is about capture, not about the timeout, so it uses the
-        // production default: a one-second budget would turn "the machine was
-        // busy while a script interpreter started" into a failure about
-        // something else entirely.
+        // About capture, not the timeout, so it uses the production default: a
+        // one-second budget would fail on a busy machine for another reason.
         .timeout_ms = 30_000,
     });
     defer outcome.deinit(alloc);
@@ -1238,8 +1153,7 @@ test "a named version is resolved and spawned here, and both its streams are cap
     try std.testing.expect(std.mem.indexOf(u8, outcome.stdout, "not-json") != null);
     try std.testing.expect(std.mem.indexOf(u8, outcome.stderr, "stderr-marker") != null);
 
-    // A version this machine does not hold is a refusal, not a spawn of
-    // something else.
+    // A version this machine does not hold is a refusal.
     try std.testing.expectError(error.VersionNotFound, lenv.environment().runExtension(alloc, .{
         .id = "noisy",
         .version = "v-000000000000000000000000",

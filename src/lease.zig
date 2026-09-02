@@ -1,16 +1,13 @@
 //! Every lock and marker file in the system, and the order they are taken in.
 //!
-//! A LEASE is an OS advisory lock on a sidecar file, held for as long as the
-//! claim is true and released by the kernel when the holder dies or its handle
-//! closes — so a crash never strands anything. A MARKER is an ordinary file
-//! whose existence is the message; it outlives its writer on purpose, and
-//! whoever acts on it deletes it. Nothing here is ever a lock on a file that
-//! also carries data: on Windows a file's own lock is mandatory and would block
-//! readers.
+//! A LEASE is an OS advisory lock on a sidecar file, released by the kernel when
+//! the holder dies or its handle closes. A MARKER is an ordinary file whose
+//! existence is the message; it outlives its writer, and whoever acts on it
+//! deletes it. Never a lock on a file that also carries data: on Windows a file's
+//! own lock is mandatory and would block readers.
 //!
-//! The table below is the contract. Rows whose function lives elsewhere are
-//! registered, not moved: an extension package cannot import the kernel, and the
-//! remote agent takes the far machine's own leases through the channel.
+//! The table is the contract. Rows whose function lives elsewhere are registered,
+//! not moved.
 //!
 //! | file                                    | taken by                                                        | wait       | order |
 //! |-----------------------------------------|-----------------------------------------------------------------|------------|-------|
@@ -30,26 +27,20 @@
 //! "somebody is depositing right now" is an answer, not a queue to join.
 //!
 //! ORDER is global and total for the two numbered rows: the deposit lease is
-//! taken before the writer lease and never after it (`step` never deposits), so
-//! `sessionLifetime` is the only place both are held and takes them that way.
-//! Rows marked `*` are leaves — nothing is taken while one of them is held, so
-//! they cannot participate in a cycle. Two leases of the SAME row at once
-//! happens once (`depositPair`) and goes in session-path order, never in call
-//! order.
+//! taken before the writer lease and never after it, so `sessionLifetime` is the
+//! only place both are held. Rows marked `*` are leaves — nothing is taken while
+//! one is held. Two leases of the SAME row at once happens once (`depositPair`)
+//! and goes in session-path order, never call order.
 
 const std = @import("std");
 
-/// Whether taking a lease waits for whoever holds it.
-///
-/// A depositor WAITS: it is here to add a fact, and the other holder is about to
-/// finish. `session prune` does NOT: it is here to take a session away, so
-/// "somebody is depositing right now" is an answer, not a queue to join.
+/// Whether taking a lease waits for whoever holds it. A depositor WAITS;
+/// `session prune` does not — "somebody is depositing right now" is an answer.
 pub const Wait = enum { block, fail_fast };
 
-/// A held lease. Closing it releases it; closing it twice is a no-op, which is
-/// what lets a callee release it at the one moment it may (a lock file cannot be
-/// unlinked while its opener holds it) without taking the handle away from the
-/// caller's `defer`.
+/// A held lease. Closing it twice is a no-op, which lets a callee release it at
+/// the one moment it may (a lock file cannot be unlinked while its opener holds
+/// it) without taking the handle away from the caller's `defer`.
 pub const Lease = struct {
     file: std.Io.File,
     open: bool = true,
@@ -64,13 +55,11 @@ pub const Lease = struct {
 // ── A session's two ─────────────────────────────────────────────────────────
 
 /// The session's writer lease: only one process opens the file for append at a
-/// time, so two `session step` runs can never interleave writes. Taken
-/// non-blocking — a second writer fails fast with `error.SessionBusy` instead of
-/// racing. The returned handle must stay open for the writer's lifetime.
+/// time. Taken non-blocking — a second writer fails fast with
+/// `error.SessionBusy`. The handle must stay open for the writer's lifetime.
 ///
-/// Public because one caller is not a writer at all: `pruneSession` has to know
-/// that nobody is writing, and that is a question only taking the lease can
-/// answer — probing a lock races with whoever is about to take it.
+/// Public because `pruneSession` has to know that nobody is writing, and only
+/// taking the lease answers that — probing races with the next taker.
 pub fn sessionWriter(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, session_path: []const u8) !std.Io.File {
     const lock_path = try siblingPath(alloc, session_path, ".lock");
     defer alloc.free(lock_path);
@@ -88,16 +77,15 @@ pub fn sessionWriter(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sess
 ///     take the same queue position.
 ///   * A session may not be taken away between a depositor's check and its
 ///     write. `ledger.pruneSession` removes one only while holding this and the
-///     writer lease; every deposit re-checks the session under this lease
-///     (`ledger.depositEventLeased`), closing the window from the other side.
-///   * Nor between the check and the START of something long-lived under it: a
-///     background task's supervisor writes into the session's scratch tree for
-///     as long as it runs, and `nulya task run` holds this across "does this
-///     session exist" and the spawn.
+///     writer lease; every deposit re-checks the session under this lease.
+///   * Nor between the check and the START of something long-lived under it:
+///     `nulya task run` holds this across "does this session exist" and the
+///     spawn of a supervisor that writes under the session for as long as it
+///     runs.
 ///
-/// It lives INSIDE the inbox and is emphatically not the session's `.lock`: that
-/// one belongs to `step`, and every gate above must work while a step runs.
-/// Neither the drain nor a scan looks at anything but `*.json` there.
+/// It lives INSIDE the inbox and is not the session's `.lock`: that one belongs
+/// to `step`, and every gate above must work while a step runs. Neither the
+/// drain nor a scan looks at anything but `*.json` there.
 pub fn sessionDeposits(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -132,11 +120,9 @@ pub fn depositLockPath(alloc: std.mem.Allocator, session_path: []const u8) ![]u8
 /// BOTH of a session's leases, held at once.
 ///
 /// Only under the pair does "nothing is alive under this session" stay true long
-/// enough to act on, because a long-lived writer under a session's scratch tree
-/// can be started down either of two paths: `nulya task run` takes the deposit
-/// lease across it, and an in-step `shell {background:true}` is covered by the
-/// writer lease its step is holding. A caller that answers that question under
-/// one of them alone has only narrowed the window it is racing.
+/// enough to act on: a long-lived writer under the scratch tree starts down
+/// either of two paths — `nulya task run` under the deposit lease, an in-step
+/// `shell {background:true}` under the writer lease its step holds.
 pub const SessionLeases = struct {
     deposits: Lease,
     writer: Lease,
@@ -162,11 +148,9 @@ pub fn sessionLifetime(
     return .{ .deposits = deposits, .writer = .{ .file = writer } };
 }
 
-/// The deposit leases of TWO sessions, held at once — what any act that changes
-/// WHERE a result will land needs, because such an act touches both ends and
-/// neither end may be pruned out from under it in between. Naming one session
-/// twice takes one lease; taking the same lease twice would deadlock on the
-/// second.
+/// The deposit leases of TWO sessions, held at once — what changing WHERE a
+/// result will land needs, since neither end may be pruned in between. Naming
+/// one session twice takes one lease; taking the same lease twice deadlocks.
 pub const DepositPair = struct {
     first: Lease,
     second: ?Lease,
@@ -198,10 +182,9 @@ pub fn depositPair(
     return .{ .first = first, .second = second };
 }
 
-/// `<dir>/<stem><suffix>` for a session file path: the naming rule for every
-/// per-session sibling (`.lock`, `.inbox`, `.cancel`). Purely lexical, so it
-/// preserves whether `session_path` is relative or absolute. Caller owns the
-/// result.
+/// `<dir>/<stem><suffix>`: the naming rule for every per-session sibling
+/// (`.lock`, `.inbox`, `.cancel`). Purely lexical, so it preserves whether
+/// `session_path` is relative or absolute. Caller owns the result.
 pub fn siblingPath(alloc: std.mem.Allocator, session_path: []const u8, suffix: []const u8) ![]u8 {
     const stem = std.fs.path.stem(std.fs.path.basename(session_path));
     const name = try std.fmt.allocPrint(alloc, "{s}{s}", .{ stem, suffix });
@@ -212,10 +195,10 @@ pub fn siblingPath(alloc: std.mem.Allocator, session_path: []const u8, suffix: [
 
 // ── Extension store ─────────────────────────────────────────────────────────
 
-/// `<store>/<id>/.lock`, the writer lease every mutation of `<id>/` runs under
-/// (build, activate, deactivate). Blocking, and held for the whole mutation —
-/// for a compiled build that is the entire `zig build-exe`, since a second
-/// writer wants the result, not a refusal. Creates `<id>/` when missing.
+/// `<store>/<id>/.lock`, the writer lease every mutation of `<id>/` runs under.
+/// Blocking, and held for the whole mutation — for a compiled build that is the
+/// entire `zig build-exe`, since a second writer wants the result, not a
+/// refusal. Creates `<id>/` when missing.
 pub fn extensionStore(alloc: std.mem.Allocator, io: std.Io, store_root: std.Io.Dir, id: []const u8) !std.Io.File {
     try store_root.createDirPath(io, id);
     const sub = try std.fs.path.join(alloc, &.{ id, ".lock" });
@@ -227,7 +210,6 @@ pub fn extensionStore(alloc: std.mem.Allocator, io: std.Io, store_root: std.Io.D
 
 /// `<file_rel>.lock`, held across one journal append's measure-repair-write, so
 /// concurrent appenders serialize instead of landing on the same offset.
-/// Blocking: the critical section is a stat and one write.
 pub fn journalAppend(io: std.Io, workspace: std.Io.Dir, file_rel: []const u8) !std.Io.File {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const lock_rel = try std.fmt.bufPrint(&buf, "{s}.lock", .{file_rel});
@@ -241,8 +223,7 @@ pub fn journalAppend(io: std.Io, workspace: std.Io.Dir, file_rel: []const u8) !s
 pub const task_lock_name = ".lock";
 
 /// Take it, for the supervisor's whole life. Null means another supervisor
-/// already owns this directory — a bug in whoever spawned a second one, not
-/// something to queue behind.
+/// already owns this directory — not something to queue behind.
 pub fn taskSupervisor(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, dir: []const u8) !?std.Io.File {
     const path = try std.fs.path.join(alloc, &.{ dir, task_lock_name });
     defer alloc.free(path);
@@ -258,20 +239,17 @@ pub fn taskSupervisor(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, di
 }
 
 /// Is a supervisor alive on this task? Asked by OPENING the lease file, never by
-/// creating it: a probe that created `.lock` could, in the instant before it
-/// closed again, make the real supervisor's own non-blocking acquire fail. A
-/// missing lease file therefore means "no supervisor has started yet", which is
-/// exactly what it means.
+/// creating it: a probe that created `.lock` could make the real supervisor's own
+/// non-blocking acquire fail. A missing lease file means "no supervisor started".
 ///
-/// `base` is the directory `dir` is relative to: `std.Io.Dir.cwd()` for every
-/// reader on this machine, and a remote agent's already-open workspace handle
-/// when the far side answers a poll — one implementation for both.
+/// `base` is the directory `dir` is relative to: `std.Io.Dir.cwd()` for a reader
+/// on this machine, a remote agent's workspace handle when the far side polls.
 pub fn taskHeld(base: std.Io.Dir, io: std.Io, alloc: std.mem.Allocator, dir: []const u8) !bool {
     const path = try std.fs.path.join(alloc, &.{ dir, task_lock_name });
     defer alloc.free(path);
     // Reject a corrupt directory before asking Windows to open it with file
-    // locking flags. Zig's threaded Windows backend treats that combination's
-    // INVALID_PARAMETER as an internal panic rather than a catchable I/O error.
+    // locking flags: Zig's threaded Windows backend turns that combination's
+    // INVALID_PARAMETER into a panic rather than a catchable I/O error.
     const before = base.statFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => |e| return e,
@@ -282,17 +260,15 @@ pub fn taskHeld(base: std.Io.Dir, io: std.Io, alloc: std.mem.Allocator, dir: []c
         .lock_nonblocking = true,
     }) catch |err| switch (err) {
         error.WouldBlock => return true,
-        // No lease file at all IS "nobody holds it". Every other failure —
-        // permission denied, the lease being a directory, any other I/O fault —
-        // propagates instead: an unreadable lease is not the same claim as an
-        // unheld one, and callers decide what an unanswerable lease means.
+        // No lease file at all IS "nobody holds it". Every other failure
+        // propagates: an unreadable lease is not the same claim as an unheld
+        // one, and callers decide what an unanswerable lease means.
         error.FileNotFound => return false,
         else => |e| return e,
     };
     defer f.close(io);
-    // POSIX permits opening and flocking a directory while Windows commonly
-    // rejects it during open, so check the kind explicitly rather than let OS
-    // behaviour decide whether a corrupt `.lock` reads as an unheld lease.
+    // POSIX permits opening and flocking a directory while Windows rejects it,
+    // so check the kind explicitly rather than let the OS decide.
     if ((try f.stat(io)).kind != .file) return error.InvalidLeaseFile;
     return false;
 }
@@ -326,8 +302,7 @@ test "two sessions' deposit leases are taken in path order, whichever way the ca
     try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = "{}\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "b.jsonl", .data = "{}\n" });
 
-    // Whichever direction, the lease taken first is `a`'s: holding it makes the
-    // opposite-direction pair refuse on ITS first acquire.
+    // Whichever direction, the lease taken first is `a`'s.
     var pair = try depositPair(alloc, io, tmp.dir, "b.jsonl", "a.jsonl", .fail_fast);
     try testing.expectError(
         error.DepositInFlight,

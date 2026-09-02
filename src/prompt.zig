@@ -13,11 +13,10 @@ const ledger = @import("ledger.zig");
 /// always consumable.
 pub const max_system_prompt_bytes: usize = 2 * 1024 * 1024;
 
-/// One tool call as a provider may be sent it. Same three fields as
-/// `ledger.ToolCall` and borrowed from it, but a distinct type: the ledger holds
-/// what the model EMITTED, this holds what may be REPLAYED. They differ when a
-/// reply ran out of `max_tokens` mid-call, where the ledger's `args_json` is a
-/// torn JSON prefix and the projection substitutes `{}`.
+/// One tool call as a provider may be sent it. Borrowed from `ledger.ToolCall`
+/// but a distinct type: the ledger holds what the model EMITTED, this holds what
+/// may be REPLAYED. They differ when a reply ran out of `max_tokens` mid-call,
+/// where the ledger's `args_json` is torn and the projection substitutes `{}`.
 pub const ToolCall = struct {
     id: []const u8,
     tool: []const u8,
@@ -35,12 +34,11 @@ pub const ToolResult = struct {
 };
 
 /// One projected ledger event: the MODEL-VISIBLE subset of `ledger.Event`, with
-/// the turn kept whole (every wire needs turn-level structure: an assistant
-/// message carries its text and calls together, a batch of results is one turn).
+/// the turn kept whole.
 ///
 /// `assistant.usage`, `assistant.stop_reason`, a result's `spill_path` and an
 /// event's inbox `origin` have no field in this type: "not projected" is a
-/// property of the type rather than a rule someone has to keep following.
+/// property of the type, not a rule someone has to keep following.
 pub const Turn = union(enum) {
     user_text: UserText,
     assistant: Assistant,
@@ -50,19 +48,17 @@ pub const Turn = union(enum) {
     /// and `meta` are bookkeeping for readers, never model-visible.
     note: []const u8,
 
-    /// A user turn's model-visible content. Every field of `ledger.UserText` is
-    /// model-visible, so the images are the LEDGER's slice borrowed whole —
-    /// nothing to copy, hence no per-projection storage the way `calls` needs.
+    /// Every field of `ledger.UserText` is model-visible, so the images are the
+    /// LEDGER's slice borrowed whole — no per-projection storage.
     pub const UserText = struct {
         text: []const u8,
         images: []const ledger.Image = &.{},
     };
 
     pub const Assistant = struct {
-        /// The turn's opaque provider reasoning items (verbatim: a JSON array as
-        /// text), or `""` when there were none. Only providers that declare
-        /// `thinking_replay` serialize it, always ahead of the turn's text and
-        /// calls. The kernel never reads inside.
+        /// The turn's opaque provider reasoning items (verbatim: a JSON array
+        /// as text), or `""` when there were none. Only providers that declare
+        /// `thinking_replay` serialize it, always ahead of the text and calls.
         reasoning: []const u8,
         text: []const u8,
         calls: []const ToolCall,
@@ -110,13 +106,10 @@ pub fn project(alloc: std.mem.Allocator, events: []const ledger.Event) !PromptIR
     return projectWithSystem(alloc, &.{}, events);
 }
 
-/// Project the ledger into what a provider may be sent.
-///
-/// The ledger holds the FACT (what the model emitted); this holds what is legal
-/// to replay. One place they differ: on a turn cut off by `max_tokens`, an
-/// `args_json` that is not a complete JSON value becomes `{}` — replaying a
-/// torn prefix would 400 every later request of the session, while the line
-/// keeps saying what happened.
+/// Project the ledger into what a provider may be sent. One place the fact and
+/// the replay differ: on a turn cut off by `max_tokens`, an `args_json` that is
+/// not a complete JSON value becomes `{}` — replaying a torn prefix would 400
+/// every later request of the session, while the line keeps the fact.
 pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const SystemBlock, events: []const ledger.Event) !PromptIR {
     var total_calls: usize = 0;
     var total_results: usize = 0;
@@ -258,8 +251,7 @@ test "assistant reasoning rides on its own turn, ahead of that turn's text and c
     try std.testing.expectEqualStrings("", p.turns[1].assistant.reasoning);
     try std.testing.expectEqualStrings("plain", p.turns[1].assistant.text);
     try std.testing.expectEqualStrings("go", p.turns[2].user_text.text);
-    // With reasoning: verbatim bytes on the same turn as the text and calls it
-    // came with, which is the order every wire replays them in.
+    // With reasoning: verbatim bytes on the same turn as its text and calls.
     const last = p.turns[3].assistant;
     try std.testing.expectEqualStrings("[{\"type\":\"reasoning\",\"encrypted_content\":\"…\"}]", last.reasoning);
     try std.testing.expectEqualStrings("", last.text);
@@ -294,8 +286,7 @@ test "a batch of tool results is ONE turn, and cost is not in the type at all" {
     try std.testing.expectEqualStrings("c2", p.turns[2].tool_results[1].call_id);
     try std.testing.expect(!p.turns[2].tool_results[1].ok);
 
-    // `usage` / `stop_reason` have no field in `Turn` at all, so the same
-    // conversation without them projects to the very same turns.
+    // `usage` / `stop_reason` have no field in `Turn` at all.
     var plain = ledger.Ledger.init(alloc);
     defer plain.deinit();
     for (l.view()) |e| switch (e) {
@@ -328,15 +319,13 @@ test "a truncated turn's torn arguments are replayable in the projection; the le
     defer p.deinit(alloc);
 
     const calls = p.turns[1].assistant.calls;
-    // Only what is NOT a complete JSON value is substituted; a call that
-    // happened to finish before the cap is sent exactly as it was written.
+    // Only what is NOT a complete JSON value is substituted.
     try std.testing.expectEqualStrings("{}", calls[0].args_json);
     try std.testing.expectEqualStrings("{\"command\":\"ls\"}", calls[1].args_json);
     // The ledger still records the fact, torn bytes and all.
     try std.testing.expectEqualStrings("{\"path\":\"a.t", l.view()[1].assistant.calls[0].args_json);
 
-    // The substitution is scoped to a truncated turn: the same torn bytes on a
-    // turn the model finished are the model's own output and stay verbatim.
+    // Scoped to a truncated turn: the same bytes on a finished turn stay.
     var whole = ledger.Ledger.init(alloc);
     defer whole.deinit();
     try whole.append(.{ .assistant = .{
@@ -361,8 +350,7 @@ test "a user turn's images are projected, and a turn carrying them still extends
     const before = try project(alloc, l.view());
     defer before.deinit(alloc);
 
-    // Model-visible, so unlike `usage` it HAS a field here — and it is the
-    // ledger's own bytes, not a copy.
+    // Model-visible, so it HAS a field here, holding the ledger's own bytes.
     const shot = before.turns[0].user_text;
     try std.testing.expectEqualStrings("what is this", shot.text);
     try std.testing.expectEqual(@as(usize, 1), shot.images.len);
@@ -370,15 +358,13 @@ test "a user turn's images are projected, and a turn carrying them still extends
     try std.testing.expectEqualStrings("iVBORw0=", shot.images[0].data);
     try std.testing.expectEqual(l.view()[0].user_text.images.ptr, shot.images.ptr);
 
-    // Appending after an image turn leaves the image turn where it was: the
-    // cached prefix survives a screenshot exactly as it survives text.
+    // The cached prefix survives a screenshot exactly as it survives text.
     try l.append(.{ .assistant = .{ .text = "a diagram", .calls = &.{} } });
     const after = try project(alloc, l.view());
     defer after.deinit(alloc);
     try std.testing.expect(isStablePrefix(before.turns, after.turns));
 
-    // …and the comparison really looks at the images: the same text with a
-    // different picture is a different turn, not a prefix.
+    // The same text with a different picture is a different turn.
     var other = ledger.Ledger.init(alloc);
     defer other.deinit();
     try other.append(.{ .user_text = .{
@@ -424,8 +410,7 @@ test "a note appends one turn carrying only its text, whatever its source" {
     // Just two more appended turns: the cached prefix is untouched.
     try std.testing.expect(isStablePrefix(before.turns, after.turns));
     try std.testing.expectEqual(before.turns.len + 2, after.turns.len);
-    // `source` and `meta` have no field in `Turn`, so the two sources project
-    // into the same shape and only the text crosses.
+    // `source` and `meta` have no field in `Turn`; only the text crosses.
     try std.testing.expectEqualStrings(report, after.turns[after.turns.len - 2].note);
     try std.testing.expectEqualStrings("New capability available: `greet`.", after.turns[after.turns.len - 1].note);
 }
@@ -452,8 +437,7 @@ test "reopening a durable ledger projects a turn-identical prefix" {
         before_turns = p.turns.len;
     }
 
-    // A separate process reopening the file projects the same prefix, then
-    // extends it by appending — the cache invariant survives resume.
+    // A separate process projects the same prefix and extends it.
     var reopened = try ledger.openDurable(alloc, io, tmp.dir, "s.jsonl");
     defer reopened.deinit();
     const before = try project(alloc, reopened.view());
@@ -472,8 +456,7 @@ test "a session written before note existed resumes and projects the identical t
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    // Two files, same conversation: one in the kinds a build before the merge
-    // wrote, one in the kind every build writes now.
+    // Two files, same conversation: legacy kinds and the current one.
     {
         var l = try ledger.createDurable(alloc, io, tmp.dir, "new.jsonl", .{ .session = "s" });
         defer l.deinit();

@@ -9,12 +9,9 @@
 //! names a positive `bytes`, exactly that many raw octets follow it, and the
 //! next frame begins immediately after them.
 //!
-//! The header is JSON because a captured channel should be readable by a human.
-//! The payload is RAW because it carries arbitrary bytes — a command, a
-//! command's stdout — and a JSON string cannot: `std.json.Stringify` writes
-//! invalid UTF-8 as an ARRAY OF NUMBERS, so a frame carrying arbitrary bytes in
-//! a JSON string stops being the shape it claims to be. Length-prefixed bytes
-//! are exact for every byte sequence, and cost no encoding.
+//! The payload is RAW: it carries arbitrary bytes — a command, a command's
+//! stdout — which a JSON string cannot hold (`std.json.Stringify` writes invalid
+//! UTF-8 as an ARRAY OF NUMBERS). Length-prefixed bytes are exact.
 //!
 //! ── The verbs ───────────────────────────────────────────────────────────────
 //!
@@ -57,42 +54,35 @@
 //!
 //! `start-task` asks the agent to start `nulya task supervise` on ITS machine —
 //! the same binary, the same role, the same `Tree` around the command — with the
-//! log, the status and the lease all in the far workspace, beside that session's
-//! spills. So a background command runs where the foreground ones do, and it
-//! outlives this channel: closing the channel ends the agent, not the task.
+//! log, the status and the lease all in the far workspace. It outlives this
+//! channel: closing the channel ends the agent, not the task.
 //!
 //! **A task's PATH never crosses.** The frame names `task` — `<sid>/t<N>`, the
 //! full name the model already reads — and each side derives the directory from
-//! it with the same function (`launch.sessionTasksDir`), against its own
-//! workspace. That is why there are three task verbs rather than "write an empty
-//! file at this path": a task is a name here, and the host does not spell
-//! directories on another machine.
+//! it with the same function, against its own workspace.
 //!
 //! **The report comes back by being FETCHED, not pushed.** There are no
 //! unsolicited frames (rule 1), and the far supervisor could not deposit anyway:
 //! the session file is on the host. So it leaves its report next to its log, and
-//! whichever host verb next asks (`task list`, `task wait`, a `session step`)
-//! turns it into the report note the session's inbox already understands.
-//! What a driver sees is an inbox event, not a second kind of file to learn.
+//! whichever host verb next asks turns it into the report note the session's
+//! inbox already understands.
 //!
 //! ── Running an extension over there ─────────────────────────────────────────
 //!
 //! `run-extension` names an IDENTITY — `(id, version, tool)` — and never a path.
 //! The agent picks the entry variant for ITS OS, verifies that version against
 //! its own seal, joins its own store root, and derives `NULYA_TOOL` /
-//! `NULYA_ARG_<k>` from the very arguments JSON in the payload
-//! (`extension/protocol.zig`). So there is no shell quoting anywhere on this
-//! path and no argv length limit, and the host never models the far file system.
+//! `NULYA_ARG_<k>` from the arguments JSON in the payload. So there is no shell
+//! quoting on this path and no argv length limit.
 //!
 //! A version that machine does not hold is `ok:false` with a sentence naming
-//! `nulya ext push` — which the host turns into an ordinary FAILED CALL (exit 1
-//! plus that stderr), so the model reads it and the usage journal records a
-//! truthful `ok=false`, rather than the whole step failing.
+//! `nulya ext push`, which the host turns into an ordinary FAILED CALL (exit 1
+//! plus that stderr) rather than failing the whole step.
 //!
 //! ── Pushing an extension version (`nulya ext push`) ─────────────────────────
 //!
-//! The three `store-*` verbs are one sequence, and they are three rather than
-//! one because a version is a TREE and a frame carries one payload:
+//! The three `store-*` verbs are one sequence — a version is a TREE and a frame
+//! carries one payload:
 //!
 //!     store-stat   → held:true  … nothing more to do; the hash IS the check
 //!                  → held:false … the agent opens a staging directory for this
@@ -105,37 +95,28 @@
 //!                    renames it into `<id>/versions/<v>`
 //!
 //! `store-put` and `store-commit` name no id: the agent is holding exactly one
-//! open push (rule 1 — one request in flight, one channel) and inventing a
-//! second place to say which one would be a second answer to drift from. What
-//! makes this safe is the commit: a torn or tampered tree fails validation and
-//! is deleted, so a half-copied version can never become visible under
-//! `versions/`, whatever happened to the channel in the middle.
+//! open push (rule 1). The commit is what makes this safe — a torn or tampered
+//! tree fails validation and is deleted, so a half-copied version never becomes
+//! visible under `versions/`.
 //!
-//! `exec` on `store-put` says these bytes are meant to be executed — the host
-//! sets it for the compiled entry under `bin/`. It exists because the bytes
-//! travel as bytes: a file copy carries its mode, a payload does not, and a
-//! pushed binary that arrives without the bit is a version that is there and
-//! cannot run. Hosts that have no such bit ignore it.
+//! `exec` on `store-put` says these bytes are meant to be executed (the compiled
+//! entry under `bin/`): a file copy carries its mode, a payload does not. Hosts
+//! that have no such bit ignore it.
 //!
 //! ── The rules ───────────────────────────────────────────────────────────────
 //!
 //!  1. **One request in flight.** The channel is strictly request → reply, and
 //!     there is no request id because there is never a second answer to match.
-//!     A concurrent channel would buy nothing: a tool batch runs serially
-//!     (`loop.zig`), which is where every request comes from.
 //!
 //!  2. **`cancel` is the one thing the host may send while a request is in
-//!     flight, and having sent it the host does not reuse the channel.** This
-//!     is what lets the agent read control frames with the same single reader
-//!     the main loop uses: when the agent cancels a control read because the
-//!     command finished first, that read cannot have consumed a partial frame,
-//!     because the host sends nothing else. A host that breaks this rule
-//!     desynchronises only itself.
+//!     flight, and having sent it the host does not reuse the channel.** That is
+//!     what lets the agent read control frames with the same single reader the
+//!     main loop uses: a control read canceled because the command finished
+//!     first cannot have consumed a partial frame.
 //!
 //!  3. **Every request gets exactly one reply frame** — including a canceled
 //!     one, which replies with whatever output it had captured and
-//!     `canceled:true`. Answering costs nothing and a silent verb would make
-//!     "the agent died" and "the agent decided not to answer" the same event.
+//!     `canceled:true`.
 //!
 //!  4. **`hello` is the only negotiation.** It is the first frame on every
 //!     channel; a `v` this build does not implement is refused with a sentence,
@@ -143,33 +124,20 @@
 //!
 //!  5. **Nothing on this channel carries a credential.** There is no field for
 //!     one, the host never forwards its environment map, and the agent builds
-//!     its children's environment from ITS OWN host environment through the
-//!     same `isSecretKey` denylist (one implementation, run on both machines).
-//!     The remote side of a nulya session never needs an API key: the model
-//!     connection stays on the host.
+//!     its children's environment from ITS OWN host environment through the same
+//!     `isSecretKey` denylist. The model connection stays on the host.
 //!
 //!  6. **Nothing that grows with what the far machine holds rides in a header.**
 //!     A header is bounded (`max_header_bytes`) because the other side reads it
 //!     with one delimited read into one buffer; a payload is not. So a listing,
 //!     a command, a command's output and a file's bytes are all payload, and
-//!     `encodeRequest` / `encodeReply` REFUSE a header over the bound rather
-//!     than write a frame the peer cannot read — that refusal is the rule's
-//!     enforcement. A listing of a thousand 255-byte names is a quarter of a
-//!     megabyte, well past `max_header_bytes`.
+//!     `encodeRequest` / `encodeReply` REFUSE a header over the bound.
 
 const std = @import("std");
 
 /// The protocol this build speaks. Bumped when a frame changes meaning — never
-/// to add a verb, which rule 4 covers by answering `ok:false` for one it does
-/// not implement.
-///
-/// v2: `list-dir` answers its entries as a payload instead of a header field
-/// (rule 6), and `put-file` became a real verb instead of a refusal.
-///
-/// Adding a verb is not a bump: no existing frame changes meaning, and an older
-/// agent asked for one answers the `unknown` sentence naming what it does know,
-/// so the caller fails with a sentence about that machine's build instead of
-/// breaking every other verb too.
+/// to add a verb: an older agent asked for an unknown one answers the `unknown`
+/// sentence naming what it does know, so no existing frame changes meaning.
 pub const version: u32 = 2;
 
 /// The longest header line either side will read before refusing. Headers are
@@ -179,9 +147,7 @@ pub const version: u32 = 2;
 pub const max_header_bytes: usize = 64 * 1024;
 
 /// The largest payload either side will accept a header's word for. A frame
-/// claiming more is refused BEFORE any allocation: "the length is a lie" is the
-/// one thing a hostile or broken peer can say cheaply that costs the reader
-/// dearly.
+/// claiming more is refused BEFORE any allocation.
 pub const max_payload_bytes: usize = 64 * 1024 * 1024;
 
 pub const Error = error{
@@ -190,8 +156,7 @@ pub const Error = error{
     /// The header's `bytes` exceeds `max_payload_bytes`.
     PayloadTooLarge,
     /// Encoding produced a header line over `max_header_bytes` — a frame the
-    /// peer could not read back (rule 6). Refused at the writer, so the bug
-    /// belongs to whoever put a growing field in a header.
+    /// peer could not read back (rule 6). Refused at the writer.
     HeaderTooLarge,
     /// The peer speaks a different `v` (rule 4).
     VersionMismatch,
@@ -200,8 +165,7 @@ pub const Error = error{
 };
 
 /// The verbs, as a closed vocabulary. `unknown` is what an unrecognised `op`
-/// string becomes — kept as a value rather than an error so the agent can
-/// answer it with a sentence naming what it does know.
+/// becomes — a value, not an error, so the agent can answer it with a sentence.
 pub const Op = enum {
     hello,
     run_shell,
@@ -217,8 +181,7 @@ pub const Op = enum {
     store_commit,
     unknown,
 
-    /// The wire spelling: kebab-case, because that is what a reader of a
-    /// captured channel expects and Zig identifiers cannot hold a hyphen.
+    /// The wire spelling: kebab-case, which a Zig identifier cannot hold.
     pub fn wire(self: Op) []const u8 {
         return switch (self) {
             .hello => "hello",
@@ -246,10 +209,9 @@ pub const Op = enum {
     }
 };
 
-/// One request header. A single struct rather than a union of per-verb shapes:
-/// the JSON encoding IS this type (the `ledger.Header` discipline — field names
-/// are wire names), and a fixed shape means neither side has to branch before
-/// it can parse. Fields not meaningful for a verb are simply at their defaults.
+/// One request header. The JSON encoding IS this type — field names are wire
+/// names — and one fixed shape means neither side branches before it parses.
+/// Fields not meaningful for a verb sit at their defaults.
 pub const Request = struct {
     op: []const u8 = "",
     /// `hello` only.
@@ -261,9 +223,8 @@ pub const Request = struct {
     /// the agent was started — the host never translates a path.
     cwd: []const u8 = "",
     /// `list-dir`: the directory to list. `put-file`: the destination, relative
-    /// to `cwd` and spelled with `/` — it is the very string the model reads in
-    /// a spill footer, which is what makes "where it was written" and "where the
-    /// model is told to look" one fact rather than two.
+    /// to `cwd` and spelled with `/` — the very string the model reads in a
+    /// spill footer.
     path: []const u8 = "",
     /// `run-shell`: the agent's own wall-clock budget for the command.
     timeout_ms: ?u32 = null,
@@ -276,18 +237,14 @@ pub const Request = struct {
     id: []const u8 = "",
     version: []const u8 = "",
     /// `run-extension`: the tool name that version's frozen manifest declares.
-    /// It becomes `NULYA_TOOL` on the far side, derived there together with the
-    /// argument variables — one implementation of that rule, two machines.
+    /// It becomes `NULYA_TOOL` on the far side, with the argument variables.
     tool: []const u8 = "",
     /// The session these commands belong to, by IDENTITY (`NULYA_SESSION_ID`).
-    /// Never the session FILE's path: that names a file on the host, and a
-    /// package over there handed one would be told a lie. The id is true on any
-    /// machine, which is why the two are separate variables.
+    /// Never the session FILE's path, which names a file on the host.
     session: []const u8 = "",
     /// The three task verbs: which background task, by its FULL name
-    /// `<sid>/t<N>` — the one the model reads in its receipt. Not a directory:
-    /// each side turns the name into a path with the same rule against its own
-    /// workspace, so no layout of one machine is ever spelled by the other.
+    /// `<sid>/t<N>`. Not a directory — each side turns the name into a path with
+    /// the same rule against its own workspace.
     task: []const u8 = "",
     /// `store-put`: these bytes are meant to be executed (the compiled entry
     /// under `bin/`). A file copy carries its mode; a payload does not.
@@ -297,13 +254,10 @@ pub const Request = struct {
 };
 
 /// One directory entry, as `list-dir` answers it. Exact rather than parsed out
-/// of an `ls`: a file name may contain a newline, and a directory browser needs
-/// the kind anyway.
+/// of an `ls`: a file name may contain a newline.
 ///
-/// A listing travels as PAYLOAD (rule 6). It is JSON rather than raw bytes
-/// because unlike a command's output it is not arbitrary: a name that is not
-/// valid UTF-8 is dropped by the writer, with a note, so what crosses is always
-/// encodable — see `cli/remote.zig`.
+/// A listing travels as PAYLOAD (rule 6), as JSON: a name that is not valid
+/// UTF-8 is dropped by the writer, with a note, so what crosses is encodable.
 pub const Entry = struct {
     name: []const u8,
     dir: bool = false,
@@ -326,9 +280,7 @@ pub fn parseEntries(arena: std.mem.Allocator, payload: []const u8) Error![]const
 
 /// What one `task-poll` answers about one background task over there: the two
 /// files that machine's supervisor writes, verbatim. The host owns the meaning
-/// of both — `status.json` is `cli/task.zig`'s own declaration, and the report
-/// is what becomes the report note — so nothing is re-parsed on the far side
-/// and there is no second definition of either.
+/// of both, so nothing is re-parsed on the far side.
 ///
 /// It travels as PAYLOAD (rule 6): a report grows with the command's output.
 pub const TaskSnapshot = struct {
@@ -340,11 +292,10 @@ pub const TaskSnapshot = struct {
     /// then. Its presence is what tells the host there is something to deliver.
     report: []const u8 = "",
     /// Is a supervisor still holding this task's lease, over there? Filled by
-    /// that machine's own `lease.taskHeld`, in the same round as
-    /// `status` — the only way `lost` (a supervisor that died) is knowable
-    /// without a second question per poll. Null when the peer predates this
-    /// column (`ignore_unknown_fields` + a default make that safe): "unknown"
-    /// is not "false", so a reader that gets null must not claim the task died.
+    /// that machine's own `lease.taskHeld`, in the same round as `status` — how
+    /// `lost` is knowable without a second question per poll. Null when the peer
+    /// predates this column: "unknown" is not "false", so a reader that gets
+    /// null must not claim the task died.
     lease_held: ?bool = null,
 };
 
@@ -387,8 +338,7 @@ pub const Reply = struct {
     canceled: bool = false,
     /// `store-stat`: that machine's user store already holds this exact version
     /// and it still validates against its seal. A version is content-addressed,
-    /// so this is the whole of "do I need to send it" — no manifest, no
-    /// timestamps, no negotiation.
+    /// so this is the whole of "do I need to send it".
     held: bool = false,
     /// Payload length: `run-shell`'s stdout followed by its stderr, or
     /// `list-dir`'s encoded entries.
@@ -403,13 +353,11 @@ const json_opts: std.json.ParseOptions = .{ .allocate = .alloc_always, .ignore_u
 /// any) straight after it.
 ///
 /// Framing safety is a property of the encoder: `std.json` escapes a newline
-/// inside any string, so no field value — a command's text, a path, a
-/// diagnostic — can end the header line early.
+/// inside any string, so no field value can end the header line early.
 ///
 /// The encoder also enforces rule 6: a line over `max_header_bytes` is refused
-/// instead of written, because the reader on the other side takes a header with
-/// one delimited read into a buffer exactly that big. Refusing HERE is the only
-/// place the fault can still be attributed to the frame that caused it.
+/// instead of written, which is the only place the fault can still be attributed
+/// to the frame that caused it.
 pub fn encodeRequest(alloc: std.mem.Allocator, req: Request) ![]u8 {
     return encodeLine(alloc, req);
 }
@@ -446,9 +394,8 @@ fn parseLine(comptime T: type, arena: std.mem.Allocator, line: []const u8) Error
     return parsed;
 }
 
-/// Check a `hello` answer before anything else is sent. Version first, because
-/// a mismatched peer's other fields describe a protocol this build does not
-/// have — and a guess there is worse than a refusal (rule 4).
+/// Check a `hello` answer before anything else is sent. Version first: a
+/// mismatched peer's other fields describe a protocol this build does not have.
 pub fn checkHello(rep: Reply) Error!void {
     if (!rep.ok) return error.BadFrame;
     if (rep.v != version) return error.VersionMismatch;
@@ -462,8 +409,7 @@ test "a header line round-trips and never ends early, whatever a field contains"
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // A cwd holding the two bytes that would break framing if they went through
-    // unescaped. The command itself travels as payload, but a path does not.
+    // A cwd holding the two bytes that would break framing unescaped.
     const line = try encodeRequest(alloc, .{
         .op = Op.run_shell.wire(),
         .cwd = "a\nb\"c",
@@ -472,8 +418,7 @@ test "a header line round-trips and never ends early, whatever a field contains"
     });
     defer alloc.free(line);
 
-    // Exactly one newline, and it is the terminator: the invariant the whole
-    // framing rests on.
+    // Exactly one newline, and it is the terminator.
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
     try std.testing.expectEqual(@as(u8, '\n'), line[line.len - 1]);
 
@@ -510,14 +455,12 @@ test "a frame that is not this protocol is refused, and a claimed length is not 
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // The shapes a wrong peer actually produces: a login banner, a half-written
-    // line, nothing at all.
+    // The shapes a wrong peer produces: a banner, a half line, nothing.
     for ([_][]const u8{ "Welcome to Ubuntu 24.04", "{\"op\":\"run-sh", "", "   ", "[1,2,3]" }) |bad| {
         try std.testing.expectError(error.BadFrame, parseRequest(arena, bad));
     }
 
-    // A length nobody can honour is refused before a single byte is allocated
-    // for it. This is the cheapest lie a broken peer can tell.
+    // A length nobody can honour is refused before a byte is allocated.
     const huge = "{\"op\":\"run-shell\",\"bytes\":99999999999}";
     try std.testing.expectError(error.PayloadTooLarge, parseRequest(arena, huge));
 }
@@ -528,9 +471,8 @@ test "a big listing travels as payload, and the header it rides behind stays rea
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // The shape that broke this before entries were payload: an ordinary
-    // directory, at the listing cap, with names near what a file system allows.
-    // A quarter of a megabyte of names — many times the header bound.
+    // An ordinary directory at the listing cap, with names near what a file
+    // system allows: a quarter of a megabyte, many times the header bound.
     var entries: std.ArrayList(Entry) = .empty;
     for (0..1000) |i| {
         const name = try std.fmt.allocPrint(arena, "{d}-{s}", .{ i, "n" ** 250 });
@@ -561,9 +503,7 @@ test "a task snapshot carries both of that supervisor's files, and an empty one 
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // The report is a multi-line text with the very characters that would end a
-    // header line early; it travels as payload, and JSON escaping is what keeps
-    // it whole either way.
+    // A multi-line report with the characters that would end a header early.
     const snap: TaskSnapshot = .{
         .status = "{\"v\":1,\"state\":\"done\",\"exit_code\":0}",
         .report = "[background task s-1/t3 finished] echo hi · exit 0 · 0.1s\n--- output ---\nhi\n",
@@ -574,8 +514,7 @@ test "a task snapshot carries both of that supervisor's files, and an empty one 
     try std.testing.expectEqualStrings(snap.status, back.status);
     try std.testing.expectEqualStrings(snap.report, back.report);
 
-    // A supervisor that has not written anything yet is not a broken frame: both
-    // halves absent is the `starting` projection.
+    // Both halves absent is the `starting` projection, not a broken frame.
     const empty = try parseTaskSnapshot(arena, "");
     try std.testing.expectEqual(@as(usize, 0), empty.status.len);
     try std.testing.expectEqual(@as(usize, 0), empty.report.len);
@@ -586,8 +525,7 @@ test "a header that would outgrow the reader's buffer is refused instead of writ
     const huge = try alloc.alloc(u8, max_header_bytes + 1);
     defer alloc.free(huge);
     @memset(huge, 'm');
-    // Whoever puts a growing value in a header learns it here, at the frame that
-    // caused it, rather than on the far side as a channel that went quiet.
+    // A growing value in a header is caught here, at the frame that caused it.
     try std.testing.expectError(error.HeaderTooLarge, encodeReply(alloc, .{ .ok = false, .message = huge }));
     try std.testing.expectError(error.HeaderTooLarge, encodeRequest(alloc, .{ .op = Op.list_dir.wire(), .path = huge }));
 }
@@ -598,8 +536,7 @@ test "unknown verbs stay in the vocabulary instead of becoming errors" {
         const op: Op = @enumFromInt(f.value);
         if (op != .unknown) try std.testing.expectEqual(op, Op.parse(op.wire()));
     }
-    // …and anything else is a value the agent can answer with a sentence,
-    // which is what makes a newer host talking to an older agent legible.
+    // …and anything else is a value the agent can answer with a sentence.
     try std.testing.expectEqual(Op.unknown, Op.parse("teleport"));
 }
 
