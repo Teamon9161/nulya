@@ -1208,21 +1208,19 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Roots.resol
 
 #### credential
 
-**三条边界**：secret 不进 session 文件（header 只存 `api_key_env` 的**名字**与 profile 名，每次 step 重新解析）· 不进工具子进程的 env（`environment.isSecretKey`）· 不从 project 层来（checkout 不能定义 profile）。在这三条之内，credential 可以来自**三处**，`launch.credentialSource` 是定义顺序的**唯一一处**（改它，`config show` 的可用性投影 / `session new` 的冻结 / resume 全部跟着走）：
+**三条边界**：secret 不进 session 文件（header 只存 `api_key_env` 的**名字**与 profile 名，每次 step 重新解析）· 不进工具子进程的 env（`environment.isSecretKey`）· 不从 project 层来（checkout 不能定义 profile）。在这三条之内，credential 可以来自**两处**，`launch.credentialSource` 是定义顺序的**唯一一处**（改它，`config show` 的可用性投影 / `session new` 的冻结 / resume 全部跟着走）：
 
 ```
 config  profile 自己的 api_key（user 层 ~/.nulya/config.toml，TUI /model 的 `s` 写的就是它）
   ↓
 env     api_key_env 指的环境变量
-  ↓
-file    <NULYA_HOME | ~/.nulya>/credentials.toml —— 键就是 api_key_env 的那个名字
 ```
 
-**为什么有第三处，以及为什么它的键是环境变量名。** 子进程拿不到 secret（physics #6，不改），代价是**一个后台任务或一个 driver 型 extension 解析不出 `api_key_env`**——它 `session new` 出来的子 session 会没有 key。`codex` 从来没这个问题，因为它的 credential 一直是**文件**（`~/.codex/auth.json`，而 `HOME` 不是 secret）。`credentials.toml` 就是把这个先例推广给其它 provider：它提供的是 profile **已经声明的那些名字**的值（`OPENAI_API_KEY = "…"`），所以 profile 一个字不用改、没有第二套命名、"durable credential 只经 `api_key_env`"这句话字面上仍然成立。格式是 TOML 而不是第四条 journal：三条 `.jsonl` 记的是发生过的事或一次授权，这个是**人写的设定**。POSIX 上 mode 宽于 0600 → stderr 一行警告（每进程至多一次）**照读**（与 `auth.json` 同款态度）；Windows 没有 mode 就不说。**值绝不进任何投影**：`config show` 只报 `credential` 与 `credential_source`（多了 `"file"` 一档）。
+子进程拿不到 secret（physics #6，不改），代价是**一个后台任务或一个 driver 型 extension 解析不出 `api_key_env`**——它 `session new` 出来的子 session 会没有 key，除非那个 profile 把 `api_key` 直接写进了 user config（子进程读得到 config.toml，这就是它能替其它 provider 兜底的原因）。`codex` 没这个问题：它的 credential 一直是**文件**（`~/.codex/auth.json`，而 `HOME` 不是 secret）。**值绝不进任何投影**：`config show` 只报 `credential` 与 `credential_source`。
 
-**缺 credential 就不开场（`session new` exit 1）。** profile 点名一个真实 provider 而三条路都解析不到 → stderr 一句指路（那个变量名 · `credentials.toml` 的绝对路径 · user config · `nulya config show`）+ exit 1，**什么都不创建**。它曾经是"警告一行然后把身份冻结成 scripted"，那是比失败更糟的一种失败：session 开起来了、看着就是被点名的那个模型、而回答它的是离线替身，且因为身份是冻的，这一场此后一辈子如此。现在它与 resume 的 `MissingCredential` 对称。**唯一的例外是 `nulya demo`**：`cli/session.zig` 的 `createSession` 收一个 `KeylessPolicy{refuse, stand_in}`，两个调用点各自写明要哪个（`session new` = `refuse`，`demo` = `stand_in`）。
+**缺 credential 就不开场（`session new` exit 1）。** profile 点名一个真实 provider 而两条路都解析不到 → stderr 一句指路（那个变量名 · user config 的绝对路径 · `nulya config show`）+ exit 1，**什么都不创建**。它曾经是"警告一行然后把身份冻结成 scripted"，那是比失败更糟的一种失败：session 开起来了、看着就是被点名的那个模型、而回答它的是离线替身，且因为身份是冻的，这一场此后一辈子如此。现在它与 resume 的 `MissingCredential` 对称。**唯一的例外是 `nulya demo`**：`cli/session.zig` 的 `createSession` 收一个 `KeylessPolicy{refuse, stand_in}`，两个调用点各自写明要哪个（`session new` = `refuse`，`demo` = `stand_in`）。
 
-resume 时按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDescriptor(.inline_key)`，找不到再看 env、再看 credentials.toml，都没有 → `MissingCredential`，不静默降级。config 在 session 开始解析成 effective 值一次；磁盘改动下一场生效。
+resume 时按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDescriptor(.inline_key)`，找不到再看 env，都没有 → `MissingCredential`，不静默降级。config 在 session 开始解析成 effective 值一次；磁盘改动下一场生效。
 
 ## 10. 内嵌 Zig 工具链（`extension/build/toolchain.zig`）
 

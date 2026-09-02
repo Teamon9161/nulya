@@ -392,15 +392,13 @@ pub fn createSession(
         if (!launch.credentialAvailable(alloc, io, profile_cfg, &host)) {
             var paths = try config.ConfigPaths.init(alloc, &host);
             defer paths.deinit(alloc);
-            const creds = (try launch.credentialFilePath(alloc, &host)) orelse try alloc.dupe(u8, launch.credentials_file);
-            defer alloc.free(creds);
             const msg = if (profile_cfg.kind == .codex)
                 try std.fmt.allocPrint(alloc, "profile '{s}' has no credential: run `codex login` (see `nulya config show`)\n", .{profile})
             else
                 try std.fmt.allocPrint(
                     alloc,
-                    "profile '{s}' has no credential: set {s}, or put `{s} = \"…\"` in {s}, or api_key in {s} (see `nulya config show`)\n",
-                    .{ profile, profile_cfg.api_key_env, profile_cfg.api_key_env, creds, paths.user },
+                    "profile '{s}' has no credential: set {s}, or put api_key in {s} (see `nulya config show`)\n",
+                    .{ profile, profile_cfg.api_key_env, paths.user },
                 );
             defer alloc.free(msg);
             if (keyless == .refuse) {
