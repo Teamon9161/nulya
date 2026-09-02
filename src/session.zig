@@ -449,7 +449,6 @@ test "session repairs interrupted tool batch before provider request" {
         fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
             _ = a;
             const self: *@This() = @ptrCast(@alignCast(ptr));
-            // user_text, assistant(call), and the repaired batch as ONE turn.
             try std.testing.expectEqual(@as(usize, 3), request.prompt_ir.turns.len);
             const repaired = request.prompt_ir.turns[2].tool_results;
             try std.testing.expectEqual(@as(usize, 1), repaired.len);
@@ -610,7 +609,6 @@ test "a canceled step accumulates its usage and the session runs the next step" 
     const first = try fut.cancel(io);
     try std.testing.expectEqual(loop.StepStatus.canceled, first.status);
 
-    // The canceled step's usage was accumulated.
     try std.testing.expectEqual(@as(u64, 9), sess.usage().input_tokens);
 
     // Step 1: runs normally, addresses the user.
@@ -618,10 +616,8 @@ test "a canceled step accumulates its usage and the session runs the next step" 
     try std.testing.expectEqual(loop.StepStatus.completed, second.status);
     try std.testing.expect(sess.lastAssistantDone());
 
-    // Usage accumulates across the canceled and completed steps.
     try std.testing.expectEqual(@as(u64, 12), sess.usage().input_tokens);
 
-    // Ledger: user, assistant(step0), canceled tool_results, assistant(step1).
     try std.testing.expectEqual(@as(usize, 4), sess.l.len());
     try std.testing.expect(sess.l.view()[2] == .tool_results);
     try std.testing.expect(!sess.l.view()[2].tool_results[0].ok);
@@ -723,11 +719,9 @@ test "a cancel during prepareStep reconciliation reports canceled with zero usag
     try std.testing.expectEqual(@as(u64, 0), first.usage.input_tokens);
     try std.testing.expectEqual(@as(u64, 0), sess.usage().input_tokens);
     try std.testing.expectEqual(@as(usize, 0), model_impl.calls); // provider never called
-    // No partial assistant or note: only the user text survives.
     try std.testing.expectEqual(@as(usize, 1), sess.l.len());
     try std.testing.expect(sess.l.view()[0] == .user_text);
 
-    // The canceled step does not poison the session: the next step runs normally.
     const second = try sess.step();
     try std.testing.expectEqual(loop.StepStatus.completed, second.status);
     try std.testing.expectEqual(@as(usize, 1), model_impl.calls);
@@ -825,7 +819,6 @@ test "a durable session persists across create, close, and reopen" {
         try std.testing.expectEqual(@as(usize, 4), b.l.len());
     }
 
-    // A third process sees all four events replayed from disk.
     var c = try AgentSession.openDurable(alloc, opts, .{ .workspace = tmp.dir, .session_path = session_path });
     defer c.deinit();
     try std.testing.expectEqual(@as(usize, 4), c.l.len());
@@ -895,7 +888,6 @@ test "a cancel marker is consumed at the step boundary: no model call, then the 
     try std.testing.expectEqual(@as(usize, 0), model_impl.calls);
     try std.testing.expectEqual(@as(usize, 1), sess.l.len()); // only the user text
 
-    // The marker was consumed: the next run proceeds normally.
     _ = try sess.run(5);
     try std.testing.expectEqual(@as(usize, 1), model_impl.calls);
     try std.testing.expect(sess.lastAssistantDone());
@@ -977,7 +969,6 @@ test "run clamps any requested budget to the kernel ceiling" {
     try sess.appendUser("go");
 
     try std.testing.expectEqual(max_steps_ceiling, try sess.run(max_steps_ceiling + 10));
-    // user + (assistant, tool_results) per step
     try std.testing.expectEqual(1 + 2 * max_steps_ceiling, sess.l.len());
 }
 
@@ -1009,7 +1000,6 @@ test "completed step records stable ids and the frozen version behind each, neve
         },
     };
 
-    // The real calls resolve to stable ids; the hallucinated one is skipped.
     const MixedModel = struct {
         fn name(ptr: *anyopaque) []const u8 {
             _ = ptr;
@@ -1080,13 +1070,11 @@ test "completed step records stable ids and the frozen version behind each, neve
     // The stable id says WHICH tool; the version beside it says which frozen
     // implementation answered.
     try std.testing.expectEqualStrings("v-frozen", events[0].version.?);
-    // Every recorded call carries a stamp and a measurement…
     try std.testing.expect(events[0].at != null);
     try std.testing.expect(events[0].duration_ms != null);
     // No session, because this one is pure memory: no id to join an outcome to.
     try std.testing.expect(events[0].session == null);
 
-    // The builtin is the kernel: there is no implementation version to record.
     try std.testing.expectEqualStrings("builtin.shell", events[1].tool_id);
     try std.testing.expect(events[1].version == null);
 }
@@ -1179,9 +1167,7 @@ test "a durable session's usage rows name the session, so outcomes can be joined
     defer tool_stats.freeEvents(alloc, events);
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqualStrings("ext:web.search/web_search", events[0].tool_id);
-    // The session id is the file's stem — the same id `session outcome` writes.
     try std.testing.expectEqualStrings("s-42", events[0].session.?);
-    // A call that really waited is measured as having taken time.
     try std.testing.expect(events[0].duration_ms.? >= 10);
 }
 
@@ -1356,7 +1342,6 @@ test "a reply cut by max_tokens before it wrote any call stops the run, unlike o
     try std.testing.expectEqual(@as(usize, 1), model_impl.turns);
     try std.testing.expectEqual(provider.StopReason.max_tokens, sess.lastStopReason());
     try std.testing.expect(sess.lastAssistantDone());
-    // user + the truncated assistant; no calls, so no batch.
     try std.testing.expectEqual(@as(usize, 2), sess.l.len());
 }
 
@@ -1414,7 +1399,6 @@ test "a truncated tail refuses to step in the next process until a message arriv
         try std.testing.expectEqual(@as(usize, 1), try sess.run(5));
     }
 
-    // Process 2 sees only the ledger; nothing about process 1's run survives it.
     const RefusingModel = struct {
         fn name(ptr: *anyopaque) []const u8 {
             _ = ptr;
@@ -1458,7 +1442,6 @@ test "a truncated tail refuses to step in the next process until a message arriv
     try std.testing.expectEqual(@as(usize, 0), calls); // provider never called
     try std.testing.expectEqual(@as(usize, 2), sess.l.len()); // and nothing appended
 
-    // A message clears the tail and the session steps normally again.
     try sess.appendUser("continue please");
     const outcome = try sess.step();
     try std.testing.expectEqual(loop.StepStatus.completed, outcome.status);

@@ -642,7 +642,6 @@ test "one step runs a batch of two shell calls and appends one result turn" {
         .scratch_dir = "/tmp",
     });
 
-    // user_text, assistant, tool_results — exactly one batched result turn.
     try std.testing.expectEqual(@as(usize, 3), l.len());
     const last = l.view()[2];
     try std.testing.expectEqual(@as(usize, 2), last.tool_results.len);
@@ -742,7 +741,6 @@ test "a gate denies one call, the batch keeps its shape, and the rest still run"
     _ = try runStepForTest(alloc, &allowed, handle, tools, ctx);
     try std.testing.expectEqual(@as(usize, 2), allow_all.asked);
     try std.testing.expectEqual(@as(usize, 2), gate_test_ran.items.len);
-    // The question carries the FROZEN definition, not just the name.
     try std.testing.expectEqualStrings("test.shell", allow_all.last_id.?);
     try std.testing.expect(allow_all.last_readonly == null);
     const allowed_results = allowed.view()[2].tool_results;
@@ -758,20 +756,16 @@ test "a gate denies one call, the batch keeps its shape, and the rest still run"
     ctx.gate = .{ .ptr = &gate, .vtable = &ScriptedGate.vtable };
     _ = try runStepForTest(alloc, &denied, handle, tools, ctx);
 
-    // One refusal is not a verdict on the rest.
     try std.testing.expectEqual(@as(usize, 2), gate.asked);
-    // Only the allowed one reached an executor.
     try std.testing.expectEqual(@as(usize, 1), gate_test_ran.items.len);
     try std.testing.expectEqualStrings("echo two", gate_test_ran.items[0]);
 
-    // One result per call, in call order.
     try std.testing.expectEqual(@as(usize, 3), denied.len());
     const results = denied.view()[2].tool_results;
     try std.testing.expectEqual(@as(usize, 2), results.len);
     try std.testing.expectEqualStrings("c1", results[0].call_id);
     try std.testing.expect(!results[0].ok);
     try std.testing.expect(std.mem.indexOf(u8, results[0].output, "denied by the user") != null);
-    // The note is what the model could not have inferred.
     try std.testing.expect(std.mem.indexOf(u8, results[0].output, "not that one") != null);
     try std.testing.expect(results[1].ok);
     try std.testing.expect(std.mem.indexOf(u8, results[1].output, "echo two") != null);
@@ -798,7 +792,6 @@ test "a gate asked about a name this session does not have is shown no declarati
         .gate = .{ .ptr = &gate, .vtable = &ScriptedGate.vtable },
     });
 
-    // Still asked, but with nothing frozen to show.
     try std.testing.expectEqual(@as(usize, 2), gate.asked);
     try std.testing.expect(gate.last_id == null);
     try std.testing.expect(gate.last_readonly == null);
@@ -838,7 +831,6 @@ test "a denied call has no duration to journal, and the slots stay call-aligned"
         .gate = .{ .ptr = &gate, .vtable = &ScriptedGate.vtable },
     }, .{}, &durations);
 
-    // One slot per call, in call order; the denied one is `null`.
     try std.testing.expectEqual(@as(usize, 2), durations.items.len);
     try std.testing.expect(durations.items[0] == null);
     try std.testing.expect(durations.items[1] != null);
@@ -877,7 +869,6 @@ test "a transient model failure is retried with a fresh collector; a permanent o
         const vtable: provider.Model.VTable = .{ .name = name, .modelName = modelName, .capabilities = capabilities, .stream = stream };
     };
 
-    // Counts retries the loop reports.
     const Watch = struct {
         retries: u32 = 0,
         last_delay_ms: u64 = 0,
@@ -915,7 +906,6 @@ test "a transient model failure is retried with a fresh collector; a permanent o
     try std.testing.expectEqual(@as(u32, 3), flaky.attempts);
     try std.testing.expectEqual(@as(u32, 2), watch.retries);
     try std.testing.expectEqual(@as(u64, 2), watch.last_delay_ms); // 1 → 2, capped
-    // Only the successful attempt's text made it into the ledger.
     try std.testing.expectEqual(@as(usize, 2), l.len());
     try std.testing.expectEqualStrings("partial done", l.view()[1].assistant.text);
 
@@ -1214,7 +1204,6 @@ test "canceling provider streaming appends no partial assistant and leaves the l
 
     try std.testing.expectEqual(StepStatus.canceled, outcome.status);
     try std.testing.expectEqual(@as(u64, 0), outcome.usage.input_tokens);
-    // Only the original user turn survives — no partial assistant was appended.
     try std.testing.expectEqual(@as(usize, 1), l.len());
     try std.testing.expect(l.view()[0] == .user_text);
 }
@@ -1263,10 +1252,8 @@ test "canceling the first executing tool records a complete canceled batch" {
     const outcome = try fut.cancel(io);
 
     try std.testing.expectEqual(StepStatus.canceled, outcome.status);
-    // The completed assistant turn's usage is preserved through the tool-phase cancel.
     try std.testing.expectEqual(@as(u64, 11), outcome.usage.input_tokens);
 
-    // user, assistant, and exactly ONE batched tool_results turn.
     try std.testing.expectEqual(@as(usize, 3), l.len());
     const trs = l.view()[2].tool_results;
     try std.testing.expectEqual(@as(usize, 2), trs.len); // result count == call count
@@ -1279,7 +1266,6 @@ test "canceling the first executing tool records a complete canceled batch" {
     try std.testing.expect(!trs[1].ok);
     try std.testing.expect(std.mem.indexOf(u8, trs[1].output, "not executed") != null);
 
-    // The second call's executor was never dispatched.
     try std.testing.expect(!record_tool.ran);
 }
 
@@ -1319,11 +1305,9 @@ test "a reply cut by max_tokens records the calls verbatim, runs nothing, and cl
     try std.testing.expectEqual(@as(u64, 7), outcome.usage.input_tokens);
     try std.testing.expect(!record_tool.ran);
 
-    // user, assistant (calls kept as produced), one marker batch.
     try std.testing.expectEqual(@as(usize, 3), l.len());
     const calls = l.view()[1].assistant.calls;
     try std.testing.expectEqual(@as(usize, 2), calls.len);
-    // The LEDGER records what the model emitted — torn JSON and all.
     try std.testing.expectEqualStrings("{\"path\":\"a.t", calls[0].args_json);
     try std.testing.expectEqualStrings("{\"path\":\"a.t", calls[1].args_json);
     // The PROJECTION is what a provider may be sent, so there they are whole.
@@ -1443,10 +1427,8 @@ test "canceling a step-budget spill keeps the ledger complete and never runs lat
     const outcome = try fut.cancel(io);
 
     try std.testing.expectEqual(StepStatus.canceled, outcome.status);
-    // The completed assistant turn's usage is preserved through the spill cancel.
     try std.testing.expectEqual(@as(u64, 11), outcome.usage.input_tokens);
 
-    // user, assistant, and exactly ONE batched tool_results turn.
     try std.testing.expectEqual(@as(usize, 3), l.len());
     const trs = l.view()[2].tool_results;
     try std.testing.expectEqual(@as(usize, 2), trs.len); // result count == call count

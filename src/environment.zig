@@ -960,7 +960,6 @@ test "local environment sanitizes its child env map" {
     const alloc = std.testing.allocator;
     var lenv = try LocalEnvironment.init(alloc, std.testing.io, .{});
     defer lenv.deinit();
-    // Whatever the host had, no secret-shaped key survives into the child env.
     var it = lenv.env.iterator();
     while (it.next()) |entry| {
         try std.testing.expect(!isSecretKey(entry.key_ptr.*));
@@ -981,7 +980,6 @@ test "local environment tells its children where the harness is" {
     const seen = lenv.env.get("NULYA_EXE").?;
     try std.testing.expect(std.fs.path.isAbsolute(seen));
     try std.testing.expectEqualStrings(exe, seen);
-    // Not secret-shaped, so sanitization keeps it.
     try std.testing.expect(!isSecretKey("NULYA_EXE"));
 }
 
@@ -1153,7 +1151,6 @@ test "a named version is resolved and spawned here, and both its streams are cap
     try std.testing.expect(std.mem.indexOf(u8, outcome.stdout, "not-json") != null);
     try std.testing.expect(std.mem.indexOf(u8, outcome.stderr, "stderr-marker") != null);
 
-    // A version this machine does not hold is a refusal.
     try std.testing.expectError(error.VersionNotFound, lenv.environment().runExtension(alloc, .{
         .id = "noisy",
         .version = "v-000000000000000000000000",

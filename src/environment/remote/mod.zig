@@ -828,12 +828,10 @@ test "the remote vocabulary parses into three launchers, and nothing else does" 
     try std.testing.expectEqualStrings("me@box", (try parseSpec("remote:ssh:me@box")).ssh);
     try std.testing.expectEqualStrings("/bin/nulya", (try parseSpec("remote:exec:/bin/nulya")).exec);
 
-    // A prefix with nothing after it names no machine.
     for ([_][]const u8{ "remote:", "remote:wsl:", "remote:ssh:", "remote:exec:", "remote:exec:   ", "remote:podman:x", "remote" }) |bad| {
         try std.testing.expectError(error.InvalidRemoteSpec, parseSpec(bad));
     }
 
-    // The older exec-target words are NOT this backend.
     for ([_][]const u8{ "", "local", "wsl", "wsl:Ubuntu", "ssh:me@box" }) |other| {
         try std.testing.expect(!isSpec(other));
         try std.testing.expectError(error.InvalidRemoteSpec, parseSpec(other));
@@ -864,7 +862,6 @@ test "each launcher argv starts an agent, and every form ends in `remote serve`"
     try std.testing.expect(has_batch_no);
     try std.testing.expect(has_one_prompt);
     try std.testing.expect(!has_batch_yes);
-    // The password has no argv slot at all.
     try std.testing.expectEqualStrings("me@box", password_ssh[5]);
 
     const wsl = try launcherArgv(alloc, .{ .wsl = "Ubuntu" }, false);
@@ -873,10 +870,8 @@ test "each launcher argv starts an agent, and every form ends in `remote serve`"
     try std.testing.expectEqualStrings("Ubuntu", wsl[2]);
     const wsl_default = try launcherArgv(alloc, .{ .wsl = "" }, false);
     defer alloc.free(wsl_default);
-    // No distro named: two fewer words, and no empty one left behind.
     try std.testing.expectEqual(wsl.len - 2, wsl_default.len);
 
-    // `exec:` is the general form: the words are the caller's, the suffix ours.
     const exec = try launcherArgv(alloc, .{ .exec = "docker exec -i box /usr/bin/nulya" }, false);
     defer alloc.free(exec);
     try std.testing.expectEqualStrings("docker", exec[0]);

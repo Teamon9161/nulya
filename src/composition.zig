@@ -751,7 +751,6 @@ pub fn testingKernelPrompt() []const u8 {
 test "the kernel prompt names the harness binary, the help verb and the source verb, and states extensibility without urging it" {
     const p = kernel_system_prompt;
 
-    // A session that composes nothing still knows where this binary is.
     try std.testing.expect(std.mem.indexOf(u8, p, "NULYA_EXE") != null);
     try std.testing.expect(std.mem.indexOf(u8, p, "nulya help") != null);
     try std.testing.expect(std.mem.indexOf(u8, p, "nulya src") != null);
@@ -834,7 +833,6 @@ test "a member named without a version freezes whatever current pointed at when 
     const v2 = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "finance", manifest_v2, &.{.{ .rel = "skills/risk-parity/SKILL.md", .bytes = skill_v2 }});
     defer alloc.free(v2);
 
-    // Named without a version, so `current` decides — once, then frozen.
     const with_finance: []const WithRef = &.{.{ .id = "finance" }};
     try testkit.activate(alloc, io, tmp.dir, "finance", v1);
     var first = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_finance });
@@ -957,7 +955,6 @@ test "activating a package composes nothing: a member is one somebody NAMED, and
         try std.testing.expectEqual(@as(usize, 1), plain.system_prompts.blocks.len); // kernel only
     }
 
-    // Naming one brings it in WHOLE, at the version `current` points at.
     {
         var worn = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode" }} });
         defer worn.deinit(alloc);
@@ -968,7 +965,6 @@ test "activating a package composes nothing: a member is one somebody NAMED, and
         try std.testing.expectEqualStrings("MODE", worn.system_prompts.blocks[1].bytes);
     }
 
-    // Naming both brings both, sorted by id.
     {
         var both = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{ .{ .id = "policy" }, .{ .id = "mode" } } });
         defer both.deinit(alloc);
@@ -1010,18 +1006,15 @@ test "--with brings a built-but-inactive version into one session, overrides an 
         defer plain.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), plain.system_prompts.blocks.len);
     }
-    // `--with mode@v2` composes that exact version into this session.
     {
         var with = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode", .version = v2 }} });
         defer with.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 2), with.system_prompts.blocks.len);
         try std.testing.expectEqualStrings("V2", with.system_prompts.blocks[1].bytes);
-        // In the frozen set, so a resume rebuilds it.
         try std.testing.expectEqual(@as(usize, 1), with.extensions.len);
         try std.testing.expectEqualStrings(v2, with.extensions[0].version);
     }
 
-    // With v1 activated, a bare `--with mode` takes `current`.
     try testkit.activate(alloc, io, tmp.dir, "mode", v1);
     {
         var current = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode" }} });
@@ -1041,7 +1034,6 @@ test "--with brings a built-but-inactive version into one session, overrides an 
         try std.testing.expectEqualStrings("V2", override.system_prompts.blocks[1].bytes); // the last --with wins
     }
 
-    // The caller named these, so an unknown id or version fails the session.
     try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "absent" }} }));
     try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode", .version = "v-000000000000000000000000" }} }));
     try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, "nulya-absent-root", .{ .with = &.{.{ .id = "mode" }} }));
@@ -1196,8 +1188,6 @@ test "inline prompts land after every member's block and before the skills catal
     try std.testing.expectEqualStrings("SECOND", comp.system_prompts.blocks[3].bytes);
     try std.testing.expectEqualStrings("skills:catalog", comp.system_prompts.blocks[4].source);
 
-    // The composition keeps the same bytes for the header writer, so a resume
-    // rebuilds this without the caller's argv.
     try std.testing.expectEqual(@as(usize, 2), comp.prompts.len);
     try std.testing.expectEqualStrings("agent-explore", comp.prompts[0].source);
     try std.testing.expectEqualStrings("SECOND", comp.prompts[1].text);
@@ -1215,8 +1205,6 @@ test "a header's inline prompts rebuild the identical blocks with no store to co
         .{ .source = "agent-explore", .text = "You are a scout.\n" },
     } };
 
-    // A store root that does not exist: an inline prompt is bytes in the
-    // header, so resuming it depends on nothing still being on disk.
     var comp = try SessionComposition.initFrozen(alloc, io, cwd, "nulya-absent-root", frozen, .{});
     defer comp.deinit(alloc);
 
@@ -1391,13 +1379,10 @@ test "a selected extension tool is provider-visible and freezes to the compositi
     var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_search });
     defer comp.deinit(alloc);
 
-    // The snapshot's Tool borrows the exact owned binding.
     const t = comp.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&comp.extension_tool_bindings[0])), t.executor.ptr);
 
-    // The binding names the VERSION; which file that is, the executing machine
-    // answers.
     try std.testing.expectEqualStrings("web.search", comp.extension_tool_bindings[0].ext_id);
     try std.testing.expectEqualStrings(v1, comp.extension_tool_bindings[0].version);
 
@@ -1438,7 +1423,6 @@ test "initFrozen rebuilds a composition from a header and ignores later activati
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&comp.extension_tool_bindings[0])), t.executor.ptr);
     try std.testing.expectEqualStrings(v1, comp.extension_tool_bindings[0].version);
 
-    // Resume is bound to the header, not to `current`.
     try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
     var comp2 = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen, .{});
     defer comp2.deinit(alloc);
@@ -1522,7 +1506,6 @@ test "a member named without a version whose current is corrupted fails the sess
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
-    // Named without a version, so this session's copy comes through `current`.
     const named: []const WithRef = &.{.{ .id = "web.search" }};
 
     // A healthy store composes normally.
@@ -1537,8 +1520,6 @@ test "a member named without a version whose current is corrupted fails the sess
     defer alloc.free(seal_sub);
     try tmp.dir.writeFile(io, .{ .sub_path = seal_sub, .data = "{}" });
 
-    // Named, so the session fails rather than starting without it — and
-    // distinguishably from "never built here".
     try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = named }));
 
     // Not naming it at all composes fine.

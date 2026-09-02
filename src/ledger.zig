@@ -1,9 +1,7 @@
 //! The immutable conversation ledger.
 //!
-//! Append-only: the ENTIRE mutable API is `append`, reads hand back a const
-//! view, and a correction is a new appended event rather than an in-place
-//! change. That is what keeps the PromptIR prefix stable, and the prompt cache
-//! hitting.
+//! Append-only: the ENTIRE mutable API is `append`, and a correction is another
+//! appended event — which is what keeps the PromptIR prefix stable.
 //!
 //! Also here: the durable session file (one JSONL file per session, header line
 //! + one line per event), its single-writer lease, and the cross-process inbox
@@ -30,8 +28,8 @@ pub const ToolResultEntry = struct {
 };
 
 /// What one model step cost, as the provider reported it. A FACT about the turn,
-/// never projected into PromptIR. Re-exported by `provider.zig`, so what a
-/// provider reports and what the ledger records are one struct.
+/// never projected. Re-exported by `provider.zig`, so what a provider reports
+/// and what the ledger records are one struct.
 pub const Usage = struct {
     /// Non-cached input tokens.
     input_tokens: u64 = 0,
@@ -76,17 +74,13 @@ pub const UserText = struct {
     images: []const Image = &.{},
 };
 
-/// The event log's alphabet.
 pub const Event = union(enum) {
     user_text: UserText,
     assistant: struct {
         /// The turn's reasoning as the provider emitted it: a JSON array of
-        /// opaque, provider-owned items, or `""` when there was none. The kernel
-        /// never reads inside; the projection hands it back to the provider,
-        /// which replays it verbatim to the SAME model. Model-locked by
-        /// construction: a session's identity is frozen for its whole file, and
-        /// a carry fork onto another model copies these turns with `reasoning`
-        /// emptied.
+        /// opaque items, or `""` when there was none. Never read here; the
+        /// projection hands it back to the SAME model, which is why a carry fork
+        /// onto another model copies these turns with `reasoning` emptied.
         reasoning: []const u8 = "",
         text: []const u8,
         calls: []const ToolCall,
@@ -105,28 +99,24 @@ pub const Event = union(enum) {
     /// Exactly ONE user turn carrying every result from a batch. Never split
     /// per-tool — that would be one model round-trip per tool.
     tool_results: []const ToolResultEntry,
-    /// A machine fact that reached this conversation from outside the step: a
-    /// finished background command, a newly active extension, whatever a driver
-    /// or a watcher observed. Deposited into the inbox, drained at a step
-    /// boundary, projected as one more user-role turn.
+    /// A machine fact that reached this conversation from outside the step.
+    /// Deposited into the inbox, drained at a step boundary, projected as one
+    /// more user-role turn.
     note: struct {
         /// An open-vocabulary short label for who deposited this (`task`,
-        /// `ext`, `driver`, `watcher`, …). The kernel carries it and never
-        /// interprets it.
+        /// `ext`, `driver`, …), carried and never interpreted.
         source: []const u8,
         /// What the model reads. The only part projected.
         text: []const u8,
-        /// One JSON value, verbatim, or `""`: the depositor's structured columns
-        /// for readers that must not parse presentation text (a task report's
-        /// `{task, exit_code}`, a capability note's `{id, version}`). Stored
+        /// One JSON value, verbatim, or `""`: the depositor's structured
+        /// columns for readers that must not parse presentation text. Stored
         /// like `ToolCall.args_json` — never parsed here.
         meta: []const u8 = "",
     },
 };
 
-/// The labels this harness's own depositors write into `note.source`. The
-/// vocabulary is open and the kernel matches on none of them; a legacy line
-/// translated on read and a live depositor must produce the SAME label.
+/// The labels this harness's own depositors write into `note.source`: a legacy
+/// line translated on read and a live depositor must produce the SAME one.
 pub const note_source_task = "task";
 pub const note_source_ext = "ext";
 
@@ -307,16 +297,11 @@ pub const ExtensionRef = struct {
     exec_version: []const u8 = "",
 };
 
-/// The session composition frozen into the header.
-///
-/// `active` is every MEMBER extension at its frozen version. The field name IS
-/// the JSON key, so renaming it would break every existing session file —
-/// rename at the next header version, not before.
-///
-/// `native_tools` is the subset of stable tool ids exposed directly to the model.
-///
-/// `prompts` is the per-session system prompt text from `session new --prompt`
-/// — bytes, not a reference.
+/// The session composition frozen into the header: `active` is every MEMBER
+/// extension at its frozen version, `native_tools` the subset of stable tool ids
+/// exposed directly to the model, `prompts` the per-session system prompt text
+/// as BYTES. Each field name IS its JSON key, so renaming `active` would break
+/// every existing session file — rename at the next header version, not before.
 pub const FrozenComposition = struct {
     active: []const ExtensionRef = &.{},
     native_tools: []const []const u8 = &.{},
@@ -348,15 +333,12 @@ pub const ModelDescriptor = struct {
     api_key_env: []const u8 = "",
 };
 
-/// Which nulya created a session — PROVENANCE ONLY, never enforcement.
-///
-/// The kernel system prompt and the builtin tool definitions are compile-time
-/// constants of the BINARY, yet they enter every session's frozen model-visible
-/// state, so upgrading nulya changes them for every existing session — the one
-/// thing the header cannot freeze. `version` is the build's version string,
-/// `kernel_hash` a digest over the kernel prompt plus every builtin definition
-/// (`composition.kernelHash`). A resume whose hash differs warns and runs; an
-/// empty stamp is a header written before this existed — unknown, not a warning.
+/// Which nulya created a session — PROVENANCE ONLY, never enforcement. The
+/// kernel prompt and the builtin definitions are constants of the BINARY, so
+/// upgrading nulya changes them under every existing session — the one part of
+/// the model-visible state the header cannot freeze. `kernel_hash` is a digest
+/// over them (`composition.kernelHash`); a resume whose hash differs warns and
+/// runs, and an empty stamp is unknown, not a warning.
 pub const Stamp = struct {
     version: []const u8 = "",
     kernel_hash: []const u8 = "",
@@ -398,8 +380,7 @@ pub const Header = struct {
     composition: FrozenComposition = .{},
 };
 
-/// A parsed header that owns every nested string (arena-backed). `.value` is
-/// the header; `deinit()` frees it.
+/// A parsed header owning every nested string; `deinit()` frees it.
 pub const OwnedHeader = std.json.Parsed(Header);
 
 pub const LedgerError = error{
@@ -412,8 +393,7 @@ pub const LedgerError = error{
     /// written by a newer nulya. Refused rather than read as `format_version`.
     UnsupportedLedgerVersion,
     /// A line records `model_rebind`, an event this binary no longer has. The
-    /// way on is `session new --parent <id>:<seq> --carry`, which copies the
-    /// history into a file of its own.
+    /// way on is `session new --parent <id>:<seq> --carry`.
     LegacyModelRebind,
     /// Another process already holds the session's writer lease: only one writer
     /// opens the file at a time, so two `session step` runs never interleave.
@@ -481,12 +461,11 @@ pub fn createDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path
 }
 
 /// Reopen an existing session file AS ITS WRITER: parse the header, replay every
-/// complete event line into memory, and keep the file open for further appends.
-/// A torn final line (an interrupted write) is dropped and the file truncated
-/// back to the last complete line. An interrupted tool batch (a complete
-/// assistant-with-calls line with no following results) is a legal tail; the
-/// caller repairs it with `loop.completeInterruptedToolBatch`. Readers use
-/// `readHeader` instead — this takes the writer lease.
+/// complete event line, keep the file open for appends. A torn final line is
+/// dropped and the file truncated back to the last complete one. An interrupted
+/// tool batch (assistant-with-calls, no results) is a legal tail the caller
+/// repairs with `loop.completeInterruptedToolBatch`. Readers use `readHeader` —
+/// this takes the writer lease.
 pub fn openDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !Ledger {
     // Take the writer lease FIRST: once held, no other writer is mid-append, so
     // the bytes read below are a stable snapshot (readers never write).
@@ -520,9 +499,8 @@ pub fn openDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: 
     return l;
 }
 
-/// Read and parse only the header line of a session file, without replaying its
-/// events or touching the file — a `session step` process resolves its model
-/// profile from this before opening the whole session. Caller owns the result.
+/// Parse only the header line, without replaying events or opening the file for
+/// write. Caller owns the result.
 pub fn readHeader(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !OwnedHeader {
     const bytes = try dir.readFileAlloc(io, path, alloc, .unlimited);
     defer alloc.free(bytes);
@@ -552,10 +530,9 @@ fn firstNonBlank(it: *std.mem.SplitIterator(u8, .scalar)) ?[]const u8 {
     return null;
 }
 
-/// Iterates the complete (non-torn), non-blank lines of a ledger/session byte
-/// buffer: drop the torn tail, split on `\n`, trim, skip blanks. Skipping the
-/// header line is left to the caller — some readers decode it differently than
-/// the rest, and some only want it counted.
+/// The complete (non-torn), non-blank lines of a ledger/session byte buffer.
+/// Skipping the header line is the caller's job — some readers decode it
+/// differently, some only want it counted.
 pub const CompleteLines = struct {
     it: std.mem.SplitIterator(u8, .scalar),
 
@@ -573,8 +550,7 @@ pub fn completeLines(bytes: []const u8) CompleteLines {
     return .{ .it = std.mem.splitScalar(u8, bytes[0..end], '\n') };
 }
 
-/// Parse one event line and append it to `l` (in-memory only — the ledger is not
-/// yet durable during replay). Validates that `seq` matches the position.
+/// Parse one event line and append it to `l`, checking `seq` against position.
 fn replayEventLine(l: *Ledger, line: []const u8) !void {
     const parsed = try parseEventLine(l.alloc, line);
     defer parsed.deinit();
@@ -644,11 +620,10 @@ pub fn encodeEventLineOrigins(alloc: std.mem.Allocator, e: Event, seq: u64, orig
     return out.toOwnedSlice();
 }
 
-/// Encode just the event body (kind + payload), without the `seq` envelope. Used
-/// for inbox event files, where `seq` is assigned on drain.
-///
-/// Every optional field below is written ONLY when it has something to say, so a
-/// line that predates the field keeps its exact shape and reads back identically.
+/// Encode just the event body (kind + payload), without the `seq` envelope —
+/// what an inbox event file holds, `seq` being assigned on drain. Every optional
+/// field below is written ONLY when it has something to say, so a line that
+/// predates the field keeps its exact shape.
 pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
     try jw.objectField("kind");
     switch (e) {
@@ -718,8 +693,7 @@ fn writeField(jw: *std.json.Stringify, name: []const u8, value: []const u8) !voi
 }
 
 /// The flat wire shape of one event line (`{"seq":n,"kind":"…",…}`) or one inbox
-/// body (same, without `seq`). Kind-specific fields are optional here; `toEvent`
-/// checks the ones its kind requires.
+/// body (the same without `seq`). `toEvent` checks what each kind requires.
 pub const WireEvent = struct {
     seq: u64 = 0,
     /// Inbox delivery ids, present only on drained events (see `Ledger.origins`).
@@ -728,8 +702,7 @@ pub const WireEvent = struct {
     origins: ?[]const []const u8 = null,
     kind: []const u8,
     text: ?[]const u8 = null,
-    /// Images inlined with a user turn. For these domain types the wire type IS
-    /// the domain type: their field names are the JSON keys.
+    /// For these domain types the wire type IS the domain type.
     images: ?[]const Image = null,
     reasoning: ?[]const u8 = null,
     usage: ?Usage = null,
@@ -840,12 +813,11 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
 
 // ── Cross-process inbox ───────────────────────────────────────
 //
-// The session file has one writer. Any other process proposes an event by
-// depositing one `<name>.json` file (an event body, no `seq`) into the sibling
-// directory `<stem>.inbox/`; the writer drains it at its next step boundary —
-// after repairing any interrupted batch, before the model runs — so a drained
-// event never lands inside a tool batch. Deposits are atomic (write `.tmp`,
-// rename), so a drain never reads a half-written body.
+// Any process but the writer proposes an event by depositing one `<name>.json`
+// file (an event body, no `seq`) into the sibling `<stem>.inbox/`; the writer
+// drains it at its next step boundary — after repairing any interrupted batch,
+// before the model runs — so a drained event never lands inside a tool batch.
+// Deposits are atomic (write `.tmp`, rename).
 
 pub fn inboxPath(alloc: std.mem.Allocator, session_path: []const u8) ![]u8 {
     return lease.siblingPath(alloc, session_path, ".inbox");
@@ -856,9 +828,8 @@ pub fn inboxPath(alloc: std.mem.Allocator, session_path: []const u8) ![]u8 {
 ///
 /// `name` is the exactly-once key and must be filesystem-safe: two deposits
 /// under one name collapse into one event. A depositor wanting idempotence picks
-/// a deterministic name (capability notes use `note-<id>-<version>`); one
-/// wanting a distinct event every time takes it from `freshDeliveryName`. An
-/// event too large to be read back is refused here (`InboxEventTooLarge`),
+/// a deterministic name; one wanting a distinct event every time takes it from
+/// `freshDeliveryName`. An event too large to be read back is refused here,
 /// before a byte is written.
 ///
 /// Takes the inbox's lease. A caller already holding it across a
@@ -898,14 +869,13 @@ pub fn depositEventLeased(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir
 
 /// Move the undrained deposit `name` from one session's inbox to another's —
 /// the only way one leaves an inbox without being drained. False when there was
-/// nothing to move, the ordinary case once the owning session has stepped.
+/// nothing to move.
 ///
 /// A WRITE OF BOTH INBOXES, so it holds BOTH leases: the destination's, like
-/// every depositor, and the source's, because "having the lease means this inbox
-/// does not change under me" is what `pruneSession` counts on.
-///
-/// Under the leases: a destination session that is gone is `error.NoSuchSession`
-/// and the file stays where it is; a source deposit drained meanwhile is `false`.
+/// every depositor, and the source's, because "this inbox does not change under
+/// me" is what `pruneSession` counts on. Under them, a destination that is gone
+/// is `error.NoSuchSession` and the file stays put; a source drained meanwhile
+/// is `false`.
 pub fn moveDeposit(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -920,8 +890,7 @@ pub fn moveDeposit(
     const src = try depositFilePath(alloc, from_session_path, name);
     defer alloc.free(src);
 
-    // Before any lock: the common answer is "nothing to move", and it costs
-    // nobody the leases to say so.
+    // The common answer is "nothing to move"; saying it costs no lease.
     base.access(io, src, .{}) catch return false;
 
     var pair = try lease.depositPair(alloc, io, base, from_session_path, to_session_path, wait);
@@ -966,29 +935,25 @@ fn depositFilePath(alloc: std.mem.Allocator, session_path: []const u8, name: []c
 
 /// The largest one deposited event may be, encoded. The invariant: whatever the
 /// inbox ACCEPTS, a step boundary can read back — enforced at the deposit,
-/// because an event accepted and then too large to read is a durable fact that
-/// makes every later `drainInbox` fail. Sized against what the shell already
-/// accepts for one turn: an 8 MiB `--file` text plus several images, each up to
-/// 5 MiB raw and ~4/3 that as base64.
+/// because an event accepted and then unreadable makes every later `drainInbox`
+/// fail. Sized against one turn's worth of shell input: an 8 MiB `--file` text
+/// plus several images, each up to 5 MiB raw and ~4/3 that as base64.
 pub const max_inbox_event_bytes: usize = 32 << 20;
 
 /// A delivery id for one more fact. Two load-bearing properties:
 ///
-/// **Distinct on every call**, because the name IS the exactly-once key. Getting
-/// it wrong is silent — a colliding second deposit is deleted at the next drain
-/// and never reaches the ledger. Distinct by CONSTRUCTION only within one inbox
-/// (the stamp steps past what is still waiting there); against an
-/// already-drained name it is a 128-bit nonce's collision resistance, not a
-/// proof.
+/// **Distinct on every call**, because the name IS the exactly-once key, and a
+/// collision is silent — the second deposit is deleted at the next drain. Only
+/// distinct by CONSTRUCTION within one inbox; against an already-drained name it
+/// is a 128-bit nonce's collision resistance.
 ///
-/// **Sorts after every name still waiting in this inbox under the same prefix**,
-/// because `drainInbox` applies files in filename order: the name is also the
-/// QUEUE POSITION. A wall clock alone does not give it — it can repeat or step
-/// backwards, and then the random tail decides — so the mint reads the inbox and
-/// steps past the newest stamp there.
+/// **Sorts after every name still waiting under the same prefix**, because
+/// `drainInbox` applies files in filename order: the name is the QUEUE POSITION.
+/// A wall clock alone does not give that — it can repeat or step backwards — so
+/// the mint reads the inbox and steps past the newest stamp there.
 ///
-/// NOT defended: two mints racing (the commands where that matters serialize on
-/// the deposit lease) and order ACROSS prefixes.
+/// NOT defended: two mints racing (those commands serialize on the deposit
+/// lease) and order ACROSS prefixes.
 pub fn freshDeliveryName(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1012,9 +977,8 @@ pub fn freshDeliveryName(
     });
 }
 
-/// The widest stamp the name's fixed-width field can hold (nanoseconds reach it
-/// in 2286). A name beyond it costs only the ordering step above; the id is
-/// still distinct.
+/// The widest stamp the name's fixed-width field holds (nanoseconds reach it in
+/// 2286). Past it only the ordering step is lost; the id is still distinct.
 const max_stamp: u64 = 9_999_999_999_999_999_999;
 
 /// True for exactly the inbox entries that count as one deposited fact: a
@@ -1023,9 +987,8 @@ fn isInboxDeposit(kind: anytype, name: []const u8) bool {
     return kind == .file and std.mem.endsWith(u8, name, ".json");
 }
 
-/// The newest stamp among the names this prefix already has waiting, or null
-/// when the inbox holds none. A name with no readable stamp is skipped: it is
-/// foreign, and not something to order against.
+/// The newest stamp among the names this prefix already has waiting. A name with
+/// no readable stamp is foreign and skipped.
 fn latestWaitingStamp(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1095,15 +1058,11 @@ pub const PruneReport = struct {
 ///
 /// The two facts that forbid removal are LOCKS (a step writing it, a deposit in
 /// flight), and a lock can only be answered by TAKING it. So every check and the
-/// removal happen under BOTH leases, and the inbox lease is the one every
-/// depositor takes — a supervisor delivering a task report is as much a reason
-/// to leave a session alone as a queued turn is.
-///
-/// A caller with a lock-shaped question of its own asks it under the same pair
-/// and calls `pruneSessionLeased`.
+/// removal happen under BOTH leases. A caller with a lock-shaped question of its
+/// own asks it under the same pair and calls `pruneSessionLeased`.
 ///
 /// NOT here: which sessions deserve removing, and anything outside the session's
-/// own files. Journal rows about a pruned session stay.
+/// own files.
 ///
 /// Refusals are distinct errors so a caller can say which: `NoSuchSession`,
 /// `SessionBusy` (a step holds the writer lease), `DepositInFlight`, and —
@@ -1121,13 +1080,11 @@ pub fn pruneSession(
     return pruneSessionLeased(alloc, io, base, session_path, opts, &leases);
 }
 
-/// `pruneSession` for a caller that ALREADY holds this session's leases.
-///
-/// The pair is what freezes a session's LIFETIME (`lease.SessionLeases`): with
-/// both held, no new background task can appear under this session by either
-/// path. The question that needs them — "is a task of this session still
-/// running?" — is the caller's to answer, which is why the leases have to be
-/// takeable from outside.
+/// `pruneSession` for a caller that ALREADY holds this session's leases. The
+/// pair is what freezes a session's LIFETIME (`lease.SessionLeases`): with both
+/// held, no new background task can appear under this session by either path.
+/// "Is a task of this session still running?" is the caller's to answer, which
+/// is why the leases are takeable from outside.
 ///
 /// They are closed by this call when the session goes; the caller's own `defer`
 /// covers every other path (closing twice is a no-op).
@@ -1192,11 +1149,11 @@ pub fn pruneSessionLeased(
     return .{ .events = events, .deposits = names.len, .leftovers = leftovers };
 }
 
-/// Remove the deposit lock, the deposits this prune counted, and then the inbox
-/// directory — which goes only if empty, since anything else in there is
-/// something this prune never accounted for (a `<name>.tmp` a depositor died
-/// halfway through). That directory is then a LEFTOVER: the error rides out to
-/// `pruneSessionLeased`, past its commit point, and becomes the report's flag.
+/// Remove the deposit lock, the deposits this prune counted, then the inbox
+/// directory — which goes only if empty, since anything else there is something
+/// this prune never counted (a `<name>.tmp` from a depositor that died). The
+/// error then rides out past `pruneSessionLeased`'s commit point into
+/// `leftovers`.
 fn removeInbox(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1234,10 +1191,9 @@ fn deleteIfPresent(io: std.Io, base: std.Io.Dir, path: []const u8) !void {
     };
 }
 
-/// Every deposited `.json` in this inbox, sorted in the order `drainInbox`
-/// applies them — lexical by filename, which is the queue position. A missing
-/// inbox directory reads as empty, not an error. Names are allocated with
-/// `alloc`; the caller frees each name and the slice (or passes an arena).
+/// Every deposited `.json` in this inbox, sorted the way `drainInbox` applies
+/// them — lexical by filename, which is the queue position. A missing inbox
+/// reads as empty. The caller frees each name and the slice.
 fn listInboxDeposits(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) ![][]u8 {
     const inbox = try inboxPath(alloc, session_path);
     defer alloc.free(inbox);
@@ -1277,12 +1233,11 @@ fn stampOf(name: []const u8, prefix: []const u8) ?u64 {
 
 /// Drain every deposited `.json` in filename order. Consecutive user messages
 /// become ONE delivery batch: one user turn, texts separated by a blank line,
-/// images in FIFO order. Non-user facts stay separate events and delimit
-/// batches.
+/// images in FIFO order; any non-user fact delimits a batch.
 ///
 /// EXACTLY-once holds through merging: the line persists every source filename
 /// in `origins`, so a crash after append but before any delete makes a reopen
-/// skip every member of that batch.
+/// skip the whole batch.
 pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io.Dir, session_path: []const u8) !void {
     const inbox = try inboxPath(alloc, session_path);
     defer alloc.free(inbox);
@@ -1355,15 +1310,13 @@ fn flushInboxUsers(
     images.clearRetainingCapacity();
 }
 
-/// The history a carry fork copies out of its parent, ready to be appended to
-/// the child in order.
+/// The history a carry fork copies out of its parent, in order. Read through the
+/// SAME codec replay uses, so a parent line this binary cannot decode stops the
+/// fork instead of landing in a new ledger.
 ///
-/// Read through the SAME codec replay uses: a parent line this binary cannot
-/// decode stops the fork instead of landing in a new ledger.
-///
-/// What does NOT come along: the inbox delivery ids (`origin` / `origins`
-/// belong to the file that drained them) and every `reasoning` (opaque and
-/// bound to the model that produced it — the child may be running another).
+/// What does NOT come along: the inbox delivery ids (they belong to the file
+/// that drained them) and every `reasoning` (bound to the model that produced
+/// it — the child may be running another).
 pub const Carried = struct {
     arena: std.heap.ArenaAllocator,
     events: []const Event,
@@ -1379,9 +1332,8 @@ pub const Carried = struct {
 /// Read events 1..`seq` of the session file at `path` (relative to `base`).
 ///
 /// `error.CarrySeqBeyondTail` when the file holds fewer than `seq` events, and
-/// `error.CorruptLedger` when its last line is torn: a fork is a decision about
-/// a definite cut point, and neither a guess about how much history there is
-/// nor a half-written turn is one. The parent file is only read.
+/// `error.CorruptLedger` when its last line is torn: a fork names a definite cut
+/// point, which neither a guess nor a half-written turn is.
 pub fn readCarry(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1426,7 +1378,6 @@ test "Usage.add sums every field in place and treats zero as the identity" {
     try std.testing.expect(total.isZero());
     total.add(.{ .input_tokens = 1, .output_tokens = 2, .cache_read_tokens = 3, .cache_write_tokens = 4 });
     total.add(.{ .input_tokens = 10, .output_tokens = 20, .cache_read_tokens = 30, .cache_write_tokens = 40 });
-    // A step whose provider reported nothing contributes nothing.
     total.add(.{});
     try std.testing.expectEqual(Usage{
         .input_tokens = 11,
@@ -1531,7 +1482,6 @@ test "header encode/parse round-trips every field" {
     try std.testing.expectEqualStrings("v-0123456789abcdef01234567", h.composition.active[0].version);
     try std.testing.expectEqual(@as(usize, 1), h.composition.native_tools.len);
     try std.testing.expectEqualStrings("ext:web.search/web_search", h.composition.native_tools[0]);
-    // The inline prompt rides as VALUE, so resume needs nothing but this file.
     try std.testing.expectEqual(@as(usize, 1), h.composition.prompts.len);
     try std.testing.expectEqualStrings("agent-explore", h.composition.prompts[0].source);
     try std.testing.expectEqualStrings("You are a scout.\n", h.composition.prompts[0].text);
@@ -1591,7 +1541,6 @@ fn writeSampleEvents(l: *Ledger) !void {
 }
 
 test "an event too large to read back is refused at the deposit" {
-    // The invariant: whatever the inbox accepts, a step boundary can read back.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1707,8 +1656,6 @@ test "pruneSession removes what a session is made of, and refuses history unless
         try tmp.dir.access(io, spath, .{});
     }
 
-    // The lease is the caller's to hold, so a background task cannot appear
-    // between its own answer and the removal.
     {
         const spath = "leased.jsonl";
         var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "leased" });
@@ -1722,9 +1669,6 @@ test "pruneSession removes what a session is made of, and refuses history unless
 }
 
 test "pruneSession commits at the session file: what will not go afterwards is reported, not raised" {
-    // Past that delete there is no rollback, so one completion rule holds for
-    // the whole session: refuse everything, or finish and say what was left. A
-    // directory where `.cancel` belongs is the portable way to fail a removal.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1743,8 +1687,6 @@ test "pruneSession commits at the session file: what will not go afterwards is r
 }
 
 test "an inbox that will not go is a leftover too, not a silence" {
-    // A depositor that died between its write and its rename leaves a `.tmp`
-    // this prune never counted, so the directory stays and the caller hears it.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1763,9 +1705,6 @@ test "an inbox that will not go is a leftover too, not a silence" {
 }
 
 test "a held deposit pair freezes BOTH sessions, in path order either way round" {
-    // What `task retarget` needs: neither end may be pruned while the routing
-    // fact is being changed. Order is by path, never by call, or two opposite
-    // retargets each hold what the other waits for.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1784,7 +1723,6 @@ test "a held deposit pair freezes BOTH sessions, in path order either way round"
         try std.testing.expectError(error.DepositInFlight, pruneSession(alloc, io, tmp.dir, "b.jsonl", .{}));
     }
 
-    // Naming one session twice is one lease: taking it twice would deadlock.
     var same = try lease.depositPair(alloc, io, tmp.dir, "a.jsonl", "a.jsonl", .block);
     try std.testing.expect(same.second == null);
     same.close(io);
@@ -1793,8 +1731,6 @@ test "a held deposit pair freezes BOTH sessions, in path order either way round"
 }
 
 test "moveDeposit takes BOTH inboxes' leases, and moves only what is still there" {
-    // The source is written too, so "this inbox does not change under me" has
-    // to hold for the source as well.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1831,8 +1767,6 @@ test "moveDeposit takes BOTH inboxes' leases, and moves only what is still there
 }
 
 test "the inbox lease is exclusive, and a deposit into a session that is gone is refused" {
-    // Both halves of the rule the lease carries: a depositor and a prune cannot
-    // both be inside it, and a deposit re-checks the session there.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1884,11 +1818,9 @@ test "a carry fork copies its parent's events, without their reasoning or delive
     defer carried.deinit();
     try std.testing.expectEqual(@as(usize, 2), carried.events.len);
     try std.testing.expectEqualStrings("one", carried.events[0].user_text.text);
-    // Opaque and bound to the model that produced it: the child may run another.
     try std.testing.expectEqualStrings("", carried.events[1].assistant.reasoning);
     try std.testing.expect(!carried.has_images);
 
-    // A child is an ordinary ledger of its own: seq from 1, no inherited origins.
     {
         var child = try createDurable(alloc, io, tmp.dir, "child.jsonl", .{ .session = "child", .parent = .{ .session = "parent", .seq = 2 } });
         defer child.deinit();
@@ -1945,7 +1877,6 @@ test "the event that used to move a session onto another model is refused with i
     try file.writePositionalAll(io, "{\"seq\":2,\"kind\":\"model_rebind\",\"profile\":\"p\",\"identity\":{\"provider\":\"openai\",\"model\":\"m\"}}\n", end);
     file.close(io);
 
-    // Distinct from CorruptLedger: the file is intact.
     try std.testing.expectError(error.LegacyModelRebind, openDurable(alloc, io, tmp.dir, spath));
     try std.testing.expectError(error.LegacyModelRebind, readCarry(alloc, io, tmp.dir, spath, 2));
 }
@@ -2065,14 +1996,12 @@ test "an image deposited into the inbox is applied exactly once, images and all"
         defer l.deinit();
         try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", shot);
         try drainInbox(alloc, io, &l, tmp.dir, spath);
-        // A second deposit under the SAME name is the same delivery.
         try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", shot);
         try drainInbox(alloc, io, &l, tmp.dir, spath);
         try std.testing.expectEqual(@as(usize, 1), l.len());
         try expectEventsEqual(&.{shot}, l.view());
     }
 
-    // The image survives the file: a reopened ledger replays it verbatim.
     var reopened = try openDurable(alloc, io, tmp.dir, spath);
     defer reopened.deinit();
     try expectEventsEqual(&.{shot}, reopened.view());
@@ -2081,8 +2010,6 @@ test "an image deposited into the inbox is applied exactly once, images and all"
 test "a note round-trips whole: its source, its structured columns and multi-line text" {
     const alloc = std.testing.allocator;
 
-    // A supervisor's report is several lines, so the round-trip has to survive
-    // escaped newlines.
     const done: Event = .{ .note = .{
         .source = note_source_task,
         .text = "[background task s-1786-3f/t3 finished] zig build test · exit 0 · 41.8s\n" ++
@@ -2100,7 +2027,6 @@ test "a note round-trips whole: its source, its structured columns and multi-lin
     defer parsed.deinit();
     try expectEventsEqual(&.{done}, &.{try toEvent(parsed.arena.allocator(), parsed.value)});
 
-    // No structured columns, no `meta` column; it reads back as the empty string.
     const bare: Event = .{ .note = .{ .source = "driver", .text = "the build is green" } };
     const bare_line = try encodeEventLine(alloc, bare, 1);
     defer alloc.free(bare_line);
@@ -2112,7 +2038,6 @@ test "a note round-trips whole: its source, its structured columns and multi-lin
     defer bare_parsed.deinit();
     try expectEventsEqual(&.{bare}, &.{try toEvent(bare_parsed.arena.allocator(), bare_parsed.value)});
 
-    // Who deposited it and what the model reads are both required.
     for ([_][]const u8{
         "{\"seq\":1,\"kind\":\"note\",\"text\":\"x\"}",
         "{\"seq\":1,\"kind\":\"note\",\"source\":\"task\"}",
@@ -2144,7 +2069,6 @@ test "the two kinds note replaced read back as notes, structured columns and all
         .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}",
     } }}, &.{try toEvent(note_parsed.arena.allocator(), note_parsed.value)});
 
-    // Translation does not invent what the writer never wrote.
     for ([_][]const u8{
         "{\"seq\":1,\"kind\":\"task_finished\",\"exit_code\":0,\"text\":\"x\"}",
         "{\"seq\":1,\"kind\":\"task_finished\",\"task\":\"s/t1\",\"text\":\"x\"}",
@@ -2170,8 +2094,6 @@ test "a task report deposited into the inbox is applied exactly once" {
     } };
     var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
     defer l.deinit();
-    // The supervisor's delivery name is DETERMINISTIC (`task-<sid>-t<N>`), so a
-    // redelivery is the same name and the origin column alone is enough.
     try depositEvent(alloc, io, tmp.dir, spath, "task-s-t3", done);
     try drainInbox(alloc, io, &l, tmp.dir, spath);
     try depositEvent(alloc, io, tmp.dir, spath, "task-s-t3", done);
@@ -2202,12 +2124,10 @@ test "a stop reason the shape cannot say is written; the two it can are not" {
     defer parsed.deinit();
     try expectEventsEqual(&.{cut}, &.{try toEvent(parsed.arena.allocator(), parsed.value)});
 
-    // A reply that ended on its own carries no `"stop_reason"`.
     const whole = try encodeEventLine(alloc, .{ .assistant = .{ .text = "half a sen", .calls = &.{} } }, 1);
     defer alloc.free(whole);
     try std.testing.expectEqualStrings("{\"seq\":1,\"kind\":\"assistant\",\"text\":\"half a sen\",\"calls\":[]}\n", whole);
 
-    // Same for a turn that stopped to call a tool: the shape already says it.
     const calling: Event = .{ .assistant = .{
         .text = "",
         .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{}" }},
@@ -2354,7 +2274,6 @@ test "the writer holds an exclusive lease: a second writer is refused with Sessi
     var a = try createDurable(alloc, io, tmp.dir, "s.jsonl", .{ .session = "s" });
     try a.append(.{ .user_text = .{ .text = "one" } });
 
-    // While `a` holds the file open, create and open both fail fast.
     try std.testing.expectError(error.SessionBusy, createDurable(alloc, io, tmp.dir, "s.jsonl", .{ .session = "s" }));
     try std.testing.expectError(error.SessionBusy, openDurable(alloc, io, tmp.dir, "s.jsonl"));
 
@@ -2362,7 +2281,6 @@ test "the writer holds an exclusive lease: a second writer is refused with Sessi
     var hdr = try readHeader(alloc, io, tmp.dir, "s.jsonl");
     hdr.deinit();
 
-    // Once `a` releases the lease, the next writer opens cleanly and continues.
     a.deinit();
     var b = try openDurable(alloc, io, tmp.dir, "s.jsonl");
     defer b.deinit();

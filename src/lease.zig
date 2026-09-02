@@ -287,10 +287,8 @@ test "the session's two leases are independent, and each refuses rather than que
     try testing.expectError(error.DepositInFlight, sessionDeposits(alloc, io, tmp.dir, "s.jsonl", .fail_fast));
     both.close(io);
 
-    // Released, so the next taker gets them.
     var again = try sessionLifetime(alloc, io, tmp.dir, "s.jsonl");
     again.close(io);
-    // Closing twice is a no-op, which is what lets a callee release early.
     again.close(io);
 }
 
@@ -302,7 +300,6 @@ test "two sessions' deposit leases are taken in path order, whichever way the ca
     try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = "{}\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "b.jsonl", .data = "{}\n" });
 
-    // Whichever direction, the lease taken first is `a`'s.
     var pair = try depositPair(alloc, io, tmp.dir, "b.jsonl", "a.jsonl", .fail_fast);
     try testing.expectError(
         error.DepositInFlight,
@@ -310,7 +307,6 @@ test "two sessions' deposit leases are taken in path order, whichever way the ca
     );
     pair.close(io);
 
-    // One session named twice is one lease, not a self-deadlock.
     var single = try depositPair(alloc, io, tmp.dir, "a.jsonl", "a.jsonl", .fail_fast);
     try testing.expect(single.second == null);
     single.close(io);
@@ -322,13 +318,11 @@ test "a task lease reads as held only while somebody holds it" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    // No file at all is "nobody has started", not a fault.
     try testing.expect(!try taskHeld(tmp.dir, io, alloc, "t1"));
 
     try tmp.dir.createDirPath(io, "t1");
     var held = (try taskSupervisor(alloc, io, tmp.dir, "t1")).?;
     try testing.expect(try taskHeld(tmp.dir, io, alloc, "t1"));
-    // A second supervisor on the same directory is refused, not queued.
     try testing.expect(try taskSupervisor(alloc, io, tmp.dir, "t1") == null);
     held.close(io);
     try testing.expect(!try taskHeld(tmp.dir, io, alloc, "t1"));

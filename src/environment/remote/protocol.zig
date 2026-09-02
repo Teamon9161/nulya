@@ -418,7 +418,6 @@ test "a header line round-trips and never ends early, whatever a field contains"
     });
     defer alloc.free(line);
 
-    // Exactly one newline, and it is the terminator.
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
     try std.testing.expectEqual(@as(u8, '\n'), line[line.len - 1]);
 
@@ -439,7 +438,6 @@ test "a reply round-trips its payload split and its refusal" {
     const back = try parseReply(arena, line[0 .. line.len - 1]);
     try std.testing.expect(back.ok);
     try std.testing.expectEqual(@as(u8, 3), back.exit_code);
-    // stdout is the first `out` bytes, stderr the rest — the whole split.
     try std.testing.expectEqual(@as(usize, 4), back.out);
     try std.testing.expectEqual(@as(usize, 6), back.bytes - back.out);
 
@@ -493,7 +491,6 @@ test "a big listing travels as payload, and the header it rides behind stays rea
     try std.testing.expectEqualStrings(entries.items[999].name, back[999].name);
     try std.testing.expect(back[0].dir and !back[1].dir);
 
-    // An empty directory is an empty listing, not a broken frame.
     try std.testing.expectEqual(@as(usize, 0), (try parseEntries(arena, "")).len);
 }
 
@@ -531,7 +528,6 @@ test "a header that would outgrow the reader's buffer is refused instead of writ
 }
 
 test "unknown verbs stay in the vocabulary instead of becoming errors" {
-    // Every named verb parses back to itself…
     inline for (@typeInfo(Op).@"enum".fields) |f| {
         const op: Op = @enumFromInt(f.value);
         if (op != .unknown) try std.testing.expectEqual(op, Op.parse(op.wire()));
