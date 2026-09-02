@@ -1480,10 +1480,19 @@ fn sessionEvents(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     try stdout.interface.flush();
     if (!follow) return 0;
 
-    // Polling is enough: the file only grows.
+    // Polling is enough: the file only grows. The tail ends when the session
+    // does — a pruned file is the one event a reader can never see, so its
+    // absence is the end of the log, not a fault.
     while (true) {
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
-        try tail.dump(alloc, io, std.Io.Dir.cwd(), spath, &stdout.interface);
+        tail.dump(alloc, io, std.Io.Dir.cwd(), spath, &stdout.interface) catch |err| switch (err) {
+            error.FileNotFound => {
+                try stdout.interface.flush();
+                try printErrFmt(alloc, io, "session '{s}' is gone; end of log\n", .{id});
+                return 0;
+            },
+            else => return err,
+        };
         try stdout.interface.flush();
     }
 }

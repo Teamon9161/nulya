@@ -259,7 +259,7 @@ pub const session_usage =
     \\  nulya session step <id> [--max-steps N] [--effort E] [--gate] [--stream] [--ssh-password-stdin]
     \\                                                    run to end of turn or budget; stdout is one JSON line per model/tool and ledger
     \\                                                    event, ending in a run verdict; --gate asks stdin to allow each call; --stream does nothing (kept for one release)
-    \\  nulya session events <id> [--since N] [--follow]  read-only tail of the event log
+    \\  nulya session events <id> [--since N] [--follow]  read-only tail of the event log; --follow keeps reading until the session is pruned
     \\  nulya session cancel <id>                         request cancel at the next step boundary
     \\  nulya session outcome <id> <success|partial|failure> [--note <text>] [--seq N]
     \\                                                    record how a session turned out (a journal, never the session file)

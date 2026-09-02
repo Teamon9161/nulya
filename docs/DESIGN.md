@@ -1432,7 +1432,7 @@ nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--carry] [--
                                                 ← 跑到本 turn 结束或预算耗尽；stdout 一律是行协议（一行一 JSON，边跑边吐），诊断也是协议里的一行；
                                                   `--gate` 不需要别的 flag 同用；`--stream` 是无操作别名，保留一个版本期
                                                   **没有 `--env`**：命令跑在哪由 header 说了算，够不着就响亮失败
-          | events <id> [--since N] [--follow]   ← 只读 tail 原始事件行（follow 轮询）
+          | events <id> [--since N] [--follow]   ← 只读 tail 原始事件行（`--follow` 轮询，session 被 prune 后以 exit 0 结束）
           | cancel <id>                          ← 写 cancel 标记，下一 step 边界消化
           | prune <id> [--force]                 ← **唯一一个删 session 的动词**（见下）
           | outcome <id> <success|partial|failure> [--note <text>] [--seq N]   ← 只写 outcome journal（§3.3）
