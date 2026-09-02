@@ -481,7 +481,7 @@ Extension = 子进程；wire protocol 就是 ABI（不用 `.so/.dll`、不用 WA
 - **对象形式只许 script kind**：所有变体必须在 `src/` 下；对象里出现 `bin/`、或混着 `bin/` 与 `src/` → `InvalidEntry`（一个版本 id 说不出"这台机器上是编译的、那台是脚本"）。编译 kind 的跨平台是**交叉编译**（§7.4），不在这个字段里。`isScript` / `implementationKind` 看**全部变体**。
 - **OS 键是封闭词表**：不是 `std.Target.Os.Tag` 的名字、也不是 `default` → `InvalidEntry`。
 - **build 校验每个声明的变体都在 snapshot 里**（`validateScriptEntries`）：建它的那台机器是唯一能发现"Windows 那个变体根本没写"的地方。
-- **本机没有入口 = 一个可命名的状态，不是坏包**：照样 build、照样 activate；只有真要跑它时才失败——选中它的 `session new` 以 `EntryUnsupportedOnHost` 硬失败（先往 stderr 点名 `<id>@<version>` 与宿主 os），`ext run` 打同一行然后 exit 1。判据只有一处实现（`store.versionRuntimeEntryPath`）。
+- **本机没有入口 = 一个可命名的状态，不是坏包**：照样 build、照样 activate；只有真要跑它时才失败——选中它的 `session new` 以 `EntryUnsupportedOnHost` 硬失败（先经 `Diag` 点名 `<id>@<version>` 与宿主 os，见下面那条），`ext run` 打同一行然后 exit 1。判据只有一处实现（`store.versionRuntimeEntryPath`）。
 
 `nulya ext init` **缺省生成脚本骨架**（`src/run.sh` + `src/run.ps1`、manifest 用对象形式的 entry + interpreter、tool input 声明一个可选 `name`），`--zig` 才是编译骨架——**被调用的方式一模一样**；`--script` 是保留一个版本期的无操作别名，usage 不再列它。脚本与编译 extension 共用 seal / integrity / store / activate / rollback / usage，区别只在"是否编译"和 hash 是否含 compiler。
 
@@ -748,13 +748,15 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
 
 **成员只有一条来路：被点名。** discovery（"每个有 `current` 的包都是成员"）**已删**。fresh 路的成员就是 `Options.with`：config 的 `[extensions] with` 在前、`session new --with` 在后，壳层已并好（§5.1）。
 
-**成员解析两条路，一样严**：被点名与 resume 时 header 冻的 `active`——两条都是**硬失败**，解析不出来就开不了这一场，绝不静默少一个能力地开场（理由：§7.2 的首个 active 持有者胜——workspace 那份坏了、静默跳过会让整个 extension 消失，哪怕 user root 里有完好的版本）。不带版本的那些走 `current`，两种失败分得开：任何 root 都没有 `current` → `WithVersionNotFound`；`current` 指着一个坏掉的版本 → `ActiveExtensionBroken`，并在**内核里**往 stderr 打一行指名道姓的话（Zig 的 error 不带 payload）：
+**成员解析两条路，一样严**：被点名与 resume 时 header 冻的 `active`——两条都是**硬失败**，解析不出来就开不了这一场，绝不静默少一个能力地开场（理由：§7.2 的首个 active 持有者胜——workspace 那份坏了、静默跳过会让整个 extension 消失，哪怕 user root 里有完好的版本）。不带版本的那些走 `current`，两种失败分得开：任何 root 都没有 `current` → `WithVersionNotFound`；`current` 指着一个坏掉的版本 → `ActiveExtensionBroken`，并在错误离开之前把一行指名道姓的话交给 `Diag`（Zig 的 error 不带 payload）：
 
 ```
 extension <id>: current points at <version>, which is broken (<err>); run 'nulya ext activate <id> <older-version>', or name a good one with --with <id>@<version>
 ```
 
 `session new` 再补一句 `session new failed: an extension this session names has a broken current version (see the line above)` 并 exit 1。**host fault 不在此列**：cancellation / OOM / 真的 I/O 错误照原样传播（`store.isExtensionFault` 是这条线）。
+
+**`Diag` 是内核说这三句话的唯一出口**（`extension/site.zig`，`{ptr, report(ptr, io, line)}`，与 `StepObserver` 同一种形状）。三句都是"error 装不下的东西"：`current` 坏了（上面这条）、这一场的目标机器没有对应的 build（`ExecVersionNotFound`，指路 `ext build --target` + `ext push`）、本机没有 runtime entry（`EntryUnsupportedOnHost`，§7.1）。**内核不选目的地**：缺省的 `Diag` 一个字都不发（单元测试正是故意造出这三种状态再断言 error 的），写 stderr 的那个 sink 是 CLI 的常量（`cli/common.stderr_diag`），经 `composition.Options.diag` / `initFrozen` 的参数 / `environment.LocalOptions.diag` 交进来。stderr 而不是 stdout，因为 `session step --stream` 的 stdout 是纯行协议。
 
 推论：session 中途 AI 重写出 `web.search` v2 并 activate，**当前 session 已 native 注册的仍是 v1**；v2 只能经 shell `nulya ext run` + note 告知；下一场 session native 才换（`tests/e2e/` 全环证明）。这不是新机制，是 §5.1 的 frozen snapshot 延伸到整个 Contribution 层。
 

@@ -50,6 +50,9 @@ pub const Resolver = struct {
     /// This machine's one store, owned; empty when it has none. Opened lazily,
     /// so a process that never runs an extension never opens a directory.
     store_path: []const u8,
+    /// Where the resolver says what an error cannot carry (which package has no
+    /// entry for this OS). Reports nothing by default.
+    diag: site_mod.Diag = .{},
     site: ?site_mod.Site = null,
     memo: std.ArrayList(Memo) = .empty,
 
@@ -63,8 +66,8 @@ pub const Resolver = struct {
     /// Take a copy of the store path. Nothing is opened and nothing can fail
     /// about the store here — an environment must be constructible on a machine
     /// with no extensions at all.
-    pub fn init(alloc: std.mem.Allocator, io: std.Io, store_path: []const u8) !Resolver {
-        return .{ .alloc = alloc, .io = io, .store_path = try alloc.dupe(u8, store_path) };
+    pub fn init(alloc: std.mem.Allocator, io: std.Io, store_path: []const u8, diag: site_mod.Diag) !Resolver {
+        return .{ .alloc = alloc, .io = io, .store_path = try alloc.dupe(u8, store_path), .diag = diag };
     }
 
     pub fn deinit(self: *Resolver) void {
@@ -121,7 +124,7 @@ pub const Resolver = struct {
     /// over.
     fn openSite(self: *Resolver) !*const site_mod.Site {
         if (self.site) |*s| return s;
-        self.site = try site_mod.Site.openStore(self.alloc, self.io, self.store_path);
+        self.site = try site_mod.Site.openStore(self.alloc, self.io, self.store_path, self.diag);
         return &self.site.?;
     }
 };
@@ -149,7 +152,7 @@ test "a version is resolved to an entry on this machine, and verified once" {
 
     const store_path = try std.fs.path.join(alloc, &.{ base, "store" });
     defer alloc.free(store_path);
-    var resolver = try Resolver.init(alloc, io, store_path);
+    var resolver = try Resolver.init(alloc, io, store_path, .{});
     defer resolver.deinit();
 
     const first = try resolver.resolve("scripted", version);
@@ -174,7 +177,7 @@ test "a version is resolved to an entry on this machine, and verified once" {
 
 test "a resolver with no store at all refuses rather than inventing one" {
     const alloc = testing.allocator;
-    var resolver = try Resolver.init(alloc, testing.io, "");
+    var resolver = try Resolver.init(alloc, testing.io, "", .{});
     defer resolver.deinit();
     try testing.expectError(error.VersionNotFound, resolver.resolve("nope", "v-000000000000000000000000"));
 }

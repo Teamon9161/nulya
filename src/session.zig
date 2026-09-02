@@ -86,8 +86,11 @@ pub const AgentSession = struct {
         /// the honest default: a session that composes no member never needs
         /// one, and a machine without a home has none.
         extension_store: []const u8 = "",
-        /// Native tool selection and budget, resolved from config at the
-        /// session-setup boundary so this module stays config-agnostic.
+        /// What the composition is built from — native tool selection, budget,
+        /// and where a repair line goes — resolved from config at the
+        /// session-setup boundary so this module stays config-agnostic. A
+        /// resumed session rebuilds its composition from the header, so only
+        /// the `diag` of this is read on that path.
         registry: composition.Options = .{},
     };
 
@@ -206,7 +209,7 @@ pub const AgentSession = struct {
         var l = try ledger.openDurable(alloc, io, d.workspace, d.session_path);
         errdefer l.deinit();
         const hdr = l.header().?;
-        var comp = try composition.SessionComposition.initFrozen(alloc, io, tool_ctx.cwd, opts.extension_store, hdr.composition);
+        var comp = try composition.SessionComposition.initFrozen(alloc, io, tool_ctx.cwd, opts.extension_store, hdr.composition, opts.registry.diag);
         errdefer comp.deinit(alloc);
 
         const owned_path = try alloc.dupe(u8, d.session_path);

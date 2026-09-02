@@ -364,7 +364,7 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         var cfg = try config.load(alloc, io, &cfg_host);
         defer cfg.deinit();
         // No session ref: a supervisor runs one command, it never starts tasks.
-        var lenv = try launch.localEnvironment(alloc, io, &cfg, null, &.{});
+        var lenv = try launch.localEnvironment(alloc, io, &cfg, null, &.{}, common.stderr_diag);
         defer lenv.deinit();
 
         const outcome = try runWatched(alloc, io, &lenv, .{
@@ -973,7 +973,7 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         .session_path = spath,
         .tasks_dir = tasks_dir,
         // No store roots: a task supervisor runs a COMMAND, never an extension.
-    }, hdr.value.environment, hdr.value.remote_workspace, &.{}, null) catch |err| switch (err) {
+    }, hdr.value.environment, hdr.value.remote_workspace, &.{}, null, common.stderr_diag) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return 1;

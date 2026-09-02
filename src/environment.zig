@@ -16,6 +16,7 @@ const builtin = @import("builtin");
 const tool = @import("tool.zig");
 const emit = @import("emit.zig");
 const ext_exec = @import("extension/exec.zig");
+const ext_site = @import("extension/site.zig");
 const protocol = @import("extension/protocol.zig");
 const process_tree = @import("environment/tree.zig");
 const testkit = @import("extension/testkit.zig");
@@ -335,6 +336,9 @@ pub const LocalOptions = struct {
     /// machine's workspace on a remote agent. Empty means this environment runs
     /// no extensions and refuses if asked.
     extension_store: []const u8 = "",
+    /// Where the extension resolver says what an error cannot carry. Reports
+    /// nothing by default.
+    diag: ext_site.Diag = .{},
 };
 
 /// How many `t<N>` slots one session may hand out. High enough that no real
@@ -395,7 +399,7 @@ pub const LocalEnvironment = struct {
             tasks_dir = try alloc.dupe(u8, s.tasks_dir);
         }
 
-        var resolver = try ext_exec.Resolver.init(alloc, io, opts.extension_store);
+        var resolver = try ext_exec.Resolver.init(alloc, io, opts.extension_store, opts.diag);
         errdefer resolver.deinit();
 
         return .{

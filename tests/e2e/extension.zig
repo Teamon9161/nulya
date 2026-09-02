@@ -676,7 +676,7 @@ test "extension store: bytes live in one store, and a workspace pointer decides 
     defer alloc.free(ws_shared);
     try std.testing.expect(!std.mem.eql(u8, user_shared, ws_shared));
 
-    var site = try site_mod.Site.open(alloc, io, ws_path, store_rel);
+    var site = try site_mod.Site.open(alloc, io, ws_path, store_rel, .{});
     defer site.deinit();
     try site.activate(alloc, .user, "user-wide", user_only);
     try site.activate(alloc, .user, "shared", user_shared);
@@ -712,7 +712,7 @@ test "extension store: bytes live in one store, and a workspace pointer decides 
             .{ .id = "shared", .version = user_shared },
         },
     };
-    var resumed = try composition.SessionComposition.initFrozen(alloc, io, ws_path, store_rel, frozen);
+    var resumed = try composition.SessionComposition.initFrozen(alloc, io, ws_path, store_rel, frozen, .{});
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), resumed.extensions.len);
     for (resumed.extensions) |pkg| {
@@ -757,7 +757,7 @@ test "cli: the store is one place and the pointer layer is a column — ext list
     const ws_shared = try buildSkillExtensionIn(alloc, io, ws, ".nulya/extensions", store_rel, "shared", "workspace copy");
     defer alloc.free(ws_shared);
     {
-        var site = try site_mod.Site.open(alloc, io, ws_path, store_rel);
+        var site = try site_mod.Site.open(alloc, io, ws_path, store_rel, .{});
         defer site.deinit();
         try site.activate(alloc, .user, "user-wide", user_only);
         try site.activate(alloc, .user, "shared", user_shared);

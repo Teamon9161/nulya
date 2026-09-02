@@ -534,7 +534,7 @@ pub fn createSession(
     const ext_store = try launch.storePath(alloc, &host);
     defer alloc.free(ext_store);
 
-    var lenv = launch.localEnvironment(alloc, io, &cfg, null, ext_store) catch |err| switch (err) {
+    var lenv = launch.localEnvironment(alloc, io, &cfg, null, ext_store, common.stderr_diag) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return null;
@@ -571,6 +571,7 @@ pub fn createSession(
         },
         .extension_store = ext_store,
         .registry = .{
+            .diag = common.stderr_diag,
             .max_tools = cfg.registry.max_tools,
             .with = with,
             .prompts = prompts,
@@ -1315,7 +1316,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var lenv = launch.sessionEnvironment(alloc, io, &cfg, .{
         .session_path = spath,
         .tasks_dir = tasks_dir,
-    }, hdr.value.environment, hdr.value.remote_workspace, ext_store, ssh_password) catch |err| switch (err) {
+    }, hdr.value.environment, hdr.value.remote_workspace, ext_store, ssh_password, common.stderr_diag) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             return stepFail(alloc, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
         },
@@ -1401,6 +1402,9 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
             .gate = if (gate) |g| g.gate() else null,
         },
         .extension_store = ext_store,
+        // A resumed session rebuilds its composition from the header; the only
+        // part of these options that path reads is where a repair line goes.
+        .registry = .{ .diag = common.stderr_diag },
     }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath }) catch |err| switch (err) {
         error.LegacyModelRebind => return stepFail(alloc, stream, legacy_rebind_refusal, .{ id, id }),
         else => return stepFail(alloc, stream, "session open failed: {s}", .{@errorName(err)}),

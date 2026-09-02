@@ -78,7 +78,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `config.zig` + `default.toml` | `default → system → user → project` 合并 | project 层只能收窄；`[extensions] with` 是唯一的 extension 键，project 层也读（只能在 store 已有的包里挑） |
 | `extension/manifest.zig` | `nulya.extension/v2` schema | 三层听众：内核强制 / driver 声明 / 前端声明。manifest 是 schema 唯一真相，不问 binary |
 | `extension/protocol.zig` `invoke.zig` | 唯一那种 wire（stdin 参数 JSON、env、stdout 即结果、退出码即 ok） | stderr 就是失败消息，所以包必须独占它 |
-| `extension/store.zig` `site.zig` `integrity.zig` | 版本目录（一台机器一个 store）+ 两层 `current` 指针 | 字节只有一处，指针有两层且 workspace 压 user；`current` 授 reach，`.sealed` 证明资格 |
+| `extension/store.zig` `site.zig` `integrity.zig` | 版本目录（一台机器一个 store）+ 两层 `current` 指针 + `Diag`（error 装不下的那句话的唯一出口） | 字节只有一处，指针有两层且 workspace 压 user；`current` 授 reach，`.sealed` 证明资格；内核不选 `Diag` 的目的地，缺省不发一个字（写 stderr 的 sink 是 `cli/common.stderr_diag`） |
 | `extension/build/` | 冻结 snapshot → 编译或直接冻结 → seal | version = hash(snapshot + compiler + target)，后两项只对 compiled 非空 |
 | `extension/exec.zig` `tools.zig` `skills.zig` `notes.zig` | 执行身份解析 / tool binding / skill catalog / 能力宣告 note | 哪个文件、哪个 entry、seal 对不对，由**持有字节的那台机器**答 |
 | `skill.zig` | `SkillSetSnapshot` + 渐进披露文本 | Agent Skills 兼容（`SKILL.md` frontmatter） |

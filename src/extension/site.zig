@@ -32,6 +32,27 @@ pub const Layer = enum {
     }
 };
 
+/// Where a repair line goes.
+///
+/// A Zig error carries no payload, so which package, which version and the verb
+/// that fixes it have to be SAID separately or lost. The kernel never picks a
+/// destination for that sentence: a shell that has one passes a sink in, and the
+/// default reports nothing — which is what a unit test wants, since it builds a
+/// broken store on purpose and asserts the error.
+///
+/// Stateless sinks are the point of passing `io` at report time rather than
+/// holding it: the one the CLI installs is a constant, so nothing here owns a
+/// lifetime that could outlive the `Site` it was copied into.
+pub const Diag = struct {
+    ptr: ?*anyopaque = null,
+    reportFn: ?*const fn (ptr: ?*anyopaque, io: std.Io, line: []const u8) void = null,
+
+    pub fn report(self: Diag, io: std.Io, line: []const u8) void {
+        const f = self.reportFn orelse return;
+        f(self.ptr, io, line);
+    }
+};
+
 pub const Site = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -43,6 +64,9 @@ pub const Site = struct {
     store_path: []const u8,
     store_dir: ?std.Io.Dir,
     ws_dir: ?std.Io.Dir,
+    /// Where this site says what an error cannot carry. Reports nothing by
+    /// default.
+    diag: Diag = .{},
 
     pub const Pointer = struct { layer: Layer, version: []const u8 };
     pub const ActiveEntry = struct { id: []const u8, layer: Layer, version: []const u8 };
@@ -73,11 +97,11 @@ pub const Site = struct {
             const rt = self.manifest.runtime orelse return error.MissingRuntime;
             const st = site.store() orelse return error.VersionNotFound;
             const entry_rel = st.versionRuntimeEntryPath(alloc, self.id, self.version, rt) catch |err| {
-                // A Zig error has no payload, so "which package, and on which
-                // host" is said separately here rather than lost with the bare
-                // error name. Best effort — a failure to say it never changes
-                // the failure.
-                if (err == error.EntryUnsupportedOnHost) reportEntryUnsupported(site.io, self.id, self.version);
+                if (err == error.EntryUnsupportedOnHost) site.report(
+                    alloc,
+                    "extension {s}@{s} declares no runtime entry for {s}; see `nulya ext inspect {s}@{s}`\n",
+                    .{ self.id, self.version, @tagName(builtin.os.tag), self.id, self.version },
+                );
                 return err;
             };
             defer alloc.free(entry_rel);
@@ -88,7 +112,7 @@ pub const Site = struct {
     /// Open what is there, creating nothing: a machine with no store and a
     /// workspace with no `.nulya/extensions` are both ordinary. `store_path`
     /// empty means this machine has no store at all.
-    pub fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, store_path: []const u8) !Site {
+    pub fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, store_path: []const u8, diag: Diag) !Site {
         const owned_cwd = try alloc.dupe(u8, cwd);
         errdefer alloc.free(owned_cwd);
 
@@ -120,13 +144,24 @@ pub const Site = struct {
             .store_path = real,
             .store_dir = store_dir,
             .ws_dir = ws_dir,
+            .diag = diag,
         };
+    }
+
+    /// Say what an error cannot carry. Silent when nobody is listening, and
+    /// silent when the line cannot be built — failing to SAY something never
+    /// changes what happened.
+    pub fn report(self: *const Site, alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) void {
+        if (self.diag.reportFn == null) return;
+        const line = std.fmt.allocPrint(alloc, fmt, args) catch return;
+        defer alloc.free(line);
+        self.diag.report(self.io, line);
     }
 
     /// The store alone, for a caller with no pointer question — an execution
     /// resolver, which is only ever handed an exact version.
-    pub fn openStore(alloc: std.mem.Allocator, io: std.Io, store_path: []const u8) !Site {
-        var site = try open(alloc, io, ".", store_path);
+    pub fn openStore(alloc: std.mem.Allocator, io: std.Io, store_path: []const u8, diag: Diag) !Site {
+        var site = try open(alloc, io, ".", store_path, diag);
         if (site.ws_dir) |*d| {
             d.close(io);
             site.ws_dir = null;
@@ -327,22 +362,6 @@ pub const Site = struct {
     }
 };
 
-/// Name the package a per-OS `runtime.entry` does not cover on this machine.
-/// Written to stderr, so `session step --stream` keeps stdout pure JSON. Silent
-/// under `builtin.is_test`: unit tests construct this state on purpose and
-/// assert the error, and a repair line about a tmp store reads as advice about
-/// a real one.
-fn reportEntryUnsupported(io: std.Io, id: []const u8, version: []const u8) void {
-    if (builtin.is_test) return;
-    var buf: [512]u8 = undefined;
-    const line = std.fmt.bufPrint(
-        &buf,
-        "extension {s}@{s} declares no runtime entry for {s}; see `nulya ext inspect {s}@{s}`\n",
-        .{ id, version, @tagName(builtin.os.tag), id, version },
-    ) catch return;
-    std.Io.File.stderr().writeStreamingAll(io, line) catch {};
-}
-
 test "a workspace pointer wins over the store's, and dropping it reveals the store's again" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -365,7 +384,7 @@ test "a workspace pointer wins over the store's, and dropping it reveals the sto
     defer alloc.free(user_only);
     try std.testing.expect(!std.mem.eql(u8, old, new));
 
-    var site = try Site.open(alloc, io, base, store_path);
+    var site = try Site.open(alloc, io, base, store_path, .{});
     defer site.deinit();
 
     try site.activate(alloc, .user, "shared", old);
@@ -424,7 +443,7 @@ test "a machine with no store answers 'not here' rather than inventing one" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const base = buf[0..try tmp.dir.realPath(io, &buf)];
 
-    var site = try Site.open(alloc, io, base, "");
+    var site = try Site.open(alloc, io, base, "", .{});
     defer site.deinit();
     try std.testing.expect(site.store() == null);
     try std.testing.expectError(error.VersionNotFound, site.resolveVersion(alloc, "any", "v-000000000000000000000000", .sealed));
@@ -473,7 +492,7 @@ test "resolveForTarget finds the sibling built for another machine, from the one
         try store_dir.writeFile(io, .{ .sub_path = seal_dst, .data = seal });
     }
 
-    var site = try Site.open(alloc, io, base, "store");
+    var site = try Site.open(alloc, io, base, "store", .{});
     defer site.deinit();
     const found = try site.resolveForTarget(alloc, "pkg", host_version, "aarch64-linux");
     defer if (found) |f| alloc.free(f);
