@@ -215,15 +215,11 @@ fn writeMessages(alloc: std.mem.Allocator, jw: *std.json.Stringify, ir: *const p
             try jw.write(result.output);
             try jw.endObject();
         },
-        // A capability announcement: an out-of-band system message the model
-        // reads to learn it can now shell out to a new extension. Appended, so
-        // it never disturbs the cached prefix.
-        .capability_note => |text| try writeRoleContentMessage(jw, "system", text),
-        // A finished background task does NOT follow it into the system role:
-        // this text carries the output of an arbitrary process, and the system
-        // role is the one place the model is entitled to read as the harness
-        // speaking. `user` is what the other two wires already give it.
-        .task_finished => |text| try writeRoleContentMessage(jw, "user", text),
+        // A machine fact from outside the step. NOT the system role: a note can
+        // carry the output of an arbitrary process, and the system role is the
+        // one place the model is entitled to read as the harness speaking.
+        // `user` is what the other two wires already give it.
+        .note => |text| try writeRoleContentMessage(jw, "user", text),
     };
     try jw.endArray();
 }
@@ -710,19 +706,19 @@ test "a finished background task is a user message here, not a system one like a
 
     var l = L.init(alloc);
     defer l.deinit();
-    try l.append(.{ .capability_note = .{ .id = "demo", .version = "v-a", .text = "note text" } });
-    try l.append(.{ .task_finished = .{ .task = "s-1/t3", .exit_code = 0, .text = "task text" } });
+    try l.append(.{ .note = .{ .source = "ext", .text = "note text", .meta = "{\"id\":\"demo\"}" } });
+    try l.append(.{ .note = .{ .source = "task", .text = "task text", .meta = "{\"task\":\"s-1/t3\"}" } });
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);
     const body = try buildRequestJson(alloc, "test-model", false, .{ .prompt_ir = &ir, .tools = &.{} });
     defer alloc.free(body);
 
-    // The note keeps the system role it has always had — the kernel wrote every
-    // byte of it. The task report carries an arbitrary process's output, so it
-    // goes where the other two wires already put it: the user role.
-    try std.testing.expect(std.mem.indexOf(u8, body, "{\"role\":\"system\",\"content\":\"note text\"}") != null);
+    // Whatever deposited it, a note is user-side content here: the system role
+    // is the model's evidence that the harness itself is speaking, and a note
+    // can carry an arbitrary process's output.
+    try std.testing.expect(std.mem.indexOf(u8, body, "{\"role\":\"user\",\"content\":\"note text\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "{\"role\":\"user\",\"content\":\"task text\"}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "{\"role\":\"system\",\"content\":\"task text\"}") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"role\":\"system\",\"content\":\"note text\"") == null);
 }
 
 test "an image turn becomes a parts array; a turn without one keeps the plain-string body byte for byte" {

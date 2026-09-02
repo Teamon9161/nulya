@@ -81,6 +81,7 @@ pub fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []con
     const rest = args[1..];
     if (std.mem.eql(u8, sub, "new")) return sessionNew(alloc, io, rest);
     if (std.mem.eql(u8, sub, "append")) return sessionAppend(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "note")) return sessionNote(alloc, io, rest);
     if (std.mem.eql(u8, sub, "step")) return sessionStep(alloc, io, rest);
     if (std.mem.eql(u8, sub, "events")) return sessionEvents(alloc, io, rest);
     if (std.mem.eql(u8, sub, "cancel")) return sessionCancel(alloc, io, rest);
@@ -88,7 +89,7 @@ pub fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []con
     if (std.mem.eql(u8, sub, "prune")) return sessionPrune(alloc, io, rest);
     if (std.mem.eql(u8, sub, "outcome")) return sessionOutcome(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return session_list.sessionList(alloc, io, sliceHasFlag(rest, "--json"));
-    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|rebind|prune|outcome|list\n");
+    try printErr(io, "unknown `session` subcommand; try new|append|note|step|events|cancel|rebind|prune|outcome|list\n");
     return 1;
 }
 
@@ -857,6 +858,126 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     return 0;
 }
 
+const note_usage = "usage: nulya session note <id> --source <label> [--meta <json>] (<text> | --file <path>)\n";
+
+/// `nulya session note <id> --source <label> [--meta <json>] (<text>|--file)` —
+/// deposit one machine fact into a session.
+///
+/// The counterpart of `append` for everything a PERSON did not say: a driver's
+/// or a plugin's observation, a watcher's report. Same deposit path, same step
+/// boundary, different event — so the ledger never has to claim a person typed
+/// what a package assembled.
+///
+/// `--source` is the depositor's own short label and is carried, not
+/// interpreted. `--meta` must be one valid JSON value: the kernel stores its
+/// bytes verbatim and never parses them, so a reader that trusts the column
+/// would otherwise be handed whatever the caller typed.
+///
+/// The delivery name is fresh every time: two identical notes are two facts.
+fn sessionNote(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len < 1) {
+        try printErr(io, note_usage);
+        return 1;
+    }
+    const id = args[0];
+    if (!launch.isValidSessionId(id)) {
+        try printErr(io, "invalid session id\n");
+        return 1;
+    }
+
+    var text_arg: ?[]const u8 = null;
+    var file_arg: ?[]const u8 = null;
+    var source: ?[]const u8 = null;
+    var meta: []const u8 = "";
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--file") or std.mem.eql(u8, arg, "--source") or std.mem.eql(u8, arg, "--meta")) {
+            if (i + 1 >= args.len) {
+                try printErrFmt(alloc, io, "{s} takes a value\n", .{arg});
+                return 1;
+            }
+            const value = args[i + 1];
+            if (std.mem.eql(u8, arg, "--file")) file_arg = value;
+            if (std.mem.eql(u8, arg, "--source")) source = value;
+            if (std.mem.eql(u8, arg, "--meta")) meta = value;
+            i += 1;
+            continue;
+        }
+        if (text_arg != null) {
+            try printErr(io, note_usage);
+            return 1;
+        }
+        text_arg = arg;
+    }
+
+    const label = source orelse {
+        try printErr(io, note_usage);
+        return 1;
+    };
+    if (label.len == 0) {
+        try printErr(io, "--source takes a non-empty label naming who deposited this\n");
+        return 1;
+    }
+    if (meta.len != 0 and !try std.json.validate(alloc, meta)) {
+        try printErr(io, "--meta takes one JSON value; readers of that column never parse text\n");
+        return 1;
+    }
+
+    const text = if (file_arg) |path|
+        std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(8 << 20)) catch {
+            try printErrFmt(alloc, io, "cannot read --file '{s}'\n", .{path});
+            return 1;
+        }
+    else if (text_arg) |t|
+        try alloc.dupe(u8, t)
+    else {
+        try printErr(io, note_usage);
+        return 1;
+    };
+    defer alloc.free(text);
+    if (!std.unicode.utf8ValidateSlice(text)) {
+        try printErr(io, "note text is not valid UTF-8\n");
+        return 1;
+    }
+
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+    if (!sessionExists(io, spath)) {
+        try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
+        return 1;
+    }
+    // Held across "does this session still exist" and the deposit, and across
+    // minting the delivery name from what is already queued.
+    var lease = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
+        try printErr(io, "session note failed: cannot open this session's inbox\n");
+        return 1;
+    };
+    defer lease.close(io);
+    if (!sessionExists(io, spath)) {
+        try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
+        return 1;
+    }
+
+    const name = try ledger.freshDeliveryName(alloc, io, std.Io.Dir.cwd(), spath, "note");
+    defer alloc.free(name);
+    ledger.depositEventLeased(alloc, io, std.Io.Dir.cwd(), spath, name, .{
+        .note = .{ .source = label, .text = text, .meta = meta },
+    }) catch |err| switch (err) {
+        error.InboxEventTooLarge => {
+            try printErrFmt(
+                alloc,
+                io,
+                "session note refused: this note encodes to more than {d} bytes, which no step could read back\n",
+                .{ledger.max_inbox_event_bytes},
+            );
+            return 1;
+        },
+        else => return err,
+    };
+    return 0;
+}
+
 /// `nulya session prune <id> [--force]` — remove a session and everything that
 /// is only about it.
 ///
@@ -1307,7 +1428,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     defer cfg.deinit();
 
     // The session this step's background tasks belong to: their supervisor
-    // deposits `task_finished` into this file's inbox, and their directories
+    // deposits its report note into this file's inbox, and their directories
     // live beside this session's spills.
     const tasks_dir = try launch.sessionTasksDir(alloc, id);
     defer alloc.free(tasks_dir);
@@ -1353,7 +1474,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // A background task on another machine cannot deposit its own report — the
     // session file is here. So before stepping, ask that machine about the
     // tasks reporting into this session (its own and any retargeted here) and
-    // turn a finished report into the `task_finished` the inbox already
+    // turn a finished report into the note the inbox already
     // understands, which `prepareStep` drains at the step boundary exactly as
     // it drains one a local supervisor deposited.
     //

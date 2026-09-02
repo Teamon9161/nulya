@@ -112,30 +112,27 @@ pub const Event = union(enum) {
     /// Exactly ONE user turn carrying every result from a batch. Never split
     /// per-tool — that would be one model round-trip per tool.
     tool_results: []const ToolResultEntry,
-    /// A capability that became available mid-conversation. An APPEND, never a
-    /// change to `tools[]`, so the prompt prefix stays stable. `text` is the
-    /// model-facing announcement; `id` / `version` are structured so
-    /// reconciliation never parses presentation text.
-    capability_note: struct {
-        id: []const u8,
-        version: []const u8,
-        text: []const u8,
-    },
-    /// A background command this session started has ended. Same genre as
-    /// `capability_note`: a fact from another process, deposited into the inbox,
-    /// drained at a step boundary, projected as one more user-role turn.
+    /// A machine fact that reached this conversation from outside the step: a
+    /// finished background command, a newly active extension, whatever a driver
+    /// or a watcher observed. Deposited into the inbox, drained at a step
+    /// boundary, projected as one more user-role turn.
     ///
-    /// Not a `tool_results` entry — the call that started the task already has
-    /// its result, and one assistant batch maps to exactly one `tool_results`.
-    /// Not a `user_text` either — the ledger would then claim a person said it.
-    ///
-    /// `task` is the full name `<session-id>/t<N>`, `exit_code` is what the
-    /// supervisor saw the direct child exit with, `text` is what the model reads
-    /// and the only part projected.
-    task_finished: struct {
-        task: []const u8,
-        exit_code: u8,
+    /// Not a `tool_results` entry — the call that started a background task
+    /// already has its result, and one assistant batch maps to exactly one
+    /// `tool_results`. Not a `user_text` either — the ledger would then claim a
+    /// person said it.
+    note: struct {
+        /// An open-vocabulary short label for who deposited this (`task`,
+        /// `ext`, `driver`, `watcher`, …). The kernel carries it and never
+        /// interprets it.
+        source: []const u8,
+        /// What the model reads. The only part projected.
         text: []const u8,
+        /// One JSON value, verbatim, or `""`: the depositor's structured columns
+        /// for readers that must not parse presentation text (a task report's
+        /// `{task, exit_code}`, a capability note's `{id, version}`). Stored
+        /// like `ToolCall.args_json` — never parsed here.
+        meta: []const u8 = "",
     },
     /// From here on, this session runs on a different model.
     ///
@@ -153,6 +150,13 @@ pub const Event = union(enum) {
         identity: ModelDescriptor,
     },
 };
+
+/// The labels this harness's own depositors write into `note.source`. The
+/// vocabulary is open and the kernel matches on none of them; they are declared
+/// once because a legacy line translated on read and a live depositor must
+/// produce the SAME label.
+pub const note_source_task = "task";
+pub const note_source_ext = "ext";
 
 /// Which model this session runs on NOW: the last `model_rebind`, or the
 /// header's frozen identity when there has been none.
@@ -302,15 +306,6 @@ pub const Ledger = struct {
     pub fn len(self: *const Ledger) usize {
         return self.events.items.len;
     }
-
-    /// True if the ledger already announced extension `id` at `version`.
-    pub fn containsNote(self: *const Ledger, id: []const u8, version: []const u8) bool {
-        for (self.events.items) |event| switch (event) {
-            .capability_note => |note| if (std.mem.eql(u8, note.id, id) and std.mem.eql(u8, note.version, version)) return true,
-            else => {},
-        };
-        return false;
-    }
 };
 
 /// Deep-copy `e` into the ledger's arena. `a` is always `Ledger.arena`, hence no
@@ -330,15 +325,10 @@ fn cloneEvent(a: std.mem.Allocator, e: Event) !Event {
             .stop_reason = as.stop_reason,
         } },
         .tool_results => |results| .{ .tool_results = try cloneToolResults(a, results) },
-        .capability_note => |note| .{ .capability_note = .{
-            .id = try a.dupe(u8, note.id),
-            .version = try a.dupe(u8, note.version),
-            .text = try a.dupe(u8, note.text),
-        } },
-        .task_finished => |t| .{ .task_finished = .{
-            .task = try a.dupe(u8, t.task),
-            .exit_code = t.exit_code,
-            .text = try a.dupe(u8, t.text),
+        .note => |n| .{ .note = .{
+            .source = try a.dupe(u8, n.source),
+            .text = try a.dupe(u8, n.text),
+            .meta = try a.dupe(u8, n.meta),
         } },
         .model_rebind => |r| .{ .model_rebind = .{
             .profile = try a.dupe(u8, r.profile),
@@ -854,18 +844,11 @@ pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
             }
             try jw.endArray();
         },
-        .capability_note => |n| {
-            try jw.write("capability_note");
-            try writeField(jw, "id", n.id);
-            try writeField(jw, "version", n.version);
+        .note => |n| {
+            try jw.write("note");
+            try writeField(jw, "source", n.source);
+            if (n.meta.len != 0) try writeField(jw, "meta", n.meta);
             try writeField(jw, "text", n.text);
-        },
-        .task_finished => |t| {
-            try jw.write("task_finished");
-            try writeField(jw, "task", t.task);
-            try jw.objectField("exit_code");
-            try jw.write(t.exit_code);
-            try writeField(jw, "text", t.text);
         },
         .model_rebind => |r| {
             try jw.write("model_rebind");
@@ -905,10 +888,15 @@ pub const WireEvent = struct {
     truncated: bool = false,
     calls: ?[]const WireCall = null,
     results: ?[]const ToolResultEntry = null,
+    /// A note's depositor label, and its structured columns as one JSON value
+    /// (absent when the depositor had none to give).
+    source: ?[]const u8 = null,
+    meta: ?[]const u8 = null,
+    /// LEGACY INPUT ONLY — the columns `capability_note` and `task_finished`
+    /// carried before both became `note`. Never written again; `toEvent` folds
+    /// them into a note's `meta`.
     id: ?[]const u8 = null,
     version: ?[]const u8 = null,
-    /// A finished background task's full name `<session-id>/t<N>` and the exit
-    /// code its supervisor observed.
     task: ?[]const u8 = null,
     exit_code: ?u8 = null,
     /// The profile name and resolved descriptor of a `model_rebind`.
@@ -965,11 +953,23 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
     if (std.mem.eql(u8, w.kind, "tool_results")) {
         return .{ .tool_results = w.results orelse return error.CorruptLedger };
     }
-    if (std.mem.eql(u8, w.kind, "capability_note")) {
-        return .{ .capability_note = .{
-            .id = w.id orelse return error.CorruptLedger,
-            .version = w.version orelse return error.CorruptLedger,
+    if (std.mem.eql(u8, w.kind, "note")) {
+        return .{ .note = .{
+            .source = w.source orelse return error.CorruptLedger,
             .text = w.text orelse return error.CorruptLedger,
+            .meta = w.meta orelse "",
+        } };
+    }
+    // The two kinds `note` replaced. Translated on READ so an existing session
+    // resumes and projects unchanged; nothing writes them again.
+    if (std.mem.eql(u8, w.kind, "capability_note")) {
+        return .{ .note = .{
+            .source = note_source_ext,
+            .text = w.text orelse return error.CorruptLedger,
+            .meta = try std.json.Stringify.valueAlloc(a, .{
+                .id = w.id orelse return error.CorruptLedger,
+                .version = w.version orelse return error.CorruptLedger,
+            }, .{}),
         } };
     }
     if (std.mem.eql(u8, w.kind, "model_rebind")) {
@@ -982,10 +982,13 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
         } };
     }
     if (std.mem.eql(u8, w.kind, "task_finished")) {
-        return .{ .task_finished = .{
-            .task = w.task orelse return error.CorruptLedger,
-            .exit_code = w.exit_code orelse return error.CorruptLedger,
+        return .{ .note = .{
+            .source = note_source_task,
             .text = w.text orelse return error.CorruptLedger,
+            .meta = try std.json.Stringify.valueAlloc(a, .{
+                .task = w.task orelse return error.CorruptLedger,
+                .exit_code = w.exit_code orelse return error.CorruptLedger,
+            }, .{}),
         } };
     }
     return error.CorruptLedger;
@@ -1692,11 +1695,7 @@ pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io
         for (batch_origins.items) |origin| try dir.deleteFile(io, origin);
         batch_origins.clearRetainingCapacity();
 
-        const already_content = switch (e) {
-            .capability_note => |n| l.containsNote(n.id, n.version),
-            else => false,
-        };
-        if (!already_content) try l.appendWithOrigin(e, name);
+        try l.appendWithOrigin(e, name);
         try dir.deleteFile(io, name);
     }
 
@@ -1923,15 +1922,10 @@ fn expectEventsEqual(a: []const Event, b: []const Event) !void {
                     if (r.presentation) |p| try std.testing.expectEqualStrings(p, s.presentation.?);
                 }
             },
-            .capability_note => |n| {
-                try std.testing.expectEqualStrings(n.id, y.capability_note.id);
-                try std.testing.expectEqualStrings(n.version, y.capability_note.version);
-                try std.testing.expectEqualStrings(n.text, y.capability_note.text);
-            },
-            .task_finished => |t| {
-                try std.testing.expectEqualStrings(t.task, y.task_finished.task);
-                try std.testing.expectEqual(t.exit_code, y.task_finished.exit_code);
-                try std.testing.expectEqualStrings(t.text, y.task_finished.text);
+            .note => |n| {
+                try std.testing.expectEqualStrings(n.source, y.note.source);
+                try std.testing.expectEqualStrings(n.text, y.note.text);
+                try std.testing.expectEqualStrings(n.meta, y.note.meta);
             },
             .model_rebind => |r| {
                 try std.testing.expectEqualStrings(r.profile, y.model_rebind.profile);
@@ -2042,7 +2036,7 @@ fn writeSampleEvents(l: *Ledger) !void {
         .stop_reason = .tool_use,
     } });
     try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "one\n[exit 0]" }} });
-    try l.append(.{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "note text" } });
+    try l.append(.{ .note = .{ .source = note_source_ext, .text = "note text", .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}" } });
     try l.append(.{ .model_rebind = .{
         .profile = "anthropic",
         .identity = .{ .provider = "anthropic", .model = "claude-sonnet-5", .base_url = "https://api.anthropic.com", .api_key_env = "ANTHROPIC_API_KEY" },
@@ -2391,7 +2385,7 @@ test "moveDeposit takes BOTH inboxes' leases, and moves only what is still there
     a.deinit();
     var b = try createDurable(alloc, io, tmp.dir, "b.jsonl", .{ .session = "b" });
     b.deinit();
-    try depositEvent(alloc, io, tmp.dir, "a.jsonl", "task-a-t1", .{ .task_finished = .{ .task = "a/t1", .exit_code = 0, .text = "done" } });
+    try depositEvent(alloc, io, tmp.dir, "a.jsonl", "task-a-t1", .{ .note = .{ .source = note_source_task, .text = "done", .meta = "{\"task\":\"a/t1\",\"exit_code\":0}" } });
 
     // Somebody is inside the SOURCE inbox: not a queue to join for a caller
     // that asked to be told instead.
@@ -2594,45 +2588,80 @@ test "an image deposited into the inbox is applied exactly once, images and all"
     try expectEventsEqual(&.{shot}, reopened.view());
 }
 
-test "a finished background task round-trips as its own kind, multi-line text and all" {
+test "a note round-trips whole: its source, its structured columns and multi-line text" {
     const alloc = std.testing.allocator;
 
-    // The real shape: the supervisor's report is several lines with its own
+    // The real shape: a supervisor's report is several lines with its own
     // delimiters, so the round-trip has to survive escaped newlines.
-    const done: Event = .{ .task_finished = .{
-        .task = "s-1786-3f/t3",
-        .exit_code = 0,
+    const done: Event = .{ .note = .{
+        .source = note_source_task,
         .text = "[background task s-1786-3f/t3 finished] zig build test · exit 0 · 41.8s\n" ++
             "--- output tail ---\nAll 114 tests passed.\n--- end of output ---",
+        .meta = "{\"task\":\"s-1786-3f/t3\",\"exit_code\":0}",
     } };
     const line = try encodeEventLine(alloc, done, 7);
     defer alloc.free(line);
-    // A flat line like every other kind, with the two structured facts beside
-    // the text a reader (or a front end) would otherwise have to parse out of it.
     try std.testing.expect(std.mem.startsWith(
         u8,
         line,
-        "{\"seq\":7,\"kind\":\"task_finished\",\"task\":\"s-1786-3f/t3\",\"exit_code\":0,\"text\":\"",
+        "{\"seq\":7,\"kind\":\"note\",\"source\":\"task\",\"meta\":",
     ));
     const parsed = try parseEventLine(alloc, line);
     defer parsed.deinit();
     try expectEventsEqual(&.{done}, &.{try toEvent(parsed.arena.allocator(), parsed.value)});
 
-    // A non-zero code is the same fact, not an error to read.
-    const failed: Event = .{ .task_finished = .{ .task = "s-1/t1", .exit_code = 137, .text = "killed" } };
-    const failed_line = try encodeEventLine(alloc, failed, 1);
-    defer alloc.free(failed_line);
+    // A depositor with nothing structured to say writes no `meta` column, and
+    // the absent column reads back as the empty string it was.
+    const bare: Event = .{ .note = .{ .source = "driver", .text = "the build is green" } };
+    const bare_line = try encodeEventLine(alloc, bare, 1);
+    defer alloc.free(bare_line);
     try std.testing.expectEqualStrings(
-        "{\"seq\":1,\"kind\":\"task_finished\",\"task\":\"s-1/t1\",\"exit_code\":137,\"text\":\"killed\"}\n",
-        failed_line,
+        "{\"seq\":1,\"kind\":\"note\",\"source\":\"driver\",\"text\":\"the build is green\"}\n",
+        bare_line,
     );
+    const bare_parsed = try parseEventLine(alloc, bare_line);
+    defer bare_parsed.deinit();
+    try expectEventsEqual(&.{bare}, &.{try toEvent(bare_parsed.arena.allocator(), bare_parsed.value)});
 
-    // A line missing either structured field is corruption, never a default:
-    // "which task" and "what happened to it" are not derivable from the text.
+    // Who deposited it and what the model reads are both required: neither is
+    // derivable from the other.
+    for ([_][]const u8{
+        "{\"seq\":1,\"kind\":\"note\",\"text\":\"x\"}",
+        "{\"seq\":1,\"kind\":\"note\",\"source\":\"task\"}",
+    }) |bad| {
+        const p = try parseEventLine(alloc, bad);
+        defer p.deinit();
+        try std.testing.expectError(error.CorruptLedger, toEvent(p.arena.allocator(), p.value));
+    }
+}
+
+test "the two kinds note replaced read back as notes, structured columns and all" {
+    const alloc = std.testing.allocator;
+
+    const old_task = "{\"seq\":5,\"kind\":\"task_finished\",\"task\":\"s-1/t3\",\"exit_code\":137,\"text\":\"killed\"}";
+    const task_parsed = try parseEventLine(alloc, old_task);
+    defer task_parsed.deinit();
+    try expectEventsEqual(&.{.{ .note = .{
+        .source = note_source_task,
+        .text = "killed",
+        .meta = "{\"task\":\"s-1/t3\",\"exit_code\":137}",
+    } }}, &.{try toEvent(task_parsed.arena.allocator(), task_parsed.value)});
+
+    const old_note = "{\"seq\":6,\"kind\":\"capability_note\",\"id\":\"demo\",\"version\":\"v-aaaa\",\"text\":\"n\"}";
+    const note_parsed = try parseEventLine(alloc, old_note);
+    defer note_parsed.deinit();
+    try expectEventsEqual(&.{.{ .note = .{
+        .source = note_source_ext,
+        .text = "n",
+        .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}",
+    } }}, &.{try toEvent(note_parsed.arena.allocator(), note_parsed.value)});
+
+    // A legacy line missing one of its structured columns is still corruption:
+    // translation does not invent what the writer never wrote.
     for ([_][]const u8{
         "{\"seq\":1,\"kind\":\"task_finished\",\"exit_code\":0,\"text\":\"x\"}",
         "{\"seq\":1,\"kind\":\"task_finished\",\"task\":\"s/t1\",\"text\":\"x\"}",
-        "{\"seq\":1,\"kind\":\"task_finished\",\"task\":\"s/t1\",\"exit_code\":0}",
+        "{\"seq\":1,\"kind\":\"capability_note\",\"version\":\"v-a\",\"text\":\"x\"}",
     }) |bad| {
         const p = try parseEventLine(alloc, bad);
         defer p.deinit();
@@ -2647,16 +2676,16 @@ test "a task report deposited into the inbox is applied exactly once" {
     defer tmp.cleanup();
     const spath = "s.jsonl";
 
-    const done: Event = .{ .task_finished = .{
-        .task = "s/t3",
-        .exit_code = 0,
+    const done: Event = .{ .note = .{
+        .source = note_source_task,
         .text = "[background task s/t3 finished] echo hi · exit 0 · 0.1s",
+        .meta = "{\"task\":\"s/t3\",\"exit_code\":0}",
     } };
     var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
     defer l.deinit();
     // The supervisor's delivery name is DETERMINISTIC (`task-<sid>-t<N>`), so a
     // redelivery is the same name and the origin column alone makes applying it
-    // twice impossible. There is no content dedup arm for this kind.
+    // twice impossible. No kind has a content dedup arm.
     try depositEvent(alloc, io, tmp.dir, spath, "task-s-t3", done);
     try drainInbox(alloc, io, &l, tmp.dir, spath);
     try depositEvent(alloc, io, tmp.dir, spath, "task-s-t3", done);
@@ -2665,7 +2694,7 @@ test "a task report deposited into the inbox is applied exactly once" {
     try expectEventsEqual(&.{done}, l.view());
 
     // A DIFFERENT task under a different name is a different fact and lands.
-    const second: Event = .{ .task_finished = .{ .task = "s/t4", .exit_code = 1, .text = "other" } };
+    const second: Event = .{ .note = .{ .source = note_source_task, .text = "other", .meta = "{\"task\":\"s/t4\",\"exit_code\":1}" } };
     try depositEvent(alloc, io, tmp.dir, spath, "task-s-t4", second);
     try drainInbox(alloc, io, &l, tmp.dir, spath);
     try std.testing.expectEqual(@as(usize, 2), l.len());
@@ -2742,8 +2771,6 @@ test "durable create then open replays a block-identical ledger with monotonic s
     try std.testing.expectEqual(@as(usize, sample_event_count), reopened.len());
     try std.testing.expectEqualStrings("s-test", reopened.header().?.session);
     try std.testing.expectEqualStrings("ext:web.search/web_search", reopened.header().?.composition.native_tools[0]);
-    try std.testing.expect(reopened.containsNote("demo", "v-aaaa"));
-    try std.testing.expect(!reopened.containsNote("demo", "v-bbbb"));
     try std.testing.expect(std.mem.startsWith(u8, reopened.view()[1].assistant.reasoning, "[{\"type\":\"thinking\""));
 
     // The persisted seqs are strictly 1..N (proven by replay's own seq check).
@@ -2874,7 +2901,7 @@ test "siblingPath names <stem><suffix> next to the session file" {
     try std.testing.expectEqualStrings("s-2.cancel", b);
 }
 
-test "inbox: deposits drain in name order, dedupe notes, and never touch the main file" {
+test "inbox: deposits drain in name order and never touch the main file" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2885,7 +2912,7 @@ test "inbox: deposits drain in name order, dedupe notes, and never touch the mai
 
     // Deposits may arrive out of directory iteration order. Filename order is
     // FIFO, and adjacent user proposals become one turn before the note.
-    try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa", .{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "n" } });
+    try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa", .{ .note = .{ .source = note_source_ext, .text = "n", .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}" } });
     try depositEvent(alloc, io, tmp.dir, spath, "msg-0002", .{ .user_text = .{
         .text = "second",
         .images = &.{.{ .media_type = "image/png", .data = "two" }},
@@ -2901,11 +2928,12 @@ test "inbox: deposits drain in name order, dedupe notes, and never touch the mai
     try std.testing.expectEqualStrings("first\n\nsecond", l.view()[0].user_text.text);
     try std.testing.expectEqualStrings("image/jpeg", l.view()[0].user_text.images[0].media_type);
     try std.testing.expectEqualStrings("image/png", l.view()[0].user_text.images[1].media_type);
-    try std.testing.expect(l.view()[1] == .capability_note);
+    try std.testing.expect(l.view()[1] == .note);
 
-    // Draining an empty inbox adds nothing; a re-deposited note is skipped.
+    // Draining an empty inbox adds nothing; a redeposit under the same delivery
+    // name is the same fact and is skipped.
     try drainInbox(alloc, io, &l, tmp.dir, spath);
-    try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa", .{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "n" } });
+    try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa", .{ .note = .{ .source = note_source_ext, .text = "n", .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}" } });
     try drainInbox(alloc, io, &l, tmp.dir, spath);
     try std.testing.expectEqual(@as(usize, 2), l.len());
 
@@ -2918,7 +2946,7 @@ test "inbox: deposits drain in name order, dedupe notes, and never touch the mai
     try std.testing.expectEqualStrings("first\n\nsecond", reopened.view()[0].user_text.text);
     try std.testing.expect(reopened.containsOrigin("msg-0001.json"));
     try std.testing.expect(reopened.containsOrigin("msg-0002.json"));
-    try std.testing.expect(reopened.containsNote("demo", "v-aaaa"));
+    try std.testing.expect(reopened.containsOrigin("note-demo-v-aaaa.json"));
 }
 
 test "inbox application is exactly-once across a crash between append and delete" {

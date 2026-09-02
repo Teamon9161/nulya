@@ -56,6 +56,7 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
         "demo",           "task run",   "task list",    "wait",       "retarget",
         "--running",      "journal append", "journal read", "remote check",
         "remote ls",      "remote serve",   "--workspace",  "remote:ssh:<dest>",
+        "session note",   "--source",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, help.stdout, needle) != null) catch |err| {
             std.debug.print("`nulya help` never mentions '{s}'\n", .{needle});
@@ -67,7 +68,7 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // budget grows only when a capability cannot be inferred from an existing
     // line and needs one of its own; a flag on an existing verb belongs on that
     // verb's line instead of costing a new one.
-    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 66);
+    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 68);
 
     // The two flag spellings a terminal user reaches for reach the same text.
     for ([_][]const u8{ "--help", "-h" }) |flag| {

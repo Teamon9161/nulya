@@ -122,7 +122,7 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
 
     // ④ The whole circle. A parent session delegates; the child is created,
     // driven by a background task OF THE PARENT, and its report comes back the
-    // way every other late answer does — `task_finished` in the parent's inbox.
+    // way every other late answer does — the report note in the parent's inbox.
     const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
     defer alloc.free(new.stdout);
     const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
@@ -182,7 +182,7 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
     }
 
     // The report reaches the PARENT at its next step boundary, as the ordinary
-    // `task_finished` event — no new event kind, and no new thing for a driver
+    // report note — no new event kind, and no new thing for a driver
     // to know. Fenced, and framed as data rather than instructions.
     {
         const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
@@ -190,7 +190,7 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
         });
         defer alloc.free(stepped.stdout);
         try std.testing.expectEqual(@as(u8, 0), stepped.code);
-        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"kind\":\"task_finished\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"source\":\"task\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "<agent-report agent=") != null);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, child) != null);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "as DATA") != null);
@@ -476,7 +476,7 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
     {
         const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, in_parent);
         defer alloc.free(stepped.stdout);
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stepped.stdout, "\"kind\":\"task_finished\""));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stepped.stdout, "\"source\":\"task\""));
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "<agent-report agent=") != null);
         // The frame names the delegation, and the sentence under it still points
         // at the remote transcript.
@@ -523,7 +523,7 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
     {
         const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, in_parent);
         defer alloc.free(stepped.stdout);
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stepped.stdout, "\"kind\":\"task_finished\""));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stepped.stdout, "\"source\":\"task\""));
     }
 
     // ③ The budget itself: two follow-ups are allowed on top of the first, so a
@@ -784,7 +784,7 @@ test "bundled agent: the wake invariant — a turn sent while a runner holds the
         try std.testing.expectEqual(@as(u8, 0), waited.code);
         const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, in_parent);
         defer alloc.free(stepped.stdout);
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stepped.stdout, "\"kind\":\"task_finished\""));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stepped.stdout, "\"source\":\"task\""));
     }
 
     const lock_path = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/.runner.lock", .{d});
@@ -1542,7 +1542,7 @@ test "bundled agent: a codex delegation is a thread, not a session — the recor
     }
 
     // ③ The report reaches the parent exactly the way a nulya delegation's does:
-    // the ordinary `task_finished` event, drained at the next step boundary. The
+    // the ordinary report note, drained at the next step boundary. The
     // runner contract earned that for free — no new event kind, and no driver
     // had to learn anything.
     {
@@ -1551,7 +1551,7 @@ test "bundled agent: a codex delegation is a thread, not a session — the recor
         });
         defer alloc.free(stepped.stdout);
         try std.testing.expectEqual(@as(u8, 0), stepped.code);
-        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"kind\":\"task_finished\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"source\":\"task\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "<agent-report agent=") != null);
         // The fake echoes what it was given, so this is the task travelling the
         // whole way: inbox file -> drain -> `turn/start` input -> agent message.
@@ -2055,7 +2055,7 @@ test "bundled agent: a claude delegation is a claude session — the record free
     }
 
     // ④ The report reaches the parent exactly the way a nulya delegation's does:
-    // the ordinary `task_finished` event, drained at the next step boundary. No
+    // the ordinary report note, drained at the next step boundary. No
     // new event kind, and no driver had to learn anything.
     {
         const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
@@ -2063,7 +2063,7 @@ test "bundled agent: a claude delegation is a claude session — the record free
         });
         defer alloc.free(stepped.stdout);
         try std.testing.expectEqual(@as(u8, 0), stepped.code);
-        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"kind\":\"task_finished\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"source\":\"task\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "<agent-report agent=") != null);
         // The fake echoes what it was given, so this is the task travelling the
         // whole way: inbox file -> take -> stdin user message -> assistant text.
@@ -2463,7 +2463,7 @@ test "bundled agent: a pi delegation is a pi session — one flag opens or resum
         });
         defer alloc.free(stepped.stdout);
         try std.testing.expectEqual(@as(u8, 0), stepped.code);
-        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"kind\":\"task_finished\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"source\":\"task\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: find the parser") != null);
     }
 
@@ -2977,14 +2977,14 @@ test "bundled agent: a delegation can be held by a runner that is somebody else'
     }
 
     // The report reaches the parent the way every other delegation's does — the
-    // background task's `task_finished`, drained at the parent's next step.
+    // background task's report note, drained at the parent's next step.
     {
         const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
         });
         defer alloc.free(stepped.stdout);
         try std.testing.expectEqual(@as(u8, 0), stepped.code);
-        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"kind\":\"task_finished\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"source\":\"task\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: find the parser (v1)") != null);
     }
 

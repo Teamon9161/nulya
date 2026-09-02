@@ -81,7 +81,7 @@ pub const tasks_subdir = "tasks";
 ///                     than `shell` — which is how a session whose workspace
 ///                     lives elsewhere gets tested: whose files does `read` read.
 ///   background:       start ONE background command, then end the turn — saying
-///                     `background done` once a `task_finished` turn is in the
+///                     `background done` once a note turn is in the
 ///                     transcript and `waiting` while it is not, so a test can
 ///                     tell whether the model actually READ the report.
 pub const ScriptedProvider = struct {
@@ -321,7 +321,7 @@ fn hasUserTextContaining(turns: []const prompt.Turn, needle: []const u8) bool {
 
 fn hasTaskReport(turns: []const prompt.Turn) bool {
     for (turns) |turn| {
-        if (turn == .task_finished) return true;
+        if (turn == .note) return true;
     }
     return false;
 }

@@ -335,7 +335,7 @@ Store and scope:
   cannot shadow a version you pushed. A background task (`shell` with
   `background: true`, or `nulya task run`) runs over there too: its supervisor,
   its log and its status live in that workspace, so it keeps running when the
-  channel closes, and its report still arrives here as the same `task_finished`
+  channel closes, and its report still arrives here as the same note
   turn a local one produces — collected by whichever `nulya task` verb or step
   next asks that machine. `nulya task list|status|wait|kill` work on it
   unchanged; a task whose machine will not answer reads `unreachable`, which is

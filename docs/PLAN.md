@@ -41,7 +41,7 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 
 ### M1 · Durable ledger（§3.1）✅ 已落地 → DESIGN §3.4
 - 目标：一 session 一个 JSONL 文件；`resume` = 重读文件；CLI 子进程可投递 note。
-- 已做：事件加 `seq`；文件格式 + header（冻结 composition）；`Ledger.createDurable/openDurable/append` 落盘；`session.prepareStep` 的每步扫盘对账改为排干 CLI 投进 `<id>.inbox` 的 `capability_note`；crash 后 `completeInterruptedToolBatch` 从文件恢复。
+- 已做：事件加 `seq`；文件格式 + header（冻结 composition）；`Ledger.createDurable/openDurable/append` 落盘；`session.prepareStep` 的每步扫盘对账改为排干 CLI 投进 `<id>.inbox` 的能力宣告 note；crash 后 `completeInterruptedToolBatch` 从文件恢复。
 - 验收（`tests/e2e.zig` 三例全绿）：进程 A 跑两步退出、进程 B `resume` 后 PromptIR 与 A 逐块相等；独立 CLI `ext activate` 投的 note 下一步被读到；磁盘残尾 assistant-with-calls 在 resume 时被修复。
 
 ### M2 · `nulya session *` + 脚本 extension（§3.2、§3.3）
@@ -98,7 +98,7 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 ✅ **已实现，现状见 [DESIGN §3.4](DESIGN.md)。** 落地形态与原计划一致：`.nulya/sessions/<id>.jsonl`，header 冻结 composition（active 版本 + native tool 选择）+ 每行 `{"seq":n,…}` 事件；`Ledger.createDurable/openDurable/append`，内存 `init` 版保留给测试；`prompt.currentGeneration()` 删除（generation == 文件）；usage journal 仍独立。outcome 是第二条 journal 而不是事件（M5a → DESIGN §3.3）。
 
 **两处实测定的决策（已定，记进 DESIGN §3.4）：**
-- **并发 append = 单写者 + inbox 目录**（不是 O_APPEND）。session 文件只有 session 进程一个写者；任何其他进程的事件（CLI 的 `capability_note`、driver 的 `session append`）投进 `<id>.inbox/`，session 在 step 边界排干——Windows 上无需文件锁，且 batch 不变量天然成立。
+- **并发 append = 单写者 + inbox 目录**（不是 O_APPEND）。session 文件只有 session 进程一个写者；任何其他进程的事件（CLI 的能力宣告 note、driver 的 `session append` 与 `session note`）投进 `<id>.inbox/`，session 在 step 边界排干——Windows 上无需文件锁，且 batch 不变量天然成立。
 - **`NULYA_SESSION` = session 文件相对 workspace 的路径**；CLI 子进程 cwd 就是 workspace，据此定位文件与 inbox。
 
 fork / compaction（新文件 + `parent` 指针，前端沿 parent 链呈现连续对话）仍未实现，见 §3.4。
@@ -341,13 +341,13 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 [agents-and-review.md](agents-and-review.md) 的审阅门设计保留其**能力模型**（read_only 硬天花板、ToolPolicy allow/deny、max_turns、结论以 fenced data 进父 ledger），但实现方式按 §3.2：reviewer = `session new --with reviewer@<v> [--pin …]` 的一个 read-only session，由人或 evolution 脚本在 **promote-to-native**（= 写一条 pin，§0.1 #6）这个门上调用；`policy.hook` 档位 `off / auto / human_approval / ai_reviewer` 决定是否调用。默认 `auto`（不调 reviewer）。不进 kernel。
 
-### 3.13 后台 shell：supervisor → inbox → `task_finished` `[内核已落地（B1–B4，DESIGN §3.1/§6.1/§8/§11/§14）；只剩 B5 = TUI 的任务面，tui.md T29]`
+### 3.13 后台 shell：supervisor → inbox → 一条 `note` `[内核已落地（B1–B4，DESIGN §3.1/§6.1/§8/§11/§14）；只剩 B5 = TUI 的任务面，tui.md T29]`
 
 base-tools.md §4 当年留下的 "later hardening：`run_in_background`"。执行契约在 [goals/background.md](goals/background.md)（内核事实 / B1–B5 / 已定决策 D1–D10），这里只记分界：
 
-- **内核只长两块 substrate**：① `shell {background:true}` 经 `Environment.startShellTask` 起一个**活得过 step 进程**的 supervisor（`NULYA_EXE task supervise`，外壳代码，用现成的 `Tree` / `emit` / `depositEvent`），调用立刻返回回执；② 第五种 ledger 事件 **`task_finished {task, exit_code, text}`**——supervisor 结束时投进 session 的 inbox，step 边界排干、投影成 user-role 文本。与 `capability_note` 同 genre（跨进程的事实），**不是** `tool_results`（那个 call 已经有结果；batch 不变量与 wire 都不允许迟到的 tool_result），也不是 `user_text` + sentinel（ledger 不说谎）。
+- **内核只长两块 substrate**：① `shell {background:true}` 经 `Environment.startShellTask` 起一个**活得过 step 进程**的 supervisor（`NULYA_EXE task supervise`，外壳代码，用现成的 `Tree` / `emit` / `depositEvent`），调用立刻返回回执；② 一条 **`note{source:"task", meta:{task, exit_code}}`**——supervisor 结束时投进 session 的 inbox，step 边界排干、投影成 user-role 文本。与能力宣告同一种事件（跨进程到达的机器事实，DESIGN §3.1），**不是** `tool_results`（那个 call 已经有结果；batch 不变量与 wire 都不允许迟到的 tool_result），也不是 `user_text` + sentinel（ledger 不说谎）。
 - **不进内核的**：何时再 step（TUI 的判据是 "driver + idle + `<id>.inbox/` 非空"；`goal.*` 用 `task wait --any`）· fork 带不带任务（`session new --parent` 不动，**compact** 把在跑的任务 `task retarget` 给子场并在 carried 文本里代码追加一行）· 退出杀不杀（不杀）· 后台的缺省 timeout（没有）· 任务注册表（status.json 是真相，`task list` 只是投影）· `--stream` 新事件（ledger 行够了）。
-- **注入只加卫生不加边界**：kernel prompt 一句关于 ledger 角色的事实（内核自己把机器事件投成 user role，它得说清）+ `task_finished` 模板自带分隔框 + `tool_results` 不包装；边界仍是 §3.8.1 的 gate 与 §3.8 的 sandbox。
+- **注入只加卫生不加边界**：kernel prompt 一句关于 ledger 角色的事实（内核自己把机器事件投成 user role，它得说清）+ 任务报告模板自带分隔框 + `tool_results` 不包装；边界仍是 §3.8.1 的 gate 与 §3.8 的 sandbox。
 - **分界一句话**：core 只动 `ledger` / `prompt` / 三 provider / `tools/shell` / `environment` / kernel prompt 那一句；supervisor 与 `nulya task list|status|wait|kill|run|retarget` 在 `cli/task.zig`；retarget 的调用者是 `extensions/compact`；唤醒、显示、kill UI、退出提示全在 TUI（tui.md T29）。
 
 ### 3.14 反应式扩展行为：watcher 协议 `[占位 · 等真实失效证据]`

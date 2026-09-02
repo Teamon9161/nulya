@@ -283,7 +283,7 @@ test "background:true outside a durable session teaches instead of starting anyt
     const cwd = root_real[0..try tmp.dir.realPath(io, &root_real)];
 
     // An environment with no session — a `session new`, the demo, a library
-    // caller. There is nowhere to deposit a `task_finished`, so nothing starts.
+    // caller. There is nowhere to deposit a report note, so nothing starts.
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
     const ctx: tool.ToolContext = .{ .environment = lenv.environment(), .cwd = cwd };

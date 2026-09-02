@@ -263,7 +263,7 @@ pub const TaskStart = struct {
 
 /// The durable session an environment's background tasks belong to, when it has
 /// one. Both halves are decided by the shell layer and handed down:
-/// `session_path` is the file the supervisor deposits its `task_finished` into
+/// `session_path` is the file the supervisor deposits its report note into
 /// (and whose stem names the task), `tasks_dir` is where this workspace keeps
 /// that session's tasks (`launch.sessionTasksDir`). Absent means `startShellTask`
 /// has nowhere to report to, and says so instead of guessing a session.
@@ -898,7 +898,7 @@ pub const LocalEnvironment = struct {
     /// What is started is NOT the command itself but `nulya task supervise` —
     /// the same binary, in its supervisor role: it holds the task's lease, runs
     /// the real command under a `Tree` so `nulya task kill` ends the whole
-    /// subtree, and deposits the `task_finished` event when it is over. Nothing
+    /// subtree, and deposits the report note when it is over. Nothing
     /// is waited on here.
     ///
     /// The slot is allocated with an exclusive `mkdir`: the first free `t<N>`

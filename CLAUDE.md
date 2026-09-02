@@ -35,7 +35,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 ## 现状（2026-09）
 
-**内核**：durable ledger（一文件 = 一 generation；header 冻结 composition + 模型身份 + inline prompts，其后是 `seq` JSONL；单写者由 `<id>.lock` 排他 advisory 锁强制，别的进程经 inbox 投递、写者在 step 边界排干、按 `origin` 去重做到 exactly-once）→ PromptIR 纯投影 → 一次 step（批量 tool call、串行执行、**一条** tool_results 回传、可取消、每个 call 可过 gate）。六种事件：`user_text` / `assistant` / `tool_results` / `capability_note` / `task_finished` / `model_rebind`。
+**内核**：durable ledger（一文件 = 一 generation；header 冻结 composition + 模型身份 + inline prompts，其后是 `seq` JSONL；单写者由 `<id>.lock` 排他 advisory 锁强制，别的进程经 inbox 投递、写者在 step 边界排干、按 `origin` 去重做到 exactly-once）→ PromptIR 纯投影 → 一次 step（批量 tool call、串行执行、**一条** tool_results 回传、可取消、每个 call 可过 gate）。五种事件：`user_text` / `assistant` / `tool_results` / `note`（从 step 之外到达的机器事实，`source` 开放词表）/ `model_rebind`。
 
 **工具面**：唯一 builtin 是 `shell`（前台带超时、`background:true` 起活得过 step 进程的任务）。其余能力都是 extension——内容寻址的不可变版本 + `current` 指针，`activate` 只移指针。上模型面两条路：`surface:"auto"` 随 membership 上，`surface:"manual"` 要 pin，`internal` 永不上。成员来自包级 `apply:"auto"`、config `[extensions] with`、`--with`、以及 pin 蕴含。
 
@@ -45,7 +45,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 **执行环境**：`--env local | wsl[:distro] | remote:{wsl,ssh,exec}`。`wsl` 只搬 `shell` 的命令；`remote:` 那族把整个工作区搬到别的机器——shell、extension（`ext build --target` + `ext push` 送过去）、spill、后台任务都在那边跑，报告被取回来翻成 inbox 事件。远端那个常驻进程就是 `nulya remote serve`，同一个二进制。
 
-**Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|step|events|cancel|rebind|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *` · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step --stream` 是行协议，`--gate` 是每个 tool call 的一票否决。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
+**Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|note|step|events|cancel|rebind|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *` · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step --stream` 是行协议，`--gate` 是每个 tool call 的一票否决。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
 
 **三条 journal**（append-only，持 `<file>.lock` 写、读端忽略残尾）：`tool-usage`（证据，内核零读者）· `session-outcomes`（评判，没有行 = unknown ≠ failure）· `trusted-stores`（授权，user 层）。
 
@@ -62,7 +62,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | 文件 | 职责 | 最容易写错的那条 |
 |---|---|---|
 | `main.zig` `cli.zig` | 入口与 dispatch | 一个动词族一个 `cli/<verb>.zig`；共用件在 `cli/common.zig`（stdout 只放数据，拒绝与警告一律 stderr） |
-| `ledger.zig` | 6 种事件、deep-copy 所有权、durable 文件（typed header + `seq` JSONL）、跨进程 inbox | 唯一写口是 `append`；一文件 = 一 generation = 一缓存域；单写者由 `<id>.lock` 独家强制；投递 id 就是 exactly-once 键；`.deposit.lock` + `<id>.lock` 两把一起才是 session 的 **lifetime 冻结**（`SessionLeases`）——投递、起后台任务、prune 在它们下面串行 |
+| `ledger.zig` | 5 种事件、deep-copy 所有权、durable 文件（typed header + `seq` JSONL）、跨进程 inbox | 唯一写口是 `append`；一文件 = 一 generation = 一缓存域；单写者由 `<id>.lock` 独家强制；投递 id 就是 exactly-once 键；`.deposit.lock` + `<id>.lock` 两把一起才是 session 的 **lifetime 冻结**（`SessionLeases`）——投递、起后台任务、prune 在它们下面串行 |
 | `prompt.zig` | `Ledger → PromptIR` 纯投影 | 一个事件一个 turn，turn 不拆散；`usage` / `stop_reason` / `origin` 在类型里**没有字段**，所以不可能被投影 |
 | `loop.zig` | 一次 step：freeze → collect → 串行执行 batch → 一条 tool_results | 取消与截断都要补齐整批（marker），ledger 永远处于合法状态 |
 | `session.zig` | ledger 生命周期 + step 边界（补残尾 → 消费 cancel → 排干 inbox）+ 预算 + usage 记账 | 排干在补残尾之后、模型跑之前，所以排干的事件永远不落在 tool batch 中间 |
@@ -79,7 +79,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `extension/protocol.zig` `invoke.zig` | 唯一那种 wire（stdin 参数 JSON、env、stdout 即结果、退出码即 ok） | stderr 就是失败消息，所以包必须独占它 |
 | `extension/store.zig` `roots.zig` `integrity.zig` | 版本目录 + `current` 记录 + 有序 root 搜索 | 首个 active 持有者胜；`current` 记录授 reach，`.sealed` 证明资格 |
 | `extension/build/` | 冻结 snapshot → 编译或直接冻结 → seal；跨 root 复用 | version = hash(snapshot + compiler + target)，后两项只对 compiled 非空 |
-| `extension/exec.zig` `tools.zig` `skills.zig` `notes.zig` | 执行身份解析 / tool binding / skill catalog / capability_note | 哪个文件、哪个 entry、seal 对不对，由**持有字节的那台机器**答 |
+| `extension/exec.zig` `tools.zig` `skills.zig` `notes.zig` | 执行身份解析 / tool binding / skill catalog / 能力宣告 note | 哪个文件、哪个 entry、seal 对不对，由**持有字节的那台机器**答 |
 | `skill.zig` | `SkillSetSnapshot` + 渐进披露文本 | Agent Skills 兼容（`SKILL.md` frontmatter） |
 | `journals/journal.zig` | 三条 journal 共用的文件层与时钟 | append 持锁并修残尾，读端不拿锁且忽略残尾；文件不存在 = 还没有事实 |
 | `journals/{tool_stats,outcome,trust}.zig` | 证据 / 评判 / 授权 | 都只加可选列、不升 `v`；没有行 = unknown ≠ failure |
@@ -116,7 +116,7 @@ Zig 0.16（新 `std.Io` API）。发布版加 `-Dembed-toolchain -Dzig-archive=<
 - **不加第二个 builtin tool**（`shell` 是唯一那个；`edit` 已搬进 `extensions/std`）；**不在 session 中途改 `tools[]`**；**不给 tool ledger**（需要对话的东西是 subagent，不是 tool）。
 - 新增 kernel 概念前先问一句：**这是 substrate 还是 intelligence？** 是 intelligence 就放 kernel 之上。
 - **内核只长 substrate，不长便利。** 往 `src/` 加东西前问：把它删掉，八条 physics 哪一条会失效？一条都不会 → 它不是内核。落点优先级：extension / skill（agent 自己造）> `cli.zig` / `launch.zig` 这类外壳 > kernel 模块。std 能做的不手写（`std.json` 类型化编解码、`union(enum)`）；一个字段只写不读、一个动词没有语义、一个决定在多层各做一遍、一个读者拿着写句柄——都是该删或该收的信号。
-- **欠答案的机制长成 inbox 事件**（`task_finished` 是先例），不长成 driver 要认的新盘面文件：靠某个目录里的文件形态传递"结果稍后到"，每个 driver（TUI / `drivers/goal.sh` / `goal.ps1` / 下一个）都要重学一遍同一份 folklore，跨平台就是两份实现。今天仓库里一个这种形状都没有，别造第一个——"模型提议、driver 决定"的回路，提议的落点是 ledger（args）或 inbox 事件。
+- **欠答案的机制长成 inbox 事件**（任务报告 `note{source:"task"}` 是先例），不长成 driver 要认的新盘面文件：靠某个目录里的文件形态传递"结果稍后到"，每个 driver（TUI / `drivers/goal.sh` / `goal.ps1` / 下一个）都要重学一遍同一份 folklore，跨平台就是两份实现。今天仓库里一个这种形状都没有，别造第一个——"模型提议、driver 决定"的回路，提议的落点是 ledger（args）或 inbox 事件。
 - **不做无意义的抽象。** 通常等第二个 consumer 出现再抽；但预期中的功能大概率会用到某个抽象时，可以提前做——尺子是"这个抽象有没有可信的用途"，不是机械数 consumer。
 - **测试守机制，不守细枝末节。** 测试是保障代码逻辑正确性的：测一个机制有没有生效、一条不变量有没有守住、一个边界条件对不对。不要断言无关紧要的具体数值与显然的细节（文案的措辞、界面的具体行数列宽、常量的字面值、同一机制的每一种排列组合）——这样的断言不增加正确性保障，只让每次无害改动多付一轮改测试的税。写测试前问一句：**这条断言失败时，是代码逻辑错了，还是只是某个无关紧要的细节变了？** 后者不值得写；review 时发现存量测试属于后者，删。
 - 改 `§15.1 frozen core`（见 DESIGN.md）的语义要有明确理由并同步文档；往外挂能力优先于改 kernel。

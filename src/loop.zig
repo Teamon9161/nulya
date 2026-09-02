@@ -1003,7 +1003,7 @@ test "completeInterruptedToolBatch appends unknown results for an assistant tail
     try std.testing.expect(std.mem.indexOf(u8, repaired[0].output, "state is unknown") != null);
 }
 
-test "a capability note reaches the provider as a capability_note turn" {
+test "a capability note reaches the provider as a note turn" {
     const alloc = std.testing.allocator;
 
     const NoteModel = struct {
@@ -1025,7 +1025,7 @@ test "a capability note reaches the provider as a capability_note turn" {
             _ = a;
             const self: *@This() = @ptrCast(@alignCast(ptr));
             for (request.prompt_ir.turns) |turn| switch (turn) {
-                .capability_note => |text| {
+                .note => |text| {
                     if (std.mem.indexOf(u8, text, "ext run") != null) self.saw_note = true;
                 },
                 else => {},
@@ -1048,7 +1048,11 @@ test "a capability note reaches the provider as a capability_note turn" {
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
     try l.append(.{ .user_text = .{ .text = "go" } });
-    try l.append(.{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "New capabilities from extension `demo` version `v-aaaa` are now available:\n\n- greet — Say hello.\n\nInvoke through the shell tool:\nnulya ext run demo <tool> '<json-args>'" } });
+    try l.append(.{ .note = .{
+        .source = ledger.note_source_ext,
+        .text = "New capabilities from extension `demo` version `v-aaaa` are now available:\n\n- greet — Say hello.\n\nInvoke through the shell tool:\nnulya ext run demo <tool> '<json-args>'",
+        .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}",
+    } });
 
     var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
     defer lenv.deinit();

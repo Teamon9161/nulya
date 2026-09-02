@@ -46,13 +46,9 @@ pub const Turn = union(enum) {
     assistant: Assistant,
     /// One batch = one turn; the provider decides how many wire messages that is.
     tool_results: []const ToolResult,
-    /// The model-facing announcement text only: a note's `id` / `version` are
-    /// reconciliation bookkeeping, never model-visible.
-    capability_note: []const u8,
-    /// The report a finished background task left behind — its text only. The
-    /// task's full name and exit code are structured facts for readers; what the
-    /// model needs is already inside the text the supervisor rendered.
-    task_finished: []const u8,
+    /// A machine fact from outside the step — its text only. A note's `source`
+    /// and `meta` are bookkeeping for readers, never model-visible.
+    note: []const u8,
 
     /// A user turn's model-visible content. Every field of `ledger.UserText` is
     /// model-visible, so the images are the LEDGER's slice borrowed whole —
@@ -180,8 +176,7 @@ pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const System
                 for (results, projected) |src, *dst| dst.* = .{ .call_id = src.call_id, .ok = src.ok, .output = src.output };
                 turn.* = .{ .tool_results = projected };
             },
-            .capability_note => |note| turn.* = .{ .capability_note = note.text },
-            .task_finished => |t| turn.* = .{ .task_finished = t.text },
+            .note => |n| turn.* = .{ .note = n.text },
             .model_rebind => unreachable, // skipped above
         }
         turn_at += 1;
@@ -217,8 +212,7 @@ fn turnsEqual(a: Turn, b: Turn) bool {
             }
             break :blk true;
         },
-        .capability_note => |text| std.mem.eql(u8, text, b.capability_note),
-        .task_finished => |text| std.mem.eql(u8, text, b.task_finished),
+        .note => |text| std.mem.eql(u8, text, b.note),
         .assistant => |as| blk: {
             const other = b.assistant;
             if (!std.mem.eql(u8, as.reasoning, other.reasoning)) break :blk false;
@@ -453,27 +447,7 @@ test "a user turn's images are projected, and a turn carrying them still extends
     try std.testing.expect(!isStablePrefix(r.turns, after.turns));
 }
 
-test "a capability_note appends a capability_note turn without breaking the prefix or generation" {
-    const alloc = std.testing.allocator;
-    var l = ledger.Ledger.init(alloc);
-    defer l.deinit();
-
-    try l.append(.{ .user_text = .{ .text = "hi" } });
-    const before = try project(alloc, l.view());
-    defer before.deinit(alloc);
-
-    try l.append(.{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "New capability available: `greet`." } });
-    const after = try project(alloc, l.view());
-    defer after.deinit(alloc);
-
-    // Prefix-stable: the note only extends the projection.
-    try std.testing.expect(isStablePrefix(before.turns, after.turns));
-    try std.testing.expectEqual(before.turns.len + 1, after.turns.len);
-    // Only the announcement text is model-visible; id/version stay behind.
-    try std.testing.expectEqualStrings("New capability available: `greet`.", after.turns[after.turns.len - 1].capability_note);
-}
-
-test "a finished task appends one turn carrying only its text" {
+test "a note appends one turn carrying only its text, whatever its source" {
     const alloc = std.testing.allocator;
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
@@ -483,16 +457,26 @@ test "a finished task appends one turn carrying only its text" {
     defer before.deinit(alloc);
 
     const report = "[background task s-1/t3 finished] zig build test · exit 0 · 41.8s\n--- output tail ---\nok\n--- end of output ---";
-    try l.append(.{ .task_finished = .{ .task = "s-1/t3", .exit_code = 0, .text = report } });
+    try l.append(.{ .note = .{
+        .source = ledger.note_source_task,
+        .text = report,
+        .meta = "{\"task\":\"s-1/t3\",\"exit_code\":0}",
+    } });
+    try l.append(.{ .note = .{
+        .source = ledger.note_source_ext,
+        .text = "New capability available: `greet`.",
+        .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}",
+    } });
     const after = try project(alloc, l.view());
     defer after.deinit(alloc);
 
-    // Just another appended turn: the cached prefix is untouched.
+    // Just two more appended turns: the cached prefix is untouched.
     try std.testing.expect(isStablePrefix(before.turns, after.turns));
-    try std.testing.expectEqual(before.turns.len + 1, after.turns.len);
-    // The name and the exit code are facts for readers: `Turn.task_finished`
-    // has nowhere to put them (they are already inside the rendered text).
-    try std.testing.expectEqualStrings(report, after.turns[after.turns.len - 1].task_finished);
+    try std.testing.expectEqual(before.turns.len + 2, after.turns.len);
+    // `source` and `meta` have no field in `Turn`, so the two sources project
+    // into the same shape and only the text crosses.
+    try std.testing.expectEqualStrings(report, after.turns[after.turns.len - 2].note);
+    try std.testing.expectEqualStrings("New capability available: `greet`.", after.turns[after.turns.len - 1].note);
 }
 
 test "reopening a durable ledger projects a turn-identical prefix" {
@@ -529,6 +513,58 @@ test "reopening a durable ledger projects a turn-identical prefix" {
     const after = try project(alloc, reopened.view());
     defer after.deinit(alloc);
     try std.testing.expect(isStablePrefix(before.turns, after.turns));
+}
+
+test "a session written before note existed resumes and projects the identical turns" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Two files, same conversation: one in the kinds a build before the merge
+    // wrote, one in the kind every build writes now.
+    {
+        var l = try ledger.createDurable(alloc, io, tmp.dir, "new.jsonl", .{ .session = "s" });
+        defer l.deinit();
+        try l.append(.{ .user_text = .{ .text = "build it" } });
+        try l.append(.{ .note = .{
+            .source = ledger.note_source_ext,
+            .text = "New capabilities from extension `demo`",
+            .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}",
+        } });
+        try l.append(.{ .note = .{
+            .source = ledger.note_source_task,
+            .text = "[background task s/t1 finished] zig build test · exit 0",
+            .meta = "{\"task\":\"s/t1\",\"exit_code\":0}",
+        } });
+    }
+    {
+        // The header is the current writer's; only the EVENT lines are old.
+        var l = try ledger.createDurable(alloc, io, tmp.dir, "old.jsonl", .{ .session = "s" });
+        l.deinit();
+        var f = try tmp.dir.openFile(io, "old.jsonl", .{ .mode = .read_write });
+        defer f.close(io);
+        const lines =
+            \\{"seq":1,"kind":"user_text","text":"build it"}
+            \\{"seq":2,"kind":"capability_note","id":"demo","version":"v-aaaa","text":"New capabilities from extension `demo`"}
+            \\{"seq":3,"kind":"task_finished","task":"s/t1","exit_code":0,"text":"[background task s/t1 finished] zig build test · exit 0"}
+            \\
+        ;
+        try f.writePositionalAll(io, lines, (try f.stat(io)).size);
+    }
+
+    var fresh = try ledger.openDurable(alloc, io, tmp.dir, "new.jsonl");
+    defer fresh.deinit();
+    var old = try ledger.openDurable(alloc, io, tmp.dir, "old.jsonl");
+    defer old.deinit();
+
+    const a = try project(alloc, fresh.view());
+    defer a.deinit(alloc);
+    const b = try project(alloc, old.view());
+    defer b.deinit(alloc);
+    // Turn for turn, both ways: neither is merely a prefix of the other.
+    try std.testing.expect(isStablePrefix(a.turns, b.turns));
+    try std.testing.expect(isStablePrefix(b.turns, a.turns));
 }
 
 test "PromptIR carries immutable system blocks separately from ledger turns" {

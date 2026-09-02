@@ -41,7 +41,7 @@ sort .nulya/tool-usage.jsonl | uniq -c | sort -rn | head -20
 cat .nulya/session-outcomes.jsonl 2>/dev/null
 
 # Capability notes: what got built mid-conversation.
-grep -ho '"kind":"capability_note","id":"[^"]*","version":"[^"]*"' .nulya/sessions/*.jsonl | sort -u
+grep -ho '"source":"ext","meta":"[^}]*}' .nulya/sessions/*.jsonl | sort -u
 
 # What exists but is never invoked.
 nulya ext list

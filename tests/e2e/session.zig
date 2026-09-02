@@ -378,7 +378,72 @@ test "session cli: append refuses a message that is not valid UTF-8 and records 
     try std.testing.expectEqual(@as(usize, 0), delivered);
 }
 
-test "durable ledger: a capability_note appended by a separate CLI process is read on the next step" {
+test "session cli: note deposits a machine fact rather than a user turn, and refuses a meta that is not one JSON value" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = std.mem.trim(u8, new.stdout, " \r\n");
+
+    // Not one JSON value: refused, and nothing is deposited — a reader of that
+    // column must never be handed whatever the caller typed.
+    const bad = try runCliStderr(alloc, io, ws, &.{
+        exe_abs,          "session", "note", id, "--source", "watcher",
+        "--meta",         "{oops",   "the tests went red",
+    }, &.{});
+    defer alloc.free(bad);
+    try std.testing.expect(std.mem.indexOf(u8, bad, "one JSON value") != null);
+    try std.testing.expect((try inboxCount(io, ws, alloc, id)) == 0);
+
+    const posted = try runCli(alloc, io, ws, &.{
+        exe_abs,  "session",                    "note", id, "--source", "watcher",
+        "--meta", "{\"file\":\"build.zig\"}", "the tests went red",
+    });
+    defer alloc.free(posted.stdout);
+    try std.testing.expectEqual(@as(u8, 0), posted.code);
+    try std.testing.expectEqualStrings("", posted.stdout);
+
+    // It enters the ledger at the next step boundary, as a note — not as
+    // something a person said.
+    const stepped = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "finish");
+    defer alloc.free(stepped.stdout);
+    try std.testing.expectEqual(@as(u8, 0), stepped.code);
+
+    const file = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(file);
+    try std.testing.expect(std.mem.indexOf(u8, file, "\"kind\":\"note\",\"source\":\"watcher\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, file, "build.zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, file, "\"kind\":\"user_text\"") == null);
+}
+
+/// How many deposits are waiting in a session's inbox (the directory may not
+/// exist, which is zero).
+fn inboxCount(io: std.Io, ws: std.Io.Dir, alloc: std.mem.Allocator, id: []const u8) !usize {
+    const inbox = try std.fmt.allocPrint(alloc, "{s}{c}{s}.inbox", .{ sessions_dir_rel, std.fs.path.sep, id });
+    defer alloc.free(inbox);
+    var dir = ws.openDir(io, inbox, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return err,
+    };
+    defer dir.close(io);
+    var it = dir.iterate();
+    var n: usize = 0;
+    while (try it.next(io)) |_| n += 1;
+    return n;
+}
+
+test "durable ledger: a capability note deposited by a separate CLI process is read on the next step" {
     const alloc = std.testing.allocator;
     const io = std.testing.io; // EndTurnModel issues no tool calls, so no async shell.
 
@@ -424,7 +489,7 @@ test "durable ledger: a capability_note appended by a separate CLI process is re
         try sess.appendUser("please make a greet tool");
 
         // No note yet.
-        try std.testing.expect(!sess.l.containsNote("demo", version));
+        try std.testing.expect(!hasExtNote(sess.l.view(), version));
 
         // A separate CLI process activates the extension with NULYA_SESSION set. It
         // deposits a capability note into the session inbox (never touching the
@@ -438,13 +503,13 @@ test "durable ledger: a capability_note appended by a separate CLI process is re
         // The next step drains the inbox at its boundary: the note is now in the
         // ledger and in the projected prompt, before the assistant turn.
         _ = try sess.step();
-        try std.testing.expect(sess.l.containsNote("demo", version));
+        try std.testing.expect(hasExtNote(sess.l.view(), version));
 
         const ir = try prompt.projectWithSystem(alloc, sess.composition.system_prompts.blocks, sess.l.view());
         defer ir.deinit(alloc);
         var saw_note_turn = false;
         for (ir.turns) |turn| switch (turn) {
-            .capability_note => |text| {
+            .note => |text| {
                 if (std.mem.indexOf(u8, text, "greet") != null) saw_note_turn = true;
             },
             else => {},
@@ -455,7 +520,21 @@ test "durable ledger: a capability_note appended by a separate CLI process is re
     // And it is durable: a fresh process resuming the session still sees the note.
     var reopened = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = session_file_rel });
     defer reopened.deinit();
-    try std.testing.expect(reopened.l.containsNote("demo", version));
+    try std.testing.expect(hasExtNote(reopened.l.view(), version));
+}
+
+/// Did this ledger announce a version of `demo`? The note's `meta` column is the
+/// structured half a reader is meant to use, so this asks it rather than the
+/// announcement text.
+fn hasExtNote(events: []const ledger.Event, version: []const u8) bool {
+    for (events) |event| switch (event) {
+        .note => |n| {
+            if (!std.mem.eql(u8, n.source, ledger.note_source_ext)) continue;
+            if (std.mem.indexOf(u8, n.meta, version) != null) return true;
+        },
+        else => {},
+    };
+    return false;
 }
 
 // ── M2a: `nulya session *` CLI ──────────────────────────────────

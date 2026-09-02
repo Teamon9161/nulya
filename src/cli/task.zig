@@ -3,7 +3,7 @@
 //! a person all read it with.
 //!
 //! The kernel's whole share of background work is `Environment.startShellTask`
-//! (which spawns `nulya task supervise`) and the `task_finished` ledger event
+//! (which spawns `nulya task supervise`) and the report note ledger event
 //! the supervisor deposits. Where the files live, what a task's state is called
 //! and when to give up waiting are decided here.
 //!
@@ -52,7 +52,7 @@ pub const notify_file = "notify";
 /// host, so the report waits here until a host verb fetches it.
 pub const report_file = "report.txt";
 /// The host's own note that a far task's report has already been turned into a
-/// `task_finished`. It lives on the HOST side of a remote task, next to
+/// a report note. It lives on the HOST side of a remote task, next to
 /// `notify`, because delivery is this machine's fact.
 ///
 /// Without it every poll would re-deposit: the ledger ignores the repeat (the
@@ -809,7 +809,7 @@ fn reportText(alloc: std.mem.Allocator, io: std.Io, req: ReportRequest) ![]u8 {
 
     const raw = try readLogTail(alloc, io, req.log_path);
     defer alloc.free(raw);
-    // A `task_finished` event owes the ledger the same valid UTF-8 a tool
+    // A report note owes the ledger the same valid UTF-8 a tool
     // result does, and `readLogTail` starts at an offset that can fall inside a
     // character. No note or spill: the report names the full log below.
     const clean = try emit.utf8Lossy(alloc, raw);
@@ -860,7 +860,7 @@ const DepositRequest = struct {
     text: []const u8,
 };
 
-/// Deposit the `task_finished` into the target session's inbox, then close the
+/// Deposit the report note into the target session's inbox, then close the
 /// retarget window: if `notify` changed while the report was being built, the
 /// file just written is renamed into the new target's inbox. The delivery name
 /// carries the OWNER's session id, so two sessions' tasks can never collide in
@@ -875,10 +875,15 @@ fn depositReport(alloc: std.mem.Allocator, io: std.Io, req: DepositRequest) !voi
 
     const target_path = try launch.sessionPath(alloc, target);
     defer alloc.free(target_path);
-    try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), target_path, name, .{ .task_finished = .{
+    const meta = try std.json.Stringify.valueAlloc(alloc, .{
         .task = req.full,
         .exit_code = req.exit_code,
+    }, .{});
+    defer alloc.free(meta);
+    try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), target_path, name, .{ .note = .{
+        .source = ledger.note_source_task,
         .text = req.text,
+        .meta = meta,
     } });
 
     const now_target = (try readNotify(alloc, io, req.dir)) orelse try alloc.dupe(u8, req.session_id);
@@ -910,7 +915,7 @@ fn moveDeposit(alloc: std.mem.Allocator, io: std.Io, from: []const u8, to: []con
 // the DELIVERY, because the name is what the ledger speaks and the ledger is
 // here. So every reading verb below asks that machine about the tasks it
 // started there and turns any undelivered finished report into the
-// `task_finished` the session's inbox already understands; a driver still sees
+// report note the session's inbox already understands; a driver still sees
 // only an inbox event at a step boundary.
 //
 // Delivery is done by whichever verb asks first — `task list`, `task wait`,
@@ -1351,7 +1356,7 @@ const Row = struct {
     /// a reader here cannot open.
     machine: ?[]const u8 = null,
     /// This task is finished and its result is still on the other machine —
-    /// nobody has turned it into the `task_finished` its target is owed.
+    /// nobody has turned it into the report note its target is owed.
     ///
     /// A remote task has TWO lifetimes, and `done` ends only the first: the
     /// process is over, the delivery is not. A local supervisor deposits

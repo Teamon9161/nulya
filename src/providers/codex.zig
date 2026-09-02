@@ -588,7 +588,7 @@ fn writeInput(jw: *std.json.Stringify, alloc: std.mem.Allocator, turns: []const 
     try jw.beginArray();
     for (turns) |turn| switch (turn) {
         .user_text => |u| try writeUserItem(jw, alloc, u),
-        .capability_note, .task_finished => |text| try writeMessageItem(jw, "user", "input_text", text),
+        .note => |text| try writeMessageItem(jw, "user", "input_text", text),
         .assistant => |as| {
             // The turn's `reasoning` items exactly as they came back — id,
             // summary and `encrypted_content` — placed before the output they
@@ -1045,15 +1045,15 @@ test "SSE events collect into a turn with cache-adjusted usage" {
     try std.testing.expectEqual(provider.StopReason.tool_use, turn.stop_reason);
 }
 
-test "a finished background task rides as a user input_text item" {
+test "a note rides as a user input_text item" {
     const alloc = std.testing.allocator;
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .task_finished = .{
-        .task = "s-1/t3",
-        .exit_code = 0,
+    try l.append(.{ .note = .{
+        .source = ledger.note_source_task,
         .text = "[background task s-1/t3 finished] zig build test · exit 0",
+        .meta = "{\"task\":\"s-1/t3\",\"exit_code\":0}",
     } });
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);

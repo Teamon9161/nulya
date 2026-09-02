@@ -4,7 +4,7 @@
 //! When the agent builds and activates an extension mid-conversation (via
 //! `shell` -> `nulya ext …`), the CLI runs in a subprocess and cannot touch the
 //! session's ledger — the session file has one writer. So the CLI, when
-//! `NULYA_SESSION` names the session file, deposits a `capability_note` into the
+//! `NULYA_SESSION` names the session file, deposits a `note` into the
 //! session's inbox (`ledger.depositEvent`); the session drains it at its next
 //! step boundary as a plain append. Promotion into `tools[]` still waits for
 //! the next session.
@@ -89,7 +89,13 @@ pub fn depositActiveNote(
     defer alloc.free(text);
     const name = try std.fmt.allocPrint(alloc, "note-{s}-{s}", .{ id, version });
     defer alloc.free(name);
-    try ledger.depositEvent(alloc, io, base, session_path, name, .{ .capability_note = .{ .id = id, .version = version, .text = text } });
+    const meta = try std.json.Stringify.valueAlloc(alloc, .{ .id = id, .version = version }, .{});
+    defer alloc.free(meta);
+    try ledger.depositEvent(alloc, io, base, session_path, name, .{ .note = .{
+        .source = ledger.note_source_ext,
+        .text = text,
+        .meta = meta,
+    } });
 }
 
 const test_manifest =
@@ -147,14 +153,16 @@ test "a deposited note is drained into the ledger and is idempotent" {
     try depositActiveNote(alloc, io, tmp.dir, session_rel, root, "demo", version);
     try ledger.drainInbox(alloc, io, &l, tmp.dir, session_rel);
     try std.testing.expectEqual(@as(usize, 1), l.len());
-    try std.testing.expect(l.view()[0] == .capability_note);
-    try std.testing.expect(l.containsNote("demo", version));
+    try std.testing.expect(l.view()[0] == .note);
+    try std.testing.expectEqualStrings(ledger.note_source_ext, l.view()[0].note.source);
+    try std.testing.expect(std.mem.indexOf(u8, l.view()[0].note.meta, version) != null);
 
     // Draining again with an empty inbox adds nothing.
     try ledger.drainInbox(alloc, io, &l, tmp.dir, session_rel);
     try std.testing.expectEqual(@as(usize, 1), l.len());
 
-    // A re-deposit of the same active version is skipped on drain (already present).
+    // A re-deposit of the same active version reuses the delivery name, which is
+    // the exactly-once key, so the drain applies nothing.
     try depositActiveNote(alloc, io, tmp.dir, session_rel, root, "demo", version);
     try ledger.drainInbox(alloc, io, &l, tmp.dir, session_rel);
     try std.testing.expectEqual(@as(usize, 1), l.len());
@@ -186,10 +194,10 @@ test "activating a new version deposits a new note with all tools" {
     try ledger.drainInbox(alloc, io, &l, tmp.dir, session_rel);
 
     try std.testing.expectEqual(@as(usize, 2), l.len());
-    try std.testing.expect(l.containsNote("demo", first));
-    try std.testing.expect(l.containsNote("demo", second));
-    try std.testing.expect(std.mem.indexOf(u8, l.view()[1].capability_note.text, "greet") != null);
-    try std.testing.expect(std.mem.indexOf(u8, l.view()[1].capability_note.text, "wave") != null);
+    try std.testing.expect(std.mem.indexOf(u8, l.view()[0].note.meta, first) != null);
+    try std.testing.expect(std.mem.indexOf(u8, l.view()[1].note.meta, second) != null);
+    try std.testing.expect(std.mem.indexOf(u8, l.view()[1].note.text, "greet") != null);
+    try std.testing.expect(std.mem.indexOf(u8, l.view()[1].note.text, "wave") != null);
 }
 
 test "a deposited skill-only note announces its skills" {
@@ -217,7 +225,7 @@ test "a deposited skill-only note announces its skills" {
     try ledger.drainInbox(alloc, io, &l, tmp.dir, session_rel);
 
     try std.testing.expectEqual(@as(usize, 1), l.len());
-    const text = l.view()[0].capability_note.text;
+    const text = l.view()[0].note.text;
     try std.testing.expect(std.mem.indexOf(u8, text, "Skills:") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "nulya skill load ext:finance@") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "risk-parity") != null);

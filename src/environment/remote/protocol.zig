@@ -72,7 +72,7 @@
 //! unsolicited frames (rule 1), and the far supervisor could not deposit anyway:
 //! the session file is on the host. So it leaves its report next to its log, and
 //! whichever host verb next asks (`task list`, `task wait`, a `session step`)
-//! turns it into the `task_finished` the session's inbox already understands.
+//! turns it into the report note the session's inbox already understands.
 //! What a driver sees is an inbox event, not a second kind of file to learn.
 //!
 //! ── Running an extension over there ─────────────────────────────────────────
@@ -327,7 +327,7 @@ pub fn parseEntries(arena: std.mem.Allocator, payload: []const u8) Error![]const
 /// What one `task-poll` answers about one background task over there: the two
 /// files that machine's supervisor writes, verbatim. The host owns the meaning
 /// of both — `status.json` is `cli/task.zig`'s own declaration, and the report
-/// is what becomes a `task_finished` — so nothing is re-parsed on the far side
+/// is what becomes the report note — so nothing is re-parsed on the far side
 /// and there is no second definition of either.
 ///
 /// It travels as PAYLOAD (rule 6): a report grows with the command's output.

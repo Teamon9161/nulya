@@ -332,8 +332,7 @@ pub fn flattenIR(alloc: std.mem.Allocator, ir: prompt.PromptIR) ![]u8 {
         .tool_results => |results| for (results) |r| {
             try out.writer.print("T|{s}|{}|{s}\n", .{ r.call_id, r.ok, r.output });
         },
-        .capability_note => |text| try out.writer.print("N|{s}\n", .{text}),
-        .task_finished => |text| try out.writer.print("F|{s}\n", .{text}),
+        .note => |text| try out.writer.print("N|{s}\n", .{text}),
     };
     return out.toOwnedSlice();
 }

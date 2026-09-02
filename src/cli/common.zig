@@ -213,6 +213,8 @@ pub const session_usage =
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
     \\                                                    queue a user turn for the next step boundary; --image inlines a
     \\                                                    png/jpeg ≤5 MB, if the model's catalog entry says vision = true
+    \\  nulya session note <id> --source <label> [--meta <json>] (<text> | --file <p>)
+    \\                                                    queue a machine fact instead of a user turn: --source names who saw it
     \\  nulya session step <id> [--max-steps N] [--effort E] [--stream] [--gate] [--ssh-password-stdin]
     \\                                                    run to end of turn or budget; stdout = event JSONL, --stream adds
     \\                                                    live model/tool lines, --gate asks stdin to allow each tool call

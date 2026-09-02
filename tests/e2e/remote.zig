@@ -24,7 +24,7 @@
 //! gated here — a checkout cannot shadow a pushed version, and
 //!      the refusal is one failed call, not a dead channel;
 //!  11. a background task runs on that machine and its report still arrives here
-//!      as the one thing a driver knows how to read — a `task_finished` drained
+//!      as the one thing a driver knows how to read — a report note drained
 //!      at a step boundary — delivered exactly once however often it is asked
 //!      for, killable across the channel, and honestly `unreachable` when that
 //!      machine will not answer (Phase 4).
@@ -1063,7 +1063,7 @@ test "a session whose header predates the exec-version column still steps" {
 //
 // The split under test: the command, its log and its supervisor are over there;
 // the NAME and the DELIVERY are here. What a driver sees is unchanged — a
-// `task_finished` drained at a step boundary — and that is the point.
+// report note drained at a step boundary — and that is the point.
 
 /// A budget, not a delay: every wait below returns the instant the thing it
 /// waits for happens (`e2e/background.zig`'s reasoning, same number).
@@ -1093,7 +1093,7 @@ fn farDialect(
     return if (std.mem.indexOf(u8, checked.stdout, "\"dialect\":\"powershell\"") != null) .powershell else .bash;
 }
 
-test "a remote session's background task runs over there and its report arrives here as a task_finished" {
+test "a remote session's background task runs over there and its report arrives here as a note" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1150,7 +1150,7 @@ test "a remote session's background task runs over there and its report arrives 
     defer alloc.free(deposit);
     const event = try ws.readFileAlloc(io, deposit, alloc, .unlimited);
     defer alloc.free(event);
-    try std.testing.expect(std.mem.indexOf(u8, event, "\"kind\":\"task_finished\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, event, "\"source\":\"task\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, event, launch.ScriptedProvider.background_marker) != null);
 
     // Asking again does not deliver it again — the whole reason the host records
@@ -1166,7 +1166,7 @@ test "a remote session's background task runs over there and its report arrives 
     const step2 = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "background");
     defer alloc.free(step2.stdout);
     try std.testing.expectEqual(@as(u8, 0), step2.code);
-    try std.testing.expect(std.mem.indexOf(u8, step2.stdout, "\"kind\":\"task_finished\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step2.stdout, "\"source\":\"task\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, step2.stdout, "background done") != null);
 
     // Drained, and it stays drained: one more poll must not put it back.
@@ -1225,7 +1225,7 @@ test "a step collects a far task's report even when no task verb ever asked" {
     const step2 = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "background");
     defer alloc.free(step2.stdout);
     try std.testing.expectEqual(@as(u8, 0), step2.code);
-    try std.testing.expect(std.mem.indexOf(u8, step2.stdout, "\"kind\":\"task_finished\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step2.stdout, "\"source\":\"task\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, step2.stdout, launch.ScriptedProvider.background_marker) != null);
 }
 
@@ -1341,7 +1341,7 @@ test "a report present while status still says running is not delivered — only
     try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"state\":\"running\"") != null);
 
     // The bug's whole shape: depositing on report-presence alone would have
-    // written this `task_finished` by now — with `exit_code:1`, read off the
+    // written this note by now — with `exit_code:1`, read off the
     // stale `running` status, which never carries one — rather than waiting
     // for the real exit code the far side never got to send.
     const deposit = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.inbox/task-{s}-t1.json", .{ id, id });
@@ -1700,6 +1700,6 @@ test "a step collects the reports of the tasks that report INTO it, not only the
     const step = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", reader, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "finish");
     defer alloc.free(step.stdout);
     try std.testing.expectEqual(@as(u8, 0), step.code);
-    try std.testing.expect(std.mem.indexOf(u8, step.stdout, "\"kind\":\"task_finished\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.stdout, "\"source\":\"task\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, step.stdout, "RETARGET-SURVIVOR") != null);
 }
