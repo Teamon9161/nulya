@@ -55,6 +55,7 @@ test {
     _ = @import("providers/openai.zig");
     _ = @import("providers/anthropic.zig");
     _ = @import("providers/codex.zig");
+    _ = @import("providers/scripted.zig");
     _ = @import("environment.zig");
     _ = @import("environment/tree.zig");
     _ = @import("environment/remote/mod.zig");
@@ -76,6 +77,7 @@ test {
     _ = @import("cli/session.zig");
     _ = @import("cli/session_list.zig");
     _ = @import("cli/task.zig");
+    _ = @import("cli/task_remote.zig");
     _ = @import("cli/remote.zig");
     _ = @import("cli/step_stream.zig");
     _ = @import("cli/ext.zig");

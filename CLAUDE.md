@@ -73,7 +73,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `emit.zig` | 输出预算、UTF-8 边界、超限落盘留指针 | 非法字节换 U+FFFD 并按 truncation 留原始字节——ledger 里的字符串必须是合法 UTF-8 |
 | `environment.zig` + `environment/tree.zig` | `runShell` / `runExtension` / `startShellTask` / `putWorkspaceFile`；进程树与有界等待 | 超时与取消杀**整棵**进程树，否则孙进程攥着管道写端让 drain 等不到 EOF；子进程 env 过 secret denylist |
 | `environment/remote/` | 帧协议 + `nulya remote serve` 的另一半 | 随对面持有的东西一起长的一律走**负载**不走 JSON 头 |
-| `provider.zig` `providers/` | `Model` vtable + `TurnCollector`；四个 provider，wire 底座共用 | provider 只能优化序列化，不能破坏 turn 前缀不变量；`reasoning` 原样交回同一 provider |
+| `provider.zig` `providers/` | `Model` vtable + `TurnCollector`；四个 provider（`openai`/`anthropic`/`codex` 共用 wire 底座，`scripted.zig` 是离线替身），`launch.ScriptedProvider` 是它的重导出 | provider 只能优化序列化，不能破坏 turn 前缀不变量；`reasoning` 原样交回同一 provider |
 | `config.zig` + `default.toml` | `default → system → user → project` 合并 | project 层只能收窄；`[extensions] paths` 只认 trusted 层，`with` project 层也读 |
 | `extension/manifest.zig` | `nulya.extension/v2` schema | 三层听众：内核强制 / driver 声明 / 前端声明。manifest 是 schema 唯一真相，不问 binary |
 | `extension/protocol.zig` `invoke.zig` | 唯一那种 wire（stdin 参数 JSON、env、stdout 即结果、退出码即 ok） | stderr 就是失败消息，所以包必须独占它 |
@@ -83,7 +83,8 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `skill.zig` | `SkillSetSnapshot` + 渐进披露文本 | Agent Skills 兼容（`SKILL.md` frontmatter） |
 | `journals/journal.zig` | 三条 journal 共用的文件层与时钟 | append 持锁并修残尾，读端不拿锁且忽略残尾；文件不存在 = 还没有事实 |
 | `journals/{tool_stats,outcome,trust}.zig` | 证据 / 评判 / 授权 | 都只加可选列、不升 `v`；没有行 = unknown ≠ failure |
-| `cli/task.zig` | 后台任务的 supervisor 与读者面 | supervisor 顺序承重：拿租约 → status → spawn → **deposit 后**才写 done。`status.json` 是真相，`starting`/`lost`/`unreachable` 只活在投影里 |
+| `cli/task.zig` | 后台任务的 supervisor 与读者面（全部动词、`Row` 投影、本机读法） | supervisor 顺序承重：拿租约 → status → spawn → **deposit 后**才写 done。`status.json` 是真相，`starting`/`lost`/`unreachable` 只活在投影里 |
+| `cli/task_remote.zig` | 任务在别的机器上时的那一半：`Far` 连接收集器 + 把远端 poll 答案投成 `Row` | `readRow` 只在已经知道任务是远端的（`Far.isRemote`）才落进这个文件；本机路径与全部动词仍在 `cli/task.zig` |
 | `launch.zig` | session 启动共享件：模型解析、credential 顺序、scratch 路径、workspace store 的 trust gate | 门只在这一层返回 error，内核不知道 trust 存在 |
 | `source.zig` `bundled.zig` | `nulya src` / `ext seed` 的数据（build.zig `@embedFile`） | 剥 test 块的是**投影**不是存储；靠 zig-fmt 第 0 列 `}` 不变量 |
 
