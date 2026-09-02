@@ -118,12 +118,11 @@ pub const Provider = struct {
     }
 };
 
-/// The model-facing tool face: how many tools a session may expose at all, and
-/// which extension tools take one of those slots. Both are decisions, never
-/// derived — nothing in the kernel reads usage to fill a slot.
+/// How many tools a session may expose at all. A ceiling, never a selection:
+/// which tools are on the face is decided by `Extensions.with`, and nothing in
+/// the kernel reads usage to fill a slot.
 pub const Registry = struct {
     max_tools: u32 = 20,
-    pinned_native_tools: []const []const u8 = &.{},
 };
 
 pub const Environment = struct {
@@ -133,18 +132,15 @@ pub const Environment = struct {
 
 pub const Extensions = struct {
     paths: []const []const u8 = &.{},
-    /// Extension ids that are a MEMBER of every session opened in this
-    /// workspace — skills into the catalog, system prompts into the system
-    /// blocks, tools reachable through the CLI. The standing half of
-    /// the membership axis, exactly as `registry.pinned_native_tools` is the
-    /// standing half of the tool-face axis; `session new --with` is the
-    /// per-session half of this one, and the shell joins the two before the
-    /// composition ever sees them.
+    /// The members of every session opened in this workspace — skills into the
+    /// catalog, system prompts into the system blocks, tools reachable through
+    /// the CLI, and the tools the entry selects on the model's tool face. The
+    /// standing half of the ONE axis; `session new --with` is the per-session
+    /// half, and the shell joins the two before the composition sees them.
     ///
-    /// Each entry is a bare id, resolved at `current` when the session opens.
-    /// No version here on purpose: pinning a version in config would make
-    /// `ext activate` stop meaning anything for these packages, and rolling
-    /// back would need a config edit instead of one verb.
+    /// Each entry is `<id>[@<version>][:<tool>,<tool>…]`. Leaving the version
+    /// out is the usual spelling: the member follows `current`, so `ext
+    /// activate` still moves it and a rollback stays one verb.
     with: []const []const u8 = &.{},
 };
 
@@ -241,7 +237,6 @@ const RawModelParams = struct {
 
 const RawRegistry = struct {
     max_tools: ?u32 = null,
-    pinned_native_tools: ?[]const []const u8 = null,
 };
 
 const RawEnvironment = struct {
@@ -330,7 +325,6 @@ fn mergeTrusted(cfg: *Config, raw: RawConfig) !void {
 
     if (raw.registry) |registry| {
         if (registry.max_tools) |max_tools| cfg.registry.max_tools = max_tools;
-        if (registry.pinned_native_tools) |tools| cfg.registry.pinned_native_tools = try dupeStringList(arena, tools);
     }
 
     if (raw.environment) |env| {
@@ -360,7 +354,6 @@ fn mergeProject(cfg: *Config, raw: RawConfig) !void {
 
     if (raw.registry) |registry| {
         if (registry.max_tools) |max_tools| cfg.registry.max_tools = @min(cfg.registry.max_tools, max_tools);
-        if (registry.pinned_native_tools) |tools| cfg.registry.pinned_native_tools = try dupeStringList(arena, tools);
     }
 
     if (raw.environment) |env| {
@@ -369,11 +362,11 @@ fn mergeProject(cfg: *Config, raw: RawConfig) !void {
         }
     }
 
-    // `extensions.with` IS read here, for `pinned_native_tools`' reason: it can
-    // only name a package this machine already holds and already trusts (the
-    // §9 gate stands in front of it), so a checkout cannot use it to introduce
-    // code — only to select among what is here. A project-level house-style
-    // prompt is exactly the use, and it lasts as long as the checkout is open.
+    // `extensions.with` IS read here: it can only name a package this machine
+    // already holds and already trusts (the workspace-store gate stands in front
+    // of it), so a checkout cannot use it to introduce code — only to select
+    // among what is here. A project-level house-style prompt is exactly the use,
+    // and it lasts as long as the checkout is open.
     if (raw.extensions) |extensions| {
         if (extensions.with) |with| cfg.extensions.with = try dupeStringList(arena, with);
     }

@@ -1,7 +1,7 @@
 //! The milestone's first sentence: "Nulya ships one tool. The
 //! second is created by Nulya itself." A shell-only session manufactures a real
-//! extension through the real CLI, usage alone never promotes it, and a pin —
-//! from config or `--pin` — puts it on the next session's tool face.
+//! extension through the real CLI, usage alone never promotes it, and composing
+//! it — from config or `--with` — puts it on the next session's tool face.
 
 const std = @import("std");
 const support = @import("support.zig");
@@ -45,17 +45,14 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
     //   builtin (real ToolExecutor -> LocalEnvironment shell spawns), runs
     //   `nulya ext init/build/activate/run` to manufacture a brand-new capability
     //   and records its usage. The tool never becomes native mid-session.
-    //     -> Session B, opened with no pin, STILL sees only shell: the
+    //     -> Session B, composing nothing, STILL sees only shell: the
     // usage journal is evidence, never a decision.
     //     -> Promotion is someone naming the package. The scaffold writes no
-    // `surface`, which means `auto`, so the axis that
-    //        promotes it is MEMBERSHIP — both spellings through the real CLI:
-    //        `[extensions] with` in the project layer's `.nulya/config.toml`,
-    //        and `session new --with`. Either way the header records the tool
-    //        and the executor spawns the frozen binary the model just built. A
-    //        `--pin` on the same tool is refused by name, because a pin is for
-    //        the OTHER surface — asserted here too, since "which axis does this
-    //        package take" is exactly what a manufacturing model must know.
+    //        `surface`, which means `auto`, so the bare id is enough — both
+    //        spellings through the real CLI: `[extensions] with` in the project
+    //        layer's `.nulya/config.toml`, and `session new --with`. Either way
+    //        the header records the tool and the executor spawns the frozen
+    //        binary the model just built.
     //
     // No real LLM: a scripted provider issues the exact shell commands a model
     // would. `NULYA_ZIG` is injected into the (non-secret) sanitized child env so
@@ -243,33 +240,31 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
         try assertGreetRunsFromHeader(alloc, io, ws, ws_path, pinned_id);
     }
 
-    // The other axis, refused by name: `greet` is `surface: auto`, and a pin is
-    // only for `manual` tools. The sentence has to say which axis to use, or the
-    // model that just built this package has nowhere to go.
+    // Naming the tool explicitly is the same session: `greet` is already
+    // `surface: auto`, so a selection that repeats it changes nothing.
     {
-        const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:demo/greet" };
-        const wrong_axis = try runCli(alloc, io, ws, &argv);
-        defer alloc.free(wrong_axis.stdout);
-        try std.testing.expectEqual(@as(u8, 1), wrong_axis.code);
-        const said = try runCliStderr(alloc, io, ws, &argv, &.{});
-        defer alloc.free(said);
-        try std.testing.expect(std.mem.indexOf(u8, said, "ext:demo/greet") != null);
-        try std.testing.expect(std.mem.indexOf(u8, said, "`manual`") != null);
-        try std.testing.expect(std.mem.indexOf(u8, said, "--with") != null);
+        const named = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "demo:greet" });
+        defer alloc.free(named.stdout);
+        try std.testing.expectEqual(@as(u8, 0), named.code);
+        const named_id = try alloc.dupe(u8, std.mem.trim(u8, named.stdout, " \r\n"));
+        defer alloc.free(named_id);
+        const header = try readSessionFile(alloc, io, ws, named_id);
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"native_tools\":[\"ext:demo/greet\"]") != null);
     }
 
-    // A pin that resolves to nothing fails the session rather than starting one
-    // quietly missing the tool it was asked for. The refusal names the pin — on
-    // stderr, because `session new`'s stdout is the id and nothing else.
+    // A selection that resolves to nothing fails the session rather than
+    // starting one quietly missing the tool it was asked for. The refusal names
+    // the member — on stderr, because `session new`'s stdout is the id alone.
     {
-        const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:demo/absent" };
+        const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--with", "demo:absent" };
         const bad = try runCli(alloc, io, ws, &argv);
         defer alloc.free(bad.stdout);
         try std.testing.expectEqual(@as(u8, 1), bad.code);
         try std.testing.expectEqualStrings("", std.mem.trim(u8, bad.stdout, " \r\n"));
         const said = try runCliStderr(alloc, io, ws, &argv, &.{});
         defer alloc.free(said);
-        try std.testing.expect(std.mem.indexOf(u8, said, "ext:demo/absent") != null);
+        try std.testing.expect(std.mem.indexOf(u8, said, "demo:absent") != null);
     }
 }
 

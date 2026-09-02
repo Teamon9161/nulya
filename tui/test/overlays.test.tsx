@@ -23,7 +23,7 @@ import {
 } from "../src/ui/overlays/ExtView.tsx"
 import { displayWidth } from "../src/ui/columns.ts"
 import { listExtensions, readHeader } from "../src/nulya/files.ts"
-import { loadTuiState, sessionPins } from "../src/state/tui_state.ts"
+import { loadTuiState, sessionMembers, sessionSelection } from "../src/state/tui_state.ts"
 import { App } from "../src/ui/App.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
@@ -235,7 +235,7 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     expect(frame).toContain("extensions · 1")
     // The switch, in words and as a marker: active, and how much of its tool
     // face is pinned.
-    expect(frame).toContain("lint · script · active · tools 0/1 pinned")
+    expect(frame).toContain("lint · script · active · tools 0/1 on the face")
     expect(frame).toContain("● lint")
     expect(frame).toContain(version)
     expect(frame).toContain("current")
@@ -360,16 +360,16 @@ test("/ext's tools pane pins with a keypress, and the pin is what the next sessi
     expect(pinned).toContain("[x] ext:lint/lint")
     expect(pinned).toContain("this TUI")
     expect(pinned).toMatch(/tools 1\+1\/\d+/)
-    expect(sessionPins(statePath)).toEqual(["ext:lint/lint"])
+    expect(sessionSelection(statePath)).toEqual(["ext:lint/lint"])
 
     // And that list is the argv: the kernel freezes exactly it (physics #2).
-    const pinnedSession = await sessionNew(ws, { profile: "scripted", pin: sessionPins(statePath) })
+    const pinnedSession = await sessionNew(ws, { profile: "scripted", with: sessionMembers(statePath) })
     expect((await readHeader(ws, pinnedSession))!.composition.native_tools).toContain("ext:lint/lint")
 
     setup.mockInput.pressKey(" ")
     await settle(setup, 4)
-    expect(sessionPins(statePath)).toEqual([])
-    const plain = await sessionNew(ws, { profile: "scripted", pin: sessionPins(statePath) })
+    expect(sessionSelection(statePath)).toEqual([])
+    const plain = await sessionNew(ws, { profile: "scripted", with: sessionMembers(statePath) })
     expect((await readHeader(ws, plain))!.composition.native_tools).not.toContain("ext:lint/lint")
   } finally {
     setup.renderer.destroy()
@@ -691,9 +691,9 @@ test("/ext: Enter turns an extension on and off, and both axes move together", a
     expect(setup.captureCharFrame()).toContain("0/1 tools")
 
     setup.mockInput.pressEnter()
-    await until(() => sessionPins(statePath).includes("ext:lint/lint"), 20_000)
+    await until(() => sessionSelection(statePath).includes("ext:lint/lint"), 20_000)
     const on = await settle(setup, 4)
-    expect(on).toContain("lint · script · active · tools 1/1 pinned")
+    expect(on).toContain("lint · script · active · tools 1/1 on the face")
     expect(on).not.toContain("0/1 tools")
     expect((await listExtensions(ws)).find((entry) => entry.id === "lint")!.current).not.toBeNull()
 
@@ -701,7 +701,7 @@ test("/ext: Enter turns an extension on and off, and both axes move together", a
     // leaves a pin that `session new` would refuse.
     setup.mockInput.pressEnter()
     await until(async () => (await listExtensions(ws)).find((entry) => entry.id === "lint")!.current === null, 20_000)
-    expect(sessionPins(statePath)).not.toContain("ext:lint/lint")
+    expect(sessionSelection(statePath)).not.toContain("ext:lint/lint")
     expect(await settle(setup, 4)).toContain("lint · script · inactive")
   } finally {
     setup.renderer.destroy()
@@ -746,10 +746,9 @@ test("/ext Enter on a prompt package moves current and writes no membership of i
     try {
       await until(() => setup.captureCharFrame().includes("house.style"), 20_000)
       const frame = await settle(setup, 4)
-      // No `standing` cell: nothing recorded this package as a standing member,
-      // so the one word in the id list that is about reach stays empty. The
-      // cell reports the kernel's record, never a manifest's `apply`.
-      expect(standingCell({ standing: false })).toBe("")
+      // No `standing` cell: no member list names this package, so the one word
+      // in the id list that is about reach stays empty.
+      expect(standingCell(false)).toBe("")
       // No declared command: the way in it names is `/with` (nothing derived).
       expect(frame).toContain("`/with house.style` wears its prompt")
       expect(frame).toContain("nothing here composes it standing")
@@ -765,9 +764,9 @@ test("/ext Enter on a prompt package moves current and writes no membership of i
       expect(on).toContain("/with house.style opens a new tab wearing it for one session")
       expect(on).toContain("Enter again takes that away")
       // The pointer moved — `current` says which version `house.style` is now
-      // — and NOTHING was written into this front end's state: no pins (the
-      // package declares no tool), and no membership list at all.
-      expect(loadTuiState(statePath).session_pins ?? []).toEqual([])
+      // — and NOTHING was written into this front end's state: the package
+      // declares no tool, so there is nothing to select and no member to add.
+      expect(loadTuiState(statePath).session_with ?? []).toEqual([])
       expect(JSON.stringify(loadTuiState(statePath))).not.toContain("house.style")
 
       setup.mockInput.pressEnter()
@@ -831,10 +830,10 @@ test("/ext: a full tool face leaves the extension half on rather than refusing i
       )
       const frame = await settle(setup, 4)
       expect(frame).toContain("tool face is full")
-      expect(frame).toContain("1 tool not pinned")
+      expect(frame).toContain("1 tool left off")
       // And the row says which half it is on, in the column that exists for it.
       expect(frame).toContain("0/1 tools")
-      expect(sessionPins(statePath)).toEqual([])
+      expect(sessionSelection(statePath)).toEqual([])
     } finally {
       setup.renderer.destroy()
     }

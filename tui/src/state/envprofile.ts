@@ -4,8 +4,8 @@
  *
  * `/env` moves where a session's `shell` commands run, but
  * the screen's own composition choices — which packages ride along as
- * `--with`, which extra tools get `--pin`ned, which packages render this
- * session's opening prompt — do not automatically follow, and the two halves
+ * `--with` and which packages render this session's opening prompt — do not
+ * automatically follow, and the two halves
  * of `remote:` have DIFFERENT reasons for not following (goals/ground-remote.md
  * §5-§6).
  *
@@ -88,7 +88,6 @@ export function execTargetKind(spec: string): ExecTargetKind {
 export interface EnvProfileOverride {
   bare?: boolean
   with?: string[]
-  pins?: string[]
   session_prompts?: string[]
 }
 
@@ -101,12 +100,14 @@ export interface EnvProfiles {
 
 /** The profile after defaults and override have been merged — always complete. */
 export interface ResolvedEnvProfile {
-  /** `--bare`: skip the config's standing `[extensions] with` and `pinned_native_tools`. */
+  /** `--bare`: skip the config's standing `[extensions] with`. */
   bare: boolean
-  /** Package ids to bring in with `--with` (in place of `extensions.session_with`). */
+  /**
+   * Members to bring in with `--with` (in place of `extensions.session_with`),
+   * each `<id>[:<tool>,…]`. Without a selection the package's own `manual` tools
+   * are all taken, which is what turning a package on has always meant here.
+   */
   with: readonly string[]
-  /** Extra native tool ids to `--pin`, unioned with what the `with` members ask for. */
-  pins: readonly string[]
   /** Package ids whose `render` becomes this session's `--prompt` (in place of `extensions.session_prompts`). */
   session_prompts: readonly string[]
 }
@@ -114,7 +115,7 @@ export interface ResolvedEnvProfile {
 /**
  * Zero-config defaults, one per kind. `local` and `wsl` are the screen's
  * existing behaviour verbatim — the front end's `session_with` /
- * `session_prompts` lists, no extra pins, the standing tables left alone.
+ * `session_prompts` lists, the standing table left alone.
  * `remote` only has `shell`/the workspace itself: no members, no renderers,
  * and `--bare` so the config's own standing packages (which were configured
  * with a local filesystem in mind) do not creep in either — this is a
@@ -127,8 +128,8 @@ function defaultProfile(
   sessionWith: readonly string[],
   sessionPrompts: readonly string[],
 ): ResolvedEnvProfile {
-  if (kind === "remote") return { bare: true, with: [], pins: [], session_prompts: [] }
-  return { bare: false, with: sessionWith, pins: [], session_prompts: sessionPrompts }
+  if (kind === "remote") return { bare: true, with: [], session_prompts: [] }
+  return { bare: false, with: sessionWith, session_prompts: sessionPrompts }
 }
 
 /**
@@ -149,7 +150,6 @@ export function resolveEnvProfile(
   return {
     bare: over.bare ?? base.bare,
     with: over.with ?? base.with,
-    pins: over.pins ?? base.pins,
     session_prompts: over.session_prompts ?? base.session_prompts,
   }
 }

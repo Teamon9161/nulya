@@ -48,7 +48,7 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
         "ext init",       "--zig",      "ext build",    "ext run",    "--arg",
         "ext activate",   "--user",     "ext trust",    "ext api",    "ext sync",
         "ext seed",       "ext prune",  "--dry-run",    "--activate", "session new",
-        "--with",         "--pin",      "--parent",     "--prompt",   "session step",
+        "--with",         "--parent",   "--prompt",     "session step",
         "--max-steps",    "--effort",   "--stream",     "--gate",     "session events",
         "session cancel", "outcome",    "session list", "--image",    "config show",
         "session rebind",
@@ -99,7 +99,7 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     try std.testing.expect(std.mem.indexOf(u8, bad_err, "nulya help") != null);
 }
 
-test "cli ext api: manifest and examples carry no document citations and walk script init -> build -> run -> activate -> --with/--pin -> outcome" {
+test "cli ext api: manifest and examples carry no document citations and walk script init -> build -> run -> activate -> --with -> outcome" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -123,10 +123,9 @@ test "cli ext api: manifest and examples carry no document citations and walk sc
         "shell",     "NULYA_EXE", "NULYA_SESSION", "readonly",
         "commands",  "ui",        "timeout_ms",    "600",
         "ext trust",
-        // The membership axis's two words, and the placement vocabulary in
-        // full — the screen has to be readable without the docs.
-        "apply",     "auto",      "manual",        "internal",
-        "ext deactivate",
+        // The one axis and the placement vocabulary in full — the screen has to
+        // be readable without the docs.
+        "[extensions] with", "auto", "manual", "internal",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, perms.stdout, needle) != null) catch |err| {
             std.debug.print("`ext api manifest` never mentions '{s}'\n", .{needle});
@@ -146,7 +145,7 @@ test "cli ext api: manifest and examples carry no document citations and walk sc
     try std.testing.expectEqual(@as(u8, 0), examples.code);
     for ([_][]const u8{
         "ext init my.helper", "ext build",       "ext run",  "--arg",
-        "ext activate",       "--pin",           "--with",   "--user",
+        "ext activate",       "--with",          "--user",
         "ext trust",          "session outcome", "ext sync", "ext prune",
         // The default scaffold is a script, so the worked
         // path has to show what a script actually reads.
@@ -301,7 +300,7 @@ test "bundled guide: ext build extensions/guide is data kind and needs no zig; s
     try std.testing.expect(std.mem.indexOf(u8, loaded.stdout, on_disk) != null);
 }
 
-test "cli config show: both forms project the effective [registry], so today's pins are readable without opening a config file that may hold a key" {
+test "cli config show: both forms project the effective composition, so today's members are readable without opening a config file that may hold a key" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -315,15 +314,18 @@ test "cli config show: both forms project the effective [registry], so today's p
     const ws = tmp.dir;
 
     // A project layer that only narrows (what that layer is allowed to do):
-    // it lowers the tool budget and names one pin. Both are decisions a reader
-    // has to be able to see before opening a session.
+    // it lowers the tool budget and names one member with a tool selection.
+    // Both are decisions a reader has to be able to see before opening a
+    // session.
     try ws.createDirPath(io, ".nulya");
     try ws.writeFile(io, .{
         .sub_path = ".nulya/config.toml",
         .data =
         \\[registry]
         \\max_tools = 5
-        \\pinned_native_tools = ["ext:date.now/print_date"]
+        \\
+        \\[extensions]
+        \\with = ["date.now:print_date"]
         \\
         ,
     });
@@ -336,9 +338,9 @@ test "cli config show: both forms project the effective [registry], so today's p
     defer parsed.deinit();
     const registry = parsed.value.object.get("registry").?.object;
     try std.testing.expectEqual(@as(i64, 5), registry.get("max_tools").?.integer);
-    const pins = registry.get("pinned_native_tools").?.array.items;
-    try std.testing.expectEqual(@as(usize, 1), pins.len);
-    try std.testing.expectEqualStrings("ext:date.now/print_date", pins[0].string);
+    const members = parsed.value.object.get("extensions").?.object.get("with").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), members.len);
+    try std.testing.expectEqualStrings("date.now:print_date", members[0].string);
 
     // The text form answers the same question, under the keys a reader writes
     // back — this is the command that replaces reading the config files, one of
@@ -346,7 +348,7 @@ test "cli config show: both forms project the effective [registry], so today's p
     const text = try runCli(alloc, io, ws, &.{ exe_abs, "config", "show" });
     defer alloc.free(text.stdout);
     try std.testing.expectEqual(@as(u8, 0), text.code);
-    for ([_][]const u8{ "registry:", "max_tools", "pinned_native_tools", "ext:date.now/print_date" }) |needle| {
+    for ([_][]const u8{ "registry:", "max_tools", "extensions:", "date.now:print_date" }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, text.stdout, needle) != null) catch |err| {
             std.debug.print("`config show` never mentions '{s}'\n", .{needle});
             return err;

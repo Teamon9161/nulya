@@ -62,7 +62,7 @@ const mouse: Array<[string, string]> = [
   ["click ask / unsafe", "open the permission-mode picker, the same as /mode"],
   ["click a tab / a pane", "go to it"],
   ["click the sidebar mark", "at the head of the line under the composer: show or hide the session list"],
-  ["click [x]", "in /ext's tools pane: pin or unpin that tool"],
+  ["click [x]", "in /ext's tools pane: that tool on or off"],
   ["drag over text", "select it; releasing copies it to the clipboard"],
 ]
 

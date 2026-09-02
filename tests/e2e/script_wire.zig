@@ -371,14 +371,14 @@ test "per-platform entry: one version, this host's script — and a version with
         try std.testing.expect(std.mem.indexOf(u8, run.stdout, @tagName(@import("builtin").os.tag)) != null);
     }
 
-    // Pinning it: the session STARTS — composition freezes an identity and no
+    // Composing it: the session STARTS — composition freezes an identity and no
     // longer asks which file it means — and the tool reports for itself when it
     // is called. That is the deliberate consequence of moving resolution to the
     // executing machine: a host cannot answer this question for a session whose
     // tools run somewhere else, and answering it twice (here for local, there
     // for remote) would be the duplicated decision the move exists to remove.
     {
-        const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:elsewhere/t" };
+        const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--with", "elsewhere:t" };
         const new = try runCli(alloc, io, ws, &argv);
         defer alloc.free(new.stdout);
         try std.testing.expectEqual(@as(u8, 0), new.code);
@@ -392,7 +392,7 @@ test "per-platform entry: one version, this host's script — and a version with
             io,
             ws_path,
             &.{".nulya/extensions"},
-            .{ .pinned_native_tools = &[_][]const u8{"ext:elsewhere/t"} },
+            .{ .with = &.{.{ .id = "elsewhere", .tools = .{ .named = &.{"t"} } }} },
         );
         defer comp.deinit(alloc);
         const t = comp.tools.lookup("t") orelse return error.TestUnexpectedResult;

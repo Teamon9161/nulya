@@ -16,7 +16,7 @@
 //!
 //! The persona reaches a session as `session new --prompt <file>` — bytes frozen
 //! into the header, nothing installed. Every child session is `--bare`, so a
-//! definition's `pins` are its whole tool face and it behaves the same in every
+//! definition's `with` is its whole composition and it behaves the same in every
 //! workspace. A delegated session carries this package only when its definition
 //! names somebody to pass work to (`agents:` non-empty).
 
@@ -171,7 +171,7 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             try jw.objectField("prompt");
             try jw.write(m.path);
             // Always true, and named rather than assumed: without `--bare` the
-            // session inherits the workspace's standing membership and pins,
+            // session inherits the workspace's standing membership,
             // which its author never wrote down.
             try jw.objectField("bare");
             try jw.write(true);
@@ -210,11 +210,9 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             try jw.beginArray();
             for (m.def.agents) |one| try jw.write(one);
             try jw.endArray();
-            // Pins only: `--pin ext:<id>/<tool>` brings its package in at
-            // `current` by itself, so a derived membership list would repeat it.
-            try jw.objectField("pins");
+            try jw.objectField("with");
             try jw.beginArray();
-            for (m.def.pins) |pin| try jw.write(pin);
+            for (m.def.with) |member| try jw.write(member);
             try jw.endArray();
             try jw.objectField("warnings");
             try jw.beginArray();
@@ -273,9 +271,9 @@ fn list(ctx: *const Ctx) !rpc.Outcome {
         try jw.beginArray();
         for (entry.def.agents) |one| try jw.write(one);
         try jw.endArray();
-        try jw.objectField("pins");
+        try jw.objectField("with");
         try jw.beginArray();
-        for (entry.def.pins) |pin| try jw.write(pin);
+        for (entry.def.with) |member| try jw.write(member);
         try jw.endArray();
         try jw.objectField("warnings");
         try jw.beginArray();
@@ -488,7 +486,7 @@ fn newDelegation(
         // a runner that cannot enforce the read-only one refuses the whole
         // delegation rather than opening one that would run wider than it said.
         .permissions = permissions,
-        .pins = m.def.pins,
+        .with = m.def.with,
         .with_self = if (m.def.agents.len != 0) self_ref else "",
         .delegation = d,
     });

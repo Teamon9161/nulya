@@ -1,7 +1,7 @@
 /**
  * `state/envprofile.ts`: the per-exec-target-kind profile
  * that decides which packages ride along as `--with`, which extra tools get
- * `--pin`ned, and which packages render this session's `--prompt`.
+ * render this session's `--prompt`.
  *
  * Pure functions only — no workspace, no kernel — because `App.tsx` reads the
  * exact same `resolveEnvProfile` for both what actually gets composed
@@ -53,11 +53,10 @@ describe("resolveEnvProfile: zero-config defaults", () => {
   const session_prompts = ["ground"]
   const no_overrides: EnvProfiles = {}
 
-  test("local is today's behaviour verbatim: not bare, the front end's own lists, no extra pins", () => {
+  test("local is today's behaviour verbatim: not bare, the front end's own lists", () => {
     expect(resolveEnvProfile("local", session_with, session_prompts, no_overrides)).toEqual({
       bare: false,
       with: session_with,
-      pins: [],
       session_prompts,
     })
   })
@@ -66,16 +65,14 @@ describe("resolveEnvProfile: zero-config defaults", () => {
     expect(resolveEnvProfile("wsl", session_with, session_prompts, no_overrides)).toEqual({
       bare: false,
       with: session_with,
-      pins: [],
       session_prompts,
     })
   })
 
-  test("remote only has shell/workspace: bare, no members, no renderers, no extra pins", () => {
+  test("remote only has shell/workspace: bare, no members, no renderers", () => {
     expect(resolveEnvProfile("remote", session_with, session_prompts, no_overrides)).toEqual({
       bare: true,
       with: [],
-      pins: [],
       session_prompts: [],
     })
   })
@@ -90,10 +87,9 @@ describe("resolveEnvProfile: field-level override", () => {
     const profile = resolveEnvProfile("remote", session_with, session_prompts, overrides)
     expect(profile.with).toEqual(["ops"])
     // The fields NOT written keep the kind's own default — `bare` stays true
-    // for remote, `pins`/`session_prompts` stay empty, because only one field
-    // was mentioned.
+    // for remote and `session_prompts` stays empty, because only one field was
+    // mentioned.
     expect(profile.bare).toBe(true)
-    expect(profile.pins).toEqual([])
     expect(profile.session_prompts).toEqual([])
   })
 
@@ -109,13 +105,12 @@ describe("resolveEnvProfile: field-level override", () => {
     expect(profile.bare).toBe(false)
   })
 
-  test("pins is additive tool ids, not a replacement for with — both apply at once", () => {
+  test("a member may carry its own tool selection, and that is the only tool key", () => {
     const profile = resolveEnvProfile("remote", session_with, session_prompts, {
-      remote: { pins: ["ext:std/read"], session_prompts: ["ground"] },
+      remote: { with: ["std:read"], session_prompts: ["ground"] },
     })
-    expect(profile.pins).toEqual(["ext:std/read"])
+    expect(profile.with).toEqual(["std:read"])
     expect(profile.session_prompts).toEqual(["ground"])
-    expect(profile.with).toEqual([]) // not mentioned, still the remote default
   })
 
   test("an empty override table for a kind is exactly its default", () => {
@@ -129,13 +124,11 @@ describe("resolveEnvProfile: field-level override", () => {
     expect(resolveEnvProfile("local", session_with, session_prompts, overrides)).toEqual({
       bare: false,
       with: session_with,
-      pins: [],
       session_prompts,
     })
     expect(resolveEnvProfile("wsl", session_with, session_prompts, overrides)).toEqual({
       bare: false,
       with: session_with,
-      pins: [],
       session_prompts,
     })
   })
@@ -146,6 +139,6 @@ describe("resolveEnvProfile: field-level override", () => {
     })
     expect(profile.bare).toBe(false)
     expect(profile.with).toEqual(["agent"])
-    expect(profile.pins).toEqual([]) // not mentioned, stays remote's default
+    expect(profile.session_prompts).toEqual([]) // not mentioned, stays remote's default
   })
 })

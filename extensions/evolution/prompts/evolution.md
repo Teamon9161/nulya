@@ -41,15 +41,15 @@ order:
 
 1. a note or skill file edited with `edit`;
 2. a script tool draft from `nulya ext init`;
-3. **a pin** — put an already-built, already-used tool on the model's tool face
-   by adding its stable id to `[registry] pinned_native_tools` in
+3. **a member** — put an already-built, already-used tool on the model's tool
+   face by adding `<id>[:<tool>,…]` to `[extensions] with` in
    `.nulya/config.toml`. This is what "promotion" means here; nothing else
    promotes anything, and usage counts by themselves promote nothing;
 4. a compiled tool;
 5. a driver.
 
 You do **not**: modify the kernel or `src/`; touch `.nulya/sessions/` or either
-journal; pin without citing the usage rows it rests on and stating the
+journal; compose a tool onto the face without citing the usage rows it rests on and stating the
 per-session cost (one `max_tools` slot plus its schema in every future session's
 prompt prefix); activate what you built without saying plainly why in the
 report.
@@ -75,7 +75,7 @@ catalog above) for the report template and the evidence-gathering recipes.
    - a **proposal** — with the *smallest* form that could work (the five-step
      order above), the session ids it rests on, and a **falsifier**: "retire
      this if the next N sessions do not invoke it / if outcomes do not
-     improve". Retiring a pin is deleting that line again.
+     improve". Retiring a member is deleting that line again.
 4. **Leave the minimum behind**: edit one notes or skill file, or scaffold one
    draft. Say whether you activated it and why.
 5. **Write the report** to `.nulya/evolution/<YYYYMMDD-HHMM>-<session>.md` with

@@ -22,7 +22,7 @@ import { createSessionState, type SessionState } from "./session.ts"
 import { createAttachment, type AttachOptions, type Attachment } from "./attach.ts"
 import { reportFailure } from "./driver.ts"
 import { createTaskWatch, type TaskWatch } from "./tasks.ts"
-import { sessionPins, type ModelPick } from "./tui_state.ts"
+import { sessionMembers, type ModelPick } from "./tui_state.ts"
 import { readActiveContributions, readHeader, type Contributions } from "../nulya/files.ts"
 import { sessionEvents, sessionNew, sessionPrune } from "../nulya/cli.ts"
 import { withOptions, type WithRef } from "../with.ts"
@@ -176,13 +176,11 @@ export interface OpenOptions {
 
 /** What the screen adds to a `session new` beyond the draft's own choices. */
 export interface SessionExtras {
-  /** `--with <id>[@<version>]`: composition membership, not a pin. */
+  /** `--with <id>[@<version>][:<tool>,…]`: this session's members. */
   with?: readonly string[]
-  /** `--pin ext:<id>/<tool>`: a native slot on the model's tool face. */
-  pin?: readonly string[]
   /**
-   * `--bare`: ignore the config's standing `[extensions] with` and
-   * `pinned_native_tools`, composing from these flags alone. A
+   * `--bare`: ignore the config's standing `[extensions] with`, composing from
+   * these flags alone. A
    * sub-agent tab is what wants it, and it comes from the agent package's own
    * `render` rather than being decided here (`agents.ts`).
    */
@@ -323,7 +321,7 @@ async function hydrate(
 }
 
 export interface TabStoreOptions extends AttachOptions {
-  /** Where `session_pins` is remembered; tests point it elsewhere. */
+  /** Where `session_with` is remembered; tests point it elsewhere. */
   statePath?: string
 }
 
@@ -543,12 +541,14 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
       const pick = draft.pick()
       const bring = draft.bring()
       // Read at the moment the session is created rather than held in a signal:
-      // the pins are program state on disk, and a second TUI (or a `/ext` toggle
+      // this list is program state on disk, and a second TUI (or a `/ext` toggle
       // a second ago) must be the truth here, not whatever this process saw when
       // the draft was opened.
-      const pins = [...sessionPins(statePath)]
-      for (const pin of extra.pin ?? []) if (!pins.includes(pin)) pins.push(pin)
-      const members = [...(bring ? withOptions(bring).with ?? [] : []), ...(extra.with ?? [])]
+      const members = [
+        ...sessionMembers(statePath),
+        ...(bring ? withOptions(bring).with ?? [] : []),
+        ...(extra.with ?? []),
+      ]
       // The DRAFT's workspace, which is the one the browser may have re-pointed
       // it at a moment ago. This is the line that makes a tab's directory real:
       // `session new` runs with that cwd, so the file, the journals and the
@@ -556,7 +556,6 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
       const id = await sessionNew(draft.ws, {
         ...(pick ? { profile: pick.profile, model: pick.model } : {}),
         ...(members.length > 0 ? { with: members } : {}),
-        ...(pins.length > 0 ? { pin: pins } : {}),
         ...(extra.bare ? { bare: true } : {}),
         ...((extra.prompt?.length ?? 0) > 0 ? { prompt: extra.prompt } : {}),
         ...(extra.execEnv ? { execEnv: extra.execEnv } : {}),

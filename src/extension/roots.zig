@@ -51,14 +51,6 @@ pub const Roots = struct {
         /// Index into `entries` of the root that won.
         root: usize,
         version: []const u8,
-        /// What the winning root's `current` recorded about `apply`
-        /// (`store.Active.standing`): this version was activated here as a
-        /// member of every fresh session. Carried along because it comes from
-        /// the same read as the version and is the only trustworthy answer to
-        /// that question — see `Store.readCurrent`. Defaults to false for the
-        /// callers that assemble an entry to resolve one named id: that path
-        /// is not asking this question.
-        standing: bool = false,
     };
 
     /// The single answer to `id[@version] -> root -> manifest -> entry path`.
@@ -208,10 +200,9 @@ pub const Roots = struct {
     }
 
     /// Every extension with an active version, first-root-wins, sorted by id.
-    /// Only `current` is read here (cheap) — the version it names and the
-    /// `apply` it recorded; whether that version is usable is the caller's
-    /// concern. A directory whose name is not a valid extension id
-    /// is not an extension and is skipped; host faults propagate.
+    /// Only `current` is read here (cheap); whether the version it names is
+    /// usable is the caller's concern. A directory whose name is not a valid
+    /// extension id is not an extension and is skipped; host faults propagate.
     /// Caller owns the slice and each `id`/`version`.
     pub fn listActive(self: *const Roots, alloc: std.mem.Allocator) ![]ActiveEntry {
         var out: std.ArrayList(ActiveEntry) = .empty;
@@ -222,14 +213,14 @@ pub const Roots = struct {
             while (try it.next(self.io)) |dir_entry| {
                 if (dir_entry.kind != .directory) continue;
                 if (hasId(out.items, dir_entry.name)) continue; // an earlier root won
-                const active = (st.readCurrent(alloc, dir_entry.name) catch |err| switch (err) {
+                const version = (st.activeVersion(alloc, dir_entry.name) catch |err| switch (err) {
                     error.InvalidId => continue,
                     else => return err,
                 }) orelse continue;
-                errdefer alloc.free(active.version);
+                errdefer alloc.free(version);
                 const id = try alloc.dupe(u8, dir_entry.name);
                 errdefer alloc.free(id);
-                try out.append(alloc, .{ .id = id, .root = root_index, .version = active.version, .standing = active.standing });
+                try out.append(alloc, .{ .id = id, .root = root_index, .version = version });
             }
         }
         std.mem.sort(ActiveEntry, out.items, {}, struct {

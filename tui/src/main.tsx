@@ -18,6 +18,7 @@ import { render } from "@opentui/solid"
 import { openWorkspace, type Workspace } from "./nulya/bin.ts"
 import { configShow } from "./nulya/cli.ts"
 import { sessionExists } from "./nulya/files.ts"
+import { selectedToolIds } from "./with.ts"
 import { loadSettings } from "./state/settings.ts"
 import { loadTuiState, rememberAgentsAnswer, rememberStoreAsked } from "./state/tui_state.ts"
 import { planLaunch } from "./launch.ts"
@@ -159,7 +160,7 @@ async function main() {
         guideOn={guideOn}
         models={config.models}
         profiles={config.profiles}
-        pinnedTools={config.registry.pinned_native_tools}
+        configTools={selectedToolIds(config.extensions.with)}
         sync={{
           user: settings.extensions.sync_on_start,
           // The project store is only the background pass's business when it was

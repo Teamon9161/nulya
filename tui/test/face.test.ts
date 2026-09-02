@@ -1,5 +1,5 @@
 /**
- * The pin panel's policy.
+ * The tool-face panel's policy.
  *
  * Two halves. The transitions and the quota line are pure — "what would the next
  * session's tool face be" is a question that must be answerable without a
@@ -7,30 +7,30 @@
  * text surgery on somebody's hand-written TOML and the only proof that comments
  * survive is a comment that survived.
  *
- * The last test is the one that matters most: the whole chain, `--pin` argv into
- * a real `session new`, checked against what the kernel actually froze.
+ * The last test is the one that matters most: the whole chain, a member's tool
+ * selection into a real `session new`, checked against what the kernel froze.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import {
   builtin_tools,
+  deselectAll,
   faceFullLine,
-  orphanPins,
-  pinAll,
-  pinState,
+  faceState,
+  orphanTools,
   promote,
   quotaLine,
-  resolvableStandingPins,
-  readUserPins,
-  setPinnedTools,
+  readUserSelection,
+  resolvableSelections,
+  selectAll,
+  setMembers,
   stateLabel,
   toggle,
   toolId,
-  unpinAll,
-  writeUserPins,
-  type PinSources,
-} from "../src/pins.ts"
+  writeUserSelection,
+  type FaceSources,
+} from "../src/face.ts"
 import { foldLine, foldedRows, nextFace, shownRows, switchState, toolRows } from "../src/ui/overlays/ExtView.tsx"
 import { readHeader } from "../src/nulya/files.ts"
 import { sessionNew } from "../src/nulya/cli.ts"
@@ -47,7 +47,7 @@ afterAll(() => {
   ws.cleanup()
 })
 
-const sources = (over: Partial<PinSources> = {}): PinSources => ({
+const sources = (over: Partial<FaceSources> = {}): FaceSources => ({
   user: [],
   session: [],
   merged: [],
@@ -60,12 +60,12 @@ test("three states, and toggling one never edits a layer this panel does not own
   const write = toolId("std", "write")
   const where = sources({ user: [read], session: [grep], merged: [read, write] })
 
-  expect(pinState(read, where)).toBe("always")
-  expect(pinState(grep, where)).toBe("session")
+  expect(faceState(read, where)).toBe("always")
+  expect(faceState(grep, where)).toBe("session")
   // In the merged projection but not in the user file: a project or system layer
   // wrote it, and the panel says so instead of offering a checkbox that lies.
-  expect(pinState(write, where)).toBe("other")
-  expect(pinState(toolId("std", "glob"), where)).toBe("off")
+  expect(faceState(write, where)).toBe("other")
+  expect(faceState(toolId("std", "glob"), where)).toBe("off")
   expect(stateLabel("session")).toBe("this TUI")
 
   const refused = toggle(write, where)
@@ -106,21 +106,21 @@ test("the switch moves a whole package: on only adds, off clears both lists it o
 
   // ON only ever adds. Turning an extension on must not take a pin off
   // something else, and a tool already on stays exactly where it was written.
-  expect(pinAll(ids, sources()).session).toEqual(ids)
-  const half = pinAll(ids, sources({ user: [ids[0]!] }))
+  expect(selectAll(ids, sources()).session).toEqual(ids)
+  const half = selectAll(ids, sources({ user: [ids[0]!] }))
   expect(half.session).toEqual([ids[1]!])
   expect(half.user).toBeNull()
-  expect(pinAll(ids, sources({ session: ids })).session).toBeNull()
+  expect(selectAll(ids, sources({ session: ids })).session).toBeNull()
 
   // OFF clears BOTH lists this panel writes — including `always`, which no
   // other key here subtracts: a pin left behind by a deactivation does not cost
   // a tool, it makes `session new` refuse outright.
-  const off = unpinAll(ids, sources({ user: [ids[0]!], session: [ids[1]!] }))
+  const off = deselectAll(ids, sources({ user: [ids[0]!], session: [ids[1]!] }))
   expect(off.user).toEqual([])
   expect(off.session).toEqual([])
 
   // A pin some other layer wrote still cannot be touched, and is named.
-  const theirs = unpinAll(ids, sources({ merged: ids }))
+  const theirs = deselectAll(ids, sources({ merged: ids }))
   expect(theirs.user).toBeNull()
   expect(theirs.session).toBeNull()
   expect(theirs.notice).toContain("another config layer")
@@ -137,8 +137,8 @@ test("the switch state is the two axes read together, and `partial` is what it i
   expect(switchState(false, 1, 1)).toBe("partial")
 
   // Which is why those pins are dropped rather than kept.
-  expect(orphanPins(["ext:std/read", "ext:gone/x"], ["ext:std/read"])).toEqual(["ext:gone/x"])
-  expect(orphanPins([], ["ext:std/read"])).toEqual([])
+  expect(orphanTools(["ext:std/read", "ext:gone/x"], ["ext:std/read"])).toEqual(["ext:gone/x"])
+  expect(orphanTools([], ["ext:std/read"])).toEqual([])
 })
 
 test("the quota counts the builtin, because max_tools does", () => {
@@ -151,25 +151,25 @@ test("the quota counts the builtin, because max_tools does", () => {
   //.
   expect(quotaLine(8, 8)).toContain("tools 1+8/8")
   expect(quotaLine(8, 8)).toContain("1 more than registry.max_tools allows")
-  expect(quotaLine(8, 8)).toContain("unpin one in the tools pane")
+  expect(quotaLine(8, 8)).toContain("take one off in the tools pane")
   expect(quotaLine(8, 10)).toContain("3 more than registry.max_tools allows")
 })
 
-test("a full tool face refuses the pins, not the extension", () => {
-  // What the switch says when it activated something and could not pin its
+test("a full tool face refuses the selection, not the extension", () => {
+  // What the switch says when it activated something and could not select its
   // tools: how full, how many are off the face, and both ways to use them.
   const line = faceFullLine(8, 6, 1)
   expect(line).toContain("tool face is full at 1+6/8")
-  expect(line).toContain("1 tool not pinned")
+  expect(line).toContain("1 tool left off")
   expect(line).toContain("Space in the tools pane")
   expect(line).toContain("ext run")
-  expect(faceFullLine(8, 6, 2)).toContain("2 tools not pinned")
+  expect(faceFullLine(8, 6, 2)).toContain("2 tools left off")
 })
 
-test("rows come only from extensions a pin could actually resolve through", () => {
+test("rows come only from extensions a selection could actually resolve through", () => {
   const entries: ExtensionEntry[] = [
     entry("std", "v-1", ["read", "grep"]),
-    // No `current`: `session new --pin` would fail — the pin brings its package in, and there is nothing to bring.
+    // No `current`: `session new --with` would fail — there is nothing to resolve.
     { ...entry("mode", "v-1", ["nope"]), current: null },
     // Shadowed by an earlier root: this copy never runs.
     { ...entry("old", "v-1", ["stale"]), shadowed: true },
@@ -232,63 +232,61 @@ test("the config write replaces one line and leaves every other byte alone", () 
     'active_profile = "deepseek"  # the cheap one',
     "",
     "[registry]",
-    "# each pin costs a slot and prefix tokens",
     "max_tools = 8",
-    'pinned_native_tools = ["ext:std/read"]',
     "",
     "[extensions]",
+    "# each selected tool costs a slot and prefix tokens",
+    'with = ["std:read"]',
     "paths = []",
   ].join("\n")
 
-  const next = setPinnedTools(written, ["ext:std/read", "ext:std/grep"])
+  const next = setMembers(written, ["std:read,grep"])
   expect(next).toContain("# my nulya config")
   expect(next).toContain('active_profile = "deepseek"  # the cheap one')
-  expect(next).toContain("# each pin costs a slot and prefix tokens")
+  expect(next).toContain("# each selected tool costs a slot and prefix tokens")
   expect(next).toContain("max_tools = 8")
   expect(next).toContain("paths = []")
-  expect(next).toContain('pinned_native_tools = ["ext:std/read", "ext:std/grep"]')
-  expect(next.split("\n").filter((line) => line.startsWith("pinned_native_tools"))).toHaveLength(1)
+  expect(next.split("\n").filter((line: string) => line.startsWith("with"))).toHaveLength(1)
   // And the kernel's own reader agrees with what the panel thinks it wrote.
-  expect((Bun.TOML.parse(next) as any).registry.pinned_native_tools).toEqual(["ext:std/read", "ext:std/grep"])
+  expect((Bun.TOML.parse(next) as any).extensions.with).toEqual(["std:read,grep"])
 
   // A multi-line array is one span, not one line.
-  const spread = ["[registry]", "pinned_native_tools = [", '  "ext:a/one",', '  "ext:b/two",', "]", "max_tools = 6"].join(
-    "\n",
-  )
-  const flattened = setPinnedTools(spread, ["ext:a/one"])
-  expect((Bun.TOML.parse(flattened) as any).registry.pinned_native_tools).toEqual(["ext:a/one"])
-  expect(flattened).toContain("max_tools = 6")
+  const spread = ["[extensions]", "with = [", '  "a",', '  "b",', "]", "paths = []"].join("\n")
+  const flattened = setMembers(spread, ["a"])
+  expect((Bun.TOML.parse(flattened) as any).extensions.with).toEqual(["a"])
+  expect(flattened).toContain("paths = []")
 
   // No key: it joins the table it belongs to. No table: both appear.
-  expect((Bun.TOML.parse(setPinnedTools("[registry]\nmax_tools = 6\n", ["x"])) as any).registry).toEqual({
-    max_tools: 6,
-    pinned_native_tools: ["x"],
+  expect((Bun.TOML.parse(setMembers("[extensions]\npaths = []\n", ["x"])) as any).extensions).toEqual({
+    paths: [],
+    with: ["x"],
   })
-  const fresh = Bun.TOML.parse(setPinnedTools('[provider]\nactive_profile = "openai"\n', ["x"])) as any
-  expect(fresh.registry.pinned_native_tools).toEqual(["x"])
+  const fresh = Bun.TOML.parse(setMembers('[provider]\nactive_profile = "openai"\n', ["x"])) as any
+  expect(fresh.extensions.with).toEqual(["x"])
   expect(fresh.provider.active_profile).toBe("openai")
-  expect(setPinnedTools("", [])).toBe("[registry]\npinned_native_tools = []\n")
 })
 
-test("writing round-trips through the file, and reads back as the kernel would", () => {
+test("writing round-trips through the file, leaving membership somebody wrote alone", () => {
   const path = join(ws.dir, "config.toml")
-  writeFileSync(path, "[registry]\n# keep me\nmax_tools = 8\n")
-  writeUserPins(path, ["ext:std/read", "ext:std/grep"])
+  writeFileSync(path, '[extensions]\n# keep me\nwith = ["guide"]\n')
+  writeUserSelection(path, ["ext:std/read", "ext:std/grep"])
   expect(readFileSync(path, "utf8")).toContain("# keep me")
-  expect(readUserPins(path)).toEqual(["ext:std/read", "ext:std/grep"])
+  expect(readUserSelection(path)).toEqual(["ext:std/read", "ext:std/grep"])
+  // The bare member nobody selected a tool for is still a member.
+  expect((Bun.TOML.parse(readFileSync(path, "utf8")) as any).extensions.with).toContain("guide")
 
-  writeUserPins(path, [])
-  expect(readUserPins(path)).toEqual([])
-  expect(readFileSync(path, "utf8")).toContain("# keep me")
+  writeUserSelection(path, [])
+  expect(readUserSelection(path)).toEqual([])
+  expect((Bun.TOML.parse(readFileSync(path, "utf8")) as any).extensions.with).toEqual(["guide", "std"])
 
   // A path that never existed is not an error: the user file is optional.
-  expect(readUserPins(join(ws.dir, "nope.toml"))).toEqual([])
+  expect(readUserSelection(join(ws.dir, "nope.toml"))).toEqual([])
 })
 
-test("the `this TUI` list becomes --pin, and the kernel freezes exactly it", async () => {
+test("the `this TUI` list becomes a member's tool selection, and the kernel freezes exactly it", async () => {
   // A data extension contributes no tools, so the real end-to-end proof needs a
-  // real declaration. `ext build` freezes the manifest; the pin then names a
-  // tool the frozen version declares, which is what `session new` checks.
+  // real declaration. `ext build` freezes the manifest; the selection then names
+  // a tool the frozen version declares, which is what `session new` checks.
   const home = join(ws.dir, ".nulya", "extensions", "notes")
   mkdirSync(join(home, "src"), { recursive: true })
   writeFileSync(
@@ -299,7 +297,7 @@ test("the `this TUI` list becomes --pin, and the kernel freezes exactly it", asy
       runtime: { entry: "src/main.sh", interpreter: "sh" },
       contributes: {
         // `surface: "manual"` out loud: the kernel's default is `auto` now, and
-        // only a `manual` tool may be named by a pin.
+        // only a `manual` tool needs a selection to reach the model.
         tools: [
           { name: "append", description: "add a line", surface: "manual", input: { type: "object", properties: {} } },
           { name: "read", description: "read it back", surface: "manual", input: { type: "object", properties: {} } },
@@ -312,16 +310,15 @@ test("the `this TUI` list becomes --pin, and the kernel freezes exactly it", asy
   const built = Bun.spawnSync({ cmd: [ws.bin, "ext", "sync", "--activate"], cwd: ws.dir, env: process.env })
   expect(new TextDecoder().decode(built.stdout)).toContain("notes")
 
-  const pins = [toolId("notes", "append")]
-  const id = await sessionNew(ws, { profile: "scripted", pin: pins })
+  const id = await sessionNew(ws, { profile: "scripted", with: ["notes:append"] })
   const header = await readHeader(ws, id)
   expect(header!.composition.native_tools).toContain("ext:notes/append")
-  // The one NOT pinned is the control: membership is not a tool face (D4).
+  // The one NOT selected is the control: membership is not a tool face (D4).
   expect(header!.composition.native_tools).not.toContain("ext:notes/read")
 
-  // And a pin the store cannot resolve is the kernel's refusal, verbatim —
-  // never something the panel predicts.
-  await expect(sessionNew(ws, { profile: "scripted", pin: ["ext:notes/nosuch"] })).rejects.toThrow(/pin/)
+  // And a selection the store cannot resolve is the kernel's refusal, verbatim
+  // — never something the panel predicts.
+  await expect(sessionNew(ws, { profile: "scripted", with: ["notes:nosuch"] })).rejects.toThrow(/session new/)
 })
 
 function entry(id: string, current: string, tools: string[]): ExtensionEntry {
@@ -332,11 +329,8 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
     kind: "script",
     tools,
     manualTools: tools,
-    recommendedTools: tools,
     autoTools: [],
     internalTools: [],
-    apply: "manual",
-    standing: false,
     skills: [],
     systemPrompts: [],
     commands: [],
@@ -348,11 +342,11 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
 
 test("an auto-surface tool its package brings into every session reads as on, and this panel will not toggle it", () => {
   // A composed package contributes `surface:\"auto\"` tools to every session
-  // this front end starts. No pin list names them, so the panel must not draw
+  // this front end starts. No selection names them, so the panel must not draw
   // an empty checkbox about a tool the model can call.
   const sources = { user: [], session: ["ext:std/read"], merged: [], composed: ["ext:agent/agent"] }
-  expect(pinState("ext:agent/agent", sources)).toBe("composed")
-  expect(stateLabel(pinState("ext:agent/agent", sources))).toBe("with the package")
+  expect(faceState("ext:agent/agent", sources)).toBe("composed")
+  expect(stateLabel(faceState("ext:agent/agent", sources))).toBe("with the package")
   // …and it counts on the face, once, beside the lists.
   expect(nextFace(sources)).toEqual(["ext:std/read", "ext:agent/agent"])
 
@@ -366,25 +360,22 @@ test("an auto-surface tool its package brings into every session reads as on, an
 })
 
 /**
- * What a standing list may legally name, and therefore what a stale one gets
- * repaired against (`App.healStandingPins`, `ExtView.dropOrphanPins`).
+ * What a standing member list may legally select, and therefore what a stale one
+ * gets repaired against (`App.healOrphanSelections`, `ExtView.dropOrphanTools`).
  *
- * One condition, the kernel's: no `current` means nothing for the pin to bring
- * in, and no session. There used to be a second, this front end's own — a
- * standing pin on a package that declared itself opt-in would wear that mode in
- * every session — and it went with the declaration (K8): reach is stated by the
- * person now, in `[extensions] with` or in `/ext`, both of them visible.
+ * One condition, the kernel's: no `current` means nothing for the member to
+ * resolve, and no session.
  */
-test("a package with a resolvable current offers only surface-manual tools a standing pin can name", () => {
+test("a package with a resolvable current offers only its surface-manual tools", () => {
   const entry = (
     id: string,
     manualTools: string[],
     over: Partial<{ current: string | null; shadowed: boolean }> = {},
   ) => ({ id, manualTools, current: "v-1", shadowed: false, ...over })
 
-  const available = resolvableStandingPins([
+  const available = resolvableSelections([
     entry("std", ["read", "edit"]),
-    // `run` is internal, `propose`/`todo` are auto: neither is pinnable, so
+    // `run` is internal, `propose`/`todo` are auto: neither needs selecting, so
     // neither may appear on a standing list.
     entry("agent", ["agent"]),
     entry("plan", []),
@@ -401,7 +392,7 @@ test("a package with a resolvable current offers only surface-manual tools a sta
 
   // Lines for auto-surface or inactive tools would make every `session new`
   // refuse, found by the same predicate that repairs them.
-  expect(orphanPins(["ext:std/read", "ext:guide/guide", "ext:ask/ask", "ext:plan/propose"], available)).toEqual([
+  expect(orphanTools(["ext:std/read", "ext:guide/guide", "ext:ask/ask", "ext:plan/propose"], available)).toEqual([
     "ext:guide/guide",
     "ext:ask/ask",
     "ext:plan/propose",

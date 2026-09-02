@@ -90,66 +90,18 @@ test("listExtensions reads the version line, the current pointer and the manifes
   // compiler-independent.
   expect(lint.kind).toBe("script")
   expect(lint.tools.length).toBeGreaterThan(0)
-  // The template writes neither `surface` nor `apply`, so this reads the two
-  // kernel defaults through a real build: a tool nobody placed is `auto`
-  // — model-facing with membership, never pinnable — and a package that said
-  // nothing about its reach is `manual`.
+  // The template writes no `surface`, so this reads the kernel default through
+  // a real build: a tool nobody placed is `auto` — model-facing as soon as its
+  // package is a member, with no selection to write.
   expect(lint.autoTools).toEqual(lint.tools)
   expect(lint.manualTools).toEqual([])
   expect(lint.internalTools).toEqual([])
-  expect(lint.apply).toBe("manual")
-  // …and it is in no session by itself: `standing` is the kernel's own record,
-  // and a `manual` package never gets one.
-  expect(lint.standing).toBe(false)
   // Which root it came from is the kernel's answer, not ours, and
   // the only copy here is the workspace one, so nothing shadows anything.
   expect(lint.root).toBe(".nulya/extensions")
   expect(lint.shadowed).toBe(false)
   // The workspace root is always first in the search order.
   expect((await storeRoots(ws))[0]).toBe(join(ws.dir, ".nulya", "extensions"))
-}, 120_000)
-
-/**
- * `standing` is a STATE the kernel records, not a field this front end derives
- *. `ext list` prints the word inside the contribution marker, off the
- * record the activation wrote into `current` — so it is false for a version
- * that merely declares `apply: "auto"` and true only once something activated
- * it, and false again the moment the pointer is gone. A manifest read here
- * could not tell those three apart: the declaration never changes.
- */
-test("listExtensions carries the kernel's standing record, not the manifest's apply", async () => {
-  const dir = join(ws.dir, ".nulya", "extensions", "kong.mode")
-  mkdirSync(join(dir, "skills", "demo"), { recursive: true })
-  writeFileSync(
-    join(dir, "extension.json"),
-    JSON.stringify({
-      schema: "nulya.extension/v2",
-      id: "kong.mode",
-      apply: "auto",
-      contributes: { skills: ["skills/demo"] },
-    }),
-  )
-  writeFileSync(join(dir, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: a standing mode\n---\nbody\n")
-
-  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
-  const built = run(["ext", "build", ".nulya/extensions/kong.mode"])
-  expect(built.exitCode).toBe(0)
-  const version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0]!
-
-  const of = async () => (await listExtensions(ws)).find((entry) => entry.id === "kong.mode")!
-  // Built and declaring `apply: "auto"`, with no `current`: it is composed into
-  // nothing, and the declaration is the only thing saying otherwise.
-  const before = await of()
-  expect(before.apply).toBe("auto")
-  expect(before.standing).toBe(false)
-
-  expect(run(["ext", "activate", "kong.mode", version]).exitCode).toBe(0)
-  expect((await of()).standing).toBe(true)
-
-  expect(run(["ext", "deactivate", "kong.mode"]).exitCode).toBe(0)
-  const after = await of()
-  expect(after.apply).toBe("auto")
-  expect(after.standing).toBe(false)
 }, 120_000)
 
 test("a system prompt entry projects its path in either form, bare or with a position", async () => {

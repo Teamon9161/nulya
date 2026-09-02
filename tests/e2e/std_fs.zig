@@ -521,7 +521,7 @@ test "bundled std read of a 200 KB file caps itself under the host budget: throu
         const activated = try runCli(alloc, io, tmp.dir, &.{ exe, "ext", "activate", "std", ref["std@".len..] });
         defer alloc.free(activated.stdout);
         try std.testing.expectEqual(@as(u8, 0), activated.code);
-        const new = try runCli(alloc, io, tmp.dir, &.{ exe, "session", "new", "--profile", "scripted", "--pin", "ext:std/read" });
+        const new = try runCli(alloc, io, tmp.dir, &.{ exe, "session", "new", "--profile", "scripted", "--with", "std:read" });
         defer alloc.free(new.stdout);
         try std.testing.expectEqual(@as(u8, 0), new.code);
         const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));

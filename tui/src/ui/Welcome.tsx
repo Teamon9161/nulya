@@ -43,7 +43,7 @@ import { fit, wrapWords } from "./columns.ts"
  * on the one line that keeps saying it once this screen is gone.
  */
 export interface NextSession {
-  /** The stable pin ids this TUI would pass as `--pin` (`ext:<id>/<tool>`). */
+  /** The stable ids of the tools this TUI's members select (`ext:<id>/<tool>`). */
   tools: string[]
   /** `--with <id>[@<version>]`, when `/evolve` or `/with` set one. */
   bring?: string
@@ -74,7 +74,7 @@ function tipsOf(glyphs: Glyphs): string[] {
     "/model picks what the NEXT session runs on · ←→ on a row changes its effort",
     "/mode switches between asking about every tool call and not asking at all",
     "/compact hands this conversation to a fresh session with a summary in front",
-    "/ext is the store: what is built, what is active, and which tools are pinned",
+    "/ext is the store: what is built, what is active, and which tools are on the face",
     "/agent delegates to a sub-agent in a tab of its own · bare /agent lists them",
     "shell {background:true} outlives the step · /tasks shows what is still running",
     "/outcome success|partial|failure records how a session went · nothing recorded is not failure",
@@ -178,13 +178,13 @@ export function Welcome(props: {
 
   /**
    * The face the next session would carry. The one builtin is always there and
-   * always first; the pinned ones are the interesting half,
-   * so only those carry the ⚡. A pin is a stable id (`ext:<ext>/<tool>`) and
+   * always first; the selected ones are the interesting half,
+   * so only those carry the ⚡. Each is a stable id (`ext:<ext>/<tool>`) and
    * the tool NAME is what the model calls, so that is what is drawn.
    */
   const tools = () => {
-    const pinned = (props.plan?.tools ?? []).map((id) => `${style.glyphs.capability}${id.split("/").pop() ?? id}`)
-    return ["shell", ...pinned].join(" ")
+    const selected = (props.plan?.tools ?? []).map((id) => `${style.glyphs.capability}${id.split("/").pop() ?? id}`)
+    return ["shell", ...selected].join(" ")
   }
 
   return (

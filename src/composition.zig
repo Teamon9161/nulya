@@ -2,11 +2,9 @@
 //! member extensions at their versions, the model-facing tool set, skills and
 //! system prompts.
 //!
-//! Two independent decisions, no shared vocabulary: which extension VERSION this
-//! session runs (`FrozenExtension`) and which extension tools take a NATIVE slot
-//! on the model's tool face (`Options.pinned_native_tools`, plus the
-//! `surface:"auto"` tools of every member). "Pin" means only the
-//! `surface:"manual"` half — the one a person names.
+//! ONE axis: a session is a list of members (`Options.with`), and each member
+//! carries a tool selection (`WithRef.tools`) saying which of its tools take a
+//! slot on the model's tool face. Nothing else can put a tool there.
 //!
 //! Two phases: `resolve` answers the request (a fresh session's named members,
 //! or a header's frozen versions) and turns tool ids into bindings; `assemble`
@@ -110,16 +108,6 @@ pub const FrozenExtension = struct {
 /// Narrow, config-agnostic selection input: the composition never learns where
 /// any of this came from. Config stays at the session-setup boundary.
 pub const Options = struct {
-    /// Stable ids (`ext:<extension-id>/<tool-name>`) to expose natively because
-    /// a person or driver pinned them — config's `pinned_native_tools` plus
-    /// `session new --pin`, already joined. Only `surface:"manual"` tools may be
-    /// pinned; members contribute their `auto` tools on their own. An
-    /// unresolvable or non-pinnable pin is a HARD ERROR, never a silent skip.
-    ///
-    /// A pin whose package is not already a member BRINGS IT IN at `current`
-    /// (`resolveFreshExtensions`): a tool cannot take a slot in a session its
-    /// package is absent from. What it brings in is a FULL member.
-    pinned_native_tools: []const []const u8 = &.{},
     /// Provider-facing total tool count, the builtin included. `shell` always
     /// occupies `registry.builtin_count` of it.
     max_tools: u32 = 20,
@@ -129,18 +117,9 @@ pub const Options = struct {
     /// `--with <id>@<version>` wins over the standing entry.
     ///
     /// Membership means: skills enter the catalog, system prompts enter the
-    /// system blocks, tools become invocable through the CLI, and every
-    /// `surface:"auto"` tool takes a native slot. `manual` tools still need a
-    /// pin; `internal` tools never join the model face.
+    /// system blocks, tools become invocable through the CLI, and the tools this
+    /// member's selection names take a slot on the model's tool face.
     with: []const WithRef = &.{},
-    /// Whether the STORE's own standing members join: every id whose `current`
-    /// records `apply: "auto"`. True for an ordinary session; `session new
-    /// --bare` sets it false and passes the standing config lists empty, so bare
-    /// composes from argv alone.
-    ///
-    /// Named members always win: an `apply: auto` package that config or
-    /// `--with` also names is taken at the version THEY asked for.
-    apply_auto: bool = true,
     /// Per-session system prompts, already read into memory by the caller
     /// (`session new --prompt <file>`). Carried by VALUE and frozen into the
     /// header rather than resolved against a store; the composition never
@@ -167,34 +146,41 @@ pub const ExecTargetProbe = struct {
     }
 };
 
-/// One `--with` request: an extension id, optionally at an exact version.
-/// Without a version, the id's `current` is used — and an id that resolves to
-/// nothing is a hard error, because the caller named it.
+/// One `--with` request: an extension id, optionally at an exact version, plus
+/// which of its tools reach the model. Without a version, the id's `current` is
+/// used — and an id that resolves to nothing is a hard error, because the caller
+/// named it.
 pub const WithRef = struct {
     id: []const u8,
     version: ?[]const u8 = null,
+    tools: ToolSelection = .default,
+};
+
+/// Which of a member's declared tools take a slot on the model's tool face.
+/// A `surface:"internal"` tool is reachable by no selection at all.
+pub const ToolSelection = union(enum) {
+    /// Nothing written after the id: the package's own default, which is its
+    /// `surface:"auto"` tools.
+    default,
+    /// `:none` — a member that puts no tool on the face, and still contributes
+    /// its skills, system prompts and CLI reach.
+    none,
+    /// `:a,b` — the package's `auto` tools plus these named ones. Borrowed from
+    /// the caller's argv or config strings.
+    named: []const []const u8,
 };
 
 pub const CompositionError = error{
     /// `max_tools` cannot even seat the permanent builtins.
     ToolBudgetTooSmall,
-    /// The explicit pins would push the tool set past `max_tools`.
+    /// The selected tools would push the tool set past `max_tools`.
     ToolBudgetExceeded,
-    /// A pin is not `ext:<extension-id>/<tool-name>`.
-    InvalidStableToolId,
-    /// A pin names an extension NO STORE ROOT HOLDS — never built on this
-    /// machine, or named with a typo. A pin whose package merely was not a
-    /// member is not this error any more: it brings the package in
-    /// (`resolveFreshExtensions`), and a package that is held but has no
-    /// `current` fails as `WithVersionNotFound` instead.
-    PinNamesUnknownExtension,
-    /// The extension is a member, but its frozen manifest declares no such tool.
-    PinToolNotDeclared,
-    /// A pin names a tool whose manifest surface is not `manual`.
-    PinToolNotPinnable,
+    /// A member's tool selection names something its frozen manifest does not
+    /// declare, or declares `surface:"internal"`. A session header's frozen
+    /// `native_tools` entry that no longer parses arrives here too.
+    WithToolNotDeclared,
     /// An extension named for this session has no built version to use: either
     /// no `current` at all, or the named version is in none of the store roots.
-    /// Both `--with` and the membership a pin implies arrive here.
     WithVersionNotFound,
     /// A member named WITHOUT a version has a `current`, and it points at a
     /// version whose seal, manifest or package is unusable. Named by a stderr
@@ -233,9 +219,8 @@ pub const SessionComposition = struct {
     ) !SessionComposition {
         try validateBudget(opts);
 
-        // No store root existing anywhere needs no special case: a pin fails as
-        // `PinNamesUnknownExtension` and a `--with` as `WithVersionNotFound` on
-        // the ordinary path.
+        // No store root existing anywhere needs no special case: a named member
+        // fails as `WithVersionNotFound` on the ordinary path.
         var roots = try roots_mod.Roots.open(alloc, io, cwd, ext_roots);
         defer roots.deinit();
 
@@ -317,8 +302,8 @@ const Resolved = struct {
 };
 
 /// Phase one: decide membership. Named members and a header's frozen versions
-/// differ only in how the list is obtained; both are STRICT, as is pin
-/// resolution — an extension someone named or froze that cannot be composed
+/// differ only in how the list is obtained; both are STRICT, as is tool
+/// selection — an extension someone named or froze that cannot be composed
 /// fails the session rather than starting it quietly without a capability it was
 /// asked for. `roots` stays the caller's; `a` is the composition arena (the
 /// bindings survive this phase), `gpa` backs the resolved manifests (they do
@@ -346,7 +331,7 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod
     };
     const bindings = switch (request) {
         .fresh => |opts| try resolveFreshBindings(a, extensions, exec_versions, opts),
-        .frozen => |frozen| try resolvePinnedBindings(a, extensions, exec_versions, frozen.native_tools),
+        .frozen => |frozen| try resolveFrozenBindings(a, extensions, exec_versions, frozen.native_tools),
     };
     return .{
         .extensions = extensions,
@@ -432,167 +417,17 @@ fn reportMissingExecVersion(
     try std.Io.File.stderr().writeStreamingAll(io, line);
 }
 
-/// Membership for a FRESH session, in three layers, IN THIS ORDER: the store's
-/// own standing members (`apply: "auto"`), then what `Options.with` names, and
-/// last what the pins imply.
+/// Membership for a FRESH session: exactly what `Options.with` names, resolved
+/// in order so a later mention of an id replaces an earlier one.
 ///
-/// `apply: "auto"` is FIRST so it can be overridden — `unionWith` takes the
-/// later mention, so a `--with <id>@<version>` naming the same id replaces it.
-/// `Options.apply_auto` is how `--bare` leaves the whole layer out.
-///
-/// A PIN IMPLIES MEMBERSHIP: a tool cannot take a native slot in a session its
-/// package is not a member of. What it brings in is an ORDINARY member — the
-/// three layers produce one set of (id, version) pairs and nothing downstream
-/// can tell them apart, so such a package contributes its system prompts, skills
-/// and `surface:"auto"` tools like any other.
-///
-/// Pins are last and NEVER an override: an id already resolved at an exact
-/// version keeps that version. A pin asks for the tool, not for a version.
-///
-/// Only ids some root actually HOLDS are implied, which keeps the two refusals
-/// distinguishable: nothing holds this id → `PinNamesUnknownExtension` (never
-/// built here); held but no `current` → `WithVersionNotFound` (built, never
-/// activated). The frozen path is untouched — a header's `active` already lists
-/// every member this rule brought in.
+/// The base is an ALLOCATED empty slice, not a stack array: `unionWith` hands
+/// the base back untouched when there is nothing to union, and that slice
+/// escapes as this function's result.
 fn resolveFreshExtensions(gpa: std.mem.Allocator, roots: *const roots_mod.Roots, opts: Options) ![]roots_mod.Roots.Resolved {
-    // The base is the store's standing members, or nothing when `--bare` turned
-    // that layer off. An ALLOCATED empty slice, not a stack array: `unionWith`
-    // hands the base back untouched when there is nothing to union, and that
-    // slice escapes as this function's result.
-    const standing = if (opts.apply_auto)
-        try resolveApplyAutoExtensions(gpa, roots)
-    else
-        try gpa.alloc(roots_mod.Roots.Resolved, 0);
-    const named = try unionWith(gpa, roots, standing, opts.with);
-    // From here on `named` belongs to `unionWith`'s contract (it takes the base
-    // and releases it on failure), so a failure in between releases it by hand
-    // rather than through an errdefer the tail call would double.
-    const implied = pinImpliedRefs(gpa, roots, opts.pinned_native_tools, named) catch |err| {
-        freeResolved(gpa, named);
-        return err;
-    };
-    defer gpa.free(implied);
-    return unionWith(gpa, roots, named, implied);
+    const base = try gpa.alloc(roots_mod.Roots.Resolved, 0);
+    return unionWith(gpa, roots, base, opts.with);
 }
 
-/// The store's own standing members: every id whose `current` RECORDS that the
-/// version it names declared `apply: "auto"`, at that `current`, in search order
-/// (`Roots.listActive` has already applied first-root-wins).
-///
-/// WHO IS ASKED ABOUT COMES FROM THE POINTER, NOT FROM THE PACKAGE. `current`
-/// carries the `apply` its version declared, written by `activate` from a
-/// manifest it had just verified against the seal, so this layer costs one small
-/// file read per active id and reads nothing a later edit of the version
-/// directory could have answered. A package the machine merely HOLDS is never a
-/// reason a session cannot start, and tampering cannot move a package in either
-/// direction: an unrecorded package doctored to `auto` is never asked about, and
-/// a recorded one doctored at all breaks its seal below.
-///
-/// A recorded package whose `current` does not resolve FAILS THE SESSION, with
-/// `--with`'s strictness — for a mode package (a system prompt) the difference
-/// is invisible from the inside. The stderr line names `ext deactivate`, the
-/// repair peculiar to this layer.
-fn resolveApplyAutoExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roots) ![]roots_mod.Roots.Resolved {
-    var resolved: std.ArrayList(roots_mod.Roots.Resolved) = .empty;
-    errdefer freeResolved(alloc, resolved.items);
-
-    const active = try roots.listActive(alloc);
-    defer roots_mod.Roots.freeActive(alloc, active);
-
-    for (active) |entry| {
-        if (!entry.standing) continue;
-
-        // A host fault — cancellation, OOM, real I/O failure — propagates as
-        // itself, never as a broken extension (`isExtensionFault`).
-        const r = roots.resolveEntry(alloc, entry, .sealed) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => {
-                if (!isExtensionFault(err)) return err;
-                try reportBrokenApplyAuto(roots.io, alloc, entry, err);
-                return error.ActiveExtensionBroken;
-            },
-        };
-        errdefer r.deinit(alloc);
-        // The record decided WHO is worth checking; the sealed manifest must
-        // still prove the qualification. Without this line a `current` doctored
-        // to `apply=auto` over a version whose sealed manifest says `manual`
-        // would grant standing reach. The other direction is fail-closed on its
-        // own: the package merely stays out.
-        if (r.manifest.applyOf() != .auto) {
-            try reportBrokenApplyAuto(roots.io, alloc, entry, error.StandingRecordMismatch);
-            return error.ActiveExtensionBroken;
-        }
-        try resolved.append(alloc, r);
-    }
-    return resolved.toOwnedSlice(alloc);
-}
-
-/// `reportBrokenActive` for a package nobody named — it is here because it says
-/// `apply: "auto"`, so the sentence says that and offers the repair peculiar to
-/// this layer: `ext deactivate <id>`, which turns standing membership off
-/// without touching the package.
-fn reportBrokenApplyAuto(
-    io: std.Io,
-    alloc: std.mem.Allocator,
-    entry: roots_mod.Roots.ActiveEntry,
-    err: anyerror,
-) !void {
-    // Silenced under test for `reportBrokenActive`'s reason.
-    if (builtin.is_test) return;
-    const line = try std.fmt.allocPrint(
-        alloc,
-        "extension {s} declares apply: auto, so every new session composes it — but its current points at {s}, which is broken ({s}); run 'nulya ext activate {s} <older-version>', or 'nulya ext deactivate {s}' to stop composing it at all\n",
-        .{ entry.id, entry.version, @errorName(err), entry.id, entry.id },
-    );
-    defer alloc.free(line);
-    try std.Io.File.stderr().writeStreamingAll(io, line);
-}
-
-/// The member refs a pin list implies: one per distinct `ext:<id>/…` id that is
-/// not already a member and that some root holds, at `current`.
-///
-/// Borrows each id from the pin string, which outlives this composition step. A
-/// malformed pin is SKIPPED rather than reported: `resolveBindings` is the one
-/// place that judges pins, and it refuses this very string a moment later.
-fn pinImpliedRefs(
-    alloc: std.mem.Allocator,
-    roots: *const roots_mod.Roots,
-    pins: []const []const u8,
-    members: []const roots_mod.Roots.Resolved,
-) ![]WithRef {
-    var out: std.ArrayList(WithRef) = .empty;
-    errdefer out.deinit(alloc);
-    for (pins) |pin| {
-        const parsed = parseStableToolId(pin) catch continue;
-        if (findResolved(members, parsed.ext_id) != null) continue;
-        for (out.items) |seen| {
-            if (std.mem.eql(u8, seen.id, parsed.ext_id)) break;
-        } else {
-            if (!try anyRootHolds(alloc, roots, parsed.ext_id)) continue;
-            try out.append(alloc, .{ .id = parsed.ext_id });
-        }
-    }
-    return out.toOwnedSlice(alloc);
-}
-
-/// Does any store root hold this extension at all — a `current`, or any built
-/// version? Same notion of "held" the trust gate uses: a directory with only a
-/// lock in it is where a failed build left its lease, not an extension.
-fn anyRootHolds(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, id: []const u8) !bool {
-    if (try roots.firstActive(alloc, id)) |active| {
-        alloc.free(active.version);
-        return true;
-    }
-    for (roots.entries, 0..) |_, i| {
-        const versions = roots.store(i).listVersions(alloc, id) catch continue;
-        defer {
-            for (versions) |v| alloc.free(v);
-            alloc.free(versions);
-        }
-        if (versions.len != 0) return true;
-    }
-    return false;
-}
 
 fn copyInlinePrompts(a: std.mem.Allocator, prompts: []const ledger.InlinePrompt) ![]const ledger.InlinePrompt {
     const out = try a.alloc(ledger.InlinePrompt, prompts.len);
@@ -640,13 +475,11 @@ fn assemble(
 }
 
 /// The tool budget is provider-facing and counts the permanent builtins. This
-/// early pass rejects impossible budgets before any filesystem work, but can
-/// only count explicit pins; `resolveFreshBindings` checks the final face again
-/// once `surface:"auto"` tools are known.
+/// early pass rejects a budget no session could ever satisfy, before any
+/// filesystem work; `resolveFreshBindings` checks the final face once the
+/// members' manifests are known.
 fn validateBudget(opts: Options) CompositionError!void {
     if (opts.max_tools < registry.builtin_count) return error.ToolBudgetTooSmall;
-    const room_for_extensions = opts.max_tools - registry.builtin_count;
-    if (opts.pinned_native_tools.len > room_for_extensions) return error.ToolBudgetExceeded;
 }
 
 /// Freeze the builtin table plus the bindings' tools. The extras array is
@@ -659,15 +492,13 @@ fn snapshotFromBindings(a: std.mem.Allocator, bindings: []ext_tools.Binding) !re
     return registry.snapshotWith(a, extras);
 }
 
-/// The extension-tool bindings for a FRESH session: explicit pins (strict), then
-/// every member's `surface:"auto"` tools.
+/// The extension-tool bindings for a FRESH session: for each member, its
+/// `surface:"auto"` tools plus whatever its selection names, in member order.
 ///
 /// **A member is a member.** Membership is a set of (id, version) pairs, and
-/// where a pair came from buys no different rights: each member contributes
-/// everything its manifest declares — system prompts, skills, and all its `auto`
-/// tools. Distinguishing them would need the frozen header to record HOW each
-/// member arrived, which is a freeze-schema field; this way fresh and frozen
-/// paths read one rule for every member.
+/// each member contributes everything its manifest declares — system prompts,
+/// skills, and its `auto` tools — regardless of which line of config or argv
+/// named it.
 fn resolveFreshBindings(
     a: std.mem.Allocator,
     resolved: []const roots_mod.Roots.Resolved,
@@ -677,17 +508,22 @@ fn resolveFreshBindings(
     var out: std.ArrayList(ext_tools.Binding) = .empty;
     errdefer out.deinit(a);
 
-    for (opts.pinned_native_tools) |pin| {
-        try out.append(a, try resolvePinnedBinding(a, resolved, exec_versions, pin, .fresh_pin));
-    }
-
     for (resolved, exec_versions) |r, exec| {
+        const selection = selectionFor(opts.with, r.id);
+        if (selection == .none) continue;
         for (r.manifest.tools) |spec| {
             if (spec.surfaceOf() != .auto) continue;
-            const id = try std.fmt.allocPrint(a, "ext:{s}/{s}", .{ r.id, spec.name });
-            defer a.free(id);
-            if (bindingIdSeen(out.items, id)) continue;
-            try out.append(a, try bindingForSpec(a, r, exec, spec, id));
+            try appendBinding(a, &out, r, exec, spec);
+        }
+        switch (selection) {
+            .named => |names| for (names) |name| {
+                const spec = findToolSpec(r.manifest, name) orelse return error.WithToolNotDeclared;
+                // `internal` is the one word no selection reaches: those tools
+                // exist for `ext run`, not for the model's face.
+                if (spec.surfaceOf() == .internal) return error.WithToolNotDeclared;
+                try appendBinding(a, &out, r, exec, spec);
+            },
+            else => {},
         }
     }
 
@@ -695,20 +531,50 @@ fn resolveFreshBindings(
     return out.toOwnedSlice(a);
 }
 
+/// What this member's tool selection is, taking the LAST mention of the id —
+/// the same rule `unionWith` uses for versions, so one `--with` line decides
+/// both halves of a member.
+fn selectionFor(with: []const WithRef, id: []const u8) ToolSelection {
+    var found: ToolSelection = .default;
+    for (with) |ref| {
+        if (std.mem.eql(u8, ref.id, id)) found = ref.tools;
+    }
+    return found;
+}
+
+fn appendBinding(
+    a: std.mem.Allocator,
+    out: *std.ArrayList(ext_tools.Binding),
+    r: roots_mod.Roots.Resolved,
+    exec: ?[]const u8,
+    spec: manifest.ToolSpec,
+) !void {
+    const id = try std.fmt.allocPrint(a, "ext:{s}/{s}", .{ r.id, spec.name });
+    defer a.free(id);
+    if (bindingIdSeen(out.items, id)) return;
+    try out.append(a, try bindingForSpec(a, r, exec, spec, id));
+}
+
 /// Resolve only the stable tool ids frozen in a session header. Resume never
-/// re-expands `surface:"auto"`: the header already IS the whole native face.
-fn resolvePinnedBindings(
+/// re-expands a selection: the header already IS the whole native face.
+fn resolveFrozenBindings(
     a: std.mem.Allocator,
     resolved: []const roots_mod.Roots.Resolved,
     exec_versions: []const ?[]const u8,
-    pins: []const []const u8,
+    frozen: []const []const u8,
 ) ![]ext_tools.Binding {
-    const bindings = try a.alloc(ext_tools.Binding, pins.len);
-    for (pins, bindings) |pin, *b| b.* = try resolvePinnedBinding(a, resolved, exec_versions, pin, .frozen_header);
+    const bindings = try a.alloc(ext_tools.Binding, frozen.len);
+    for (frozen, bindings) |id, *b| {
+        const parsed = try parseStableToolId(id);
+        const index = findResolvedIndex(resolved, parsed.ext_id) orelse return error.WithToolNotDeclared;
+        const r = resolved[index];
+        const spec = findToolSpec(r.manifest, parsed.tool_name) orelse return error.WithToolNotDeclared;
+        // `id` already passed parseStableToolId, whose two segments reformat
+        // back to exactly `id` (ids never contain `/`), so initOwned dupes it.
+        b.* = try bindingForSpec(a, r, exec_versions[index], spec, id);
+    }
     return bindings;
 }
-
-const PinBindingMode = enum { fresh_pin, frozen_header };
 
 fn bindingIdSeen(bindings: []const ext_tools.Binding, id: []const u8) bool {
     for (bindings) |b| {
@@ -722,33 +588,15 @@ const StableToolId = struct { ext_id: []const u8, tool_name: []const u8 };
 /// Parse `ext:<extension-id>/<tool-name>`. Pure — no filesystem. Both segments
 /// must be valid ids, so splitting on the first `/` is unambiguous (ids never
 /// contain `/`).
-fn parseStableToolId(pin: []const u8) CompositionError!StableToolId {
+fn parseStableToolId(id: []const u8) CompositionError!StableToolId {
     const prefix = "ext:";
-    if (!std.mem.startsWith(u8, pin, prefix)) return error.InvalidStableToolId;
-    const rest = pin[prefix.len..];
-    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.InvalidStableToolId;
+    if (!std.mem.startsWith(u8, id, prefix)) return error.WithToolNotDeclared;
+    const rest = id[prefix.len..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.WithToolNotDeclared;
     const ext_id = rest[0..slash];
     const tool_name = rest[slash + 1 ..];
-    if (!manifest.isValidId(ext_id) or !manifest.isValidId(tool_name)) return error.InvalidStableToolId;
+    if (!manifest.isValidId(ext_id) or !manifest.isValidId(tool_name)) return error.WithToolNotDeclared;
     return .{ .ext_id = ext_id, .tool_name = tool_name };
-}
-
-fn resolvePinnedBinding(
-    a: std.mem.Allocator,
-    resolved: []const roots_mod.Roots.Resolved,
-    exec_versions: []const ?[]const u8,
-    pin: []const u8,
-    mode: PinBindingMode,
-) !ext_tools.Binding {
-    const parsed = try parseStableToolId(pin);
-
-    const index = findResolvedIndex(resolved, parsed.ext_id) orelse return error.PinNamesUnknownExtension;
-    const r = resolved[index];
-    const spec = findToolSpec(r.manifest, parsed.tool_name) orelse return error.PinToolNotDeclared;
-    if (mode == .fresh_pin and spec.surfaceOf() != .manual) return error.PinToolNotPinnable;
-    // `pin` already passed parseStableToolId, whose two segments reformat back
-    // to exactly `pin` (ids never contain `/`), so initOwned dupes it directly.
-    return bindingForSpec(a, r, exec_versions[index], spec, pin);
 }
 
 /// A binding is an IDENTITY, not a path: the package, the version that will
@@ -782,11 +630,6 @@ fn findResolvedIndex(resolved: []const roots_mod.Roots.Resolved, id: []const u8)
         if (std.mem.eql(u8, r.id, id)) return i;
     }
     return null;
-}
-
-fn findResolved(resolved: []const roots_mod.Roots.Resolved, id: []const u8) ?roots_mod.Roots.Resolved {
-    const index = findResolvedIndex(resolved, id) orelse return null;
-    return resolved[index];
 }
 
 fn findToolSpec(m: manifest.Manifest, name: []const u8) ?manifest.ToolSpec {
@@ -1497,17 +1340,17 @@ test "a header's inline prompts rebuild the identical blocks with no store to co
     try std.testing.expectEqualStrings("You are a scout.\n", comp.system_prompts.blocks[1].bytes);
 }
 
-test "parseStableToolId splits ext:<id>/<tool>, rejecting malformed pins" {
+test "parseStableToolId splits ext:<id>/<tool>, rejecting malformed ids" {
     const ok = try parseStableToolId("ext:web.search/web_search");
     try std.testing.expectEqualStrings("web.search", ok.ext_id);
     try std.testing.expectEqualStrings("web_search", ok.tool_name);
 
-    try std.testing.expectError(error.InvalidStableToolId, parseStableToolId("web_search"));
-    try std.testing.expectError(error.InvalidStableToolId, parseStableToolId("ext:web.search"));
-    try std.testing.expectError(error.InvalidStableToolId, parseStableToolId("ext:/web_search"));
-    try std.testing.expectError(error.InvalidStableToolId, parseStableToolId("ext:web.search/"));
+    try std.testing.expectError(error.WithToolNotDeclared, parseStableToolId("web_search"));
+    try std.testing.expectError(error.WithToolNotDeclared, parseStableToolId("ext:web.search"));
+    try std.testing.expectError(error.WithToolNotDeclared, parseStableToolId("ext:/web_search"));
+    try std.testing.expectError(error.WithToolNotDeclared, parseStableToolId("ext:web.search/"));
     // A second slash lands in the tool-name segment, which is not a valid id.
-    try std.testing.expectError(error.InvalidStableToolId, parseStableToolId("ext:web.search/a/b"));
+    try std.testing.expectError(error.WithToolNotDeclared, parseStableToolId("ext:web.search/a/b"));
 }
 
 test "isExtensionFault classifies extension faults vs host faults" {
@@ -1531,15 +1374,9 @@ test "isExtensionFault classifies extension faults vs host faults" {
 }
 
 test "budget rejects an impossible tool count before any filesystem work" {
-    // Below the permanent builtin.
+    // Below the permanent builtin: no member list could ever make this fit.
     try std.testing.expectError(error.ToolBudgetTooSmall, validateBudget(.{ .max_tools = registry.builtin_count - 1 }));
-    // Room for zero extensions, but one pin requested.
-    try std.testing.expectError(error.ToolBudgetExceeded, validateBudget(.{
-        .max_tools = registry.builtin_count,
-        .pinned_native_tools = &.{"ext:web.search/web_search"},
-    }));
-    // Exactly enough room.
-    try validateBudget(.{ .max_tools = registry.builtin_count + 1, .pinned_native_tools = &.{"ext:web.search/web_search"} });
+    try validateBudget(.{ .max_tools = registry.builtin_count });
 }
 
 /// A runtime extension exposing arbitrary tool JSON. `marker` differentiates
@@ -1572,8 +1409,8 @@ fn writeToolExtension(
     tool_name: []const u8,
     marker: []const u8,
 ) ![]u8 {
-    // `surface: manual` because this is the fixture the PIN tests stand on: a
-    // tool a person has to name. Silence would mean `auto`, a different fixture.
+    // `surface: manual` because this is the fixture the SELECTION tests stand
+    // on: a tool a member has to name. Silence would mean `auto`.
     const tools_json = try std.fmt.allocPrint(alloc,
         \\ [{{"name":"{s}","description":"a tool","input":{{"type":"object"}},"surface":"manual"}}]
     , .{tool_name});
@@ -1668,8 +1505,8 @@ test "a selected extension tool is provider-visible and freezes to the compositi
 
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
-    const pins = [_][]const u8{"ext:web.search/web_search"};
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &pins });
+    const with_search: []const WithRef = &.{.{ .id = "web.search", .tools = .{ .named = &.{"web_search"} } }};
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with_search });
     defer comp.deinit(alloc);
 
     // Provider-visible under its model-facing name, and the snapshot's Tool
@@ -1689,7 +1526,7 @@ test "a selected extension tool is provider-visible and freezes to the compositi
     try std.testing.expectEqualStrings(v1, comp.extension_tool_bindings[0].version);
 
     // A fresh session opened after the switch sees v2.
-    var comp2 = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &pins });
+    var comp2 = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with_search });
     defer comp2.deinit(alloc);
     try std.testing.expectEqualStrings(v2, comp2.extension_tool_bindings[0].version);
 }
@@ -1757,8 +1594,8 @@ test "executor calls reach the composition-time frozen version" {
     defer alloc.free(v2);
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
-    const pins = [_][]const u8{"ext:web.search/web_search"};
-    var session_a = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &pins });
+    const with_search: []const WithRef = &.{.{ .id = "web.search", .tools = .{ .named = &.{"web_search"} } }};
+    var session_a = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with_search });
     defer session_a.deinit(alloc);
     const tool_a = session_a.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     var env_a = FakeEnv{ .io = io };
@@ -1781,7 +1618,7 @@ test "executor calls reach the composition-time frozen version" {
     }
 
     // ...while a fresh session's executor reaches v2.
-    var session_b = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &pins });
+    var session_b = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with_search });
     defer session_b.deinit(alloc);
     const tool_b = session_b.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     var env_b = FakeEnv{ .io = io };
@@ -1883,7 +1720,7 @@ test "a broken workspace copy fails the session rather than hiding a good user-r
     try std.testing.expectEqualStrings(user_v, comp.extensions[0].version);
 }
 
-test "a member's tool is not natively visible without a pin" {
+test "a member's manual tool is not natively visible without a selection" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1895,9 +1732,9 @@ test "a member's tool is not natively visible without a pin" {
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
-    // No pins: the extension is a member (composition freezes its version), but
-    // its `surface: manual` tool is reachable only through the CLI, never the
-    // model-facing set.
+    // No selection: the extension is a member (composition freezes its
+    // version), but its `surface: manual` tool is reachable only through the
+    // CLI, never the model-facing set.
     var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "web.search" }} });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
@@ -1905,7 +1742,7 @@ test "a member's tool is not natively visible without a pin" {
     try std.testing.expectEqual(@as(usize, 1), comp.extensions.len);
 }
 
-test "membership exposes surface-auto tools but not manual or internal ones" {
+test "a bare member exposes surface-auto tools but not manual or internal ones" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1932,7 +1769,7 @@ test "membership exposes surface-auto tools but not manual or internal ones" {
     try std.testing.expect(comp.tools.lookup("run") == null);
 }
 
-test "a pin-implied member is a full member: its surface-auto tools reach the model too" {
+test "a member's auto tools join the face beside the ones its selection names" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1950,17 +1787,25 @@ test "a pin-implied member is a full member: its surface-auto tools reach the mo
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
 
-    // Nobody wrote `--with pkg`: the pin is the only reason this package is in
-    // the session, and it is still an ordinary member — so `extra` is on the face
-    // next to the pinned `call`.
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &.{"ext:pkg/call"} });
+    // A selection ADDS to the package's own default; it does not replace it.
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{
+        .with = &.{.{ .id = "pkg", .tools = .{ .named = &.{"call"} } }},
+    });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), comp.extension_tool_bindings.len);
     try std.testing.expect(comp.tools.lookup("call") != null);
     try std.testing.expect(comp.tools.lookup("extra") != null);
+
+    // `:none` is how a member takes nothing at all onto the face — the
+    // package's `auto` default included.
+    var quiet = try SessionComposition.init(alloc, io, cwd, one_root, .{
+        .with = &.{.{ .id = "pkg", .tools = .none }},
+    });
+    defer quiet.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), quiet.extension_tool_bindings.len);
 }
 
-test "explicit pins are only accepted for surface-manual tools" {
+test "a selection reaches no internal tool and no tool the manifest never declared" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1978,8 +1823,20 @@ test "explicit pins are only accepted for surface-manual tools" {
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
 
-    try std.testing.expectError(error.PinToolNotPinnable, SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &.{"ext:pkg/auto_tool"} }));
-    try std.testing.expectError(error.PinToolNotPinnable, SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &.{"ext:pkg/internal_tool"} }));
+    try std.testing.expectError(error.WithToolNotDeclared, SessionComposition.init(alloc, io, cwd, one_root, .{
+        .with = &.{.{ .id = "pkg", .tools = .{ .named = &.{"internal_tool"} } }},
+    }));
+    try std.testing.expectError(error.WithToolNotDeclared, SessionComposition.init(alloc, io, cwd, one_root, .{
+        .with = &.{.{ .id = "pkg", .tools = .{ .named = &.{"nope"} } }},
+    }));
+
+    // Naming a tool the package already surfaces is not an error, and does not
+    // put it on the face twice.
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{
+        .with = &.{.{ .id = "pkg", .tools = .{ .named = &.{"auto_tool"} } }},
+    });
+    defer comp.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
 }
 
 test "frozen resume accepts header native tools regardless of current surface" {
@@ -2060,7 +1917,7 @@ test "frozen resume uses header native tools only, not fresh surface expansion" 
     try std.testing.expect(resumed.tools.lookup("call") == null);
 }
 
-test "two pinned tools sharing a model-facing name are rejected" {
+test "two selected tools sharing a model-facing name are rejected" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2075,11 +1932,14 @@ test "two pinned tools sharing a model-facing name are rejected" {
     try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
     try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
 
-    const pins = [_][]const u8{ "ext:a.pkg/search", "ext:b.pkg/search" };
-    try std.testing.expectError(error.DuplicateToolName, SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &pins }));
+    const with: []const WithRef = &.{
+        .{ .id = "a.pkg", .tools = .{ .named = &.{"search"} } },
+        .{ .id = "b.pkg", .tools = .{ .named = &.{"search"} } },
+    };
+    try std.testing.expectError(error.DuplicateToolName, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with }));
 }
 
-test "the same pin listed twice is rejected as a duplicate stable id" {
+test "a selection naming the same tool twice still puts it on the face once" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2091,11 +1951,14 @@ test "the same pin listed twice is rejected as a duplicate stable id" {
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
-    const pins = [_][]const u8{ "ext:web.search/web_search", "ext:web.search/web_search" };
-    try std.testing.expectError(error.DuplicateToolId, SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &pins }));
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{
+        .with = &.{.{ .id = "web.search", .tools = .{ .named = &.{ "web_search", "web_search" } } }},
+    });
+    defer comp.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
 }
 
-test "a pin to an inactive extension or undeclared tool is a hard error" {
+test "a member with no built version, and a selection with no slot left, are both hard errors" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2107,51 +1970,19 @@ test "a pin to an inactive extension or undeclared tool is a hard error" {
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
-    // Unknown extension.
-    try std.testing.expectError(error.PinNamesUnknownExtension, SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &[_][]const u8{"ext:absent/tool"} }));
-    // Active extension, but no such tool in its frozen manifest.
-    try std.testing.expectError(error.PinToolNotDeclared, SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &[_][]const u8{"ext:web.search/nope"} }));
-    // Malformed stable id.
-    try std.testing.expectError(error.InvalidStableToolId, SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &[_][]const u8{"web_search"} }));
-    // A resolvable pin with no slot left is refused too: a pin never silently
-    // loses to the budget.
+    // A member nothing holds: named, so it fails the session.
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{
+        .with = &.{.{ .id = "absent" }},
+    }));
+    // A resolvable selection with no slot left is refused too: a selected tool
+    // never silently loses to the budget.
     try std.testing.expectError(error.ToolBudgetExceeded, SessionComposition.init(alloc, io, cwd, one_root, .{
-        .pinned_native_tools = &[_][]const u8{"ext:web.search/web_search"},
+        .with = &.{.{ .id = "web.search", .tools = .{ .named = &.{"web_search"} } }},
         .max_tools = registry.builtin_count,
     }));
 }
 
-test "a pin brings its own package into the session, at current, without a --with saying so" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    // Activated, so it has a `current`, but nothing names it and it does not ask
-    // to be everywhere (`apply` absent = manual).
-    const manifest_bytes =
-        \\{"schema":"nulya.extension/v2","id":"opt","runtime":{"entry":"bin/run"},"contributes":{"tools":[{"name":"look","description":"a tool","input":{"type":"object"},"readonly":true,"surface":"manual"}]}}
-    ;
-    const version = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "opt", manifest_bytes, &.{.{ .rel = "src/main.zig", .bytes = "pub fn main() void {}\n" }});
-    defer alloc.free(version);
-    try testkit.activate(alloc, io, tmp.dir, "opt", version);
-
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &[_][]const u8{"ext:opt/look"} });
-    defer comp.deinit(alloc);
-
-    // A member, at `current`, and its tool on the face — from the pin alone.
-    try std.testing.expectEqual(@as(usize, 1), comp.extensions.len);
-    try std.testing.expectEqualStrings("opt", comp.extensions[0].id);
-    try std.testing.expectEqualStrings(version, comp.extensions[0].version);
-    try std.testing.expect(comp.tools.lookup("look") != null);
-    // …and the manifest's own claim rode along with the definition.
-    try std.testing.expectEqual(@as(?bool, true), comp.tools.lookup("look").?.definition.readonly);
-    try std.testing.expect(comp.tools.lookup("shell").?.definition.readonly == null);
-}
-
-test "a pin never moves a session off a version somebody named" {
+test "a member named at a version stays on it whatever current says" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2165,48 +1996,16 @@ test "a pin never moves a session off a version somebody named" {
     defer alloc.free(v2);
     try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
 
-    // `--with` names the OLD version; the pin names the tool. A pin asks for a
-    // slot, not a version, so it must not promote the session to `current`.
     var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{
-        .with = &.{.{ .id = "web.search", .version = v1 }},
-        .pinned_native_tools = &[_][]const u8{"ext:web.search/web_search"},
+        .with = &.{.{ .id = "web.search", .version = v1, .tools = .{ .named = &.{"web_search"} } }},
     });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), comp.extensions.len);
     try std.testing.expectEqualStrings(v1, comp.extensions[0].version);
+    try std.testing.expect(comp.tools.lookup("web_search") != null);
 }
 
-test "a pin whose package is held but has no current fails as WithVersionNotFound; one nothing holds is still an unknown extension" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    // Built here, never activated: there is a version to name, so the refusal
-    // is about the missing `current` and the way out is `--with <id>@<v>`.
-    const built = try writeToolExtension(alloc, io, tmp.dir, "shy", "peek", "v1");
-    defer alloc.free(built);
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{
-        .pinned_native_tools = &[_][]const u8{"ext:shy/peek"},
-    }));
-    // Naming that version explicitly is the way in, and the pin then resolves.
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{
-        .with = &.{.{ .id = "shy", .version = built }},
-        .pinned_native_tools = &[_][]const u8{"ext:shy/peek"},
-    });
-    defer comp.deinit(alloc);
-    try std.testing.expect(comp.tools.lookup("peek") != null);
-
-    // Nothing anywhere holds this id: it was never built here, and no version
-    // could be named — a different sentence, so a different error.
-    try std.testing.expectError(error.PinNamesUnknownExtension, SessionComposition.init(alloc, io, cwd, one_root, .{
-        .pinned_native_tools = &[_][]const u8{"ext:never.built/tool"},
-    }));
-}
-
-test "a pin without any extension store is a hard error, not a silent empty set" {
+test "a member with no store at all is a hard error, not a silent empty set" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2215,16 +2014,18 @@ test "a pin without any extension store is a hard error, not a silent empty set"
     defer alloc.free(cwd);
 
     // No extensions root exists at all.
-    try std.testing.expectError(error.PinNamesUnknownExtension, SessionComposition.init(alloc, io, cwd, &.{"nulya-absent-root"}, .{ .pinned_native_tools = &[_][]const u8{"ext:web.search/web_search"} }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, &.{"nulya-absent-root"}, .{
+        .with = &.{.{ .id = "web.search" }},
+    }));
 
-    // With no pins, an absent store yields a clean builtin-only composition.
+    // With no members, an absent store yields a clean builtin-only composition.
     var comp = try SessionComposition.init(alloc, io, cwd, &.{"nulya-absent-root"}, .{});
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
     try std.testing.expect(comp.tools.lookup("shell") != null);
 }
 
-test "pins decide membership, not the final tool order" {
+test "members decide the face, not the final tool order" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2239,10 +2040,13 @@ test "pins decide membership, not the final tool order" {
     try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
     try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
 
-    // Pinned b first, a second: the frozen snapshot is the builtin then extras
-    // sorted by stable id, so a precedes b regardless of pin order.
-    const pins = [_][]const u8{ "ext:b.pkg/beta", "ext:a.pkg/alpha" };
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &pins, .max_tools = 4 });
+    // b named first, a second: the frozen snapshot is the builtin then extras
+    // sorted by stable id, so a precedes b regardless of the order asked for.
+    const with: []const WithRef = &.{
+        .{ .id = "b.pkg", .tools = .{ .named = &.{"beta"} } },
+        .{ .id = "a.pkg", .tools = .{ .named = &.{"alpha"} } },
+    };
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with, .max_tools = 4 });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), comp.extension_tool_bindings.len);
     try std.testing.expectEqual(@as(usize, 3), comp.tools.tools.len);
@@ -2251,7 +2055,7 @@ test "pins decide membership, not the final tool order" {
     try std.testing.expectEqualStrings("ext:b.pkg/beta", comp.tools.tools[2].definition.id);
 }
 
-test "the tool set freezes at session creation; a changed pin only reaches the next session" {
+test "the tool set freezes at session creation; a changed selection only reaches the next session" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2266,14 +2070,20 @@ test "the tool set freezes at session creation; a changed pin only reaches the n
     try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
     try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
 
-    var first = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &[_][]const u8{"ext:a.pkg/alpha"}, .max_tools = 3 });
+    var first = try SessionComposition.init(alloc, io, cwd, one_root, .{
+        .with = &.{.{ .id = "a.pkg", .tools = .{ .named = &.{"alpha"} } }},
+        .max_tools = 3,
+    });
     defer first.deinit(alloc);
     try std.testing.expect(first.tools.lookup("alpha") != null);
     try std.testing.expect(first.tools.lookup("beta") == null);
 
-    // A later session with a different pin gets a different face and the first
-    // composition is untouched: a pin takes effect at a session boundary only.
-    var second = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &[_][]const u8{"ext:b.pkg/beta"}, .max_tools = 3 });
+    // A later session with a different member gets a different face and the
+    // first composition is untouched: composition moves at a session boundary.
+    var second = try SessionComposition.init(alloc, io, cwd, one_root, .{
+        .with = &.{.{ .id = "b.pkg", .tools = .{ .named = &.{"beta"} } }},
+        .max_tools = 3,
+    });
     defer second.deinit(alloc);
     try std.testing.expect(second.tools.lookup("beta") != null);
     try std.testing.expect(second.tools.lookup("alpha") == null);

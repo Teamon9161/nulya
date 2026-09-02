@@ -34,7 +34,8 @@ const StepGate = @import("step_stream.zig").StepGate;
 const cwdRealPath = common.cwdRealPath;
 const flagValue = common.flagValue;
 const sliceHasFlag = common.sliceHasFlag;
-const withRef = common.withRef;
+const memberRef = common.memberRef;
+const freeMemberRefs = common.freeMemberRefs;
 const envSessionId = common.envSessionId;
 const printOut = common.printOut;
 const printErrFmt = common.printErrFmt;
@@ -155,57 +156,37 @@ fn sessionOutcome(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8
 }
 
 /// The session's member extensions: the config's `extensions.with` first, then
-/// every `--with <id>[@<version>]` in argv order (repeatable). Config first so
-/// a command line naming the same id overrides it — `composition.unionWith`
-/// keeps the last mention of an id. Slices borrow `configured` and `args`; the
-/// caller owns only the returned array.
+/// every `--with <id>[@<version>][:<tool>,…]` in argv order (repeatable). Config
+/// first so a command line naming the same id overrides it —
+/// `composition.unionWith` keeps the last mention of an id. Both sources take
+/// the same spelling. Strings borrow `configured` and `args`; the caller owns
+/// the array and each selection (`freeMemberRefs`).
 fn withRefs(
     alloc: std.mem.Allocator,
     configured: []const []const u8,
     args: []const []const u8,
 ) ![]composition.WithRef {
     var out: std.ArrayList(composition.WithRef) = .empty;
-    errdefer out.deinit(alloc);
-    // Bare ids: a standing member follows `current`, so `ext activate` still
-    // moves it and a rollback stays one verb.
-    for (configured) |id| try out.append(alloc, .{ .id = id });
+    errdefer freeMemberRefs(alloc, out.items);
+    // An entry with no version follows `current`, so `ext activate` still moves
+    // it and a rollback stays one verb.
+    for (configured) |spec| try out.append(alloc, try memberRef(alloc, spec));
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
         if (!std.mem.eql(u8, args[i], "--with")) continue;
-        try out.append(alloc, withRef(args[i + 1]));
+        try out.append(alloc, try memberRef(alloc, args[i + 1]));
         i += 1;
     }
     return out.toOwnedSlice(alloc);
 }
 
-/// `--bare`: compose from argv alone. The two standing config lists
-/// (`[extensions] with`, `registry.pinned_native_tools`) read as empty and the
-/// store's standing layer (packages declaring `apply: "auto"`) is off, so a
-/// delegated sub-agent cannot inherit capabilities its definition never named.
-/// `max_tools` is still read: it is a ceiling, not a selection. The flag
-/// reaches no header column — a resume reads the frozen list either way.
+/// `--bare`: compose from argv alone. The standing config list
+/// (`[extensions] with`) reads as empty, so a delegated sub-agent cannot inherit
+/// capabilities its definition never named. `max_tools` is still read: it is a
+/// ceiling, not a selection. The flag reaches no header column — a resume reads
+/// the frozen list either way.
 fn bareComposition(args: []const []const u8) bool {
     return sliceHasFlag(args, "--bare");
-}
-
-/// The session's native tool pins: the config's `registry.pinned_native_tools`
-/// first, then every `--pin <ext:id/tool>` in argv order (the flag is
-/// repeatable). An id already present is not added twice, so naming a
-/// configured pin again is a no-op rather than a `DuplicateToolId`. Slices
-/// borrow `configured` and `args`; the caller owns only the returned array.
-fn pinRefs(alloc: std.mem.Allocator, configured: []const []const u8, args: []const []const u8) ![][]const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    errdefer out.deinit(alloc);
-    for (configured) |pin| {
-        if (!containsString(out.items, pin)) try out.append(alloc, pin);
-    }
-    var i: usize = 0;
-    while (i + 1 < args.len) : (i += 1) {
-        if (!std.mem.eql(u8, args[i], "--pin")) continue;
-        if (!containsString(out.items, args[i + 1])) try out.append(alloc, args[i + 1]);
-        i += 1;
-    }
-    return out.toOwnedSlice(alloc);
 }
 
 /// Every `--prompt <file>` (repeatable), read HERE, at creation time, into the
@@ -557,18 +538,13 @@ pub fn createSession(
 
     const bare = bareComposition(args);
 
-    // The session's members: config's standing `[extensions] with`, then every
-    // `--with <id>[@<version>]` on the command line. A package joins a session
-    // only by being on this list or by being dragged in by a pin — activating
-    // one never puts it here.
+    // The session's members, and the whole of them: config's standing
+    // `[extensions] with`, then every `--with <id>[@<version>][:<tool>,…]` on
+    // the command line. A package joins a session only by being on this list —
+    // activating one never puts it here, and the usage journal never puts a
+    // tool on the model's face by itself.
     const with = try withRefs(alloc, if (bare) &.{} else cfg.extensions.with, args);
-    defer alloc.free(with);
-
-    // `--pin ext:<id>/<tool>` (repeatable), unioned with the configured pins:
-    // the whole native tool selection, and the only one there is — the usage
-    // journal never puts a tool on the model's face by itself.
-    const pins = try pinRefs(alloc, if (bare) &.{} else cfg.registry.pinned_native_tools, args);
-    defer alloc.free(pins);
+    defer freeMemberRefs(alloc, with);
 
     // A placeholder handle is enough since `new` never steps.
     var holder: launch.ModelHolder = .{ .scripted = .{} };
@@ -582,10 +558,8 @@ pub fn createSession(
         },
         .extension_roots = ext_roots,
         .registry = .{
-            .pinned_native_tools = pins,
             .max_tools = cfg.registry.max_tools,
             .with = with,
-            .apply_auto = !bare,
             .prompts = prompts,
             .exec_target = if (launch.isRemoteSpec(exec)) target_probe.handle() else null,
         },
@@ -601,12 +575,8 @@ pub fn createSession(
         .nulya_version = launch.version,
         .parent = parent,
     }) catch |err| switch (err) {
-        // A pin names an extension silently — it brings its own package into
-        // the composition — so this refusal can be about a package nothing on
-        // the command line spelled out. Hence the second line.
         error.WithVersionNotFound => {
-            try printErrFmt(alloc, io, "session new failed: an extension this session names has no such built version (see `nulya ext list`)\n", .{});
-            try printPinImplied(alloc, io, pins, with);
+            try printWithFailure(alloc, io, with, "has no such built version (see `nulya ext list`); give it one with `--with <id>@<version>`, or `nulya ext activate <id> <version>`");
             return null;
         },
         // A member named without a version resolved through `current` to
@@ -629,26 +599,12 @@ pub fn createSession(
             try printErrFmt(alloc, io, "session new failed: '{s}' did not answer, and this session composes an extension whose build for that machine has to be identified now\n", .{exec});
             return null;
         },
-        // Same rule for pins. Name them all, since the bad one is in that
-        // list, in `.nulya/config.toml` or on the command line.
-        error.PinNamesUnknownExtension => {
-            try printPinFailure(alloc, io, pins, "names an extension no store root holds — never built on this machine, or a typo (see `nulya ext list`)");
-            return null;
-        },
-        error.PinToolNotDeclared => {
-            try printPinFailure(alloc, io, pins, "names a tool its active version does not declare (see `nulya ext inspect <id>`)");
-            return null;
-        },
-        error.PinToolNotPinnable => {
-            try printPinFailure(alloc, io, pins, "names a tool whose manifest surface is not `manual`; compose the package with `--with` if the tool is surface `auto`, or call it with `nulya ext run` if it is surface `internal`");
-            return null;
-        },
-        error.InvalidStableToolId => {
-            try printPinFailure(alloc, io, pins, "is not a stable tool id (want ext:<extension-id>/<tool-name>)");
+        error.WithToolNotDeclared => {
+            try printWithFailure(alloc, io, with, "selects a tool its version does not declare, or one whose surface is `internal` and reachable only through `nulya ext run` (see `nulya ext inspect <id>`)");
             return null;
         },
         error.ToolBudgetExceeded => {
-            try printPinFailure(alloc, io, pins, "does not fit registry.max_tools (builtins included)");
+            try printWithFailure(alloc, io, with, "puts more tools on the face than registry.max_tools allows (the builtin included)");
             return null;
         },
         else => {
@@ -686,45 +642,23 @@ fn storeTrusted(
     return true;
 }
 
-/// One line for a refused pin: what went wrong, plus every pin this session
-/// asked for, since either source could have carried the bad one.
-fn printPinFailure(alloc: std.mem.Allocator, io: std.Io, pins: []const []const u8, reason: []const u8) !void {
-    const listed = try std.mem.join(alloc, " ", pins);
-    defer alloc.free(listed);
-    try printErrFmt(alloc, io, "session new failed: a pin {s}; pinned: {s}\n", .{ reason, listed });
-}
-
-/// The packages nobody spelled out but the pins asked for anyway — otherwise
-/// "an extension this session names" would be a name the reader cannot find
-/// anywhere. Printed only when there IS such a package. Which one is the
-/// unresolvable one is not knowable here (a Zig error carries no payload), but
-/// the way out is the same for every entry.
-fn printPinImplied(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    pins: []const []const u8,
-    with: []const composition.WithRef,
-) !void {
-    var implied: std.ArrayList([]const u8) = .empty;
-    defer implied.deinit(alloc);
-    for (pins) |pin| {
-        const rest = if (std.mem.startsWith(u8, pin, "ext:")) pin["ext:".len..] else continue;
-        const id = rest[0 .. std.mem.indexOfScalar(u8, rest, '/') orelse continue];
-        if (containsString(implied.items, id)) continue;
-        for (with) |ref| {
-            if (std.mem.eql(u8, ref.id, id)) break;
-        } else try implied.append(alloc, id);
+/// One line for a refused member: what went wrong, plus every member this
+/// session asked for, since either config or argv could have carried the bad
+/// one (a Zig error names none of them).
+fn printWithFailure(alloc: std.mem.Allocator, io: std.Io, with: []const composition.WithRef, reason: []const u8) !void {
+    var listed: std.Io.Writer.Allocating = .init(alloc);
+    defer listed.deinit();
+    for (with, 0..) |ref, i| {
+        if (i != 0) try listed.writer.writeByte(' ');
+        try listed.writer.writeAll(ref.id);
+        if (ref.version) |v| try listed.writer.print("@{s}", .{v});
+        switch (ref.tools) {
+            .default => {},
+            .none => try listed.writer.writeAll(":none"),
+            .named => |names| for (names, 0..) |n, j| try listed.writer.print("{s}{s}", .{ if (j == 0) ":" else ",", n }),
+        }
     }
-    if (implied.items.len == 0) return;
-    const listed = try std.mem.join(alloc, " ", implied.items);
-    defer alloc.free(listed);
-    try printErrFmt(
-        alloc,
-        io,
-        "  a pin brings its own package into the session, so these were named too: {s}\n" ++
-            "  one of them has no `current` here; give it a version with `--with <id>@<version>`, or `nulya ext activate <id> <version>` (see `nulya ext list`)\n",
-        .{listed},
-    );
+    try printErrFmt(alloc, io, "session new failed: a member {s}; composed: {s}\n", .{ reason, listed.written() });
 }
 
 const append_usage = "usage: nulya session append <id> [<text> | --file <path>] [--image <path>]…\n";
@@ -2006,7 +1940,7 @@ test "--with unions with the configured members, config first, and splits <id>[@
         "--with",
     }; // a trailing --with with no value is not a ref
     const refs = try withRefs(alloc, &.{}, &args);
-    defer alloc.free(refs);
+    defer freeMemberRefs(alloc, refs);
 
     try std.testing.expectEqual(@as(usize, 2), refs.len);
     try std.testing.expectEqualStrings("evolution", refs[0].id);
@@ -2015,7 +1949,7 @@ test "--with unions with the configured members, config first, and splits <id>[@
     try std.testing.expectEqualStrings("v-0123456789abcdef01234567", refs[1].version.?);
 
     const none = try withRefs(alloc, &.{}, &.{ "--profile", "scripted" });
-    defer alloc.free(none);
+    defer freeMemberRefs(alloc, none);
     try std.testing.expectEqual(@as(usize, 0), none.len);
 
     // Config's standing members come FIRST and carry no version — they follow
@@ -2023,7 +1957,7 @@ test "--with unions with the configured members, config first, and splits <id>[@
     // lets it override (`unionWith` keeps the last mention of an id).
     const configured = [_][]const u8{ "guide", "std" };
     const both = try withRefs(alloc, &configured, &.{ "--with", "std@v-0123456789abcdef01234567" });
-    defer alloc.free(both);
+    defer freeMemberRefs(alloc, both);
     try std.testing.expectEqual(@as(usize, 3), both.len);
     try std.testing.expectEqualStrings("guide", both[0].id);
     try std.testing.expect(both[0].version == null);
@@ -2038,34 +1972,36 @@ test "--with unions with the configured members, config first, and splits <id>[@
     try std.testing.expect(!bareComposition(&args));
 }
 
-test "--pin unions with the configured pins, in order, without duplicating one" {
+test "a member spec carries its own tool selection, in either source" {
     const alloc = std.testing.allocator;
-    const configured = [_][]const u8{ "ext:web.search/web_search", "ext:notes/append" };
+    const configured = [_][]const u8{"std:read,grep"};
     const args = [_][]const u8{
         "--profile", "scripted",
-        "--pin",     "ext:demo/greet",
-        // Re-naming a configured pin is a no-op, not a duplicate id.
-        "--pin",     "ext:notes/append",
-        "--pinned",  "ignored",
-        "--pin",
-    }; // a trailing --pin with no value is not a pin
-    const pins = try pinRefs(alloc, &configured, &args);
-    defer alloc.free(pins);
+        "--with",    "ask:none",
+        "--with",    "web.search@v-0123456789abcdef01234567:web_search",
+        "--with",    "plain",
+    };
+    const refs = try withRefs(alloc, &configured, &args);
+    defer freeMemberRefs(alloc, refs);
+    try std.testing.expectEqual(@as(usize, 4), refs.len);
 
-    try std.testing.expectEqual(@as(usize, 3), pins.len);
-    try std.testing.expectEqualStrings("ext:web.search/web_search", pins[0]);
-    try std.testing.expectEqualStrings("ext:notes/append", pins[1]);
-    try std.testing.expectEqualStrings("ext:demo/greet", pins[2]);
+    try std.testing.expectEqualStrings("std", refs[0].id);
+    try std.testing.expectEqualStrings("read", refs[0].tools.named[0]);
+    try std.testing.expectEqualStrings("grep", refs[0].tools.named[1]);
 
-    // Neither source: an empty native selection, which is the default face.
-    const none = try pinRefs(alloc, &.{}, &.{ "--profile", "scripted" });
-    defer alloc.free(none);
-    try std.testing.expectEqual(@as(usize, 0), none.len);
+    // `:none` is a member with nothing on the model's face.
+    try std.testing.expectEqualStrings("ask", refs[1].id);
+    try std.testing.expectEqual(composition.ToolSelection.none, refs[1].tools);
 
-    // Config alone is enough; the flag is only the per-session addition.
-    const configured_only = try pinRefs(alloc, &configured, &.{});
-    defer alloc.free(configured_only);
-    try std.testing.expectEqual(@as(usize, 2), configured_only.len);
+    // A version and a selection on one spec: the `:` splits first, the `@`
+    // inside the head second.
+    try std.testing.expectEqualStrings("web.search", refs[2].id);
+    try std.testing.expectEqualStrings("v-0123456789abcdef01234567", refs[2].version.?);
+    try std.testing.expectEqualStrings("web_search", refs[2].tools.named[0]);
+
+    // No `:` at all is the package's own default.
+    try std.testing.expectEqualStrings("plain", refs[3].id);
+    try std.testing.expectEqual(composition.ToolSelection.default, refs[3].tools);
 }
 
 test "parseParent parses <session>:<seq> and rejects malformed input" {

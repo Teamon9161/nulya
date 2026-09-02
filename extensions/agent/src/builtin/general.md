@@ -1,7 +1,7 @@
 ---
 name: general
 description: Independent multi-step work with the full toolset
-pins: [ext:std/read, ext:std/write, ext:std/append, ext:std/edit, ext:std/grep, ext:std/glob]
+with: ["std:read,write,append,edit,grep,glob"]
 ---
 # nulya delegated-task sub-agent
 

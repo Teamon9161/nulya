@@ -300,7 +300,6 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
       // setting on this page follows: a nearer layer that wants FEWER things
       // must be able to say so.
       if (Array.isArray(table["with"])) target.with = table["with"].filter((e): e is string => typeof e === "string")
-      if (Array.isArray(table["pins"])) target.pins = table["pins"].filter((e): e is string => typeof e === "string")
       if (Array.isArray(table["session_prompts"])) {
         target.session_prompts = table["session_prompts"].filter((e): e is string => typeof e === "string")
       }
@@ -521,12 +520,7 @@ export const setting_fields: readonly SettingField[] = [
     value: (s) => shown(s.extensions.session_prompts),
   },
   { key: "env.<local|wsl|remote>.bare", accepts: yesno, value: (s) => envSet(s, (t) => t.bare !== undefined) },
-  { key: "env.<local|wsl|remote>.with", accepts: "package ids", value: (s) => envSet(s, (t) => t.with !== undefined) },
-  {
-    key: "env.<local|wsl|remote>.pins",
-    accepts: "ext:<id>/<tool>",
-    value: (s) => envSet(s, (t) => t.pins !== undefined),
-  },
+  { key: "env.<local|wsl|remote>.with", accepts: "<id>[:<tool>,…]", value: (s) => envSet(s, (t) => t.with !== undefined) },
   {
     key: "env.<local|wsl|remote>.session_prompts",
     accepts: "package ids",

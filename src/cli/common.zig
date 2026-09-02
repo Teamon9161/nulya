@@ -147,6 +147,45 @@ pub fn withRef(spec: []const u8) composition.WithRef {
     return .{ .id = spec[0..at], .version = spec[at + 1 ..] };
 }
 
+/// `<id>[@<version>][:<tool>,<tool>…]` — one member of a session, the spelling
+/// `session new --with` and config `[extensions] with` share. Neither an
+/// extension id nor a version contains `:`, so the first one starts the tool
+/// selection. `:none` and an empty selection both mean "a member with nothing
+/// on the model's tool face".
+///
+/// Every string is BORROWED from `spec`, which outlives the composition; only
+/// the names array is allocated, and `freeMemberRefs` releases it.
+pub fn memberRef(alloc: std.mem.Allocator, spec: []const u8) !composition.WithRef {
+    const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return withRef(spec);
+    var ref = withRef(spec[0..colon]);
+    ref.tools = try toolSelection(alloc, spec[colon + 1 ..]);
+    return ref;
+}
+
+fn toolSelection(alloc: std.mem.Allocator, text: []const u8) !composition.ToolSelection {
+    const trimmed = std.mem.trim(u8, text, " ");
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "none")) return .none;
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer names.deinit(alloc);
+    var it = std.mem.splitScalar(u8, trimmed, ',');
+    while (it.next()) |raw| {
+        const name = std.mem.trim(u8, raw, " ");
+        if (name.len != 0) try names.append(alloc, name);
+    }
+    if (names.items.len == 0) return .none;
+    return .{ .named = try names.toOwnedSlice(alloc) };
+}
+
+pub fn freeMemberRefs(alloc: std.mem.Allocator, refs: []const composition.WithRef) void {
+    for (refs) |ref| {
+        switch (ref.tools) {
+            .named => |names| alloc.free(names),
+            else => {},
+        }
+    }
+    alloc.free(refs);
+}
+
 pub fn cwdRealPath(io: std.Io, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
     // Not `Dir.cwd().realPath`: that resolves the handle through
     // /proc/self/fd/<fd>, and cwd()'s handle is the AT_FDCWD sentinel, which
@@ -193,7 +232,7 @@ pub const ext_usage =
     \\  nulya ext seed [--user] [<id>…] [--force] [--dry-run]  write the drafts this binary ships into that root; sync builds them
     \\  nulya ext run <id>[@<ver>] <tool> [<json> | --arg k=v …] [--timeout-ms N]   run the version in effect, or exactly that one; no timeout unless asked
     \\  nulya ext activate [--user] <id> <ver>            point `current` at a version; activating an older one is the rollback
-    \\  nulya ext deactivate [--user] <id>                drop `current`; the versions stay, and an apply: auto package stops composing
+    \\  nulya ext deactivate [--user] <id>                drop `current`; the versions stay, and members naming no version stop resolving
     \\  nulya ext prune [--user] [<id>] [--dry-run]       delete the versions `current` does not name
     \\  nulya ext list | inspect <id>[@<ver>] | <path>     every extension, or one manifest: the version in effect, an exact one, or a draft named by path
     \\  nulya ext trust                                   allow this workspace's store once, if it came with a checkout
@@ -203,13 +242,13 @@ pub const ext_usage =
 ;
 
 pub const session_usage =
-    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]… [--prompt <file>]… [--env <spec>] [--workspace <dir>] [--ssh-password-stdin] [--bare]
+    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>][:<tool>,…]]… [--prompt <file>]… [--env <spec>] [--workspace <dir>] [--ssh-password-stdin] [--bare]
     \\                                                    freeze composition + model, print a new session id; --with composes a built
-    \\                                                    version in, --pin puts one of its tools on the model's tool face, --parent
-    \\                                                    forks that session, --prompt freezes a file as this session's system prompt,
-    \\                                                    --env freezes where shell runs: wsl | wsl:<distro> move only the command;
+    \\                                                    version in, :tool,tool adds its manual tools to the model's tool face (:none adds
+    \\                                                    nothing), --parent forks that session, --prompt freezes a file as this session's
+    \\                                                    system prompt, --env freezes where shell runs: wsl | wsl:<distro> move only the command;
     \\                                                    remote:wsl | remote:ssh:<dest> | remote:exec:<argv…> move the workspace (--workspace says where),
-    \\                                                    --bare reads no standing layer: neither config list, nor apply: auto packages
+    \\                                                    --bare reads no standing layer: the config `with` list is left out
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
     \\                                                    queue a user turn for the next step boundary; --image inlines a
     \\                                                    png/jpeg ≤5 MB, if the model's catalog entry says vision = true
@@ -256,7 +295,7 @@ pub const journal_usage =
 ;
 
 pub const config_usage =
-    \\  nulya config show [--json]                        effective profiles, model catalog and pins; never a secret
+    \\  nulya config show [--json]                        effective profiles, model catalog and members; never a secret
     \\  nulya config refresh [--json]                     ask a subscription endpoint for today's models, then show
     \\
 ;

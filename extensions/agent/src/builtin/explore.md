@@ -2,7 +2,7 @@
 name: explore
 description: Read-only reconnaissance that returns a report
 permissions: readonly
-pins: [ext:std/read, ext:std/grep, ext:std/glob]
+with: ["std:read,grep,glob"]
 ---
 # nulya exploration sub-agent
 

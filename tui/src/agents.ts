@@ -66,7 +66,8 @@ export interface AgentEntry {
   max_exchanges: number
   /** Who this persona may delegate to. Empty = a leaf, which is every persona but a coordinator. */
   agents: string[]
-  pins: string[]
+  /** The members this persona composes (`<id>[@<version>][:<tool>,…]`). */
+  with: string[]
   warnings: string[]
 }
 
@@ -106,7 +107,7 @@ export async function listAgents(ws: Workspace, pkg: WithRef): Promise<AgentEntr
     max_steps: typeof row.max_steps === "number" ? row.max_steps : 0,
     max_exchanges: typeof row.max_exchanges === "number" ? row.max_exchanges : 0,
     agents: Array.isArray(row.agents) ? row.agents : [],
-    pins: Array.isArray(row.pins) ? row.pins : [],
+    with: Array.isArray(row.with) ? row.with : [],
     warnings: Array.isArray(row.warnings) ? row.warnings : [],
   }))
 }
@@ -267,11 +268,10 @@ export interface RenderedAgent {
    */
   agents: string[]
   /**
-   * The pins this persona asks for. No member list beside them: a pin brings its
-   * own package into the session at `current`, so the `--with`
-   * that used to be derived here was the same implication said twice.
+   * The members this persona composes, in the kernel's own spelling — passed
+   * through to `session new --with` verbatim, never re-derived here.
    */
-  pins: string[]
+  with: string[]
   /** Everything the parser found wrong that did not make the file unusable. */
   warnings: string[]
 }
@@ -312,7 +312,7 @@ export async function renderAgent(
     max_steps: typeof m.max_steps === "number" ? m.max_steps : 0,
     max_exchanges: typeof m.max_exchanges === "number" ? m.max_exchanges : 0,
     agents: Array.isArray(m.agents) ? m.agents.filter((a): a is string => typeof a === "string") : [],
-    pins: Array.isArray(m.pins) ? m.pins.filter((p): p is string => typeof p === "string") : [],
+    with: Array.isArray(m.with) ? m.with.filter((p): p is string => typeof p === "string") : [],
     warnings: Array.isArray(m.warnings) ? m.warnings.filter((w): w is string => typeof w === "string") : [],
   }
 }

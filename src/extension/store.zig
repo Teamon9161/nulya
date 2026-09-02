@@ -7,10 +7,7 @@
 //!
 //! Layout under a store root (`.nulya/extensions`):
 //!   <id>/versions/v-<hash>/{extension.json, package/{src,skills}/..., bin/<entry>}
-//!   <id>/current  — plain text file: "v-<hash> apply=<auto|manual>". `apply`
-//!                   is written by `activate` from the manifest it just
-//!                   verified against the seal, not re-read from
-//!                   `extension.json` later — an edit cannot change it.
+//!   <id>/current  — plain text file naming one version: "v-<hash>".
 //!   <id>/.lock    — writer lease held by build / activate / deactivate.
 
 const std = @import("std");
@@ -32,20 +29,6 @@ const current_file = "current";
 const lock_file = ".lock";
 const versions_dir = "versions";
 const exe_suffix = integrity.exe_suffix;
-/// The prefix of `current`'s second column (`apply=auto` / `apply=manual`).
-/// Spelled out so a person reading the file knows what the word is about.
-const apply_key = "apply=";
-
-/// What a root's `current` pointer says — see `Store.readCurrent`, which is the
-/// only thing that reads that file.
-pub const Active = struct {
-    /// The version `current` names. Owned by the caller.
-    version: []u8,
-    /// The version above declared `apply: "auto"` when `activate` verified and
-    /// recorded it: this package is a member of every fresh session in this
-    /// workspace. False for a pointer written without the record.
-    standing: bool,
-};
 
 pub const Store = struct {
     io: std.Io,
@@ -140,20 +123,15 @@ pub const Store = struct {
         return self.root.createFile(self.io, sub, .{ .truncate = false, .read = true, .lock = .exclusive });
     }
 
-    /// Point `current` at `version`, and record what that version declares about
-    /// `apply` (see `Active`). Refuses to activate a version that was never fully
-    /// built. The write is atomic (temp file + rename in the same directory), so
-    /// a crash mid-switch leaves the previous `current` — pointer AND record —
-    /// intact. One file, one rename: the two can never disagree, so there is no
-    /// third state for a reader to interpret.
+    /// Point `current` at `version`. Refuses to activate a version that was
+    /// never fully built. The write is atomic (temp file + rename in the same
+    /// directory), so a crash mid-switch leaves the previous `current` intact.
     pub fn activate(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !void {
         // Lease first, then validate: validating outside the lease could read
         // a version another process is still building and report a spurious
         // refusal where waiting for the build would have succeeded.
         var held = try self.lease(alloc, id);
         defer held.close(self.io);
-        // `.sealed`: this is what makes the `apply` record below trustworthy —
-        // the manifest it is read from is, at this instant, proven sealed.
         var m = try self.readManifest(alloc, id, version, .sealed);
         defer m.deinit();
 
@@ -162,7 +140,7 @@ pub const Store = struct {
         const final_sub = try std.fs.path.join(alloc, &.{ id, current_file });
         defer alloc.free(final_sub);
 
-        const record = try std.fmt.allocPrint(alloc, "{s} {s}{s}\n", .{ version, apply_key, @tagName(m.applyOf()) });
+        const record = try std.fmt.allocPrint(alloc, "{s}\n", .{version});
         defer alloc.free(record);
         try self.root.writeFile(self.io, .{ .sub_path = tmp_sub, .data = record });
         try self.root.rename(tmp_sub, self.root, final_sub, self.io);
@@ -196,15 +174,11 @@ pub const Store = struct {
         return integrity.openVersion(alloc, self.io, self.root, version_rel, version, id, level);
     }
 
-    /// Everything `<id>/current` says: which version this root activates, and
-    /// whether `activate` recorded that version as declaring `apply: "auto"`
-    /// (see the module doc). Null when this root has no `current` for the id.
-    /// Caller owns `version`.
-    ///
-    /// A `current` with no `apply=` column at all — written before this column
-    /// existed — reads as `false`: an unknown is not a claim, and the repair is
-    /// one `nulya ext activate <id> <version>`.
-    pub fn readCurrent(self: Store, alloc: std.mem.Allocator, id: []const u8) !?Active {
+    /// The version `<id>/current` names, or null if this root has no `current`
+    /// for the id. The only reader of that file. Trailing columns a later build
+    /// may add are ignored, so an old binary reads a new pointer. Caller owns
+    /// the returned slice.
+    pub fn activeVersion(self: Store, alloc: std.mem.Allocator, id: []const u8) !?[]u8 {
         if (!manifest.isValidId(id)) return error.InvalidId;
         const sub = try std.fs.path.join(alloc, &.{ id, current_file });
         defer alloc.free(sub);
@@ -215,20 +189,7 @@ pub const Store = struct {
         defer alloc.free(raw);
         var fields = std.mem.tokenizeAny(u8, raw, " \t\r\n");
         const version = fields.next() orelse return null;
-        var standing = false;
-        while (fields.next()) |field| {
-            if (!std.mem.startsWith(u8, field, apply_key)) continue;
-            standing = manifest.Apply.fromString(field[apply_key.len..]) == .auto;
-        }
-        return .{ .version = try alloc.dupe(u8, version), .standing = standing };
-    }
-
-    /// The active version id, or null if the extension has none — `readCurrent`
-    /// for the callers that only move or name versions. Caller owns the
-    /// returned slice.
-    pub fn activeVersion(self: Store, alloc: std.mem.Allocator, id: []const u8) !?[]u8 {
-        const active = (try self.readCurrent(alloc, id)) orelse return null;
-        return active.version;
+        return try alloc.dupe(u8, version);
     }
 
     /// The package digest a built version's seal records — "which package bytes
@@ -471,58 +432,30 @@ test "version id is deterministic and inputs-sensitive" {
     try std.testing.expect(!std.mem.eql(u8, a, c));
 }
 
-test "current records the apply the activated version declared, and only activate can write it" {
+test "current names one version, and a pointer with extra columns still names it" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const store = Store.init(io, tmp.dir);
 
-    // Two packages differing in one manifest key.
-    const standing_manifest =
-        \\{"schema":"nulya.extension/v2","id":"mode","apply":"auto","contributes":{"skills":["skills/demo"]}}
-    ;
-    const standing = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "mode", standing_manifest, &.{.{ .rel = "skills/demo/SKILL.md", .bytes = "body" }});
-    defer alloc.free(standing);
     const plain = try testkit.writeSkillVersion(alloc, io, tmp.dir, "plain", "body");
     defer alloc.free(plain);
-
-    try store.activate(alloc, "mode", standing);
     try store.activate(alloc, "plain", plain);
     {
-        const active = (try store.readCurrent(alloc, "mode")).?;
-        defer alloc.free(active.version);
-        try std.testing.expectEqualStrings(standing, active.version);
-        try std.testing.expect(active.standing);
-    }
-    {
-        const active = (try store.readCurrent(alloc, "plain")).?;
-        defer alloc.free(active.version);
-        try std.testing.expect(!active.standing);
+        const active = (try store.activeVersion(alloc, "plain")).?;
+        defer alloc.free(active);
+        try std.testing.expectEqualStrings(plain, active);
     }
 
-    // Editing the frozen manifest cannot change the record — that is the whole
-    // point of recording it. What such an edit DOES do is break
-    // the seal, so the version stops resolving, loudly, for whoever composes it.
-    const manifest_sub = try store.versionManifestPath(alloc, "mode", standing);
-    defer alloc.free(manifest_sub);
-    try tmp.dir.writeFile(io, .{ .sub_path = manifest_sub, .data =
-        \\{"schema":"nulya.extension/v2","id":"mode","apply":"manual","contributes":{"skills":["skills/demo"]}}
-    });
-    {
-        const active = (try store.readCurrent(alloc, "mode")).?;
-        defer alloc.free(active.version);
-        try std.testing.expect(active.standing);
-    }
-    try std.testing.expectError(error.VersionSealInvalid, store.readManifest(alloc, "mode", standing, .sealed));
-
-    // A pointer written before the record existed still names its version, and
-    // claims nothing: an unknown is not a claim.
-    try tmp.dir.writeFile(io, .{ .sub_path = "plain/current", .data = plain });
-    const active = (try store.readCurrent(alloc, "plain")).?;
-    defer alloc.free(active.version);
-    try std.testing.expectEqualStrings(plain, active.version);
-    try std.testing.expect(!active.standing);
+    // A pointer another build wrote with trailing columns still names its
+    // version: the first field is the pointer, the rest is not this reader's.
+    const with_columns = try std.fmt.allocPrint(alloc, "{s} something=else\n", .{plain});
+    defer alloc.free(with_columns);
+    try tmp.dir.writeFile(io, .{ .sub_path = "plain/current", .data = with_columns });
+    const active = (try store.activeVersion(alloc, "plain")).?;
+    defer alloc.free(active);
+    try std.testing.expectEqualStrings(plain, active);
 }
 
 test "activate moves the current pointer atomically, forwards and back" {

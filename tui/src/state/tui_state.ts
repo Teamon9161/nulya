@@ -16,6 +16,7 @@ import { dirname, join } from "node:path"
 import { normalizeMode, type PermissionMode } from "../approvals.ts"
 import { default_sidebar_ratio } from "./sidebar.ts"
 import { userConfigDir } from "./settings.ts"
+import { applySelection, selectedToolIds } from "../with.ts"
 
 /** The last (profile, model, effort) picked in `/model`, or by `/effort`. */
 export interface ModelPick {
@@ -106,14 +107,14 @@ export interface TuiState {
   asked_agents?: string[]
   trusted_agents?: string[]
   /**
-   * Extension tools this TUI puts on the face of every session it starts, as
-   * stable ids (`ext:<id>/<tool>`) — the `this TUI` state of the pin panel
-   *. Program state rather than config on purpose: trying a
-   * tool out should cost nothing and leave nothing in a file somebody else
-   * reads. `A` in the panel is what makes one permanent, and that writes the
-   * kernel's own `registry.pinned_native_tools` instead.
+   * Members this TUI adds to every session it starts, in the kernel's own
+   * spelling (`<id>[@<version>][:<tool>,…]`) — the `this TUI` state of the
+   * tool-face panel. Program state rather than config on purpose: trying a tool
+   * out should cost nothing and leave nothing in a file somebody else reads.
+   * `A` in the panel is what makes one permanent, and that writes the kernel's
+   * own `[extensions] with` instead.
    */
-  session_pins?: string[]
+  session_with?: string[]
   /**
    * One slot per plugin package, keyed by package id (tui-plugin U3,
    * `api.state`). PREFERENCES a plugin should remember between runs — not view
@@ -188,9 +189,9 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
       const list = record[key]
       if (Array.isArray(list)) state[key] = list.filter((s): s is string => typeof s === "string")
     }
-    const sessionPinsList = record["session_pins"]
-    if (Array.isArray(sessionPinsList)) {
-      state.session_pins = sessionPinsList.filter((s): s is string => typeof s === "string")
+    const sessionWithList = record["session_with"]
+    if (Array.isArray(sessionWithList)) {
+      state.session_with = sessionWithList.filter((s): s is string => typeof s === "string")
     }
     const execEnv = record["exec_env"]
     // The bare `ssh:<destination>` exec target was retired 2026-08-30
@@ -300,15 +301,25 @@ export function rememberModel(pick: ModelPick, path = tuiStatePath()): void {
   saveTuiState(state, path)
 }
 
-/** The `--pin` list every `session new` from this TUI carries. */
-export function sessionPins(path = tuiStatePath()): string[] {
-  return loadTuiState(path).session_pins ?? []
+/** The extra `--with` members every `session new` from this TUI carries. */
+export function sessionMembers(path = tuiStatePath()): string[] {
+  return loadTuiState(path).session_with ?? []
 }
 
-export function rememberSessionPins(pins: readonly string[], path = tuiStatePath()): void {
+export function rememberSessionMembers(members: readonly string[], path = tuiStatePath()): void {
   const state = loadTuiState(path)
-  state.session_pins = [...pins]
+  state.session_with = [...members]
   saveTuiState(state, path)
+}
+
+/** The same list seen as the tool face it selects, which is what the panel draws. */
+export function sessionSelection(path = tuiStatePath()): string[] {
+  return selectedToolIds(sessionMembers(path))
+}
+
+/** Write the member list so its selections are exactly `toolIds`. */
+export function rememberSessionSelection(toolIds: readonly string[], path = tuiStatePath()): void {
+  rememberSessionMembers(applySelection(sessionMembers(path), toolIds), path)
 }
 
 /** Remember whether the sessions sidebar was up, and how wide. */

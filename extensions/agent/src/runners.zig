@@ -138,7 +138,7 @@ pub const StartOptions = struct {
     /// must be able to enforce, or refuse the whole delegation; the other two are
     /// grants each harness has its own word for (see the table above).
     permissions: record.Permissions = record.default_permissions,
-    pins: []const []const u8 = &.{},
+    with: []const []const u8 = &.{},
     /// `--with <agent@version>` so the sub-agent can delegate onwards. Empty is
     /// a leaf, which is what every persona but a coordinator is.
     with_self: []const u8 = "",
@@ -183,7 +183,7 @@ pub fn start(r: Runner, alloc: std.mem.Allocator, io: std.Io, opts: StartOptions
                 .failed => |f| return .{ .run = .{ .code = 1, .stdout = "", .stderr = @constCast(f) } },
                 .ok => {},
             }
-            // `pins` and `with_self` say nothing here, for the reason they say
+            // `with` and `with_self` say nothing here, for the reason they say
             // nothing to Codex: they are nulya composition.
             const opened = try external.open(alloc, io, opts.exe, .{
                 .ref = try external.refOf(alloc, id, version),
@@ -225,7 +225,7 @@ pub fn start(r: Runner, alloc: std.mem.Allocator, io: std.Io, opts: StartOptions
             // driving the first round. The name is what this opens, and it is
             // enough to resume from ever after.
             //
-            // `pins` and `with_self` say nothing here: they are nulya
+            // `with` and `with_self` say nothing here: they are nulya
             // composition.
             return .{
                 .run = .{ .code = 0, .stdout = try record.mintUuid(alloc, io), .stderr = "" },
@@ -262,9 +262,9 @@ pub fn start(r: Runner, alloc: std.mem.Allocator, io: std.Io, opts: StartOptions
                     .stderr = try std.fmt.allocPrint(alloc, "could not read the rendered persona at {s}: {s}", .{ opts.prompt, @errorName(err) }),
                 } };
             };
-            // `pins` and `with_self` say nothing here: they are nulya
+            // `with` and `with_self` say nothing here: they are nulya
             // composition, and a Codex thread has its own tools. A definition
-            // naming pins for a codex agent is warned about when it is read
+            // naming members for a codex agent is warned about when it is read
             // (`defs.zig`), not silently honoured as something else.
             const opened = try codex.open(alloc, io, opts.env, .{
                 .persona = persona,
@@ -282,16 +282,13 @@ pub fn start(r: Runner, alloc: std.mem.Allocator, io: std.Io, opts: StartOptions
             // installed, so this session's identity text cannot be pruned out
             // from under its own resume.
             //
-            // `--bare`: the workspace's standing `[extensions] with` and
-            // `pinned_native_tools` are read as empty for it. Inheriting them
-            // would give a sub-agent capabilities its author never wrote down.
+            // `--bare`: the workspace's standing `[extensions] with` is read as
+            // empty for it. Inheriting it would give a sub-agent capabilities
+            // its author never wrote down.
             try argv.appendSlice(alloc, &.{ opts.exe, "session", "new", "--bare", "--prompt", opts.prompt });
             if (opts.profile.len != 0) try argv.appendSlice(alloc, &.{ "--profile", opts.profile });
             if (opts.model.len != 0) try argv.appendSlice(alloc, &.{ "--model", opts.model });
-            // Just the pins: a pin brings its own package into the session at
-            // `current` by itself, so a `--with` derived here would be a second,
-            // slightly different copy of an implication the kernel already makes.
-            for (opts.pins) |pin| try argv.appendSlice(alloc, &.{ "--pin", pin });
+            for (opts.with) |member| try argv.appendSlice(alloc, &.{ "--with", member });
             if (opts.with_self.len != 0) try argv.appendSlice(alloc, &.{ "--with", opts.with_self });
             return .{ .run = try proc.run(alloc, io, argv.items) };
         },

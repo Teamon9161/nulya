@@ -33,9 +33,10 @@ import {
   type SyncReport,
 } from "./nulya/cli.ts"
 import { readContributions, rootsOf, type Contributions, type PackageCommand } from "./nulya/files.ts"
-import { builtin_tools, toolId } from "./pins.ts"
+import { builtin_tools, toolId } from "./face.ts"
+import { parseWithRef, selectedToolIds } from "./with.ts"
 import { userConfigDir } from "./state/settings.ts"
-import { loadTuiState, rememberSessionPins } from "./state/tui_state.ts"
+import { rememberSessionSelection, sessionSelection } from "./state/tui_state.ts"
 import type { Workspace } from "./nulya/bin.ts"
 import type { AgentTrustPlan } from "./agents.ts"
 
@@ -487,14 +488,14 @@ export function planStore(ws: Workspace, user: boolean): Promise<SyncReport> {
 // and one Enter in `/ext` undoes any of it.
 
 /**
- * The six std tools, as the stable ids `session new --pin` takes.
+ * The six std tools, as the stable ids a member's selection resolves to.
  *
  * A COLD-START FALLBACK, not the truth. The truth is the manifest of whichever
- * `std` version is active on this machine (`pinsOf`), because that is what the
- * kernel will resolve the pins against. This list is read in exactly one place:
- * when no built version can be read at all.
+ * `std` version is active on this machine (`selectableToolsOf`), because that
+ * is what the kernel resolves a selection against. This list is read in exactly
+ * one place: when no built version can be read at all.
  */
-export const std_pins = [
+export const std_tools = [
   "ext:std/read",
   "ext:std/write",
   "ext:std/append",
@@ -504,30 +505,22 @@ export const std_pins = [
 ]
 
 /**
- * The pins turning a package on should write: one per `manual` tool the package
- * RECOMMENDS (`manifest.ToolSpec.recommended`).
+ * The tool ids a member entry for this package would have to SELECT: one per
+ * `surface:"manual"` tool it declares.
  *
  * Per tool, not per package: the bundled `agent` package has one manual tool
  * and three internal ones, and asking the package means an extension from
- * outside this repository gets the same answer instead of arriving in the
- * tools pane wearing a checkbox that cannot work. Pinning every `manual` tool
- * unconditionally would be the WRONG answer for a package that mixes: an
- * author writes `auto` for the tools the package is for and `manual` for
- * extras nobody wants by default, and a front end that pinned all the manual
- * ones would turn on exactly the half meant to stay off. The default is
- * `true`, so nothing here changes for a package that says nothing — `manual`
- * means on-once-installed and closable, which is the whole difference from
- * `auto`.
+ * outside this repository gets the same answer instead of arriving in the tools
+ * pane wearing a checkbox that cannot work.
  *
- * An empty list is a perfectly ordinary answer, and it now has three shapes.
+ * An empty list is a perfectly ordinary answer, and it has two shapes.
  * `compact` declares only `internal` tools: `nulya ext run` reaches them
- * without a pin, which is how `/compact` has always called it. `handoff`
- * declares `auto` ones: they reach the model face through membership, and a
- * pin naming one is refused outright (`PinToolNotPinnable`). And a package may
- * declare every one of its `manual` tools `recommended: false`.
+ * without any selection, which is how `/compact` has always called it.
+ * `handoff` declares `auto` ones: they reach the model face through membership
+ * alone, so naming them would be a no-op.
  */
-export function pinsOf(what: Pick<Contributions, "id" | "recommendedTools">): string[] {
-  return what.recommendedTools.map((tool) => toolId(what.id, tool))
+export function selectableToolsOf(what: Pick<Contributions, "id" | "manualTools">): string[] {
+  return what.manualTools.map((tool) => toolId(what.id, tool))
 }
 
 /**
@@ -638,7 +631,7 @@ export function seedBundled(ws: Workspace): Promise<SeedReport> {
 
 /**
  * Finish the install for the ids that ARRIVED in this run: point `current` at
- * what the build pass produced, and put the std tools on this TUI's pin list.
+ * what the build pass produced, and select the std tools on this TUI's member list.
  *
  * Which ones get activated goes through the same `activateUnattended` the
  * start-up sync uses, because "these ids arrived with the binary" says where
@@ -654,7 +647,7 @@ export async function adoptBundled(
   statePath?: string,
   /**
    * The ids that already had a `current` before this pass. Only an id absent
-   * from it is an INSTALL, and only an install may have pins written for it
+   * from it is an INSTALL, and only an install may have a selection written for it
    * (`adoptInstalled`). Omitted means "not known", which counts every id as
    * already installed: a pass that cannot tell must not write over choices.
    */
@@ -687,62 +680,47 @@ export async function adoptBundled(
 }
 
 /**
- * What a pass says about the packages it just INSTALLED: the pins they asked
- * for, and the reach they now have.
+ * What a pass says about the packages it just INSTALLED: the tools they put
+ * within one keypress of the model.
  *
- * Both halves belong to the same moment and to no other. A first `current` is
- * the one time a package's recommended pins may be written for somebody
- * (`pinRecommended`), and it is the one time "this is now in every session"
- * is news rather than a fact they already know.
- *
- * The second half is the `warnUserScope` precedent, and it is what stands in
- * for the guard this front end used to carry: an unattended pass may turn a
- * standing package on, and it may not do so invisibly. `/ext`'s `standing`
- * column and its Enter are where one is taken back.
+ * A first `current` is the one time a package's `manual` tools may be selected
+ * for somebody (`selectInstalled`); a pass that merely moved a package FORWARD
+ * must not touch the list, because by then the list is a person's — a tool they
+ * took off with `Space` would come back on the next rebuild, and a switch that
+ * undoes itself is not a switch.
  */
 export async function adoptInstalled(
   ws: Workspace,
   installed: readonly Contributions[],
   statePath?: string,
 ): Promise<string[]> {
-  const parts: string[] = []
-  const pinned = await pinRecommended(ws, installed, statePath)
-  if (pinned.length > 0) parts.push(`${pinned.join(" & ")} tools pinned`)
-  const standing = installed.filter((what) => what.apply === "auto").map((what) => what.id)
-  if (standing.length > 0) parts.push(`${standing.join(" & ")} now in every session · /ext`)
-  return parts
+  const selected = await selectInstalled(ws, installed, statePath)
+  return selected.length > 0 ? [`${selected.join(" & ")} tools selected`] : []
 }
 
 /**
- * Put the recommended tools of packages this pass just INSTALLED on this TUI's
- * session pin list, and report which packages got any.
+ * Put the `manual` tools of packages this pass just INSTALLED on this TUI's
+ * session member list, and report which packages got any.
  *
- * "Installed" is the narrow word on purpose: this runs only where a package
- * received its first `current`. A pass that merely moved a package FORWARD must
- * not touch the pin list, because by then the list is a person's — a tool they
- * took off with `Space` would come back on the next rebuild, and a switch that
- * undoes itself is not a switch.
- *
- * WHICH tools is the package's own word (`pinsOf` → `recommended`),
- * so a package that grew, lost, or declined one is followed without editing this
- * file. The quota is checked against the whole prospective face at once: a
- * `session new` that refuses to start is worse than an unpinned tool, so if the
- * lot will not fit, none of it is written and `/ext` is where the choosing
- * happens.
+ * WHICH tools is the package's own word (`selectableToolsOf` → `surface`), so a
+ * package that grew or lost one is followed without editing this file. The
+ * quota is checked against the whole prospective face at once: a `session new`
+ * that refuses to start is worse than a tool left off, so if the lot will not
+ * fit, none of it is written and `/ext` is where the choosing happens.
  */
-async function pinRecommended(
+async function selectInstalled(
   ws: Workspace,
   installed: readonly Contributions[],
   statePath?: string,
 ): Promise<string[]> {
-  const wanted = installed.flatMap((what) => pinsOf(what))
+  const wanted = installed.flatMap((what) => selectableToolsOf(what))
   if (wanted.length === 0) return []
-  const current = loadTuiState(statePath).session_pins ?? []
+  const current = sessionSelection(statePath)
   let merged_config: string[] = []
   let max_tools = 8
   try {
     const view = await configShow(ws)
-    merged_config = view.registry.pinned_native_tools
+    merged_config = selectedToolIds(view.extensions.with)
     max_tools = view.registry.max_tools
   } catch {
     // No projection is "unknown": assume the defaults and let `session new`
@@ -750,31 +728,31 @@ async function pinRecommended(
   }
   const face = new Set([...merged_config, ...current, ...wanted])
   if (builtin_tools + face.size > max_tools) return []
-  rememberSessionPins([...new Set([...current, ...wanted])], statePath)
-  return installed.filter((what) => pinsOf(what).length > 0).map((what) => what.id)
+  rememberSessionSelection([...new Set([...current, ...wanted])], statePath)
+  return installed.filter((what) => selectableToolsOf(what).length > 0).map((what) => what.id)
 }
 
 /**
  * One package this TUI composes a top-level session with (`[extensions]
- * session_with`): the exact version, and the pins its tools ask for.
+ * session_with`): the exact version, and the tools its member entry selects.
  *
  * Both halves are needed because membership is not a tool face. A version whose
- * tools are `surface: "auto"` reaches the model through the `--with` alone
- * (`handoff`, `agent`); one that declares `manual` does not, and the pin has to
- * travel in the same argv. Every package on this list happens to be `auto`
- * today, so `pins` is usually empty — it stays because a package that moves a
- * tool to `manual` must be followed without an edit here.
+ * tools are `surface: "auto"` reaches the model through the bare member
+ * (`handoff`, `agent`); one that declares `manual` does not, and the selection
+ * has to ride on the same entry. Every package on this list happens to be
+ * `auto` today, so `tools` is usually empty — it stays because a package that
+ * moves a tool to `manual` must be followed without an edit here.
  */
 export interface SessionMember {
   id: string
   version: string
-  /** The `surface: "manual"` tool ids this exact version declares (`pinsOf`). */
-  pins: string[]
+  /** The `surface: "manual"` tool ids this exact version declares. */
+  tools: string[]
 }
 
 /**
  * Resolve one `session_with` id to the version a `session new` should name, and
- * the pins that version's own manifest asks for.
+ * the tools that version's own manifest offers a selection.
  *
  * Two ways in, in this order:
  *
@@ -790,14 +768,20 @@ export interface SessionMember {
  *
  * Throws with a sentence for the notice; the caller starts the session anyway.
  */
-export async function sessionMember(ws: Workspace, id: string): Promise<SessionMember> {
+export async function sessionMember(ws: Workspace, spec: string): Promise<SessionMember> {
+  const asked = parseWithRef(spec)
+  const id = asked?.id ?? spec
   const version = (await buildBundledDraft(ws, id)) ?? (await activeVersionOf(ws, id))
   if (!version) {
     throw new Error(`${id} · no active version in any store · \`nulya ext build <path> --user\` then \`nulya ext activate --user ${id} <v>\``)
   }
-  // The pins come off THAT version's frozen manifest, never from a list here:
-  // a package that moves a tool between surfaces is followed without an edit.
-  return { id, version, pins: pinsOf(await readContributions(ws, id, version)) }
+  // A spec that names its own tools is taken at its word; otherwise the tools
+  // come off THAT version's frozen manifest, never from a list here — a package
+  // that moves a tool between surfaces is followed without an edit.
+  const tools = asked?.tools
+    ? asked.tools.map((tool) => toolId(id, tool))
+    : selectableToolsOf(await readContributions(ws, id, version))
+  return { id, version, tools }
 }
 
 /** Build the draft this binary ships for `id`, or null when it ships none. */

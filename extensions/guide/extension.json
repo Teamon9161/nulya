@@ -1,7 +1,6 @@
 {
   "schema": "nulya.extension/v2",
   "id": "guide",
-  "apply": "auto",
   "contributes": {
     "skills": ["skills/guide"]
   }
