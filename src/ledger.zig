@@ -89,8 +89,10 @@ pub const Event = union(enum) {
         /// The turn's reasoning as the provider emitted it: a JSON array of
         /// opaque, provider-owned items, or `""` when there was none. The kernel
         /// never reads inside; the projection hands it back to the provider,
-        /// which replays it verbatim to the SAME model — which is why a rebind
-        /// stops it being replayed (`reasoningFloor`).
+        /// which replays it verbatim to the SAME model. Model-locked by
+        /// construction: a session's identity is frozen for its whole file, and
+        /// a carry fork onto another model copies these turns with `reasoning`
+        /// emptied.
         reasoning: []const u8 = "",
         text: []const u8,
         /// Zero or more tool calls: the batch the loop executes together.
@@ -134,21 +136,6 @@ pub const Event = union(enum) {
         /// like `ToolCall.args_json` — never parsed here.
         meta: []const u8 = "",
     },
-    /// From here on, this session runs on a different model.
-    ///
-    /// The header freezes ONE identity and cannot be rewritten, so a change of
-    /// identity is an APPEND. `identity` is the already RESOLVED descriptor,
-    /// frozen exactly as the header's is: whoever asked for the change resolved
-    /// it against config with the credential in hand. `profile` is the profile
-    /// NAME, for the same display / effort lookup the header's is used for.
-    ///
-    /// NOT a turn — `prompt.zig` gives it no `Turn`. What it changes is what may
-    /// still be REPLAYED: `reasoning` is model-locked, so everything recorded
-    /// before the last rebind stops being projected (`reasoningFloor`).
-    model_rebind: struct {
-        profile: []const u8 = "",
-        identity: ModelDescriptor,
-    },
 };
 
 /// The labels this harness's own depositors write into `note.source`. The
@@ -157,58 +144,6 @@ pub const Event = union(enum) {
 /// produce the SAME label.
 pub const note_source_task = "task";
 pub const note_source_ext = "ext";
-
-/// Which model this session runs on NOW: the last `model_rebind`, or the
-/// header's frozen identity when there has been none.
-///
-/// The one answer to that question for a reader INSIDE a step, where every fact
-/// is committed. Nothing else may ask `header.model_identity` what a session
-/// runs on — that answers what it STARTED on, a different question. Outside a
-/// step, deposits count too: ask `scanSession`.
-pub const Identity = struct { profile: []const u8, identity: ModelDescriptor };
-
-pub fn effectiveIdentity(header: Header, events: []const Event) Identity {
-    return lastRebind(events) orelse .{ .profile = header.model, .identity = header.model_identity };
-}
-
-/// Do these two name the same running model? The whole `Identity`, profile
-/// included: the descriptor says which model over which wire, the profile says
-/// which credential reaches it. Every "is this already what we run on" test asks
-/// THIS one — a comparison covering less of the frozen unit makes a real change
-/// look like a no-op, and a no-op is silent.
-pub fn identityEqual(a: Identity, b: Identity) bool {
-    return std.mem.eql(u8, a.profile, b.profile) and
-        std.mem.eql(u8, a.identity.provider, b.identity.provider) and
-        std.mem.eql(u8, a.identity.model, b.identity.model) and
-        std.mem.eql(u8, a.identity.base_url, b.identity.base_url) and
-        std.mem.eql(u8, a.identity.api_key_env, b.identity.api_key_env);
-}
-
-/// Index of the last `.model_rebind` event, or null when there has been none.
-/// The one backward scan both `lastRebind` and `reasoningFloor` need.
-fn lastRebindIndex(events: []const Event) ?usize {
-    var at = events.len;
-    while (at > 0) {
-        at -= 1;
-        if (events[at] == .model_rebind) return at;
-    }
-    return null;
-}
-
-/// The last `model_rebind`, or null when this session still runs on what its
-/// header froze.
-pub fn lastRebind(events: []const Event) ?Identity {
-    const at = lastRebindIndex(events) orelse return null;
-    const r = events[at].model_rebind;
-    return .{ .profile = r.profile, .identity = r.identity };
-}
-
-/// How many events precede the identity in force — the index before which the
-/// projection stops replaying `reasoning`. Zero when the session never rebound.
-pub fn reasoningFloor(events: []const Event) usize {
-    const at = lastRebindIndex(events) orelse return 0;
-    return at + 1;
-}
 
 pub const Ledger = struct {
     alloc: std.mem.Allocator,
@@ -329,15 +264,6 @@ fn cloneEvent(a: std.mem.Allocator, e: Event) !Event {
             .source = try a.dupe(u8, n.source),
             .text = try a.dupe(u8, n.text),
             .meta = try a.dupe(u8, n.meta),
-        } },
-        .model_rebind => |r| .{ .model_rebind = .{
-            .profile = try a.dupe(u8, r.profile),
-            .identity = .{
-                .provider = try a.dupe(u8, r.identity.provider),
-                .model = try a.dupe(u8, r.identity.model),
-                .base_url = try a.dupe(u8, r.identity.base_url),
-                .api_key_env = try a.dupe(u8, r.identity.api_key_env),
-            },
         } },
     };
 }
@@ -531,6 +457,11 @@ pub const LedgerError = error{
     /// written by a newer nulya. Refused rather than read as `format_version`:
     /// a future format may keep the same field names and mean other things.
     UnsupportedLedgerVersion,
+    /// A line records `model_rebind`, the event that used to move a running
+    /// session onto another model. This binary has no such event: the way to
+    /// continue this conversation elsewhere is `session new --parent <id>:<seq>
+    /// --carry`, which copies the history into a file of its own.
+    LegacyModelRebind,
     /// Another process already holds the session's writer lease (its exclusive
     /// advisory lock). The single-writer guarantee: only one writer opens the
     /// file at a time, so two `session step` runs can never interleave writes.
@@ -850,12 +781,6 @@ pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
             if (n.meta.len != 0) try writeField(jw, "meta", n.meta);
             try writeField(jw, "text", n.text);
         },
-        .model_rebind => |r| {
-            try jw.write("model_rebind");
-            try writeField(jw, "profile", r.profile);
-            try jw.objectField("identity");
-            try jw.write(r.identity);
-        },
     }
 }
 
@@ -899,9 +824,6 @@ pub const WireEvent = struct {
     version: ?[]const u8 = null,
     task: ?[]const u8 = null,
     exit_code: ?u8 = null,
-    /// The profile name and resolved descriptor of a `model_rebind`.
-    profile: ?[]const u8 = null,
-    identity: ?ModelDescriptor = null,
 };
 
 pub const WireCall = struct {
@@ -982,15 +904,10 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
             }, .{}),
         } };
     }
-    if (std.mem.eql(u8, w.kind, "model_rebind")) {
-        // The descriptor is required and the profile is not: a session can be
-        // rebound to a model without naming a profile, but a rebind that does
-        // not say what to run is not a rebind.
-        return .{ .model_rebind = .{
-            .profile = w.profile orelse "",
-            .identity = w.identity orelse return error.CorruptLedger,
-        } };
-    }
+    // A kind this binary no longer has: changing model mid-conversation is a
+    // carry fork now, not an event. Distinct from `CorruptLedger` because the
+    // file is intact and there is a way forward for it.
+    if (std.mem.eql(u8, w.kind, "model_rebind")) return error.LegacyModelRebind;
     return error.CorruptLedger;
 }
 
@@ -1048,12 +965,9 @@ pub const DepositWait = enum { block, fail_fast };
 /// The exclusive right to deposit into this session's inbox. Held by EVERY
 /// writer of the inbox, for three rules:
 ///
-///   * A gate that READS the session and then deposits must be one act.
-///     `append --image` refuses a picture the model in force cannot see, and
-///     `rebind` refuses a model that cannot see the pictures already here; run
-///     concurrently, both read the old state, both pass, and exactly the pair
-///     they exist to refuse lands. Same for a delivery id, which is minted from
-///     what is already waiting (`freshDeliveryName`).
+///   * A delivery id is minted from what is already waiting
+///     (`freshDeliveryName`), so two depositors racing would otherwise take
+///     the same queue position.
 ///   * A session may not be taken away between a depositor's check and its
 ///     write. `pruneSession` removes one only while holding this and the writer
 ///     lease; every deposit re-checks the session under this lease
@@ -1310,8 +1224,8 @@ fn depositFilePath(alloc: std.mem.Allocator, session_path: []const u8, name: []c
 /// The invariant it holds: whatever the inbox ACCEPTS, a step boundary can read
 /// back. Enforced at the deposit, because an event accepted and then too large
 /// to read is a durable fact that makes every later `drainInbox` fail. One
-/// number, enforced where events are written and used where they are read
-/// (`drainInbox`, `scanSession`).
+/// number, enforced where events are written and used where `drainInbox` reads
+/// them back.
 ///
 /// Sized against what the shell already accepts for one turn: an 8 MiB `--file`
 /// text plus several images, each up to 5 MiB raw and ~4/3 that as base64.
@@ -1329,15 +1243,14 @@ pub const max_inbox_event_bytes: usize = 32 << 20;
 /// **Sorts after every name still waiting in this inbox under the same prefix**,
 /// because `drainInbox` applies files in filename order: the name is also the
 /// QUEUE POSITION. That set is exactly the one whose order means something (two
-/// queued messages merge into one turn in this order; of two waiting rebinds the
-/// last is what the session ends on). A wall clock alone does not give it — it
+/// queued messages merge into one turn in this order). A wall clock alone does
+/// not give it — it
 /// can repeat or step backwards, and then the random tail decides — so the mint
 /// reads the inbox and steps past the newest stamp there. Committed events need
 /// no such care: anything still waiting is applied after all of them.
 ///
 /// NOT defended: two mints racing (the commands where that matters serialize on
-/// the deposit lease) and order ACROSS prefixes (cosmetic — a rebind is not a
-/// turn).
+/// the deposit lease) and order ACROSS prefixes.
 pub fn freshDeliveryName(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1715,147 +1628,69 @@ fn flushInboxUsers(
     images.clearRetainingCapacity();
 }
 
-/// What a session on disk will run on at its NEXT step, for a reader that is
-/// not the writer.
+/// The history a carry fork copies out of its parent, ready to be appended to
+/// the child in order.
 ///
-/// `effectiveIdentity` answers the same question INSIDE a step, where every fact
-/// is committed. Outside one there is a third place an identity can be: the
-/// inbox. A deposited `model_rebind` is as decided as an appended one — the very
-/// next step boundary applies it — so a reader stopping at the committed events
-/// answers with a model the session is about to leave. Every such reader (the
-/// vision gates, the rebind no-op, what a fork continues on) asks HERE.
+/// Read through the SAME codec replay uses, so a child is a file this binary
+/// wrote rather than a splice of somebody else's lines: a parent line this
+/// binary cannot decode stops the fork instead of landing in a new ledger.
 ///
-/// It does not open the ledger: `openDurable` takes the writer lease, and these
-/// readers must work while a step is running. So it reads bytes and honours the
-/// same crash-tail rule replay does; being concurrent with the writer shapes the
-/// rest (see `scanSession`).
-pub const SessionScan = struct {
+/// What does NOT come along: the inbox delivery ids (`origin` / `origins`
+/// belong to the file that drained them) and every `reasoning` (opaque and
+/// bound to the model that produced it — the child may be running another).
+pub const Carried = struct {
     arena: std.heap.ArenaAllocator,
-    /// The last rebind this session has been told about, committed or pending;
-    /// null when it still runs on what its header froze. Decided at the end of
-    /// `scanSession` from the two below.
-    rebound: ?Identity = null,
-    /// Whether any user turn, committed or pending, carries an image.
+    events: []const Event,
+    /// Whether any copied user turn carries an image. The child's model has to
+    /// be able to see what it is about to be handed.
     has_images: bool = false,
 
-    /// The last rebind still waiting in the inbox, in the order the drain will
-    /// apply them, and whether the ledger turned out to have applied it already.
-    /// Only the LAST one is kept: the drain works in filename order, so a later
-    /// name being committed implies every earlier one is too.
-    pending: ?struct { name: []const u8, id: Identity } = null,
-    pending_drained: bool = false,
-    /// The last rebind in the ledger, in ledger order.
-    committed: ?Identity = null,
-
-    /// The identity in force, given the header the same reader already holds.
-    pub fn identity(self: SessionScan, header: Header) Identity {
-        return self.rebound orelse .{ .profile = header.model, .identity = header.model_identity };
-    }
-
-    pub fn deinit(self: *SessionScan) void {
+    pub fn deinit(self: *Carried) void {
         self.arena.deinit();
-    }
-
-    /// The pre-filter both passes share: the decoded line, or null when it says
-    /// nothing this scan cares about. An undecodable body is SKIPPED rather than
-    /// fatal — only the writer gets to declare a ledger corrupt. Images fold in
-    /// here because they only accumulate, so either pass may be the one to see
-    /// them.
-    fn look(self: *SessionScan, a: std.mem.Allocator, body: []const u8) ?WireEvent {
-        // The substring tests keep a gate from decoding a whole transcript; the
-        // decoded `kind` is what decides.
-        const may_be_rebind = std.mem.indexOf(u8, body, "\"kind\":\"model_rebind\"") != null;
-        const may_have_images = !self.has_images and std.mem.indexOf(u8, body, "\"images\":") != null;
-        if (!may_be_rebind and !may_have_images) return null;
-        const parsed = parseEventLine(a, body) catch return null;
-        if (std.mem.eql(u8, parsed.value.kind, "user_text")) {
-            if (parsed.value.images) |images| {
-                if (images.len != 0) self.has_images = true;
-            }
-        }
-        if (!std.mem.eql(u8, parsed.value.kind, "model_rebind")) return null;
-        if (parsed.value.identity == null) return null;
-        return parsed.value;
-    }
-
-    fn observeDeposit(self: *SessionScan, a: std.mem.Allocator, name: []const u8, body: []const u8) void {
-        const line = self.look(a, body) orelse return;
-        self.pending = .{ .name = name, .id = identityOfLine(line) };
-    }
-
-    fn observeCommitted(self: *SessionScan, a: std.mem.Allocator, body: []const u8) void {
-        const line = self.look(a, body) orelse return;
-        self.committed = identityOfLine(line);
-        // The same fact seen twice: this line IS the deposit the inbox pass
-        // read, drained between the two passes.
-        if (self.pending) |p| {
-            if (line.origin) |o| {
-                if (std.mem.eql(u8, o, p.name)) self.pending_drained = true;
-            }
-        }
     }
 };
 
-fn identityOfLine(line: WireEvent) Identity {
-    return .{ .profile = line.profile orelse "", .identity = line.identity.? };
-}
+/// Read events 1..`seq` of the session file at `path` (relative to `base`).
+///
+/// `error.CarrySeqBeyondTail` when the file holds fewer than `seq` events, and
+/// `error.CorruptLedger` when its last line is torn: a fork is a decision about
+/// a definite cut point, and neither a guess about how much history there is
+/// nor a half-written turn is one. The parent file is only read.
+pub fn readCarry(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    path: []const u8,
+    seq: u64,
+) !Carried {
+    const bytes = try base.readFileAlloc(io, path, alloc, .unlimited);
+    defer alloc.free(bytes);
+    if (lastCompleteLineEnd(bytes) != bytes.len) return error.CorruptLedger;
 
-pub fn scanSession(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) !SessionScan {
-    var scan: SessionScan = .{ .arena = .init(alloc) };
-    errdefer scan.arena.deinit();
-    const a = scan.arena.allocator();
+    var carried: Carried = .{ .arena = .init(alloc), .events = &.{} };
+    errdefer carried.arena.deinit();
+    const a = carried.arena.allocator();
 
-    // The INBOX first and the ledger second — the opposite of the order the
-    // drain applies them in, because a drain appends to the ledger and THEN
-    // deletes the file. Ledger-first would let a fact be in NEITHER pass:
-    // committed just after the ledger was read, deleted just before the inbox
-    // was listed. This way round, every fact decided before the scan began shows
-    // up in at least one pass.
-    try scanInbox(&scan, a, io, base, session_path);
-    try scanLedger(&scan, a, io, base, session_path);
-
-    // A file still waiting is applied AFTER everything committed, so it wins —
-    // but only while it is still genuinely waiting. The inbox pass reads files
-    // one at a time, so a concurrent drain can commit AND delete a LATER deposit
-    // between two of those reads, leaving this scan holding an earlier one and
-    // blind to the later one. The deposit's own delivery id settles it: if the
-    // ledger carries it as an `origin`, the drain has been through and its last
-    // committed rebind is the newer truth (also the right answer for a file left
-    // behind by a crash between append and delete).
-    const pending_wins = scan.pending != null and !scan.pending_drained;
-    scan.rebound = if (pending_wins) scan.pending.?.id else scan.committed;
-    return scan;
-}
-
-/// Every deposited body still waiting, in the order the drain will apply it.
-fn scanInbox(scan: *SessionScan, a: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) !void {
-    const inbox = try inboxPath(a, session_path);
-    const names = try listInboxDeposits(a, io, base, session_path); // arena-allocated; nothing to free here
-    var dir = base.openDir(io, inbox, .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => return,
-        else => return err,
-    };
-    defer dir.close(io);
-    for (names) |name| {
-        // A file that vanished between the listing and here was drained by the
-        // writer; the ledger pass is where it turns up.
-        const body = dir.readFileAlloc(io, name, a, .limited(max_inbox_event_bytes)) catch continue;
-        scan.observeDeposit(a, name, body);
-    }
-}
-
-/// Every committed line, in ledger order, minus the torn tail replay drops too.
-fn scanLedger(scan: *SessionScan, a: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8) !void {
-    const bytes = try base.readFileAlloc(io, session_path, a, .unlimited);
+    var events: std.ArrayList(Event) = .empty;
     var lines = completeLines(bytes);
-    var header_seen = false;
+    _ = lines.next() orelse return error.MissingHeader;
     while (lines.next()) |line| {
-        if (!header_seen) {
-            header_seen = true;
-            continue;
+        if (events.items.len == seq) break;
+        const parsed = try parseEventLine(a, line);
+        if (parsed.value.seq != events.items.len + 1) return error.CorruptLedger;
+        var e = try toEvent(a, parsed.value);
+        switch (e) {
+            .assistant => |*as| as.reasoning = "",
+            .user_text => |u| {
+                if (u.images.len != 0) carried.has_images = true;
+            },
+            else => {},
         }
-        scan.observeCommitted(a, line);
+        try events.append(a, e);
     }
+    if (events.items.len < seq) return error.CarrySeqBeyondTail;
+    carried.events = events.items;
+    return carried;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1926,13 +1761,6 @@ fn expectEventsEqual(a: []const Event, b: []const Event) !void {
                 try std.testing.expectEqualStrings(n.source, y.note.source);
                 try std.testing.expectEqualStrings(n.text, y.note.text);
                 try std.testing.expectEqualStrings(n.meta, y.note.meta);
-            },
-            .model_rebind => |r| {
-                try std.testing.expectEqualStrings(r.profile, y.model_rebind.profile);
-                try std.testing.expectEqualStrings(r.identity.provider, y.model_rebind.identity.provider);
-                try std.testing.expectEqualStrings(r.identity.model, y.model_rebind.identity.model);
-                try std.testing.expectEqualStrings(r.identity.base_url, y.model_rebind.identity.base_url);
-                try std.testing.expectEqualStrings(r.identity.api_key_env, y.model_rebind.identity.api_key_env);
             },
         }
     }
@@ -2024,7 +1852,7 @@ test "a header from a future ledger version is refused, not read as v1" {
 
 /// How many events `writeSampleEvents` writes, so the round-trip tests below
 /// say "all of them" rather than restating a number.
-const sample_event_count = 5;
+const sample_event_count = 4;
 
 fn writeSampleEvents(l: *Ledger) !void {
     try l.append(.{ .user_text = .{ .text = "hi" } });
@@ -2037,128 +1865,6 @@ fn writeSampleEvents(l: *Ledger) !void {
     } });
     try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "one\n[exit 0]" }} });
     try l.append(.{ .note = .{ .source = note_source_ext, .text = "note text", .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}" } });
-    try l.append(.{ .model_rebind = .{
-        .profile = "anthropic",
-        .identity = .{ .provider = "anthropic", .model = "claude-sonnet-5", .base_url = "https://api.anthropic.com", .api_key_env = "ANTHROPIC_API_KEY" },
-    } });
-}
-
-test "the model a session runs on is the last rebind, or the header when there is none" {
-    const alloc = std.testing.allocator;
-    var l = Ledger.init(alloc);
-    defer l.deinit();
-    const header: Header = .{ .model = "openai", .model_identity = .{ .provider = "openai", .model = "gpt-4o-mini" } };
-
-    // No rebind: the header, and nothing before it to stop replaying.
-    try l.append(.{ .user_text = .{ .text = "hi" } });
-    try std.testing.expectEqualStrings("gpt-4o-mini", effectiveIdentity(header, l.view()).identity.model);
-    try std.testing.expectEqual(@as(usize, 0), reasoningFloor(l.view()));
-    try std.testing.expect(lastRebind(l.view()) == null);
-
-    try l.append(.{ .model_rebind = .{ .profile = "anthropic", .identity = .{ .provider = "anthropic", .model = "claude-sonnet-5" } } });
-    try l.append(.{ .assistant = .{ .reasoning = "[{}]", .text = "after", .calls = &.{} } });
-    // The last one wins, and everything before it is behind the floor.
-    try l.append(.{ .model_rebind = .{ .profile = "openai", .identity = .{ .provider = "openai", .model = "gpt-5.6-sol" } } });
-    const now = effectiveIdentity(header, l.view());
-    try std.testing.expectEqualStrings("openai", now.profile);
-    try std.testing.expectEqualStrings("gpt-5.6-sol", now.identity.model);
-    try std.testing.expectEqual(l.view().len, reasoningFloor(l.view()));
-}
-
-test "a reader outside the step sees the rebind that is still in the inbox" {
-    // A deposited rebind is as decided as an appended one — the next step
-    // boundary applies it — so a gate stopping at the committed events would
-    // judge against a model already on its way out.
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const spath = "s.jsonl";
-    const header: Header = .{ .model = "openai", .model_identity = .{ .provider = "openai", .model = "gpt-4o-mini" } };
-
-    {
-        var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s", .model = header.model, .model_identity = header.model_identity });
-        defer l.deinit();
-        try l.append(.{ .model_rebind = .{ .profile = "anthropic", .identity = .{ .provider = "anthropic", .model = "committed" } } });
-    }
-
-    {
-        var scan = try scanSession(alloc, io, tmp.dir, spath);
-        defer scan.deinit();
-        try std.testing.expectEqualStrings("committed", scan.identity(header).identity.model);
-        try std.testing.expect(!scan.has_images);
-    }
-
-    // Two more, deposited and not yet drained: the drain applies files in
-    // filename order, so the last name is the one in force. Names are spelled
-    // out rather than minted — the rule under test is the drain's order, not how
-    // well a clock separates two calls.
-    try depositEvent(alloc, io, tmp.dir, spath, "rebind-0001", .{ .model_rebind = .{ .profile = "p", .identity = .{ .provider = "openai", .model = "pending-1" } } });
-    try depositEvent(alloc, io, tmp.dir, spath, "rebind-0002", .{ .model_rebind = .{ .profile = "p", .identity = .{ .provider = "openai", .model = "pending-2" } } });
-    try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{
-        .text = "look",
-        .images = &.{.{ .media_type = "image/png", .data = "x" }},
-    } });
-
-    var scan = try scanSession(alloc, io, tmp.dir, spath);
-    defer scan.deinit();
-    try std.testing.expectEqualStrings("pending-2", scan.identity(header).identity.model);
-    // The image arrives at the same boundary, so it counts as held already.
-    try std.testing.expect(scan.has_images);
-
-    // And what the scan predicted is what the drain does.
-    var l = try openDurable(alloc, io, tmp.dir, spath);
-    defer l.deinit();
-    try drainInbox(alloc, io, &l, tmp.dir, spath);
-    try std.testing.expectEqualStrings("pending-2", effectiveIdentity(header, l.view()).identity.model);
-}
-
-test "a rebind still waiting outranks one already committed" {
-    // The passes run in the opposite order from the one events are applied in,
-    // so this is the rule that repairs it: what is still waiting is applied
-    // after everything committed, and wins even though it was read first.
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const spath = "s.jsonl";
-    const header: Header = .{ .model = "openai", .model_identity = .{ .provider = "openai", .model = "frozen" } };
-
-    {
-        var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s", .model = header.model, .model_identity = header.model_identity });
-        defer l.deinit();
-        try l.append(.{ .model_rebind = .{ .profile = "p", .identity = .{ .provider = "openai", .model = "committed" } } });
-    }
-    try depositEvent(alloc, io, tmp.dir, spath, "rebind-0001", .{ .model_rebind = .{ .profile = "p", .identity = .{ .provider = "openai", .model = "waiting" } } });
-
-    var scan = try scanSession(alloc, io, tmp.dir, spath);
-    defer scan.deinit();
-    try std.testing.expectEqualStrings("waiting", scan.identity(header).identity.model);
-}
-
-test "a deposit the ledger already applied does not outrank what came after it" {
-    // The interleaving this defends against, frozen as state: the file the scan
-    // read has already been applied (its delivery id is right there as
-    // `origin`), and a newer rebind is committed behind it. A flat "waiting
-    // wins" would answer with a model two facts out of date.
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const spath = "s.jsonl";
-    const header: Header = .{ .model = "openai", .model_identity = .{ .provider = "openai", .model = "frozen" } };
-
-    {
-        var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s", .model = header.model, .model_identity = header.model_identity });
-        defer l.deinit();
-        try l.appendWithOrigin(.{ .model_rebind = .{ .profile = "p", .identity = .{ .provider = "openai", .model = "first" } } }, "rebind-0001.json");
-        try l.appendWithOrigin(.{ .model_rebind = .{ .profile = "p", .identity = .{ .provider = "openai", .model = "second" } } }, "rebind-0002.json");
-    }
-    try depositEvent(alloc, io, tmp.dir, spath, "rebind-0001", .{ .model_rebind = .{ .profile = "p", .identity = .{ .provider = "openai", .model = "first" } } });
-
-    var scan = try scanSession(alloc, io, tmp.dir, spath);
-    defer scan.deinit();
-    try std.testing.expectEqualStrings("second", scan.identity(header).identity.model);
 }
 
 test "an event too large to read back is refused at the deposit" {
@@ -2191,7 +1897,7 @@ test "an event too large to read back is refused at the deposit" {
 test "a delivery id is distinct, and sorts after what is already waiting" {
     // Order is a property of the INBOX, not of the clock: the deposit below
     // carries a stamp from the far future and the next name still has to land
-    // after it — which is what makes two rebinds issued in a row apply in that
+    // after it — which is what makes two deposits issued in a row apply in that
     // order even if the clock repeated or stepped back.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -2202,16 +1908,16 @@ test "a delivery id is distinct, and sorts after what is already waiting" {
     var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
     defer l.deinit();
 
-    const first = try freshDeliveryName(alloc, io, tmp.dir, spath, "rebind");
+    const first = try freshDeliveryName(alloc, io, tmp.dir, spath, "note");
     defer alloc.free(first);
-    const second = try freshDeliveryName(alloc, io, tmp.dir, spath, "rebind");
+    const second = try freshDeliveryName(alloc, io, tmp.dir, spath, "note");
     defer alloc.free(second);
     try std.testing.expect(!std.mem.eql(u8, first, second));
 
-    try depositEvent(alloc, io, tmp.dir, spath, "rebind-9000000000000000000-ff", .{ .user_text = .{ .text = "from the future" } });
-    const after = try freshDeliveryName(alloc, io, tmp.dir, spath, "rebind");
+    try depositEvent(alloc, io, tmp.dir, spath, "note-9000000000000000000-ff", .{ .user_text = .{ .text = "from the future" } });
+    const after = try freshDeliveryName(alloc, io, tmp.dir, spath, "note");
     defer alloc.free(after);
-    try std.testing.expect(std.mem.lessThan(u8, "rebind-9000000000000000000-ff.json", after));
+    try std.testing.expect(std.mem.lessThan(u8, "note-9000000000000000000-ff.json", after));
 
     // Another prefix is another queue; it does not drag this one forward.
     const other = try freshDeliveryName(alloc, io, tmp.dir, spath, "msg");
@@ -2448,13 +2154,91 @@ test "the inbox lease is exclusive, and a deposit into a session that is gone is
     }
 }
 
-test "identityEqual covers the profile, not just the descriptor" {
-    // Two profiles can name the same model over the same wire and still reach
-    // it with different credentials, so this is a real move, not a no-op.
-    const a: Identity = .{ .profile = "work", .identity = .{ .provider = "openai", .model = "m" } };
-    const b: Identity = .{ .profile = "personal", .identity = .{ .provider = "openai", .model = "m" } };
-    try std.testing.expect(!identityEqual(a, b));
-    try std.testing.expect(identityEqual(a, a));
+test "a carry fork copies its parent's events, without their reasoning or delivery ids" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spath = "parent.jsonl";
+
+    {
+        var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "parent" });
+        defer l.deinit();
+        try l.appendWithOrigin(.{ .user_text = .{ .text = "one" } }, "msg-0001.json");
+        try l.append(.{ .assistant = .{ .reasoning = "[{\"type\":\"thinking\"}]", .text = "two", .calls = &.{} } });
+        try l.append(.{ .user_text = .{ .text = "three" } });
+    }
+
+    var carried = try readCarry(alloc, io, tmp.dir, spath, 2);
+    defer carried.deinit();
+    try std.testing.expectEqual(@as(usize, 2), carried.events.len);
+    try std.testing.expectEqualStrings("one", carried.events[0].user_text.text);
+    // Opaque and bound to the model that produced it: the child may run another.
+    try std.testing.expectEqualStrings("", carried.events[1].assistant.reasoning);
+    try std.testing.expect(!carried.has_images);
+
+    // A child written from them is an ordinary ledger of its own: seq from 1,
+    // and the parent's delivery ids are not its exactly-once keys.
+    {
+        var child = try createDurable(alloc, io, tmp.dir, "child.jsonl", .{ .session = "child", .parent = .{ .session = "parent", .seq = 2 } });
+        defer child.deinit();
+        for (carried.events) |e| try child.append(e);
+        try std.testing.expect(!child.containsOrigin("msg-0001.json"));
+    }
+    const bytes = try tmp.dir.readFileAlloc(io, "child.jsonl", alloc, .unlimited);
+    defer alloc.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"seq\":1,\"kind\":\"user_text\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "origin") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "thinking") == null);
+
+    // The parent kept every byte it had.
+    var reopened = try openDurable(alloc, io, tmp.dir, spath);
+    defer reopened.deinit();
+    try std.testing.expectEqual(@as(usize, 3), reopened.len());
+    try std.testing.expect(reopened.view()[1].assistant.reasoning.len != 0);
+}
+
+test "a carry names a definite cut point: past the tail and a torn tail are both refused" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spath = "s.jsonl";
+
+    {
+        var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
+        defer l.deinit();
+        try l.append(.{ .user_text = .{ .text = "only" } });
+    }
+    try std.testing.expectError(error.CarrySeqBeyondTail, readCarry(alloc, io, tmp.dir, spath, 2));
+
+    const bytes = try tmp.dir.readFileAlloc(io, spath, alloc, .unlimited);
+    defer alloc.free(bytes);
+    try tmp.dir.writeFile(io, .{ .sub_path = spath, .data = bytes[0 .. bytes.len - 3] });
+    try std.testing.expectError(error.CorruptLedger, readCarry(alloc, io, tmp.dir, spath, 1));
+}
+
+test "the event that used to move a session onto another model is refused with its own error" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spath = "s.jsonl";
+
+    {
+        var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
+        defer l.deinit();
+        try l.append(.{ .user_text = .{ .text = "hi" } });
+    }
+    var file = try tmp.dir.openFile(io, spath, .{ .mode = .read_write });
+    const end = (try file.stat(io)).size;
+    try file.writePositionalAll(io, "{\"seq\":2,\"kind\":\"model_rebind\",\"profile\":\"p\",\"identity\":{\"provider\":\"openai\",\"model\":\"m\"}}\n", end);
+    file.close(io);
+
+    // Distinct from CorruptLedger: the file is intact, and a carry fork is the
+    // way on from it.
+    try std.testing.expectError(error.LegacyModelRebind, openDurable(alloc, io, tmp.dir, spath));
+    try std.testing.expectError(error.LegacyModelRebind, readCarry(alloc, io, tmp.dir, spath, 2));
 }
 
 test "assistant reasoning is stored opaquely, round-trips, and is optional on the wire" {

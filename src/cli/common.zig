@@ -242,10 +242,11 @@ pub const ext_usage =
 ;
 
 pub const session_usage =
-    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>][:<tool>,…]]… [--prompt <file>]… [--env <spec>] [--workspace <dir>] [--ssh-password-stdin] [--bare]
+    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--carry] [--with <id>[@<ver>][:<tool>,…]]… [--prompt <file>]… [--env <spec>] [--workspace <dir>] [--ssh-password-stdin] [--bare]
     \\                                                    freeze composition + model, print a new session id; --with composes a built
     \\                                                    version in, :tool,tool adds its manual tools to the model's tool face (:none adds
-    \\                                                    nothing), --parent forks that session, --prompt freezes a file as this session's
+    \\                                                    nothing), --parent forks that session and --carry copies its events 1..seq along
+    \\                                                    (how a live conversation changes model, tools or prompt), --prompt freezes a file as this session's
     \\                                                    system prompt, --env freezes where shell runs: wsl | wsl:<distro> move only the command;
     \\                                                    remote:wsl | remote:ssh:<dest> | remote:exec:<argv…> move the workspace (--workspace says where),
     \\                                                    --bare reads no standing layer: the config `with` list is left out
@@ -259,9 +260,6 @@ pub const session_usage =
     \\                                                    live model/tool lines, --gate asks stdin to allow each tool call
     \\  nulya session events <id> [--since N] [--follow]  read-only tail of the event log
     \\  nulya session cancel <id>                         request cancel at the next step boundary
-    \\  nulya session rebind <id> [--profile P] [--model ID]
-    \\                                                    run the rest of this session on another model from its next step; the transcript
-    \\                                                    stays, the reasoning recorded before it does not, and a cold prompt cache is the cost
     \\  nulya session outcome <id> <success|partial|failure> [--note <text>] [--seq N]
     \\                                                    record how a session turned out (a journal, never the session file)
     \\  nulya session prune <id> [--force]                remove a session that recorded nothing and holds nothing; --force takes one

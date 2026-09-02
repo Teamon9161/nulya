@@ -79,17 +79,16 @@ Ledger ──projection──▶ PromptIR { system_blocks, turns }
 
 ## 3. Ledger（`ledger.zig`）
 
-### 3.1 数据模型（五种事件）
+### 3.1 数据模型（四种事件）
 
 ```
 user_text        { text, images: []Image{media_type, data} }   ← images 空 = 纯文本 turn
 assistant        { reasoning, text, calls: []ToolCall{id, tool, args_json}, usage?, stop_reason }
 tool_results     []ToolResultEntry{call_id, ok, output, spill_path?, presentation?}
 note             { source, text, meta? }                        ← 从 step 之外到达的一条机器事实（下节）
-model_rebind     { profile, identity: ModelDescriptor }         ← 从这里起换一个模型跑（§9.5）
 ```
 
-一条 `tool_results` 事件 = 一整批。`presentation` 是 UI-only 的 JSON 字符串，不投影。事件字母表**可加不可改**：现有五种保留原字段。`seq` 是落盘 envelope 字段（§3.4），不属于事件负载。
+一条 `tool_results` 事件 = 一整批。`presentation` 是 UI-only 的 JSON 字符串，不投影。事件字母表**可加不可改**：现有四种保留原字段。`seq` 是落盘 envelope 字段（§3.4），不属于事件负载。**每一条事件都是一个 turn**——没有"不投影成 turn 的事件"这一档。
 
 **投影与否，一张表：**
 
@@ -102,34 +101,14 @@ model_rebind     { profile, identity: ModelDescriptor }         ← 从这里起
 | `tool_results[].spill_path` / `presentation` | 否 | — |
 | 事件的 `origin` | 否 | inbox 投递去重键（§3.4） |
 | `note.source` / `note.meta` | 否（只投 `text`） | `source` 必给（缺 = `CorruptLedger`）；`meta` 非空才写 |
-| `model_rebind` | 否（不成为 turn） | — |
 
 多出的可选列不改变已有列的含义，所以 header `v` 仍是 1。
 
-**`assistant.reasoning` 是不透明的，不是单独一种事件。** provider 原样吐出的本轮 reasoning item JSON 数组（Anthropic 带 signature 的 `thinking` / `redacted_thinking` block、Responses 带 `encrypted_content` 的 `reasoning` item）。kernel 从不解析，只按序交回，provider 认得（`ProviderCapabilities.thinking_replay`）才回放。它**绑在产出它的模型上**。为什么必须存：Anthropic 在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（400），Responses 端点不带则模型每步重推上一步的计划——前者是正确性，后者是质量与 token。
+**`assistant.reasoning` 是不透明的，不是单独一种事件。** provider 原样吐出的本轮 reasoning item JSON 数组（Anthropic 带 signature 的 `thinking` / `redacted_thinking` block、Responses 带 `encrypted_content` 的 `reasoning` item）。kernel 从不解析，只按序交回，provider 认得（`ProviderCapabilities.thinking_replay`）才回放。它**绑在产出它的模型上**——这一条由构造成立：一场 session 的模型身份整个文件冻结（§3.4），而把历史带到另一个模型上的 carry fork（§11）复制时把每条 `reasoning` 置空。为什么必须存：Anthropic 在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（400），Responses 端点不带则模型每步重推上一步的计划——前者是正确性，后者是质量与 token。
 
 **`calls[].args_json` 是模型实际产出的那些字节**，包括被 `max_tokens` 切断的半截 JSON。把它变成可发给 provider 的东西是投影的事（§4）。
 
-**`user_text.images`**：`data` 是 base64 文本（wire 上就是这形状，ledger 既不解码也不校验）。只做 user 输入，assistant / tool_results 里没有图。哪些 media type、多大、本场模型看不看得懂图——**全是决定，住在壳层**（`session append --image`，§9 / §14）；绕过它的后果是 provider 的 400 原样浮出。图片不跨 fork（fork 本来就不复制 history，§11）。
-
-#### `model_rebind`：唯一一种不是 turn 的事件
-
-header 冻一个模型身份而 header 不可改写（physics #1），所以"换模型"只能是一次 append（physics #3）。`identity` 是**已解析的** descriptor，与 header 那一列同形：谁发起谁解析、credential-aware，所以"跑的 == 冻结的"仍成立，只是冻结点从一个变成一串。
-
-> **有效身份 = 最后一条 `model_rebind`，没有就是 header 的。**（`ledger.effectiveIdentity`，唯一实现）
-
-它改变的是**哪些 reasoning 还能回放**：投影把最后一次 rebind 之前的每一条 reasoning 换成 `""`（`reasoningFloor`；ledger 里原样留着——存事实，投影只交出可以合法回放的东西，与 `max_tokens` 的 torn-args 同一处、同一个理由）。这条规则就是全部机制：内核**不持有任何"哪些模型互相兼容"的知识**（physics #8）。
-
-**读者分两种，问的是同一个问题的两个时刻：**
-
-- **step 里面**（写者）：每条事实都已 committed，答案就是 `effectiveIdentity`。
-- **step 外面**（`session append --image` / `session rebind` 的两道门、`session new --parent` 继承什么、前端）：还有一个地方藏着身份——**inbox**。投递了还没排干的 rebind 与已 append 的一样定了。这些读者问 `ledger.scanSession`（header → committed → pending，顺带一次读出"这一场有没有图片"）。它不开 ledger：`openDurable` 要拿写者租约，而这些读者必须在 step 跑着时能工作。
-
-`scanSession` **先读 inbox 再读 ledger**——与排干的顺序相反，因为它与写者并发：drain 是「先 append 再删文件」，先看 ledger 后看 inbox 会撞上交接窗口，一条比扫描还早就定下的事实在两处都不在。反过来读，凡是扫描开始前已定下的事实至少有一趟看得见。
-
-代价是次序，规则收成一句：**pending 且它还没被 committed，才胜过 ledger 最后那条**。限定词承重——inbox 那趟是一个文件一个文件读的，并发 drain 可以在两次读之间把**更晚**的那条 commit 掉并删除；此时若一口咬定"等着的赢"，答出来的模型已经过时两条事实。裁决靠投递 id：**ledger 里若把它记成了 `origin`，说明 drain 已经走过这里**（顺带把"崩在 append 与 delete 之间的残余文件"白拿地答对）。图片没这问题——只增不减，两趟都往上加。
-
-相等判据只有一处 `ledger.identityEqual`：**整个 `Identity`，profile 也在内**。descriptor 说"哪个模型、走哪条 wire"，profile 说"用谁的凭据够得着它"；比得少了会把一次真切换读成 no-op，而 no-op 是静默的。
+**`user_text.images`**：`data` 是 base64 文本（wire 上就是这形状，ledger 既不解码也不校验）。只做 user 输入，assistant / tool_results 里没有图。哪些 media type、多大、本场模型看不看得懂图——**全是决定，住在壳层**（`session append --image`，§9 / §14）；绕过它的后果是 provider 的 400 原样浮出。图片跨不跨 fork 由 fork 的种类决定：`--parent` 不复制 history，`--carry` 复制（于是 fork 时查一次同一把尺子，§11）。
 
 #### `note`：从 step 之外到达的机器事实
 
@@ -225,11 +204,11 @@ header 冻的东西：
 
 **模型身份创建时冻结、resume 不可变。** 解析**只有一处**：`launch.resolveDescriptor` 在创建时冻进 header，运行 handle 也**只从这个 descriptor** 建（`launch.buildFromDescriptor`），所以"实际跑的 == header 冻的"包括 fork。它是 **credential-aware** 的（解析不到就在创建时失败，§9.5），因为解析是会受环境影响的动作。resume 时只重解 credential，**不换密钥源、没有静默 fallback**：缺了就 `MissingCredential`。**durable credential 只经 `api_key_env`**——inline `api_key` 无法在 resume 时从环境恢复，所以不参与 durable 身份。
 
-**唯一一种合法的改变是 append 一条 `model_rebind`**（§3.1、§9.5）：header 不可改写，而"跑的 == 冻的"仍成立（每条 rebind 也带已解析的 descriptor）。三道门都在壳层、都在投递之前：凭据 · 图片-vision · step 边界由 inbox 天然保证。
+**它没有第二个冻结点。** 一个文件一个身份，从 header 那一行到最后一个 step 都是它；没有任何事件、任何 flag 能在一场 session 中途换掉它。要换就是**换文件**——带历史的 fork（`session new --carry`，§11），于是"这一场跑在什么模型上"永远只有一处答案：`header.model_identity`（effort 缺省、`session list` 的投影、`--image` 的 vision 门读的都是它）。
 
-**vision 是同一条规则的两侧**：`--image` 拒绝给看不懂图的模型送图，`rebind` 拒绝把带图的场换到看不懂图的模型上。两条都是"读 → 判断 → 投递"，同时跑就双双读到旧状态、双双放行——所以两条命令在 `<id>.inbox/.deposit.lock` 上排他串行，**检查与投递成为一次动作**。锁不在 `<id>.lock` 上，因为那是 step 的租约而每道门都必须在 step 跑着时能工作。
+**vision 门守在两个入口**，同一份 `[[models]]` 目录、同一条"没有条目 = 不主张 = 拒绝"：`session append --image` 拒绝给看不懂图的模型送图；`session new --carry` 拒绝把带图的历史复制给看不懂图的模型（拒绝时什么都不建）。两条都在壳层，内核不知道它们存在。
 
-**resume**：`openDurable` 重放 header + 每个完整事件行；截断的**最后一行**修掉；**中间**行坏了或 `seq` 不连是 `CorruptLedger`。停在 assistant-with-calls 之后（合法但未闭合的 batch）由 `completeInterruptedToolBatch` 补一条（§4）。
+**resume**：`openDurable` 重放 header + 每个完整事件行；截断的**最后一行**修掉；**中间**行坏了或 `seq` 不连是 `CorruptLedger`。**`model_rebind` 行是单独一档 `LegacyModelRebind`**（不是 `CorruptLedger`——文件是好的）：那是"中途换模型"曾经的形状，`session step` 把它翻成一句指路 `session new --parent <id>:<seq> --carry --profile …`。`session list` 读原始行，所以这样一场仍然列得出来。停在 assistant-with-calls 之后（合法但未闭合的 batch）由 `completeInterruptedToolBatch` 补一条（§4）。
 
 **一场 session 的全部制品**（共享 id，`rm -rf .nulya/scratch/<id>` 一次清完）：`<id>.jsonl` · `<id>.lock`（写者租约）· `<id>.inbox/`（跨进程事件投递）与它自己的 `.deposit.lock` · `<id>.cancel` · `.nulya/scratch/<id>/tool-output/`（`emit` 落盘，§4）· `.nulya/scratch/<id>/tasks/t<N>/`（后台任务，§6.1）。
 
@@ -237,9 +216,9 @@ header 冻的东西：
 
 session 文件**只有一个写者**：`createDurable` / `openDurable` 打开时原子获取 `<id>.lock` 上的排他 advisory 锁，第二个写者 `SessionBusy` 快速失败。锁在**专门的** `<id>.lock` 上而**不是 session 文件本身**——Windows 上文件锁是强制性的，会挡住 `session events` 的读者。
 
-其它进程都不写文件，只往 inbox 投递事件：`ext activate` 的能力宣告 note（§5.3）、driver 的 `session append` 与 `session note`、supervisor 的任务报告 note、`session rebind`。一事件一文件写进 `<id>.inbox/`（`ledger.depositEvent`：先写 `.tmp` 再 rename），写者在下一个 step 边界（`prepareStep`）按文件名序排干。**同一次 drain 的连续 `user_text` 合成一条 user turn**（文本按 FIFO 以空行连接，图片顺序附加）；非用户事件各自独立。**cancel 是另一回事**：`<id>.cancel` 标记，同样在 step 边界消费。
+其它进程都不写文件，只往 inbox 投递事件：`ext activate` 的能力宣告 note（§5.3）、driver 的 `session append` 与 `session note`、supervisor 的任务报告 note。一事件一文件写进 `<id>.inbox/`（`ledger.depositEvent`：先写 `.tmp` 再 rename），写者在下一个 step 边界（`prepareStep`）按文件名序排干。**同一次 drain 的连续 `user_text` 合成一条 user turn**（文本按 FIFO 以空行连接，图片顺序附加）；非用户事件各自独立。**cancel 是另一回事**：`<id>.cancel` 标记，同样在 step 边界消费。
 
-**投递锁的纪律**：写 inbox 的每一个人都拿 `<id>.inbox/.deposit.lock`——缺省 `depositEvent` 自己拿，只有已经持锁跨越"先读后投"的调用方走 `depositEventLeased`（重复拿会自己死锁自己）。它是 **inbox 自己**的并发原语而不是某个 CLI helper 的私有约定，新的投递者不必*记得*遵守它。配套的另一半：**每次投递都在锁下重新确认 session 文件还在**（不在就 `NoSuchSession`，一个字节都不写），所以 `session prune`（§14）"什么都没有才删"这句话一直到删完为止都成立——否则一个 supervisor 可以正卡在自己的写 `.tmp` 与 rename 之间，最后留下一条没有 session 的 durable 事实。
+**投递锁的纪律**：写 inbox 的每一个人都拿 `<id>.inbox/.deposit.lock`——缺省 `depositEvent` 自己拿，只有已经持锁跨越"先读后投"的调用方走 `depositEventLeased`（重复拿会自己死锁自己；`session append` 是唯一那个，它要在锁下铸投递名）。它是 **inbox 自己**的并发原语而不是某个 CLI helper 的私有约定，新的投递者不必*记得*遵守它。配套的另一半：**每次投递都在锁下重新确认 session 文件还在**（不在就 `NoSuchSession`，一个字节都不写），所以 `session prune`（§14）"什么都没有才删"这句话一直到删完为止都成立——否则一个 supervisor 可以正卡在自己的写 `.tmp` 与 rename 之间，最后留下一条没有 session 的 durable 事实。
 
 **它同时是 session lifetime 冻结的一半**：不只"要投一条事件"的人拿它，**要在这一场底下开一个长命写者**的人也拿——`nulya task run` 跨越"这场还在吗"与 spawn 全程持它，因为 supervisor 会往 `.nulya/scratch/<id>/` 里写到它跑完为止，而那棵树正是 prune 要删的。另一半是写者租约：任务的第二条起法是 step 里的 `shell {background:true}`，那条由它那一步已经持着的写者租约盖住。两把一起才是冻结（`ledger.SessionLeases`），所以 `session prune` **两把都自己拿**、在两把下面问"这一场底下还有活着的任务吗"，再把它们交给 `ledger.pruneSessionLeased`（`depositEvent` / `depositEventLeased` 那对的同一种分法）。只拿一把、或者先问后锁，都只是把窗口改窄：两条命令双双返回成功，而系统里已经没有那个 task 所属的 session。配套的一条：prune 持锁时问的那趟投影**一个字节都不投递**（`heldTaskFor`），否则它会等一把自己正握着的锁。也正因为不投递，那趟投影要多答一件事：远端任务 `done` 结束的是**进程**不是**投递**（报告还在那台机器上，`report_pending`），本机这个 task 目录是"这份结果欠给谁"的唯一记录，所以它和"还在跑"一样拦住 prune。
 
@@ -249,7 +228,7 @@ session 文件**只有一个写者**：`createDurable` / `openDurable` 打开时
 
 被排干事件的 inbox 文件名作为 `origin` 落到 ledger 行上（合并的用户消息写 `origins`），`Ledger.origins` 集合从这两列重建。所以崩在"append 成功 → 删 inbox 文件"之间留下的文件，下一次排干发现 origin 已在 ledger 里就只删不 append。重复投递（同名文件重现）同理。**没有第二套去重**：按内容判"这条说过了"的分支一条都没有，同一件事说一次就是取同一个投递名。
 
-**这个文件名就是投递 id，选它就是选"同一件事说一次"还是"这一件事"**：幂等的投递者取确定名字（note 取 `note-<id>-<version>`），每次都是新事实的（`user_text`、`model_rebind`）取 `ledger.freshDeliveryName`。它的承诺是**每次都不同**——名字就是 exactly-once 键，固定名字会让第二次之后的每一次在下次排干时被当成同一件事删掉。作用域如实说：**在当前 inbox 里是构造保证的**，对已排干的名字是 128 位 nonce 的抗碰撞（要数学意义上的唯一得引入 durable sequence，而"活得过排干的状态"正是这里刻意没有的东西）。
+**这个文件名就是投递 id，选它就是选"同一件事说一次"还是"这一件事"**：幂等的投递者取确定名字（note 取 `note-<id>-<version>`），每次都是新事实的（`user_text`）取 `ledger.freshDeliveryName`。它的承诺是**每次都不同**——名字就是 exactly-once 键，固定名字会让第二次之后的每一次在下次排干时被当成同一件事删掉。作用域如实说：**在当前 inbox 里是构造保证的**，对已排干的名字是 128 位 nonce 的抗碰撞（要数学意义上的唯一得引入 durable sequence，而"活得过排干的状态"正是这里刻意没有的东西）。
 
 **名字同时是队列位置**：排干按文件名序，所以 `freshDeliveryName` 铸名时跨过 inbox 里同前缀的最新戳。作用域正好是顺序有含义的那个集合——同时在等的那些；已 committed 的不需要（"等着的排在后面"是另一条独立成立的规则）。不另开一条顺序通道：那要第二份 durable 状态，而一个每次排干就清空的目录上的计数器会**重用编号**，而重用的名字正是"同一件事说一次"的静默失败。
 
@@ -1265,8 +1244,23 @@ resume 时按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDe
 **内核提供的是 fork，不是 compaction。** 没有"替换历史"的动词，也不会长出一个——ledger 只 append（physics #1），没有东西能 rewrite model-visible 状态（physics #3）。所以压缩不是编辑而是**分叉**：开一个新文件，header 的 `parent` 记下旧文件与切分点，摘要作为新文件的第一条 turn 进去；旧文件原封不动留在盘上。内核在这条路径上只保证三件事（`cli/session.zig` 的 `session new`）：
 
 1. **parent 必须存在**——读不到父 header 就 exit 1，不建文件。
-2. **不点名模型时继承父场此刻在跑的那个身份**（`ledger.scanSession`：父 header 的 `model_identity`，被父场的 rebind 移过去之后的那个）。压缩是同一场对话换个文件，不该因为 `active_profile` 期间漂了、或因为这场对话曾经 rebind 过就换了说话对象。`--profile` / `--model` 任一给出即按今天的 config 重新解析。
+2. **不点名模型时继承父 header 冻的那个身份**。压缩是同一场对话换个文件，不该因为 `active_profile` 期间漂了就换了说话对象。`--profile` / `--model` 任一给出即按今天的 config 重新解析。
 3. **composition 不继承**（`--with` 要再传一次），照常从 config 现解——新 session 正是今天的成员表与新 activate 版本该生效的地方，而 fork 就是一个 session 边界。（`environment` / `remote_workspace` 反过来**继承**，§8.1：那是身份不是 composition。）
+
+### fork 两种：带不带历史
+
+同一个动词，一个 flag 的差别，两种都不改父文件一个字节：
+
+| | `--parent <id>:<seq>` | `--parent <id>:<seq> --carry` |
+|---|---|---|
+| 子场的事件 | 空（要什么由 driver `append`：摘要、brief） | 父场 1..seq 逐条复制，`seq` 从 1 重编 |
+| 用途 | 压缩 / handoff / 委派 | **中途换模型、换工具、换 system prompt** |
+
+**`--carry` 是"改变一场进行中的对话的组成"的那一个原语**，也是唯一一个：身份与 composition 在一个文件里冻死（§3.4、§5.1），所以改它们只能换文件，而"换了文件还是同一场对话"正是复制历史的意思。
+
+复制经**同一套 codec**（`parseEventLine` → `toEvent` → `append`），不是搬原始行——于是子场是这个二进制写出来的 ledger，父场里一条读不出来的行会**停住 fork**而不是落进一个新文件。不跟着走的两样：`origin` / `origins`（投递 id 属于排干它的那个文件），以及每条 assistant 的 `reasoning`（不透明、绑在产出它的模型上，而子场很可能换了模型——代价是子场第一步的前缀缓存是冷的）。
+
+两道门在 fork 时各查一次，**拒绝就什么都不建**：`seq` 超过父场 tail（`CarrySeqBeyondTail`）或父场末行是残尾——fork 说的是一个确定的切点，"大概有这么多历史"与"半条 turn"都不是；以及 vision——复制的这些 turn 里有图而子场的模型没在 `[[models]]` 里主张 `vision = true`（§3.4 的两个入口之一）。
 
 **何时压、压成什么，都不在内核里。** 前者是 driver 的 policy（内核没有对应的 config 键），后者是模型的判断。两者都由 driver 用现成的 `session append` / `session step` / `session new --parent` 组合出来。
 
@@ -1430,9 +1424,10 @@ nulya ext init [--zig] [--user] <id> [tool]     ← 缺省是脚本骨架（§7.
                                                 ← `inspect <id>` = **生效中版本**的冻结 manifest（`Roots.firstActive`），没有即拒（无 draft 回退）
                                                   `inspect <id>@<version>` = **点名那个版本**（session header 记的正是这个形状）
                                                   `inspect <path>` = 那份 draft，未建未冻
-nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<version>][:<tool>,…]]…
+nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--carry] [--with <id>[@<version>][:<tool>,…]]…
                   [--prompt <file>]… [--bare] [--env <spec>] [--workspace <dir>]
                                                 ← 冻结 composition + 模型身份、写 header，打印 session id
+                                                  `--carry` 把父场 1..seq 复制进来（§11）：换模型 / 换工具 / 换 prompt 的**唯一**原语
                                                   `--env` 两族词汇（§8.1/§8.2）：`local|wsl|wsl:<distro>` 只搬 `shell` 的命令；
                                                     `remote:wsl|remote:wsl:<distro>|remote:ssh:<dest>|remote:exec:<argv…>` 搬整个工作区
                                                     （`ssh:<dest>` 已删除，指路 `remote:ssh:`）
@@ -1451,9 +1446,6 @@ nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[
                                                   **没有 `--env`**：命令跑在哪由 header 说了算，够不着就响亮失败
           | events <id> [--since N] [--follow]   ← 只读 tail 原始事件行（follow 轮询）
           | cancel <id>                          ← 写 cancel 标记，下一 step 边界消化
-          | rebind <id> [--profile P] [--model ID]
-                                                ← 这一场从下一步起换个模型跑（§3.1、§9.5）：把一条 `model_rebind` **投进 inbox**
-                                                  两个 flag 至少给一个；缺省 profile = 这一场当前那个
           | prune <id> [--force]                 ← **唯一一个删 session 的动词**（见下）
           | outcome <id> <success|partial|failure> [--note <text>] [--seq N]   ← 只写 outcome journal（§3.3）
           | list [--json]                        ← `.nulya/sessions/` 的只读投影（composition / 事件数 / usage / episode / verdict）
@@ -1496,7 +1488,7 @@ nulya                                            ← 无参数：同 `nulya help
 
 ### session 驱动面
 
-`nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `note` / `rebind` 投递到 `<id>.inbox/`、`cancel` 写 `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append / rebind / cancel），`events` 是只读 tail。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。
+`nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`（带着历史换就是 `session new --parent … --carry`，§11）。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `note` 投递到 `<id>.inbox/`、`cancel` 写 `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append / note / cancel），`events` 是只读 tail。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。
 
 **stdout 只放数据与成功输出**（新 session 的 id、事件 JSONL、`list` 的两种形态、`<id>: <verdict>`、`cancel requested for <id>`）：所有拒绝与警告一律走 stderr，所以一个 driver 拿到的 stdout 要么是它要的东西要么什么都没有。唯一的例外是 `--stream`，那里诊断是协议的一部分。
 
@@ -1507,8 +1499,9 @@ nulya                                            ← 无参数：同 `nulya help
 #### `session new` 的模型与继承
 
 - `--profile P` 是 config 里的 profile 名（默认 `active_profile`），`--model ID` 是该 profile 服务的一个 model id（默认 `ProviderProfile.defaultModel()`；接受任意 id，选择器只列目录里的）。不存在的 profile 直接拒绝（exit 1，提示 `nulya config show`）。
-- `--parent <id>:<seq>` 的模型分两级继承，因为两个 flag 含义不同：`--profile` 换的是"怎么连"，所以它替掉父的 profile；`--model` 只是在一个 profile 内换 id，所以**父的 profile 仍然生效**；两个都不给则**原样继承父场此刻在跑的那个身份**（§11），此时不重解 credential、也不打降级警告（缺 key 由需要它的那次 `step` 一次性报响）。composition 一律现解，不继承；`environment` / `remote_workspace` 反过来继承（§8.1）。
-- `session step --effort E` 是**每次 step 的 generation option**（不是身份）：不给则用 `Config.defaultEffort(header.model, header.model_identity.model)`。已知边界：effort 缺省跟随**本进程开始时**的身份，run 中途排干的 rebind 要下一个进程才换默认档。
+- `--parent <id>:<seq>` 的模型分两级继承，因为两个 flag 含义不同：`--profile` 换的是"怎么连"，所以它替掉父的 profile；`--model` 只是在一个 profile 内换 id，所以**父的 profile 仍然生效**；两个都不给则**原样继承父 header 冻的那个身份**（§11），此时不重解 credential、也不打降级警告（缺 key 由需要它的那次 `step` 一次性报响）。composition 一律现解，不继承；`environment` / `remote_workspace` 反过来继承（§8.1）。
+- `--carry`（要 `--parent`）另外把父场 1..seq 的事件复制进来，`reasoning` 一律置空、`origin` 一列不带（§11）。两种拒绝都什么都不建：`seq` 超过父场 tail 或父场末行是残尾；复制的 turn 里有图而新模型没主张 `vision = true`。
+- `session step --effort E` 是**每次 step 的 generation option**（不是身份）：不给则用 `Config.defaultEffort(header.model, header.model_identity.model)`——header 那一列，因为一场 session 的身份整个文件只有它一个（§3.4）。
 
 #### 一根轴的三个 flag
 
@@ -1543,17 +1536,13 @@ nulya                                            ← 无参数：同 `nulya help
 
 **`--image <path>`（可重复）把 png / jpeg 内联进这条 user turn**（§3.1）。三道门全在壳层（`cli/session.zig`，与 trust gate 同一先例——`composition.zig` / `session.zig` / `prompt.zig` 都不知道它存在），**任何一道拒绝都在投递之前**：
 
-1. **vision**：读 header 冻结的 `model_identity.model`（不是今天的 active profile；实际读的是 `ledger.scanSession`，所以一条还在 inbox 里等的 rebind 也算数），去 `[[models]]` 找那个 id，`vision = true` 才放行——**没有条目 = 不主张 = 拒绝**，文案指路要写的 config 键与 `nulya config show`（目录只认 trusted 层，checkout 自己主张不了）。
+1. **vision**：读 header 冻结的 `model_identity.model`（不是今天的 active profile——一场 session 的身份整个文件只有它一个，§3.4），去 `[[models]]` 找那个 id，`vision = true` 才放行——**没有条目 = 不主张 = 拒绝**，文案指路要写的 config 键与 `nulya config show`（目录只认 trusted 层，checkout 自己主张不了）。同一个判据的另一个入口是 `session new --carry`（§11），两处一处实现。
 2. **类型**：按**魔数**认 png（`\x89PNG`）/ jpeg（`\xFF\xD8\xFF`），扩展名不作数。
 3. **大小**：单张原始字节 ≤ 5 MB（我们说的三个 wire 里最紧的那条），超了报实际大小与上限，**绝不替用户缩图**。
 
 纯文本 append 一个字节都没变（三道门只在 `--image` 出现时才跑）；库路径直接 `append` 绕过它们的后果是 provider 的 400 原样浮出——诚实。
 
-`session append` 与 `session rebind` **都在 `<id>.inbox/.deposit.lock` 上排他串行**（§3.4）：vision 那道门在两条命令里守的是同一条规则的两侧，都是"读 → 判断 → 投递"，不串起来就双双读到旧状态、双双放行。
-
-#### `session rebind` 的三道门
-
-都在投递之前：凭据解析不到 → 拒（与 `session new` 对称）· ledger 里已有图片而新模型没主张 `vision = true` → 拒并指路 config · 已经在这个模型上（`ledger.identityEqual`）→ 说一句、不写事件。它另外说出两项代价：换 provider = 前缀缓存作废，rebind 之前的 reasoning 不再回放。step 边界由 inbox 天然保证。
+`session append` 全程持 `<id>.inbox/.deposit.lock`（§3.4）：投递名是从"inbox 里已经等着什么"铸出来的，两条并发的 append 不串起来会取到同一个队列位置；而 `session prune` 不能在这条命令的检查与投递之间把这一场拿走。
 
 #### `session outcome` 与 `session list`
 

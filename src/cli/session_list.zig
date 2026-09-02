@@ -155,7 +155,6 @@ fn readSessionView(
     var events: usize = 0;
     var total: ledger.Usage = .{};
     var first_user_text: []const u8 = "";
-    var rebound: ?ledger.Identity = null;
 
     while (lines.next()) |line| {
         if (header == null) {
@@ -168,17 +167,11 @@ fn readSessionView(
         // pre-filter, never the decision: what counts is the decoded line.
         const may_have_usage = std.mem.indexOf(u8, line, "\"usage\":") != null;
         const may_be_first_text = first_user_text.len == 0 and std.mem.indexOf(u8, line, "\"kind\":\"user_text\"") != null;
-        // A session may have changed model since its header was written;
-        // "what does this session run on" means the one in force.
-        const may_be_rebind = std.mem.indexOf(u8, line, "\"kind\":\"model_rebind\"") != null;
-        if (!may_have_usage and !may_be_first_text and !may_be_rebind) continue;
+        if (!may_have_usage and !may_be_first_text) continue;
         const parsed = ledger.parseEventLine(a, line) catch continue;
         if (parsed.value.usage) |u| total.add(u);
         if (first_user_text.len == 0 and std.mem.eql(u8, parsed.value.kind, "user_text")) {
             if (parsed.value.text) |t| first_user_text = try summarize(a, t);
-        }
-        if (std.mem.eql(u8, parsed.value.kind, "model_rebind")) {
-            if (parsed.value.identity) |identity| rebound = .{ .profile = parsed.value.profile orelse "", .identity = identity };
         }
     }
 
@@ -198,11 +191,9 @@ fn readSessionView(
         // The episode is resolved once the whole listing is known; until then a
         // session is its own root, which is also the final answer for most.
         .root = id,
-        // The identity in force: the header's until a rebind said otherwise —
-        // the same question `session step` asks.
-        .model = if (rebound) |r| r.profile else h.model,
-        .provider = if (rebound) |r| r.identity.provider else h.model_identity.provider,
-        .model_id = if (rebound) |r| r.identity.model else h.model_identity.model,
+        .model = h.model,
+        .provider = h.model_identity.provider,
+        .model_id = h.model_identity.model,
         .nulya = h.nulya,
         .environment = h.environment,
         .remote_workspace = h.remote_workspace,

@@ -2,7 +2,7 @@
 //! setModel / replaceHistory: changing composition means a new session.
 //!
 //! Each subcommand is a separate process over the durable session file, and
-//! only `step` ever WRITES it: `append`, `rebind` and `cancel` deposit into the
+//! only `step` ever WRITES it: `append`, `note` and `cancel` deposit into the
 //! session's siblings (`<id>.inbox/`, `<id>.cancel`) for `step` to consume at
 //! its next step boundary, and `events` tails the file read-only.
 //!
@@ -86,11 +86,10 @@ pub fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []con
     if (std.mem.eql(u8, sub, "step")) return sessionStep(alloc, io, rest);
     if (std.mem.eql(u8, sub, "events")) return sessionEvents(alloc, io, rest);
     if (std.mem.eql(u8, sub, "cancel")) return sessionCancel(alloc, io, rest);
-    if (std.mem.eql(u8, sub, "rebind")) return sessionRebind(alloc, io, rest);
     if (std.mem.eql(u8, sub, "prune")) return sessionPrune(alloc, io, rest);
     if (std.mem.eql(u8, sub, "outcome")) return sessionOutcome(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return session_list.sessionList(alloc, io, sliceHasFlag(rest, "--json"));
-    try printErr(io, "unknown `session` subcommand; try new|append|note|step|events|cancel|rebind|prune|outcome|list\n");
+    try printErr(io, "unknown `session` subcommand; try new|append|note|step|events|cancel|prune|outcome|list\n");
     return 1;
 }
 
@@ -354,7 +353,7 @@ pub fn createSession(
     // A fork continues its parent's model unless told otherwise, so a
     // compaction cannot change who the conversation is with because
     // `active_profile` moved meanwhile. Composition does NOT come along: a fork
-    // is a session boundary like any other, where today's pins and newly
+    // is a session boundary like any other, where today's member list and newly
     // activated versions take hold.
     //
     // `--profile` replaces the parent's; `--model` only picks another id WITHIN
@@ -362,31 +361,15 @@ pub fn createSession(
     // re-resolves against today's config; naming neither takes the parent's
     // frozen descriptor verbatim, which is the compaction case.
     //
-    // What it continues is the identity IN FORCE (`ledger.scanSession`), not
-    // the one the parent's header froze: a rebound session is answered by the
-    // model it moved to.
-    //
     // An empty profile is a legacy header that never recorded one: absent, not
     // a profile named "".
-    var parent_now: ?ledger.Identity = null;
-    var parent_scan: ?ledger.SessionScan = null;
-    defer if (parent_scan) |*s| s.deinit();
-    if (parent_header) |h| {
-        const ppath = try launch.sessionPath(alloc, parent.?.session);
-        defer alloc.free(ppath);
-        parent_scan = ledger.scanSession(alloc, io, std.Io.Dir.cwd(), ppath) catch {
-            try printErrFmt(alloc, io, "cannot read parent session '{s}'\n", .{parent.?.session});
-            return null;
-        };
-        parent_now = parent_scan.?.identity(h.value);
-    }
-    const parent_profile: ?[]const u8 = if (parent_now) |n|
-        (if (n.profile.len != 0) n.profile else null)
+    const parent_profile: ?[]const u8 = if (parent_header) |h|
+        (if (h.value.model.len != 0) h.value.model else null)
     else
         null;
-    const inherited: ?ledger.ModelDescriptor = if (parent_now) |n| blk: {
+    const inherited: ?ledger.ModelDescriptor = if (parent_header) |h| blk: {
         if (named_profile != null or model_id != null) break :blk null;
-        break :blk if (n.identity.provider.len != 0) n.identity else null;
+        break :blk if (h.value.model_identity.provider.len != 0) h.value.model_identity else null;
     } else null;
 
     const profile = named_profile orelse parent_profile orelse
@@ -490,6 +473,42 @@ pub fn createSession(
             .{launch.remote_spec_syntax},
         );
         return null;
+    }
+
+    // `--carry` is what makes changing model, tools or system prompt mid
+    // conversation ONE primitive: the fork copies the parent's events 1..seq
+    // into a file of its own, under whatever the flags above resolved to. The
+    // parent is only read.
+    //
+    // Read before anything exists on disk, like `--prompt` below: a history
+    // that cannot be carried must leave no session behind at all.
+    var carried: ?ledger.Carried = null;
+    defer if (carried) |*c| c.deinit();
+    if (sliceHasFlag(args, "--carry")) {
+        const ref = parent orelse {
+            try printErr(io, "--carry names no history: it copies a parent's events, so it needs --parent <id>:<seq>\n");
+            return null;
+        };
+        const ppath = try launch.sessionPath(alloc, ref.session);
+        defer alloc.free(ppath);
+        carried = ledger.readCarry(alloc, io, std.Io.Dir.cwd(), ppath, ref.seq) catch |err| switch (err) {
+            error.CarrySeqBeyondTail => {
+                try printErrFmt(alloc, io, "--carry: session '{s}' has fewer than {d} events (see `nulya session events {s}`)\n", .{ ref.session, ref.seq, ref.session });
+                return null;
+            },
+            error.LegacyModelRebind => {
+                try printErrFmt(alloc, io, "--carry: session '{s}' records a model_rebind, an event this binary no longer has; carry the part before it (`--parent {s}:<seq>`)\n", .{ ref.session, ref.session });
+                return null;
+            },
+            else => {
+                try printErrFmt(alloc, io, "--carry: cannot read the history of '{s}': {s}\n", .{ ref.session, @errorName(err) });
+                return null;
+            },
+        };
+        // The same catalog rule `session append --image` asks, once, here: the
+        // pictures come along, so the model taking the conversation over has to
+        // claim it can see them.
+        if (carried.?.has_images and !try visionClaimed(alloc, io, &cfg, identity.model, "--carry")) return null;
     }
 
     // Read before anything exists on disk: a `--prompt` that cannot be read
@@ -612,7 +631,13 @@ pub fn createSession(
             return null;
         },
     };
-    sess.deinit();
+    defer sess.deinit();
+    if (carried) |c| {
+        for (c.events) |e| sess.l.append(e) catch |err| {
+            try printErrFmt(alloc, io, "session new failed while carrying history: {s}\n", .{@errorName(err)});
+            return null;
+        };
+    }
 
     return try alloc.dupe(u8, id);
 }
@@ -730,12 +755,10 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         return 1;
     }
 
-    // Held from here to the deposit. Three things need it: the images gate
-    // below reads the session and then deposits, and so does the other half of
-    // that rule in `session rebind`; the delivery id is minted from what is
-    // already waiting, so two racing appends could otherwise take the same
-    // queue position; and `session prune` may not take the session away between
-    // the check below and the deposit.
+    // Held from here to the deposit. Two things need it: the delivery id is
+    // minted from what is already waiting, so two racing appends could
+    // otherwise take the same queue position; and `session prune` may not take
+    // the session away between the check below and the deposit.
     var lease = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
         try printErr(io, "session append failed: cannot open this session's inbox\n");
         return 1;
@@ -1120,103 +1143,61 @@ fn printImageRefusal(alloc: std.mem.Allocator, io: std.Io, path: []const u8, err
     }
 }
 
-/// Builds the model a `model_rebind` names, and keeps every handle it built
-/// alive for as long as this process steps.
-///
-/// The kernel says WHEN (it read the ledger); this says HOW. Handles are
-/// heap-allocated because `ModelHolder.model()` hands out a pointer into the
-/// holder: the list has to keep addresses, not values. Nothing is freed early —
-/// a swapped-away provider may still be draining its last response.
-const RebindResolver = struct {
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    env: *const std.process.Environ.Map,
-    cfg: *const config.Config,
-    cache_key: []const u8,
-    holders: std.ArrayList(*launch.ModelHolder) = .empty,
-
-    fn build(ptr: *anyopaque, wanted: ledger.Identity) anyerror!provider.Model {
-        const self: *RebindResolver = @ptrCast(@alignCast(ptr));
-        // The same credential order the header's identity gets on every step:
-        // the profile's own key first, then the env var the descriptor names,
-        // then the file (`launch.credentialSource`).
-        const inline_key = if (self.cfg.provider.findProfile(wanted.profile)) |p| p.api_key else null;
-        const holder = try self.alloc.create(launch.ModelHolder);
-        errdefer self.alloc.destroy(holder);
-        holder.* = try launch.buildFromDescriptor(self.alloc, self.io, wanted.identity, self.env, .{
-            .cache_key = self.cache_key,
-            .inline_key = inline_key,
-        });
-        errdefer holder.deinit();
-        try self.holders.append(self.alloc, holder);
-        return holder.model();
-    }
-
-    fn resolver(self: *RebindResolver) session.AgentSession.ModelResolver {
-        return .{ .ptr = self, .build = build };
-    }
-
-    fn deinit(self: *RebindResolver) void {
-        for (self.holders.items) |holder| {
-            holder.deinit();
-            self.alloc.destroy(holder);
-        }
-        self.holders.deinit(self.alloc);
-    }
-};
-
 fn imageSize(io: std.Io, path: []const u8) ?u64 {
     var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
     defer file.close(io);
     return (file.stat(io) catch return null).size;
 }
 
-/// The vision gate: may THIS session be handed an image?
+/// Does anything claim this model accepts images?
 ///
-/// It asks the session's own identity — not today's active profile — and looks
-/// the model id up in the `[[models]]` catalog, which is descriptive and
-/// trusted-layer only. No entry, or an entry that does not say `vision = true`,
-/// is a refusal: nothing here guesses on the model's behalf. Prints its own
-/// refusal (stderr) and returns false; the kernel never learns it exists.
+/// The `[[models]]` catalog is descriptive and trusted-layer only, and no entry
+/// — like an entry without `vision = true` — is a NO: nothing here guesses on a
+/// model's behalf. Both places pictures and a model meet ask this one question:
+/// `session append --image` about the session's frozen identity, and
+/// `session new --carry` about the model a fork hands the pictures to. `what`
+/// names the refusing command; a false answer prints its own refusal (stderr)
+/// and how to state the claim, and the kernel never learns any of it exists.
+fn visionClaimed(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    cfg: *const config.Config,
+    model_id: []const u8,
+    what: []const u8,
+) !bool {
+    const named = if (model_id.len != 0) model_id else "(unnamed model)";
+    for (cfg.models) |m| {
+        if (!std.mem.eql(u8, m.id, model_id)) continue;
+        if (m.vision) return true;
+        try printErrFmt(alloc, io, "{s} refused: model '{s}' is not marked as accepting images\n", .{ what, named });
+        break;
+    } else {
+        try printErrFmt(alloc, io, "{s} refused: no [[models]] entry for '{s}', so nothing claims it accepts images\n", .{ what, named });
+    }
+    var host = try environment.hostEnvironMap(alloc);
+    defer host.deinit();
+    var paths = try config.ConfigPaths.init(alloc, &host);
+    defer paths.deinit(alloc);
+    try printVisionHint(alloc, io, model_id, paths.user);
+    return false;
+}
+
+/// The vision gate for `session append --image`: may THIS session be handed an
+/// image? It asks the identity the session's header froze — the one every step
+/// of it runs on — never today's active profile.
 fn visionAccepted(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !bool {
     var header = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch {
         try printErr(io, "session append failed: cannot read this session's header\n");
         return false;
     };
     defer header.deinit();
-    // The model in force, not the one the header froze: a rebound session is
-    // answered by the model it was rebound TO, so that is the one that has to
-    // claim it accepts images — including a rebind still in the inbox, which
-    // the very step that would carry this image applies first.
-    var scan = ledger.scanSession(alloc, io, std.Io.Dir.cwd(), spath) catch {
-        try printErr(io, "session append failed: cannot read this session\n");
-        return false;
-    };
-    defer scan.deinit();
-    const model_id = scan.identity(header.value).identity.model;
 
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
-    var paths = try config.ConfigPaths.init(alloc, &host);
-    defer paths.deinit(alloc);
 
-    for (cfg.models) |m| {
-        if (!std.mem.eql(u8, m.id, model_id)) continue;
-        if (m.vision) return true;
-        try printErrFmt(alloc, io, "session append refused: model '{s}' is not marked as accepting images\n", .{model_id});
-        try printVisionHint(alloc, io, model_id, paths.user);
-        return false;
-    }
-    try printErrFmt(
-        alloc,
-        io,
-        "session append refused: no [[models]] entry for '{s}', so nothing claims it accepts images\n",
-        .{if (model_id.len != 0) model_id else "(unnamed model)"},
-    );
-    try printVisionHint(alloc, io, model_id, paths.user);
-    return false;
+    return visionClaimed(alloc, io, &cfg, header.value.model_identity.model, "session append");
 }
 
 fn printVisionHint(alloc: std.mem.Allocator, io: std.Io, model_id: []const u8, user_config: []const u8) !void {
@@ -1446,9 +1427,6 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // session is actually on.
     const effort_flag = flagValue(args[1..], "--effort");
 
-    var rebinder: RebindResolver = .{ .alloc = alloc, .io = io, .env = &host, .cfg = &cfg, .cache_key = id };
-    defer rebinder.deinit();
-
     // Workspace-relative, deliberately: a spill is written through the
     // environment's `putWorkspaceFile`, so this one string is the path on
     // whichever machine this session's workspace lives on.
@@ -1464,27 +1442,13 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
             .gate = if (gate) |g| g.gate() else null,
         },
         .extension_roots = ext_roots,
-        .rebind = rebinder.resolver(),
     }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath }) catch |err| switch (err) {
-        // The header's credential was fine (it built above); the one the
-        // session rebound TO is not, and saying which is the difference between
-        // "fix your key" and "fix which key".
-        error.MissingCredential => {
-            return stepFail(alloc, io, stream, "session '{s}' was rebound to a model whose credential is not available here; refusing to run (no silent fallback)", .{id});
-        },
-        error.ProviderUnavailable => {
-            return stepFail(alloc, io, stream, "session '{s}' was rebound to a provider this build cannot construct", .{id});
-        },
+        error.LegacyModelRebind => return stepFail(alloc, io, stream, legacy_rebind_refusal, .{ id, id }),
         else => return stepFail(alloc, io, stream, "session open failed: {s}", .{@errorName(err)}),
     };
     defer sess.deinit();
 
-    // What this session is on NOW: the header's identity until a
-    // `model_rebind` says otherwise. A rebind drained later in this same run
-    // keeps this process's effort default — effort is a per-step option, and
-    // the next process reads the new one.
-    const now = ledger.effectiveIdentity(hdr.value, sess.l.view());
-    sess.model_options = .{ .effort = effort_flag orelse cfg.defaultEffort(now.profile, now.identity.model) };
+    sess.model_options = .{ .effort = effort_flag orelse cfg.defaultEffort(hdr.value.model, hdr.value.model_identity.model) };
 
     const before = sess.l.len();
     if (stream) |s| {
@@ -1499,6 +1463,9 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         if (stream) |s| s.flushEvents(sess.l.view()) catch {};
         // Not a fault but a state: the last reply was cut off, and stepping it
         // again would send it back as a prefill.
+        if (err == error.LegacyModelRebind) {
+            return stepFail(alloc, io, stream, legacy_rebind_refusal, .{ id, id });
+        }
         if (err == error.TruncatedTurnNeedsInput) {
             return stepFail(alloc, io, stream, "the last reply was cut off at its output cap; append a message before stepping again", .{});
         }
@@ -1688,150 +1655,16 @@ fn sessionCancel(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     return 0;
 }
 
-/// `nulya session rebind <id> [--profile P] [--model ID]` — run the rest of
-/// this conversation on a different model.
-///
-/// It is a DEPOSIT, not a write: the identity change is an event, and events
-/// from other processes reach the ledger through the inbox, drained at the next
-/// step boundary by the one writer. So a mid-step session can be rebound too —
-/// it takes effect on the step after the one running.
-///
-/// Three gates, all before the deposit, and all facts rather than judgements:
-/// whether a model is a GOOD idea for this conversation is the caller's call.
-fn sessionRebind(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len < 1) {
-        try printErr(io, "usage: nulya session rebind <id> [--profile P] [--model ID]\n");
-        return 1;
-    }
-    const id = args[0];
-    if (!launch.isValidSessionId(id)) {
-        try printErr(io, "invalid session id\n");
-        return 1;
-    }
-    const spath = try launch.sessionPath(alloc, id);
-    defer alloc.free(spath);
-    if (!sessionExists(io, spath)) {
-        try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
-        return 1;
-    }
-
-    // Before anything is opened or created: a command that names nothing to run
-    // on is a usage error, not a rebind.
-    const model_id = flagValue(args[1..], "--model");
-    const named_profile = flagValue(args[1..], "--profile");
-    if (named_profile == null and model_id == null) {
-        try printErr(io, "session rebind: name what to run — --profile P, --model ID, or both\n");
-        return 1;
-    }
-
-    // Held from before the read until after the deposit: the images gate below
-    // and `session append --image` are two halves of one rule, and each is a
-    // read followed by a deposit.
-    var lease = ledger.acquireDepositLease(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
-        try printErrFmt(alloc, io, "session rebind failed: cannot open the inbox of '{s}'\n", .{id});
-        return 1;
-    };
-    defer lease.close(io);
-    // Under the lease: waiting for it is a moment in which the session can have
-    // been pruned out from under this command.
-    if (!sessionExists(io, spath)) {
-        try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
-        return 1;
-    }
-
-    var header = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch {
-        try printErrFmt(alloc, io, "session rebind failed: cannot read '{s}'\n", .{id});
-        return 1;
-    };
-    defer header.deinit();
-
-    // What the next step runs on: the header's identity, moved by the last
-    // rebind this session has been told about, committed OR still in the inbox.
-    // Asking only the committed events would judge a second rebind against a
-    // model already on its way out — "already runs on A" while a pending B is
-    // what the next step will use.
-    var scan = ledger.scanSession(alloc, io, std.Io.Dir.cwd(), spath) catch {
-        try printErrFmt(alloc, io, "session rebind failed: cannot read '{s}'\n", .{id});
-        return 1;
-    };
-    defer scan.deinit();
-    const current = scan.identity(header.value);
-
-    const profile = named_profile orelse current.profile;
-
-    var host = try environment.hostEnvironMap(alloc);
-    defer host.deinit();
-    var cfg = try config.load(alloc, io, &host);
-    defer cfg.deinit();
-
-    const profile_cfg = cfg.provider.findProfile(profile) orelse {
-        try printErrFmt(alloc, io, "no such profile '{s}' (see `nulya config show`)\n", .{profile});
-        return 1;
-    };
-    // Gate 1 — the credential. The same refusal `session new` gives: a rebind
-    // that silently became the offline stand-in would be a conversation
-    // answered by nobody.
-    if (!launch.credentialAvailable(alloc, io, profile_cfg, &host)) {
-        try printErrFmt(alloc, io, "profile '{s}' has no credential, so this session cannot be moved to it (see `nulya config show`)\n", .{profile});
-        return 1;
-    }
-    const wanted = launch.resolveDescriptor(alloc, io, cfg.provider, &host, profile, model_id);
-
-    // Gate 2 — vision. The pictures are already in this ledger and every later
-    // step replays them, so a model that does not claim to accept images cannot
-    // take this conversation over. Same catalog and same "no entry = no claim =
-    // refusal" as `session append --image`.
-    if (scan.has_images) {
-        var claims_vision = false;
-        var listed = false;
-        for (cfg.models) |m| {
-            if (!std.mem.eql(u8, m.id, wanted.model)) continue;
-            listed = true;
-            claims_vision = m.vision;
-        }
-        if (!claims_vision) {
-            var paths = try config.ConfigPaths.init(alloc, &host);
-            defer paths.deinit(alloc);
-            if (listed) {
-                try printErrFmt(alloc, io, "session rebind refused: this session holds images and model '{s}' is not marked as accepting them\n", .{wanted.model});
-            } else {
-                try printErrFmt(alloc, io, "session rebind refused: this session holds images and nothing claims '{s}' accepts them\n", .{wanted.model});
-            }
-            try printVisionHint(alloc, io, wanted.model, paths.user);
-            return 1;
-        }
-    }
-
-    const target: ledger.Identity = .{ .profile = profile, .identity = wanted };
-    if (ledger.identityEqual(target, current)) {
-        try printOut(alloc, io, "{s} already runs on {s}/{s}\n", .{ id, wanted.provider, wanted.model });
-        return 0;
-    }
-
-    // A FRESH delivery id: the name is the inbox's exactly-once key, so a
-    // fixed one would make every rebind after the first collapse into the one
-    // already applied and vanish at the next drain.
-    const name = try ledger.freshDeliveryName(alloc, io, std.Io.Dir.cwd(), spath, "rebind");
-    defer alloc.free(name);
-    try ledger.depositEventLeased(alloc, io, std.Io.Dir.cwd(), spath, name, .{
-        .model_rebind = .{ .profile = profile, .identity = wanted },
-    });
-    try printOut(alloc, io, "{s} will run on {s}/{s} from its next step\n", .{ id, wanted.provider, wanted.model });
-    // Both costs, said once, because neither is visible from the outside: the
-    // provider's prefix cache starts cold, and the reasoning recorded before
-    // this point belongs to the model that produced it and is no longer
-    // replayed.
-    if (!std.mem.eql(u8, wanted.provider, current.identity.provider)) {
-        try printErr(io, "  a different provider means a cold prompt cache: the next step pays for the whole prefix again\n");
-    }
-    try printErr(io, "  reasoning recorded before now is kept in the ledger and no longer replayed\n");
-    return 0;
-}
-
 fn sessionExists(io: std.Io, spath: []const u8) bool {
     std.Io.Dir.cwd().access(io, spath, .{}) catch return false;
     return true;
 }
+
+/// A session written when moving a running conversation onto another model was
+/// an event. Both takes on `{s}` are the session id: the refusal and the way on
+/// from it name the same session.
+const legacy_rebind_refusal =
+    "session '{s}' records a model_rebind, an event this binary no longer has; continue it with `nulya session new --parent {s}:<seq> --carry --profile <P>`";
 
 fn parseParent(s: []const u8) ?ledger.ParentRef {
     const colon = std.mem.lastIndexOfScalar(u8, s, ':') orelse return null;
