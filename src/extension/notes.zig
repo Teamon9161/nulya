@@ -67,7 +67,7 @@ pub fn buildActiveNoteText(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Di
 /// `base` is the directory `session_path` is relative to (or `cwd()` when it is
 /// absolute); `ext_root` is the extensions store. A version with nothing to
 /// announce deposits nothing. Idempotent per active version: the deposit name
-/// `note-<id>-<version>` is the exactly-once key.
+/// `note-<id>-<version>.json` is the exactly-once key.
 pub fn depositActiveNote(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -79,7 +79,7 @@ pub fn depositActiveNote(
 ) !void {
     const text = (try buildActiveNoteText(alloc, io, ext_root, id, version)) orelse return;
     defer alloc.free(text);
-    const name = try std.fmt.allocPrint(alloc, "note-{s}-{s}", .{ id, version });
+    const name = try std.fmt.allocPrint(alloc, "note-{s}-{s}.json", .{ id, version });
     defer alloc.free(name);
     const meta = try std.json.Stringify.valueAlloc(alloc, .{ .id = id, .version = version }, .{});
     defer alloc.free(meta);

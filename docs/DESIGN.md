@@ -117,7 +117,7 @@ note             { source, text, meta? }                        ← 从 step 之
 - **`text`** 是模型读到的全部。
 - **`meta`** 是**一个 JSON 值的原文**（可空），给必须拿到结构化事实、又不该去解析展示文本的读者：任务报告写 `{"task","exit_code"}`，能力宣告写 `{"id","version"}`。与 `calls[].args_json` / `presentation` 同一条纪律——**内核存字节、从不解析**。
 
-**去重只靠投递名**：`note` 没有按内容去重的分支，幂等的投递者取确定的投递 id（能力宣告取 `note-<id>-<version>`），`origin` 列的 exactly-once 覆盖它（§3.4）。
+**去重只靠投递名**：`note` 没有按内容去重的分支，幂等的投递者取确定的投递 id（能力宣告取 `note-<id>-<version>.json`），`origin` 列的 exactly-once 覆盖它（§3.4）。
 
 **老文件读得回来**：`task_finished` / `capability_note` 两种旧 kind 在 `toEvent` 里翻译成 `note`（`task` / `ext` 两个 source，旧的结构化列折进 `meta`），写端不再产生它们；header `v` 仍是 1。
 
@@ -344,7 +344,7 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
 
 - **不改 `tools[]`。**
 - `nulya ext activate` 在 `NULYA_SESSION` 命名了 session 文件时，把一条 `note{source:"ext", meta:{id, version}}` **投递**进该 session 的 inbox（文本确定性：列出 tools + `nulya ext run` 用法 + skills + `nulya skill load <ref>`）。它绝不直接写 session 文件——那是单写者（§3.4）。
-- `session.prepareStep` 每步在 step 边界排干 inbox 并 append。投递名是确定的 `note-<id>-<version>`，所以同一个 `id@version` 宣告两次只进 ledger 一次。
+- `session.prepareStep` 每步在 step 边界排干 inbox 并 append。投递名是确定的 `note-<id>-<version>.json`，所以同一个 `id@version` 宣告两次只进 ledger 一次。
 - 前缀不动，缓存继续命中；模型下一 step 经 shell 调用。下一场 session 若被写进成员表才进 `tools[]`。
 
 > **晋升 = 下一场的一行成员，对话中途只追加 note。**
@@ -1268,10 +1268,10 @@ stdout **只有一种形状**：一行一个 JSON，写完即 flush，跑的过�
 
 机制是 `loop.StepContext.observer`（`StepObserver{ptr,vtable}`）。observer **无权力**：五个回调全部返回 `void`、只拿只读视图，所以它不能 append、不能改 model-visible 状态、不能让一个 step 失败。回调点：`collectTurn` 把 provider 流 **tee** 给 observer 再交给 `TurnCollector`，瞬态失败重发前一次 `modelRetry`（§13）；`execOne` 前后各一次（未被派发的尾部调用两个回调都不发）；`AgentSession.step` 在 step 边界一次（含 canceled）。
 
-行协议：带 `stream` 字段的是瞬态观测行，不带的就是与 `session events` **同形**的 ledger 事件行（同一个 `encodeEventLine`、同一套 seq）。
+行协议：带 `stream` 字段的是瞬态观测行，不带的就是与 `session events` **同形**的 ledger 事件行（同一套 seq、同一条 `encodeEventLineOrigins`）。**同形是逐字节的**：从 inbox 排干的事件把它的 `origin` / `origins`（§3.4）一起印出来，读这条流与读 session 文件不会对同一个 seq 给出两个答案——driver 就是靠这一列认出 `session append` 刚回执给它的那条投递。
 
 ```jsonl
-{"seq":6,"kind":"user_text","text":"…"}                     ← 这一步的边界从 inbox 排干的（§3.4），在 started 之前
+{"seq":6,"origin":"msg-…json","kind":"user_text","text":"…"} ← 这一步的边界从 inbox 排干的（§3.4），在 started 之前
 {"stream":"model","event":"started"}
 {"stream":"model","event":"text_delta","text":"…"}          # 另有 thinking_delta（展示用）
 {"stream":"model","event":"tool_use_start","index":0,"id":"call_1","name":"shell"}

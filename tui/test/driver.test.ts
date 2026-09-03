@@ -67,7 +67,7 @@ test("a send joining while the opening tail is draining stays in that opening tu
         signalBStarted()
         await bBarrier
       }
-      await sessionAppend(workspace, session, text, images)
+      return await sessionAppend(workspace, session, text, images)
     },
   })
   try {
@@ -107,7 +107,7 @@ test("a failed opening append keeps ownership until later queued appends are dri
         signalBStarted()
         await bBarrier
       }
-      await sessionAppend(workspace, session, text, images)
+      return await sessionAppend(workspace, session, text, images)
     },
   })
   try {

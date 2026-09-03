@@ -82,9 +82,15 @@ pub const StepStream = struct {
 
     /// Emit every ledger event not yet reported, in `session events` shape. The
     /// seq of view index i is i+1 — the numbering the session file uses.
+    ///
+    /// The line is the file's line, `origin` included: a driver that deposited a
+    /// turn recognises its own delivery here, and reading this stream must not
+    /// answer differently from reading the session file.
     pub fn flushEvents(self: *StepStream, events: []const ledger.Event) !void {
         while (self.printed < events.len) : (self.printed += 1) {
-            const line = try ledger.encodeEventLine(self.alloc, events[self.printed], self.printed + 1);
+            const seq = self.printed + 1;
+            const origins = if (self.ledger_view) |l| l.originsAt(seq) else &.{};
+            const line = try ledger.encodeEventLineOrigins(self.alloc, events[self.printed], seq, origins);
             defer self.alloc.free(line);
             try self.out.writeAll(line);
         }

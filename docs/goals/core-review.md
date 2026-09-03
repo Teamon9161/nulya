@@ -310,3 +310,26 @@ vtable 后面这道缝。
   先落成 `cb7cc29` 再随分支 rebase，没有丢。
   验收：`zig build test` 590/590 · `zig build e2e` 172 pass 1 skip（注释分支 rebase 后单跑一次，
   合流后再跑一次）。
+
+- **2026-09-03 · 小刀「`session append` 打印投递名」收口（回执 → `origin` → TUI 转正）· 本 commit**：
+  `d0c6f08` 只做了三分之一，而且做错了一处。三段全断：**(a)** 回执印的是 `msg-<stamp>-<nonce>`，
+  ledger 的 `origin` 是 inbox **文件名** `msg-<stamp>-<nonce>.json`——两个字符串永远不等，
+  所以那条回执从落地第一天起就对不上任何事件；**(b)** `session step` 的行协议根本不印 `origin`：
+  `flushEvents` 走的是 `encodeEventLine`（origins 恒空），而 `Ledger` 只把 origin 收进一个扁平的
+  去重集合，不记「哪条事件是哪个投递」——读文件能看见的东西，读这条流看不见；**(c)** `session.ts`
+  仍按文本拼接匹配。
+  收口：**投递名就是 inbox 文件名**（`freshDeliveryName` / `depositName` / `depositActiveNote`
+  自己带 `.json`，`depositFilePath` 只负责拼目录，`task.zig` 里第三处手拼的 `.json` 删掉改调它）——
+  DESIGN §3.4 那句「这个文件名就是投递 id」本来就是这么写的，是代码没做到。`Ledger` 多一列
+  `line_origins`（与 `events` 平行，index i 对 seq i+1），`originsAt(seq)` 让 `flushEvents` 印出
+  **与 session 文件逐字节同形**的那一行。TUI 那边 `UserItem.delivery` + `confirmQueued`，
+  `promoteQueued` 只按 `origin` / `origins` 认领——**没有留文本回退路径**；回执比事件晚到那一格
+  （step 先排干了 inbox）由一个只在 append 在飞时才存在的 `drained_origins` 收尾。
+  测试：kernel e2e 断言「同一段文本 append 两次 → 两个不同回执 → 两个名字都在合并那条 turn 的
+  `origins` 里，且 step 的 stdout 与 session 文件都这么写」；TUI 四条纯状态测试断言
+  「同文本别人的 turn 不顶掉我们的」「合并批次两条回显都摘掉」「事件先到、回执后到也能收尾」
+  「replay 不误摘正在排队的那条」。头两条在旧的文本匹配下会红。
+  验收：`zig build test` 590/590 · `zig build e2e` 173 pass 1 skip · `bun test` 773 pass 0 fail。
+  评审里另两条按提出者自己的判断没动：`events --follow` 被 prune 后那句 stderr（正常控制流已由
+  exit 0 表达，但人直接在 shell 里跑时它是有用的一句）与 `Diag` 的 `{?ptr, ?fn}` 双 nullable
+  （与 `StepObserver` 同形比理论纯洁重要）。

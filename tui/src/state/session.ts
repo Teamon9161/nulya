@@ -13,7 +13,7 @@
  *    and sorts back into place even though it arrived after the model deltas.
  */
 import { createStore, produce } from "solid-js/store"
-import { noteMeta, startedTaskOf, taskReportOf } from "../nulya/ledger.ts"
+import { noteMeta, originsOf, startedTaskOf, taskReportOf } from "../nulya/ledger.ts"
 import type { LedgerEvent, SessionHeader, ToolCall, Usage } from "../nulya/ledger.ts"
 import type { StreamLine, StepStatus, StopReason } from "../nulya/cli.ts"
 
@@ -33,6 +33,13 @@ export interface UserItem extends ItemBase {
   imageCount?: number
   /** Deposited into the inbox but not yet drained into the ledger. */
   queued: boolean
+  /**
+   * The inbox delivery name `session append` receipted, or null while the
+   * append is still in flight. This is what promotes the item: the drained
+   * `user_text` carries the same name back as its `origin`, so two turns with
+   * identical text are still two distinct deliveries.
+   */
+  delivery?: string | null
 }
 
 export interface AssistantItem extends ItemBase {
@@ -283,6 +290,12 @@ export interface SessionState {
   lastSeq(): number
   /** Optimistic echo of a just-sent turn; promoted when its `user_text` lands. */
   enqueueUser(text: string, imageCount?: number): string
+  /**
+   * Record the delivery name `session append` receipted for one optimistic
+   * turn. Must be called for every `enqueueUser` that succeeded, or that turn
+   * has no identity and can never be promoted.
+   */
+  confirmQueued(localId: string, delivery: string): void
   /** Remove one optimistic turn after its own append failed. Committed turns are never touched. */
   rejectUser(localId: string): void
   pendingCount(): number
@@ -397,6 +410,47 @@ export function createSessionState(id: string): SessionState {
     }
   }
 
+  /**
+   * Delivery names of drained `user_text` events whose optimistic item did not
+   * know its own name yet: a step can drain the inbox file before the `session
+   * append` process has finished printing the receipt. Held only while some
+   * append is in flight (`forgetSettledOrigins`), so replaying a long session
+   * remembers nothing.
+   */
+  const drained_origins = new Set<string>()
+
+  function awaitingReceipt(items: readonly TranscriptItem[]): boolean {
+    return items.some(
+      (item) => item.kind === "user" && item.seq === null && item.queued && item.delivery == null,
+    )
+  }
+
+  function forgetSettledOrigins(draft: SessionSnapshot) {
+    if (!awaitingReceipt(draft.items)) drained_origins.clear()
+  }
+
+  /**
+   * Drop the optimistic echoes this event committed. Identity, never text: the
+   * delivery name `session append` receipted comes back as the event's
+   * `origin`, so two turns reading "hello" are still two deliveries. One event
+   * can carry several names — a step boundary merges consecutive user turns.
+   */
+  function promoteQueued(draft: SessionSnapshot, origins: string[]) {
+    if (origins.length === 0) return
+    const unmatched = new Set(origins)
+    let awaiting = false
+    for (let i = draft.items.length - 1; i >= 0; i--) {
+      const item = draft.items[i]!
+      if (item.kind !== "user" || item.seq !== null || !item.queued) continue
+      if (item.delivery == null) {
+        awaiting = true
+        continue
+      }
+      if (unmatched.delete(item.delivery)) draft.items.splice(i, 1)
+    }
+    if (awaiting) for (const name of unmatched) drained_origins.add(name)
+  }
+
   function toolItemsOf(seq: number, calls: ToolCall[]): ToolItem[] {
     return calls.map((call) => ({
       key: `e${seq}:${call.id}`,
@@ -477,25 +531,7 @@ export function createSessionState(id: string): SessionState {
           const user = event as Extract<LedgerEvent, { kind: "user_text" }>
           const text = user.text
           const imageCount = user.images?.length ?? 0
-          const queued = draft.items
-            .map((item, index) => ({ item, index }))
-            .filter((entry): entry is { item: UserItem; index: number } =>
-              entry.item.kind === "user" && entry.item.seq === null && entry.item.queued)
-          let matched: { item: UserItem; index: number }[] = []
-          for (let start = 0; start < queued.length && matched.length === 0; start++) {
-            let joined = ""
-            for (let end = start; end < queued.length; end++) {
-              joined += `${end === start ? "" : "\n\n"}${queued[end]!.item.text}`
-              if (joined === text) {
-                matched = queued.slice(start, end + 1)
-                break
-              }
-              if (!text.startsWith(joined)) break
-            }
-          }
-          if (matched.length > 0) {
-            for (const entry of matched.toReversed()) draft.items.splice(entry.index, 1)
-          }
+          promoteQueued(draft, originsOf(user))
           insertCommitted(draft, [{ key: `e${seq}`, seq, kind: "user", text, imageCount, queued: false }])
           break
         }
@@ -812,9 +848,22 @@ export function createSessionState(id: string): SessionState {
     enqueueUser(text, imageCount = 0) {
       const localId = `q:${Date.now()}:${localUser++}`
       edit((draft) => {
-        draft.items.push({ key: localId, seq: null, kind: "user", text, imageCount, queued: true })
+        draft.items.push({ key: localId, seq: null, kind: "user", text, imageCount, queued: true, delivery: null })
       })
       return localId
+    },
+    confirmQueued(localId, delivery) {
+      edit((draft) => {
+        const at = draft.items.findIndex(
+          (item) => item.key === localId && item.kind === "user" && item.seq === null && item.queued,
+        )
+        if (at < 0) return
+        // The event beat the receipt: the committed turn is already in the
+        // transcript, so this echo has nothing left to wait for.
+        if (drained_origins.delete(delivery)) draft.items.splice(at, 1)
+        else (draft.items[at] as UserItem).delivery = delivery
+        forgetSettledOrigins(draft)
+      })
     },
     rejectUser(localId) {
       edit((draft) => {
@@ -822,6 +871,7 @@ export function createSessionState(id: string): SessionState {
           (item) => item.key === localId && item.kind === "user" && item.seq === null && item.queued,
         )
         if (at >= 0) draft.items.splice(at, 1)
+        forgetSettledOrigins(draft)
       })
     },
     pendingCount() {

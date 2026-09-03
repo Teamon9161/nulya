@@ -977,13 +977,17 @@ const appends = new Map<string, Promise<void>>()
  * turn lands in the inbox and only enters the ledger at the next step boundary,
  * so the caller must treat it as queued until the matching `user_text` arrives.
  * Calls for the same session run one after another, in call order.
+ *
+ * Returns the delivery name the kernel printed. That name comes back as the
+ * `origin` of the drained `user_text`, so the caller identifies its own turn by
+ * identity — two turns with the same text are two deliveries.
  */
 export interface ImageInput {
   bytes: Uint8Array
   mediaType: "image/png" | "image/jpeg"
 }
 
-export function sessionAppend(ws: Workspace, id: string, text: string, images: readonly ImageInput[] = []): Promise<void> {
+export function sessionAppend(ws: Workspace, id: string, text: string, images: readonly ImageInput[] = []): Promise<string> {
   // The id first: it has a fixed alphabet (`s-[A-Za-z0-9._-]+`), so `@` cannot
   // be part of it and the key is unambiguous whatever the directory contains.
   const key = `${id}@${ws.dir}`
@@ -1004,7 +1008,7 @@ export function sessionAppend(ws: Workspace, id: string, text: string, images: r
   return mine
 }
 
-async function appendNow(ws: Workspace, id: string, text: string, images: readonly ImageInput[]): Promise<void> {
+async function appendNow(ws: Workspace, id: string, text: string, images: readonly ImageInput[]): Promise<string> {
   const nonce = Math.random().toString(36).slice(2, 10)
   const stem = `.nulya/scratch/tui-${Date.now().toString(36)}-${nonce}`
   const textPath = `${stem}.txt`
@@ -1018,6 +1022,7 @@ async function appendNow(ws: Workspace, id: string, text: string, images: readon
   }
   const result = await run(ws, args)
   if (result.code !== 0) fail("session append failed", result)
+  return result.stdout.trim()
 }
 
 /**

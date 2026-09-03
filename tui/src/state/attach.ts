@@ -210,7 +210,7 @@ export function createAttachment(
     setSending(true)
     setQueuedAt(Date.now())
     try {
-      await sessionAppend(ws, id, wire, images)
+      state.confirmQueued(localId, await sessionAppend(ws, id, wire, images))
     } catch (error) {
       state.rejectUser(localId)
       reportFailure(state, "attach", error)

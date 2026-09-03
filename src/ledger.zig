@@ -134,6 +134,12 @@ pub const Ledger = struct {
     /// appending and deleting leaves the file behind, and the next drain skips
     /// it. Never projected.
     origins: std.StringHashMapUnmanaged(void) = .empty,
+    /// The delivery ids of each event's own line, index i for seq i+1 — what
+    /// `origins` above cannot answer, being one flat set. Parallel to `events`,
+    /// so a line rebuilt from it is the line the file holds; that equality is
+    /// what lets `session step` report a drained turn with the same `origin` a
+    /// reader of the file would see.
+    line_origins: std.ArrayListUnmanaged([]const []const u8) = .empty,
 
     pub fn init(alloc: std.mem.Allocator) Ledger {
         return .{ .alloc = alloc, .arena = .init(alloc), .events = .empty };
@@ -145,6 +151,7 @@ pub const Ledger = struct {
         self.arena.deinit();
         self.events.deinit(self.alloc);
         self.origins.deinit(self.alloc);
+        self.line_origins.deinit(self.alloc);
         if (self.durable) |*d| d.deinit();
     }
 
@@ -170,28 +177,37 @@ pub const Ledger = struct {
 
     fn appendInternal(self: *Ledger, e: Event, origins: []const []const u8) !void {
         const owner = self.arena.allocator();
-        var origin_keys: std.ArrayList([]u8) = .empty;
-        defer origin_keys.deinit(self.alloc);
-        for (origins) |origin| {
-            if (self.origins.contains(origin)) continue;
-            try origin_keys.append(self.alloc, try owner.dupe(u8, origin));
-        }
-        try self.origins.ensureUnusedCapacity(self.alloc, @intCast(origin_keys.items.len));
+        // One copy, two readers: the per-line record below and the flat set,
+        // which only borrows these keys (everything here outlives both).
+        const owned_origins = try owner.alloc([]const u8, origins.len);
+        for (origins, owned_origins) |origin, *slot| slot.* = try owner.dupe(u8, origin);
+        try self.origins.ensureUnusedCapacity(self.alloc, @intCast(owned_origins.len));
 
         const owned = try cloneEvent(owner, e);
         try self.events.append(self.alloc, owned);
+        try self.line_origins.append(self.alloc, owned_origins);
         if (self.durable) |*d| {
             const seq: u64 = self.events.items.len;
             d.persist(self.alloc, e, seq, origins) catch |err| {
                 _ = self.events.pop();
+                _ = self.line_origins.pop();
                 return err;
             };
         }
-        for (origin_keys.items) |key| self.origins.putAssumeCapacity(key, {});
+        // Only after the line is durable: an origin marked applied but not
+        // written would make the next drain delete the inbox file for nothing.
+        for (owned_origins) |key| self.origins.putAssumeCapacity(key, {});
     }
 
     pub fn containsOrigin(self: *const Ledger, origin: []const u8) bool {
         return self.origins.contains(origin);
+    }
+
+    /// The delivery ids on the line of `seq` (1-based); empty for an event that
+    /// did not come through the inbox, and for a seq this ledger does not hold.
+    pub fn originsAt(self: *const Ledger, seq: u64) []const []const u8 {
+        if (seq == 0 or seq > self.line_origins.items.len) return &.{};
+        return self.line_origins.items[seq - 1];
     }
 
     pub fn header(self: *const Ledger) ?Header {
@@ -926,11 +942,12 @@ pub fn moveDepositLeased(
     return true;
 }
 
-/// `<inbox>/<name>.json` — where one deposited event lands.
-fn depositFilePath(alloc: std.mem.Allocator, session_path: []const u8, name: []const u8) ![]u8 {
+/// `<inbox>/<name>` — where one deposited event lands. The name carries its own
+/// `.json`, because it is also the delivery id the ledger records.
+pub fn depositFilePath(alloc: std.mem.Allocator, session_path: []const u8, name: []const u8) ![]u8 {
     const inbox = try inboxPath(alloc, session_path);
     defer alloc.free(inbox);
-    return std.fmt.allocPrint(alloc, "{s}{c}{s}.json", .{ inbox, std.fs.path.sep, name });
+    return std.fmt.allocPrint(alloc, "{s}{c}{s}", .{ inbox, std.fs.path.sep, name });
 }
 
 /// The largest one deposited event may be, encoded. The invariant: whatever the
@@ -940,7 +957,13 @@ fn depositFilePath(alloc: std.mem.Allocator, session_path: []const u8, name: []c
 /// plus several images, each up to 5 MiB raw and ~4/3 that as base64.
 pub const max_inbox_event_bytes: usize = 32 << 20;
 
-/// A delivery id for one more fact. Two load-bearing properties:
+/// A delivery id for one more fact. It is the inbox FILE NAME, `.json` and all,
+/// and `drainInbox` records it verbatim as the event's `origin` — so a depositor
+/// holding this name can recognise its own fact in the ledger. Three
+/// load-bearing properties:
+///
+/// **Ends in `.json`**, which is what makes an inbox entry a deposit at all
+/// (`isInboxDeposit`); a name without it is deposited and never drained.
 ///
 /// **Distinct on every call**, because the name IS the exactly-once key, and a
 /// collision is silent — the second deposit is deleted at the next drain. Only
@@ -970,7 +993,7 @@ pub fn freshDeliveryName(
     }
     var nonce: [16]u8 = undefined;
     io.random(&nonce);
-    return std.fmt.allocPrint(alloc, "{s}-{d:0>19}-{x}", .{
+    return std.fmt.allocPrint(alloc, "{s}-{d:0>19}-{x}.json", .{
         prefix,
         stamp,
         std.mem.readInt(u128, &nonce, .little),
@@ -1556,7 +1579,7 @@ test "an event too large to read back is refused at the deposit" {
     @memset(oversized, 'x');
     try std.testing.expectError(
         error.InboxEventTooLarge,
-        depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{ .text = oversized } }),
+        depositEvent(alloc, io, tmp.dir, spath, "msg-0001.json", .{ .user_text = .{ .text = oversized } }),
     );
 
     // Refused before a byte is written: nothing is left waiting.
@@ -1584,7 +1607,7 @@ test "a delivery id is distinct, and sorts after what is already waiting" {
     defer alloc.free(second);
     try std.testing.expect(!std.mem.eql(u8, first, second));
 
-    try depositEvent(alloc, io, tmp.dir, spath, "note-9000000000000000000-ff", .{ .user_text = .{ .text = "from the future" } });
+    try depositEvent(alloc, io, tmp.dir, spath, "note-9000000000000000000-ff.json", .{ .user_text = .{ .text = "from the future" } });
     const after = try freshDeliveryName(alloc, io, tmp.dir, spath, "note");
     defer alloc.free(after);
     try std.testing.expect(std.mem.lessThan(u8, "note-9000000000000000000-ff.json", after));
@@ -1625,7 +1648,7 @@ test "pruneSession removes what a session is made of, and refuses history unless
         l.deinit();
 
         try std.testing.expectError(error.HasEvents, pruneSession(alloc, io, tmp.dir, spath, .{}));
-        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{ .text = "queued" } });
+        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001.json", .{ .user_text = .{ .text = "queued" } });
         try std.testing.expectError(error.HasEvents, pruneSession(alloc, io, tmp.dir, spath, .{}));
         // Still there: a refusal removes nothing.
         try tmp.dir.access(io, spath, .{});
@@ -1642,7 +1665,7 @@ test "pruneSession removes what a session is made of, and refuses history unless
         const spath = "queued.jsonl";
         var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "queued" });
         l.deinit();
-        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{ .text = "not yet stepped" } });
+        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001.json", .{ .user_text = .{ .text = "not yet stepped" } });
         try std.testing.expectError(error.HoldsDeposits, pruneSession(alloc, io, tmp.dir, spath, .{}));
         _ = try pruneSession(alloc, io, tmp.dir, spath, .{ .force = true });
     }
@@ -1740,7 +1763,7 @@ test "moveDeposit takes BOTH inboxes' leases, and moves only what is still there
     a.deinit();
     var b = try createDurable(alloc, io, tmp.dir, "b.jsonl", .{ .session = "b" });
     b.deinit();
-    try depositEvent(alloc, io, tmp.dir, "a.jsonl", "task-a-t1", .{ .note = .{ .source = note_source_task, .text = "done", .meta = "{\"task\":\"a/t1\",\"exit_code\":0}" } });
+    try depositEvent(alloc, io, tmp.dir, "a.jsonl", "task-a-t1.json", .{ .note = .{ .source = note_source_task, .text = "done", .meta = "{\"task\":\"a/t1\",\"exit_code\":0}" } });
 
     // Somebody is inside the SOURCE inbox, and this caller asked to be told.
     {
@@ -1748,20 +1771,20 @@ test "moveDeposit takes BOTH inboxes' leases, and moves only what is still there
         defer held.close(io);
         try std.testing.expectError(
             error.DepositInFlight,
-            moveDeposit(alloc, io, tmp.dir, "a.jsonl", "b.jsonl", "task-a-t1", .fail_fast),
+            moveDeposit(alloc, io, tmp.dir, "a.jsonl", "b.jsonl", "task-a-t1.json", .fail_fast),
         );
     }
     try tmp.dir.access(io, "a.inbox/task-a-t1.json", .{});
 
-    try std.testing.expect(try moveDeposit(alloc, io, tmp.dir, "a.jsonl", "b.jsonl", "task-a-t1", .block));
+    try std.testing.expect(try moveDeposit(alloc, io, tmp.dir, "a.jsonl", "b.jsonl", "task-a-t1.json", .block));
     try tmp.dir.access(io, "b.inbox/task-a-t1.json", .{});
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "a.inbox/task-a-t1.json", .{}));
 
     // Nothing left to move, and nowhere to move it to.
-    try std.testing.expect(!try moveDeposit(alloc, io, tmp.dir, "a.jsonl", "b.jsonl", "task-a-t1", .block));
+    try std.testing.expect(!try moveDeposit(alloc, io, tmp.dir, "a.jsonl", "b.jsonl", "task-a-t1.json", .block));
     try std.testing.expectError(
         error.NoSuchSession,
-        moveDeposit(alloc, io, tmp.dir, "b.jsonl", "gone.jsonl", "task-a-t1", .block),
+        moveDeposit(alloc, io, tmp.dir, "b.jsonl", "gone.jsonl", "task-a-t1.json", .block),
     );
     try tmp.dir.access(io, "b.inbox/task-a-t1.json", .{});
 }
@@ -1789,7 +1812,7 @@ test "the inbox lease is exclusive, and a deposit into a session that is gone is
     try tmp.dir.deleteFile(io, spath);
     try std.testing.expectError(
         error.NoSuchSession,
-        depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{ .text = "too late" } }),
+        depositEvent(alloc, io, tmp.dir, spath, "msg-0001.json", .{ .user_text = .{ .text = "too late" } }),
     );
     var dir = try tmp.dir.openDir(io, "s.inbox", .{ .iterate = true });
     defer dir.close(io);
@@ -1994,9 +2017,9 @@ test "an image deposited into the inbox is applied exactly once, images and all"
     {
         var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
         defer l.deinit();
-        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", shot);
+        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001.json", shot);
         try drainInbox(alloc, io, &l, tmp.dir, spath);
-        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", shot);
+        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001.json", shot);
         try drainInbox(alloc, io, &l, tmp.dir, spath);
         try std.testing.expectEqual(@as(usize, 1), l.len());
         try expectEventsEqual(&.{shot}, l.view());
@@ -2094,16 +2117,16 @@ test "a task report deposited into the inbox is applied exactly once" {
     } };
     var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
     defer l.deinit();
-    try depositEvent(alloc, io, tmp.dir, spath, "task-s-t3", done);
+    try depositEvent(alloc, io, tmp.dir, spath, "task-s-t3.json", done);
     try drainInbox(alloc, io, &l, tmp.dir, spath);
-    try depositEvent(alloc, io, tmp.dir, spath, "task-s-t3", done);
+    try depositEvent(alloc, io, tmp.dir, spath, "task-s-t3.json", done);
     try drainInbox(alloc, io, &l, tmp.dir, spath);
     try std.testing.expectEqual(@as(usize, 1), l.len());
     try expectEventsEqual(&.{done}, l.view());
 
     // A DIFFERENT task under a different name is a different fact and lands.
     const second: Event = .{ .note = .{ .source = note_source_task, .text = "other", .meta = "{\"task\":\"s/t4\",\"exit_code\":1}" } };
-    try depositEvent(alloc, io, tmp.dir, spath, "task-s-t4", second);
+    try depositEvent(alloc, io, tmp.dir, spath, "task-s-t4.json", second);
     try drainInbox(alloc, io, &l, tmp.dir, spath);
     try std.testing.expectEqual(@as(usize, 2), l.len());
 }
@@ -2299,12 +2322,12 @@ test "inbox: deposits drain in name order and never touch the main file" {
     var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
 
     // Filename order is FIFO, and adjacent user proposals become one turn.
-    try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa", .{ .note = .{ .source = note_source_ext, .text = "n", .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}" } });
-    try depositEvent(alloc, io, tmp.dir, spath, "msg-0002", .{ .user_text = .{
+    try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa.json", .{ .note = .{ .source = note_source_ext, .text = "n", .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}" } });
+    try depositEvent(alloc, io, tmp.dir, spath, "msg-0002.json", .{ .user_text = .{
         .text = "second",
         .images = &.{.{ .media_type = "image/png", .data = "two" }},
     } });
-    try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{
+    try depositEvent(alloc, io, tmp.dir, spath, "msg-0001.json", .{ .user_text = .{
         .text = "first",
         .images = &.{.{ .media_type = "image/jpeg", .data = "one" }},
     } });
@@ -2319,7 +2342,7 @@ test "inbox: deposits drain in name order and never touch the main file" {
 
     // Draining an empty inbox adds nothing; a redeposited name is skipped.
     try drainInbox(alloc, io, &l, tmp.dir, spath);
-    try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa", .{ .note = .{ .source = note_source_ext, .text = "n", .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}" } });
+    try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa.json", .{ .note = .{ .source = note_source_ext, .text = "n", .meta = "{\"id\":\"demo\",\"version\":\"v-aaaa\"}" } });
     try drainInbox(alloc, io, &l, tmp.dir, spath);
     try std.testing.expectEqual(@as(usize, 2), l.len());
 
@@ -2346,8 +2369,8 @@ test "inbox application is exactly-once across a crash between append and delete
     {
         var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
         defer l.deinit();
-        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{ .text = "first" } });
-        try depositEvent(alloc, io, tmp.dir, spath, "msg-0002", .{ .user_text = .{ .text = "second" } });
+        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001.json", .{ .user_text = .{ .text = "first" } });
+        try depositEvent(alloc, io, tmp.dir, spath, "msg-0002.json", .{ .user_text = .{ .text = "second" } });
         try l.appendWithOrigins(
             .{ .user_text = .{ .text = "first\n\nsecond" } },
             &.{ "msg-0001.json", "msg-0002.json" },

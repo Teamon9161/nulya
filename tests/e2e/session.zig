@@ -338,6 +338,50 @@ test "session cli: prune --force removes a session that recorded events, and its
     try std.testing.expect(std.mem.indexOf(u8, listed.stdout, id) == null);
 }
 
+test "session cli: append receipts the delivery name the drained turn carries back" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // The SAME text twice: text cannot tell the two apart, so the receipt is
+    // the only thing a driver can reconcile its two optimistic echoes against.
+    const first = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", id, "hello" });
+    defer alloc.free(first.stdout);
+    const second = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", id, "hello" });
+    defer alloc.free(second.stdout);
+    const one = std.mem.trim(u8, first.stdout, " \r\n");
+    const two = std.mem.trim(u8, second.stdout, " \r\n");
+    try std.testing.expect(one.len > 0);
+    try std.testing.expect(!std.mem.eql(u8, one, two));
+
+    const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", id }, "NULYA_SCRIPTED_MODE", "finish");
+    defer alloc.free(step.stdout);
+    try std.testing.expectEqual(@as(u8, 0), step.code);
+
+    // Both names ride on the one merged turn, and the step's own stdout says so
+    // — a driver reading only that stream never has to guess.
+    const merged = try std.fmt.allocPrint(alloc, "\"origins\":[\"{s}\",\"{s}\"]", .{ one, two });
+    defer alloc.free(merged);
+    try std.testing.expect(std.mem.indexOf(u8, step.stdout, merged) != null);
+
+    const file = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(file);
+    try std.testing.expect(std.mem.indexOf(u8, file, merged) != null);
+}
+
 test "session cli: append refuses a message that is not valid UTF-8 and records nothing" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -1109,11 +1153,10 @@ test "session cli: the line protocol is stdout's only shape, with or without --s
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
     defer alloc.free(id);
 
-    {
-        const ap = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", id, "probe the box" });
-        defer alloc.free(ap.stdout);
-        try std.testing.expectEqual(@as(u8, 0), ap.code);
-    }
+    const ap = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", id, "probe the box" });
+    defer alloc.free(ap.stdout);
+    try std.testing.expectEqual(@as(u8, 0), ap.code);
+    const delivery = std.mem.trim(u8, ap.stdout, " \r\n");
 
     // No `--stream`: this is the one output protocol now, not the bare form.
     const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", id }, "NULYA_SCRIPTED_MODE", "finish");
@@ -1156,10 +1199,16 @@ test "session cli: the line protocol is stdout's only shape, with or without --s
     // model is asked anything, and it is reported when it becomes one: a driver
     // showing an appended turn optimistically learns it landed at the top of the
     // step it opened, not at the end of it (step_stream.zig).
-    try std.testing.expectEqualStrings(
-        "{\"seq\":1,\"kind\":\"user_text\",\"text\":\"probe the box\"}",
-        std.mem.trim(u8, first.?, " \r\n"),
+    //
+    // It carries the delivery name `append` receipted, so the driver matches its
+    // own send by identity: two turns with the same text are two deliveries.
+    const expected_first = try std.fmt.allocPrint(
+        alloc,
+        "{{\"seq\":1,\"origin\":\"{s}\",\"kind\":\"user_text\",\"text\":\"probe the box\"}}",
+        .{delivery},
     );
+    defer alloc.free(expected_first);
+    try std.testing.expectEqualStrings(expected_first, std.mem.trim(u8, first.?, " \r\n"));
     try std.testing.expect(saw_tool_begin and saw_tool_end and saw_ledger_event);
     try std.testing.expectEqual(@as(usize, 2), step_ends); // one tool step, one closing step
     try std.testing.expectEqualStrings(
@@ -1179,14 +1228,19 @@ test "session cli: the line protocol is stdout's only shape, with or without --s
     const id2 = try alloc.dupe(u8, std.mem.trim(u8, new2.stdout, " \r\n"));
     defer alloc.free(id2);
     {
-        const ap = try runCli(alloc, io, ws2, &.{ exe_abs, "session", "append", id2, "probe the box" });
-        defer alloc.free(ap.stdout);
-        try std.testing.expectEqual(@as(u8, 0), ap.code);
+        const ap2 = try runCli(alloc, io, ws2, &.{ exe_abs, "session", "append", id2, "probe the box" });
+        defer alloc.free(ap2.stdout);
+        try std.testing.expectEqual(@as(u8, 0), ap2.code);
     }
     const streamed = try runCliEnv(alloc, io, ws2, &.{ exe_abs, "session", "step", id2, "--stream" }, "NULYA_SCRIPTED_MODE", "finish");
     defer alloc.free(streamed.stdout);
     try std.testing.expectEqual(@as(u8, 0), streamed.code);
-    try std.testing.expectEqualStrings(step.stdout, streamed.stdout);
+    // Past the first line, for the same reason the ledger comparison below skips
+    // seq 1: that line names the delivery it was drained from, and a delivery
+    // name is fresh per append by construction.
+    const plain_rest = step.stdout[(std.mem.indexOfScalar(u8, step.stdout, '\n').? + 1)..];
+    const streamed_rest = streamed.stdout[(std.mem.indexOfScalar(u8, streamed.stdout, '\n').? + 1)..];
+    try std.testing.expectEqualStrings(plain_rest, streamed_rest);
 
     // The ledger a `--stream` run writes is exactly the ledger a plain run
     // writes: the observer is pure observation, so the file is the same

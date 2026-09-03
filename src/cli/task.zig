@@ -741,8 +741,11 @@ pub fn depositReport(alloc: std.mem.Allocator, io: std.Io, req: DepositRequest) 
     }
 }
 
+/// The delivery id, which is also the inbox file name and the `origin` the
+/// ledger records: derived from the pair rather than minted, so a supervisor
+/// that deposits twice deposits the same fact once.
 fn depositName(alloc: std.mem.Allocator, session_id: []const u8, slot: []const u8) ![]u8 {
-    return std.fmt.allocPrint(alloc, "task-{s}-{s}", .{ session_id, slot });
+    return std.fmt.allocPrint(alloc, "task-{s}-{s}.json", .{ session_id, slot });
 }
 
 /// The paths are this layer's business, both inboxes' leases the ledger's.
@@ -1124,9 +1127,8 @@ fn firstPositional(args: []const []const u8, valued: []const []const u8) ?[]cons
 fn depositPending(alloc: std.mem.Allocator, io: std.Io, row: Row) !bool {
     const target = row.notify orelse row.session;
     const spath = try launch.sessionPath(alloc, target);
-    const inbox = try ledger.inboxPath(alloc, spath);
     const name = try depositName(alloc, row.session, std.fs.path.basename(row.dir));
-    const path = try std.fmt.allocPrint(alloc, "{s}{c}{s}.json", .{ inbox, std.fs.path.sep, name });
+    const path = try ledger.depositFilePath(alloc, spath, name);
     std.Io.Dir.cwd().access(io, path, .{}) catch return false;
     return true;
 }

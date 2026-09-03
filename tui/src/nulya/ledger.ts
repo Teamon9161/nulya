@@ -98,14 +98,23 @@ export interface ToolResultEntry {
 
 /**
  * One ledger event, in the flat wire shape the session file uses. `seq` is the
- * envelope field (1-based, monotonic); `origin` is the inbox dedup column and
- * only appears on events drained from the inbox.
+ * envelope field (1-based, monotonic); `origin` / `origins` are the inbox dedup
+ * column and only appear on events drained from the inbox — `origins` when one
+ * drained turn merged several deliveries. Read them with `originsOf`.
  */
 export type LedgerEvent =
-  | { seq: number; origin?: string; kind: "user_text"; text: string; images?: { media_type: string; data: string }[] }
   | {
       seq: number
       origin?: string
+      origins?: string[]
+      kind: "user_text"
+      text: string
+      images?: { media_type: string; data: string }[]
+    }
+  | {
+      seq: number
+      origin?: string
+      origins?: string[]
       kind: "assistant"
       /** Opaque provider reasoning items, as a JSON string. Never parsed by the kernel. */
       reasoning?: string
@@ -114,7 +123,7 @@ export type LedgerEvent =
       /** What this step cost. Absent — not zero — when the provider reported nothing. */
       usage?: Usage
     }
-  | { seq: number; origin?: string; kind: "tool_results"; results: ToolResultEntry[] }
+  | { seq: number; origin?: string; origins?: string[]; kind: "tool_results"; results: ToolResultEntry[] }
   /**
    * A machine fact that reached the ledger from outside the step — a finished
    * background task, a newly active extension, whatever a driver or a plugin
@@ -125,12 +134,12 @@ export type LedgerEvent =
    * TEXT (`{"task","exit_code"}`, `{"id","version"}`, …) or absent — read it
    * with `noteMeta`, never by parsing `text`.
    */
-  | { seq: number; origin?: string; kind: "note"; source: string; text: string; meta?: string }
+  | { seq: number; origin?: string; origins?: string[]; kind: "note"; source: string; text: string; meta?: string }
   /**
    * A kind this build does not know. New event kinds must survive: the reader
    * keeps them, and the render registry decides what (if anything) to draw.
    */
-  | { seq: number; origin?: string; kind: string; [field: string]: unknown }
+  | { seq: number; origin?: string; origins?: string[]; kind: string; [field: string]: unknown }
 
 /**
  * A field the kernel promises is a string, turned into one whatever arrived.
@@ -179,6 +188,16 @@ function foldLegacyKinds(record: Record<string, unknown>): void {
     record["source"] = "ext"
     record["meta"] = JSON.stringify({ id: record["id"], version: record["version"] })
   }
+}
+
+/**
+ * The inbox delivery names this event was drained from: one for the ordinary
+ * case, several when a step boundary merged consecutive user turns into one.
+ * Empty for an event that never came through the inbox.
+ */
+export function originsOf(event: { origin?: string; origins?: string[] }): string[] {
+  if (Array.isArray(event.origins)) return event.origins.filter((name) => typeof name === "string")
+  return typeof event.origin === "string" ? [event.origin] : []
 }
 
 /**

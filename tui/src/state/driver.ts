@@ -216,9 +216,12 @@ export function createDriver(
   // `session append` is a separate process. Serialize those processes so two
   // Enter presses can never acquire timestamped inbox names in reverse order.
   let appendTail: Promise<void> = Promise.resolve()
-  function appendInOrder(text: string, images: readonly ImageInput[]): Promise<void> {
+  function appendInOrder(text: string, images: readonly ImageInput[]): Promise<string> {
     const next = appendTail.then(() => (options.append ?? sessionAppend)(ws, id, text, images))
-    appendTail = next.catch(() => {})
+    appendTail = next.then(
+      () => {},
+      () => {},
+    )
     return next
   }
   async function drainAppends(): Promise<void> {
@@ -340,7 +343,7 @@ export function createDriver(
     const running = status() !== "idle"
     if (!running) setStatus("sending")
     try {
-      await appendInOrder(wire, images)
+      state.confirmQueued(localId, await appendInOrder(wire, images))
     } catch (error) {
       state.rejectUser(localId)
       reportFailure(state, "driver", error)
