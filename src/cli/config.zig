@@ -48,8 +48,7 @@ const ConfigView = struct {
     registry: config.Registry,
     /// Which packages are a member of every session opened here. Projected so a
     /// reader need not go read the config files, one of which may hold an
-    /// inline `api_key`. `extensions.paths` is deliberately not projected: it
-    /// names directories this machine will run code from.
+    /// inline `api_key`.
     extensions: ExtensionsView,
 
     const ExtensionsView = struct {
