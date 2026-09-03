@@ -21,6 +21,9 @@ const environment = @import("../../environment.zig");
 const environment_mod = environment;
 const protocol = @import("protocol.zig");
 const ssh_askpass = @import("ssh_askpass.zig");
+const install = @import("install.zig");
+const target_mod = @import("../../extension/target.zig");
+const Diag = @import("../../diag.zig").Diag;
 
 /// What marks a `--env` spec as naming this backend rather than the local
 /// one. One prefix, checked in one place.
@@ -49,24 +52,35 @@ pub const Error = error{
     /// does NOT survive: `startShellTask` answers a `TaskStart` or an error,
     /// with no failed-call shape to carry words in.
     RemoteTaskRefused,
+    /// The far machine would not say what it is, so nothing may be sent to it.
+    RemoteTargetUnknown,
+    /// That machine is a machine this build has no binary for. Not a failure of
+    /// the far side: a failure to have the bytes here.
+    RemoteNoBuildForTarget,
+    /// The agent over there works, and is built from other source than this
+    /// binary. Not a protocol failure — a question about WHICH nulya is serving.
+    RemoteAgentStale,
+    /// The bytes were sent and the far side did not end up with a runnable
+    /// agent. Distinct from a lost channel: something answered, and refused.
+    RemoteInstallFailed,
+    /// The transport never reached the machine at all — ssh could not connect,
+    /// resolve, or authenticate. Separate from a lost channel because nothing
+    /// on the far side can be wrong yet, so nothing there is worth retrying.
+    RemoteTransportFailed,
 };
 
 /// How to start the agent. The payload borrows the spec string, so a parsed
 /// value never outlives it.
 pub const Launch = union(enum) {
-    /// `wsl.exe [-d <distro>] -e <nulya> remote serve`; empty payload = the
+    /// `wsl.exe [-d <distro>] -e sh -c <the serve command>`; empty payload = the
     /// default distribution.
     wsl: []const u8,
-    /// `ssh -o BatchMode=yes <destination> <nulya> remote serve`.
+    /// `ssh -o BatchMode=yes <destination> <the serve command>`.
     ssh: []const u8,
     /// The general form: the payload IS the command that starts a process on
     /// that machine, and `remote serve` is appended to it.
     exec: []const u8,
 };
-
-/// The program name the named launchers assume on the far side. Anything else
-/// is spelled out with `remote:exec:`.
-pub const default_remote_exe = "nulya";
 
 pub fn isSpec(spec: []const u8) bool {
     return std.mem.startsWith(u8, spec, spec_prefix);
@@ -111,33 +125,75 @@ pub fn supportedOnHost(launch: Launch) bool {
 /// WORDS are not — they are literals or subslices of `spec`, which must outlive
 /// the argv.
 ///
-/// `remote serve` is appended in every form. `exec:` is split on spaces and has
-/// NO quoting: a program path containing a space cannot be spelled this way.
-pub fn launcherArgv(alloc: std.mem.Allocator, launch: Launch, password: bool) ![]const []const u8 {
+/// `entry` decides WHICH nulya over there answers, and the named transports say
+/// so by handing the far shell one command instead of a bare program name
+/// (`install.serveCommand`). `exec:` has no room for that choice: its payload IS
+/// the program, spelled by the person who wrote the spec, split on spaces with
+/// NO quoting — a program path containing a space cannot be spelled that way.
+pub fn launcherArgv(
+    alloc: std.mem.Allocator,
+    launch: Launch,
+    password: bool,
+    entry: install.Entry,
+) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     errdefer argv.deinit(alloc);
     switch (launch) {
         .wsl => |distro| {
             try argv.append(alloc, "wsl.exe");
             if (distro.len != 0) try argv.appendSlice(alloc, &.{ "-d", distro });
-            // `-e` runs the program directly, not through the login shell.
-            try argv.appendSlice(alloc, &.{ "-e", default_remote_exe });
+            // `-e` runs the argv directly rather than through the login shell,
+            // so the command needs a shell of its own to be a command at all.
+            try argv.appendSlice(alloc, &.{ "-e", "sh", "-c", install.serveCommand(entry) });
         },
         .ssh => |dest| {
             // SSH stdin is always the framing channel, so password mode forces
             // the askpass helper; the default stays non-interactive.
             try argv.appendSlice(alloc, &.{ "ssh", "-o", if (password) "BatchMode=no" else "BatchMode=yes" });
             if (password) try argv.appendSlice(alloc, &.{ "-o", "NumberOfPasswordPrompts=1" });
-            try argv.appendSlice(alloc, &.{ dest, default_remote_exe });
+            // One argv word: ssh joins what follows the destination with spaces
+            // and the far login shell parses the result, so the whole command
+            // has to arrive as a single word to survive that round trip.
+            try argv.appendSlice(alloc, &.{ dest, install.serveCommand(entry) });
         },
         .exec => |words| {
             var it = std.mem.splitScalar(u8, words, ' ');
             while (it.next()) |w| {
                 if (w.len != 0) try argv.append(alloc, w);
             }
+            try argv.appendSlice(alloc, &.{ "remote", "serve" });
         },
     }
-    try argv.appendSlice(alloc, &.{ "remote", "serve" });
+    return argv.toOwnedSlice(alloc);
+}
+
+/// The argv that runs ONE ordinary shell command over there and comes back.
+///
+/// Not a frame and not the agent: this is what opens the door before there is
+/// an agent to speak frames to — asking a machine what it is, and landing a
+/// binary on it. `exec:` is refused because its payload names a program, and
+/// there is no way to ask that program to be a shell instead.
+pub fn farCommandArgv(
+    alloc: std.mem.Allocator,
+    launch: Launch,
+    password: bool,
+    command: []const u8,
+) ![]const []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    errdefer argv.deinit(alloc);
+    switch (launch) {
+        .wsl => |distro| {
+            try argv.append(alloc, "wsl.exe");
+            if (distro.len != 0) try argv.appendSlice(alloc, &.{ "-d", distro });
+            try argv.appendSlice(alloc, &.{ "-e", "sh", "-c", command });
+        },
+        .ssh => |dest| {
+            try argv.appendSlice(alloc, &.{ "ssh", "-o", if (password) "BatchMode=no" else "BatchMode=yes" });
+            if (password) try argv.appendSlice(alloc, &.{ "-o", "NumberOfPasswordPrompts=1" });
+            try argv.appendSlice(alloc, &.{ dest, command });
+        },
+        .exec => return error.InvalidRemoteSpec,
+    }
     return argv.toOwnedSlice(alloc);
 }
 
@@ -171,6 +227,52 @@ pub const Bounds = struct {
     /// link can change them.
     pub const default: Bounds = .{};
 };
+
+/// Everything a connection attempt needs beyond the spec itself.
+///
+/// A struct rather than four parameters because two of them — whether nulya may
+/// put itself on that machine, and where the story of doing so is told — are
+/// decisions of the shell layer, and every call site that has an opinion about
+/// one usually has an opinion about the other.
+pub const Options = struct {
+    version: []const u8,
+    bounds: Bounds = .default,
+    /// Transient, owned by the caller, wiped by the caller.
+    ssh_password: ?[]const u8 = null,
+    /// May this build put a copy of itself on the far machine when no agent
+    /// answers, or when the one there speaks another protocol?
+    install: Install = .never,
+    /// How to obtain a nulya for a far machine this build's own bytes cannot
+    /// serve. Null refuses that machine instead — which is what a caller that
+    /// has not opted into installing wants anyway.
+    build_agent: ?AgentBuilder = null,
+    /// Which build this side is (`selfbuild.build_id`). An agent answering with
+    /// a different one is serving another source tree, and — when installing is
+    /// allowed — is replaced. Empty compares equal to everything, so a caller
+    /// that does not care is not made to.
+    build_id: []const u8 = "",
+    /// Where the ladder narrates what it is doing. Silent by default: a library
+    /// path does not choose a destination for its own sentences.
+    diag: Diag = .{},
+};
+
+/// Whether the far machine may be changed to make a session possible.
+pub const Install = enum { never, auto };
+
+/// How the shell layer produces a nulya for `for_target`.
+///
+/// A function rather than a path because producing one may mean COMPILING for
+/// about a minute — so it is called only after the far machine has said it is
+/// something else, and the sentences explaining that wait are its own to write.
+/// The result is an absolute path to a runnable binary; the caller owns it.
+/// Any error means "no binary for that machine", the reason having gone to the
+/// diag it was handed.
+pub const AgentBuilder = *const fn (
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    for_target: install.Target,
+    diag: Diag,
+) anyerror![]u8;
 
 /// Read exactly one password line from a CLI stdin stream. The caller owns the
 /// mutable result and must wipe it before freeing; the reader stays outside so
@@ -209,80 +311,77 @@ pub const Channel = struct {
     /// caller can print. The transport's own stderr is INHERITED, so `ssh`'s
     /// "Permission denied (publickey)" reaches the operator.
     pub fn connect(alloc: std.mem.Allocator, io: std.Io, launch: Launch, version: []const u8, bounds: Bounds) anyerror!Channel {
-        return connectPassword(alloc, io, launch, version, bounds, null);
+        return connectWith(alloc, io, launch, .{ .version = version, .bounds = bounds });
     }
 
     pub fn connectPassword(alloc: std.mem.Allocator, io: std.Io, launch: Launch, version: []const u8, bounds: Bounds, password: ?[]const u8) anyerror!Channel {
+        return connectWith(alloc, io, launch, .{ .version = version, .bounds = bounds, .ssh_password = password });
+    }
+
+    /// The ladder: ask the far machine for an agent, and — when allowed — make
+    /// there be one.
+    ///
+    /// Three rungs, and the ordinary case stops on the first:
+    ///
+    ///   1. the command that prefers nulya's own copy and falls back to PATH;
+    ///   2. bare `nulya` on PATH, for a far side whose shell did not understand
+    ///      rung 1 (a peer greeting commands with something other than a POSIX
+    ///      shell answered to this before installs existed, and still must);
+    ///   3. install this build's own bytes over there, then rung 1 again.
+    ///
+    /// A version mismatch jumps straight to rung 3: the agent is there and it
+    /// is the wrong one, so there is nothing to look for on PATH.
+    ///
+    /// The askpass broker is opened ONCE around the whole ladder, so a password
+    /// the person typed is asked for once however many connections this takes.
+    pub fn connectWith(alloc: std.mem.Allocator, io: std.Io, launch: Launch, opts: Options) anyerror!Channel {
         if (!supportedOnHost(launch)) return error.RemoteSpecUnsupportedOnHost;
-        if (password != null and launch != .ssh) return error.InvalidRemoteSpec;
-
-        const argv = try launcherArgv(alloc, launch, password != null);
-        errdefer alloc.free(argv);
-
-        // The stripped map, so there is no secret for `SendEnv` / `WSLENV` to
-        // forward even if someone configured them to.
-        var env = try environment.sanitizedChildEnv(alloc, io);
-        errdefer env.deinit();
+        if (opts.ssh_password != null and launch != .ssh) return error.InvalidRemoteSpec;
 
         var broker: ?ssh_askpass.Broker = null;
         defer if (broker) |*one| one.deinit();
-        if (password) |secret| {
+        var marker: ?[]const u8 = null;
+        if (opts.ssh_password) |secret| {
             broker = try .init(io, secret);
-            const helper = env.get("NULYA_EXE") orelse return error.RemoteChannelLost;
-            try env.put("SSH_ASKPASS", helper);
-            try env.put("SSH_ASKPASS_REQUIRE", "force");
-            try env.put(ssh_askpass.marker_env, broker.?.marker());
             broker.?.start();
+            marker = broker.?.marker();
         }
 
-        var child = std.process.spawn(io, .{
-            .argv = argv,
-            // The stripped map, explicitly: without it the transport, the agent
-            // and every command it runs inherit this environment whole.
-            .environ_map = &env,
-            .stdin = .pipe,
-            .stdout = .pipe,
-            .stderr = .inherit,
-            .create_no_window = true,
-        }) catch return error.RemoteChannelLost;
-        errdefer child.kill(io);
+        // `exec:` names a program, not a shell: there is nothing to install
+        // into and no second spelling to try.
+        const may_install = opts.install == .auto and launch != .exec;
 
-        const read_buf = try alloc.alloc(u8, protocol.max_header_bytes);
-        errdefer alloc.free(read_buf);
-
-        var ch: Channel = .{
-            .alloc = alloc,
-            .io = io,
-            .child = child,
-            .read_buf = read_buf,
-            .reader = child.stdout.?.readerStreaming(io, read_buf),
-            .argv = argv,
-            .env = env,
-            .arena = .init(alloc),
-            .bounds = bounds,
-        };
-        errdefer ch.arena.deinit();
-
-        const rep = try ch.controlRound(.{ .op = protocol.Op.hello.wire(), .v = protocol.version, .nulya = version }, "");
-        protocol.checkHello(rep) catch |err| switch (err) {
-            error.VersionMismatch => {
-                ch.dead = true;
-                return error.RemoteVersionMismatch;
+        if (attemptOnce(alloc, io, launch, marker, .installed_or_path, opts)) |ch| {
+            return ch;
+        } else |first| switch (first) {
+            error.RemoteChannelLost => {},
+            error.RemoteVersionMismatch, error.RemoteAgentStale => {
+                if (!may_install) return first;
+                opts.diag.report(io, if (first == error.RemoteAgentStale)
+                    "the nulya over there was built from other source; replacing it\n"
+                else
+                    "the nulya over there speaks another protocol; replacing it\n");
+                try installAgent(alloc, io, launch, marker, opts);
+                return attemptOnce(alloc, io, launch, marker, .installed_or_path, opts);
             },
-            else => {
-                ch.dead = true;
-                return error.RemoteChannelLost;
-            },
-        };
-        ch.hello = .{
-            .nulya = rep.nulya,
-            .os = rep.os,
-            .arch = rep.arch,
-            .home = rep.home,
-            .cwd = rep.cwd,
-            .dialect = rep.dialect,
-        };
-        return ch;
+            else => return first,
+        }
+
+        // `exec:` ignores `entry` — its argv IS the program — so rung two
+        // would ask the identical question a second time.
+        if (launch != .exec) {
+            if (attemptOnce(alloc, io, launch, marker, .path, opts)) |ch| {
+                return ch;
+            } else |second| switch (second) {
+                error.RemoteChannelLost => {},
+                else => return second,
+            }
+        }
+
+        if (!may_install) return error.RemoteChannelLost;
+        opts.diag.report(io, "no nulya on that machine; installing one\n");
+        try installAgent(alloc, io, launch, marker, opts);
+        return attemptOnce(alloc, io, launch, marker, .installed_or_path, opts);
     }
 
     pub fn deinit(self: *Channel) void {
@@ -392,6 +491,252 @@ pub const Channel = struct {
         return rep;
     }
 };
+
+/// The transport's environment: the stripped host map, plus the askpass wiring
+/// when a password is in play. Built fresh per attempt because a `Channel` owns
+/// the map it was spawned with.
+fn transportEnv(alloc: std.mem.Allocator, io: std.Io, marker: ?[]const u8) !std.process.Environ.Map {
+    // The stripped map, so there is no secret for `SendEnv` / `WSLENV` to
+    // forward even if someone configured them to.
+    var env = try environment.sanitizedChildEnv(alloc, io);
+    errdefer env.deinit();
+    if (marker) |m| {
+        const helper = env.get("NULYA_EXE") orelse return error.RemoteChannelLost;
+        try env.put("SSH_ASKPASS", helper);
+        try env.put("SSH_ASKPASS_REQUIRE", "force");
+        try env.put(ssh_askpass.marker_env, m);
+    }
+    return env;
+}
+
+/// One rung of the ladder: start the agent this way and complete the handshake.
+fn attemptOnce(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    launch: Launch,
+    marker: ?[]const u8,
+    entry: install.Entry,
+    opts: Options,
+) anyerror!Channel {
+    const argv = try launcherArgv(alloc, launch, marker != null, entry);
+    errdefer alloc.free(argv);
+
+    var env = try transportEnv(alloc, io, marker);
+    errdefer env.deinit();
+
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        // The stripped map, explicitly: without it the transport, the agent
+        // and every command it runs inherit this environment whole.
+        .environ_map = &env,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .inherit,
+        .create_no_window = true,
+    }) catch return error.RemoteChannelLost;
+    // Killing a process that was already waited for would signal whatever pid
+    // the system handed out next, so the two paths that can end this child are
+    // exclusive by construction.
+    var reaped = false;
+    errdefer if (!reaped) child.kill(io);
+
+    const read_buf = try alloc.alloc(u8, protocol.max_header_bytes);
+    errdefer alloc.free(read_buf);
+
+    var ch: Channel = .{
+        .alloc = alloc,
+        .io = io,
+        .child = child,
+        .read_buf = read_buf,
+        .reader = child.stdout.?.readerStreaming(io, read_buf),
+        .argv = argv,
+        .env = env,
+        .arena = .init(alloc),
+        .bounds = opts.bounds,
+    };
+    errdefer ch.arena.deinit();
+
+    const rep = ch.controlRound(.{ .op = protocol.Op.hello.wire(), .v = protocol.version, .nulya = opts.version }, "") catch |err| {
+        if (err == error.RemoteChannelLost) return transportVerdict(&ch, launch, &reaped);
+        return err;
+    };
+    protocol.checkHello(rep) catch |err| switch (err) {
+        error.VersionMismatch => {
+            ch.dead = true;
+            return error.RemoteVersionMismatch;
+        },
+        else => {
+            ch.dead = true;
+            return error.RemoteChannelLost;
+        },
+    };
+    // The protocol matches, so this agent WORKS — it is just built from other
+    // source, which is a different question and gets a different answer.
+    if (opts.build_id.len != 0 and rep.build.len != 0 and !std.mem.eql(u8, opts.build_id, rep.build)) {
+        ch.dead = true;
+        return error.RemoteAgentStale;
+    }
+    ch.hello = .{
+        .nulya = rep.nulya,
+        .os = rep.os,
+        .arch = rep.arch,
+        .home = rep.home,
+        .cwd = rep.cwd,
+        .dialect = rep.dialect,
+    };
+    return ch;
+}
+
+/// Nothing greeted us: was that the machine, or the way there?
+///
+/// OpenSSH answers 255 for its own failures and passes anything else through
+/// from the command it ran, so an unreachable host is one exit code and a far
+/// side with no nulya on it (127 from that shell) is another. Worth telling
+/// apart: the ladder's remaining rungs all ask the same machine the same
+/// question, and asking a host that is down three times only makes the wait
+/// three times as long.
+fn transportVerdict(ch: *Channel, launch: Launch, reaped: *bool) anyerror {
+    ch.dead = true;
+    if (launch != .ssh) return error.RemoteChannelLost;
+    // Closing stdin first: the transport is gone or going, and a held write end
+    // is the one thing that can keep a wait from returning.
+    if (ch.child.stdin) |stdin| {
+        var f = stdin;
+        f.close(ch.io);
+        ch.child.stdin = null;
+    }
+    const term = ch.child.wait(ch.io) catch return error.RemoteChannelLost;
+    reaped.* = true;
+    return switch (term) {
+        .exited => |code| if (code == 255) error.RemoteTransportFailed else error.RemoteChannelLost,
+        else => error.RemoteChannelLost,
+    };
+}
+
+/// Put this build's own binary on the far machine.
+///
+/// Ask that machine what it is, then hand it a binary built for it: the bytes
+/// this process was started from when it is the same machine, and otherwise
+/// whatever `opts.build_agent` produces. Only the second case compiles anything,
+/// and nothing is ever fetched — a nulya binary is statically linked and carries
+/// everything it ships, its own checkout included.
+fn installAgent(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    launch: Launch,
+    marker: ?[]const u8,
+    opts: Options,
+) anyerror!void {
+    var probe_buf: [512]u8 = undefined;
+    const probe = try runFar(alloc, io, launch, marker, install.probe_command, "", &probe_buf);
+    const far = install.parseUname(probe_buf[0..probe.out_len]) orelse {
+        opts.diag.reportFmt(io, "that machine calls itself \"{s}\", which this build has no binary for\n", .{
+            std.mem.trim(u8, probe_buf[0..probe.out_len], " \t\r\n"),
+        });
+        return error.RemoteTargetUnknown;
+    };
+
+    // The same machine needs no build: the bytes this process was started from
+    // ARE the ones that belong over there.
+    const built: ?[]u8 = if (install.isHost(far)) null else blk: {
+        const make = opts.build_agent orelse {
+            opts.diag.reportFmt(io, "that machine is {s} and this nulya is {s}: no binary to send\n", .{
+                far.words(), target_mod.host,
+            });
+            return error.RemoteNoBuildForTarget;
+        };
+        opts.diag.reportFmt(io, "that machine is {s} and this nulya is {s}\n", .{ far.words(), target_mod.host });
+        break :blk make(alloc, io, far, opts.diag) catch return error.RemoteNoBuildForTarget;
+    };
+    defer if (built) |path| alloc.free(path);
+
+    const own: ?[]u8 = if (built == null)
+        (std.process.executablePathAlloc(io, alloc) catch return error.RemoteInstallFailed)
+    else
+        null;
+    defer if (own) |path| alloc.free(path);
+
+    const exe = built orelse own.?;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, exe, alloc, .limited(max_agent_bytes)) catch {
+        return error.RemoteInstallFailed;
+    };
+    defer alloc.free(bytes);
+
+    opts.diag.reportFmt(io, "sending a nulya ({d} MB) to {s}\n", .{ bytes.len / (1024 * 1024), far.words() });
+    var sink: [256]u8 = undefined;
+    const landed = try runFar(alloc, io, launch, marker, install.install_command, bytes, &sink);
+    if (landed.exit_code != 0) return error.RemoteInstallFailed;
+    opts.diag.reportFmt(io, "installed at {s}\n", .{install.far_exe});
+}
+
+/// The most a far agent may weigh. A guard on a path that reads a file and
+/// writes it down someone else's pipe, not a budget anyone tunes.
+const max_agent_bytes: usize = 256 * 1024 * 1024;
+
+/// Run one ordinary command over there, hand it `stdin_bytes`, and keep the
+/// first `out.len` bytes it printed.
+///
+/// The far side of this is `cat` or `uname`: one of them says almost nothing and
+/// the other is handed nothing, so writing all of stdin before reading any of
+/// stdout cannot deadlock here. A far side that floods stdout while refusing to
+/// read stdin would be a machine no session could use anyway.
+fn runFar(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    launch: Launch,
+    marker: ?[]const u8,
+    command: []const u8,
+    stdin_bytes: []const u8,
+    out: []u8,
+) anyerror!struct { exit_code: u8, out_len: usize } {
+    const argv = try farCommandArgv(alloc, launch, marker != null, command);
+    defer alloc.free(argv);
+
+    var env = try transportEnv(alloc, io, marker);
+    defer env.deinit();
+
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .environ_map = &env,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .inherit,
+        .create_no_window = true,
+    }) catch return error.RemoteChannelLost;
+    errdefer child.kill(io);
+
+    if (child.stdin) |stdin| {
+        var f = stdin;
+        if (stdin_bytes.len != 0) f.writeStreamingAll(io, stdin_bytes) catch {};
+        // EOF is what tells `cat` the file is whole.
+        f.close(io);
+        child.stdin = null;
+    }
+
+    var read_buf: [4096]u8 = undefined;
+    var reader = child.stdout.?.readerStreaming(io, &read_buf);
+    var filled: usize = 0;
+    while (filled < out.len) {
+        const n = reader.interface.readSliceShort(out[filled..]) catch break;
+        if (n == 0) break;
+        filled += n;
+    }
+    // Whatever did not fit is drained, or the child can block on a full pipe.
+    var drain: [4096]u8 = undefined;
+    while (true) {
+        const n = reader.interface.readSliceShort(&drain) catch break;
+        if (n == 0) break;
+    }
+
+    const term = child.wait(io) catch return error.RemoteChannelLost;
+    return .{
+        .exit_code = switch (term) {
+            .exited => |code| code,
+            else => 1,
+        },
+        .out_len = filled,
+    };
+}
 
 /// One payload-free round, as a task, so the bound above can race it. A canceled
 /// task leaves `out` null: "did not settle" rather than "settled badly".
@@ -551,6 +896,16 @@ pub const RemoteEnvironment = struct {
         session: ?environment_mod.SessionRef = null,
         /// Transient SSH password, owned and wiped by the caller.
         ssh_password: ?[]const u8 = null,
+        /// May nulya put a copy of itself on that machine to make this session
+        /// possible? The shell layer decides; the kernel only carries it.
+        install: Install = .never,
+        /// Passed straight through: which machine the far side is, and so
+        /// which binary it needs, is the channel's question to ask.
+        build_agent: ?AgentBuilder = null,
+        /// Which build this side is; see `Options.build_id`.
+        build_id: []const u8 = "",
+        /// Where the connect ladder narrates itself. Silent by default.
+        diag: Diag = .{},
         bounds: Bounds = .default,
     };
 
@@ -561,7 +916,15 @@ pub const RemoteEnvironment = struct {
     ) anyerror!RemoteEnvironment {
         const spec = opts.spec;
         const launch = try parseSpec(spec);
-        var ch = try Channel.connectPassword(alloc, io, launch, opts.version, opts.bounds, opts.ssh_password);
+        var ch = try Channel.connectWith(alloc, io, launch, .{
+            .version = opts.version,
+            .bounds = opts.bounds,
+            .ssh_password = opts.ssh_password,
+            .install = opts.install,
+            .build_agent = opts.build_agent,
+            .build_id = opts.build_id,
+            .diag = opts.diag,
+        });
         errdefer ch.deinit();
 
         const spec_owned = try alloc.dupe(u8, spec);
@@ -838,18 +1201,20 @@ test "the remote vocabulary parses into three launchers, and nothing else does" 
     }
 }
 
-test "each launcher argv starts an agent, and every form ends in `remote serve`" {
+test "each launcher argv starts an agent, and the destination is never interpolated" {
     const alloc = std.testing.allocator;
 
-    const ssh = try launcherArgv(alloc, .{ .ssh = "me@box" }, false);
+    const ssh = try launcherArgv(alloc, .{ .ssh = "me@box" }, false, .installed_or_path);
     defer alloc.free(ssh);
     try std.testing.expectEqualStrings("ssh", ssh[0]);
     // The destination is its own word — never interpolated into a command.
     try std.testing.expectEqualStrings("me@box", ssh[3]);
-    try std.testing.expectEqualStrings("remote", ssh[ssh.len - 2]);
-    try std.testing.expectEqualStrings("serve", ssh[ssh.len - 1]);
+    // …and the command is ONE word after it, because ssh joins what follows
+    // with spaces and lets the far shell parse the result.
+    try std.testing.expectEqual(@as(usize, 5), ssh.len);
+    try std.testing.expect(std.mem.indexOf(u8, ssh[4], "remote serve") != null);
 
-    const password_ssh = try launcherArgv(alloc, .{ .ssh = "me@box" }, true);
+    const password_ssh = try launcherArgv(alloc, .{ .ssh = "me@box" }, true, .installed_or_path);
     defer alloc.free(password_ssh);
     var has_batch_no = false;
     var has_one_prompt = false;
@@ -864,19 +1229,50 @@ test "each launcher argv starts an agent, and every form ends in `remote serve`"
     try std.testing.expect(!has_batch_yes);
     try std.testing.expectEqualStrings("me@box", password_ssh[5]);
 
-    const wsl = try launcherArgv(alloc, .{ .wsl = "Ubuntu" }, false);
+    // The rung a peer with no POSIX shell still answers to: no test, no
+    // `$HOME`, nothing but the program name every earlier build used.
+    const bare = try launcherArgv(alloc, .{ .ssh = "me@box" }, false, .path);
+    defer alloc.free(bare);
+    try std.testing.expect(std.mem.indexOf(u8, bare[4], "$HOME") == null);
+    try std.testing.expectEqualStrings("nulya remote serve", bare[4]);
+
+    const wsl = try launcherArgv(alloc, .{ .wsl = "Ubuntu" }, false, .installed_or_path);
     defer alloc.free(wsl);
     try std.testing.expectEqualStrings("-d", wsl[1]);
     try std.testing.expectEqualStrings("Ubuntu", wsl[2]);
-    const wsl_default = try launcherArgv(alloc, .{ .wsl = "" }, false);
+    const wsl_default = try launcherArgv(alloc, .{ .wsl = "" }, false, .installed_or_path);
     defer alloc.free(wsl_default);
     try std.testing.expectEqual(wsl.len - 2, wsl_default.len);
 
-    const exec = try launcherArgv(alloc, .{ .exec = "docker exec -i box /usr/bin/nulya" }, false);
+    // `exec:` names a program, so it keeps the shape it always had: the words
+    // as written, then the verb.
+    const exec = try launcherArgv(alloc, .{ .exec = "docker exec -i box /usr/bin/nulya" }, false, .installed_or_path);
     defer alloc.free(exec);
     try std.testing.expectEqualStrings("docker", exec[0]);
     try std.testing.expectEqualStrings("/usr/bin/nulya", exec[exec.len - 3]);
     try std.testing.expectEqualStrings("remote", exec[exec.len - 2]);
+    try std.testing.expectEqualStrings("serve", exec[exec.len - 1]);
+}
+
+test "a one-shot far command carries the command, and exec: cannot host one" {
+    const alloc = std.testing.allocator;
+
+    const ssh = try farCommandArgv(alloc, .{ .ssh = "me@box" }, false, "uname -sm");
+    defer alloc.free(ssh);
+    try std.testing.expectEqualStrings("me@box", ssh[3]);
+    try std.testing.expectEqualStrings("uname -sm", ssh[4]);
+
+    const wsl = try farCommandArgv(alloc, .{ .wsl = "" }, false, "uname -sm");
+    defer alloc.free(wsl);
+    try std.testing.expectEqualStrings("sh", wsl[2]);
+    try std.testing.expectEqualStrings("-c", wsl[3]);
+    try std.testing.expectEqualStrings("uname -sm", wsl[4]);
+
+    // The payload of `exec:` is a program; nothing can ask it to be a shell.
+    try std.testing.expectError(
+        error.InvalidRemoteSpec,
+        farCommandArgv(alloc, .{ .exec = "docker exec -i box nulya" }, false, "uname -sm"),
+    );
 }
 
 test "wsl is reachable only from Windows, and the other two from anywhere" {

@@ -322,6 +322,10 @@ pub const Reply = struct {
     /// `hello`.
     v: u32 = 0,
     nulya: []const u8 = "",
+    /// `hello`: which BUILD this agent is — a digest of the source tree it was
+    /// compiled from. Empty from an agent predating this field, and an empty
+    /// answer is never a mismatch (rule 4: an older agent still answers).
+    build: []const u8 = "",
     os: []const u8 = "",
     arch: []const u8 = "",
     home: []const u8 = "",

@@ -108,7 +108,46 @@ export interface RunResult {
   stderr: string
 }
 
-async function run(ws: Workspace, args: string[], env?: Record<string, string>, secret?: Uint8Array): Promise<RunResult> {
+/**
+ * Read a stream to the end, handing each finished line to `onLine` on the way.
+ *
+ * Only when someone is listening: without a listener this is one `Response`
+ * read, which is what every caller but the remote ones wants. The lines are
+ * stderr's, and stderr is where a command narrates itself while it works —
+ * a 5 MB agent going down an ssh pipe is otherwise a frozen screen.
+ */
+async function drain(stream: ReadableStream<Uint8Array>, onLine?: (line: string) => void): Promise<string> {
+  if (!onLine) return await new Response(stream).text()
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let all = ""
+  let pending = ""
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    const chunk = decoder.decode(value, { stream: true })
+    all += chunk
+    pending += chunk
+    for (;;) {
+      const cut = pending.indexOf("\n")
+      if (cut < 0) break
+      const line = pending.slice(0, cut).trim()
+      pending = pending.slice(cut + 1)
+      if (line) onLine(line)
+    }
+  }
+  const tail = pending.trim()
+  if (tail) onLine(tail)
+  return all
+}
+
+async function run(
+  ws: Workspace,
+  args: string[],
+  env?: Record<string, string>,
+  secret?: Uint8Array,
+  onProgress?: (line: string) => void,
+): Promise<RunResult> {
   const start = () =>
     Bun.spawn({
       cmd: [ws.bin, ...args],
@@ -139,7 +178,7 @@ async function run(ws: Workspace, args: string[], env?: Record<string, string>, 
   }
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    drain(proc.stderr, onProgress),
     proc.exited,
   ])
   return { code, stdout, stderr }
@@ -1218,10 +1257,16 @@ export interface RemoteHello {
  * — with the kernel's own sentence, which already names what to do about it
  * (`CliError`'s `detail`).
  */
-export async function remoteCheck(ws: Workspace, spec: string, env?: Record<string, string>, sshPassword?: Uint8Array): Promise<RemoteHello> {
+export async function remoteCheck(
+  ws: Workspace,
+  spec: string,
+  env?: Record<string, string>,
+  sshPassword?: Uint8Array,
+  onProgress?: (line: string) => void,
+): Promise<RemoteHello> {
   const args = ["remote", "check", "--env", spec, "--json"]
   if (sshPassword) args.push("--ssh-password-stdin")
-  const result = await run(ws, args, env, sshPassword)
+  const result = await run(ws, args, env, sshPassword, onProgress)
   if (result.code !== 0) fail(`could not reach ${spec}`, result)
   try {
     return JSON.parse(result.stdout) as RemoteHello

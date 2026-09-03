@@ -686,10 +686,10 @@ T0–T115 全部落地，逐条经过与验收标准在归档的实施日志里�
 
 按面各说一两句；每一面的契约在 §1–§10，这里只说它现在长什么样。
 
-- **屏幕**：内容区是一棵 pane 树（`src/pane/`），最常见的形态是它的退化形——一个 pane、一张 transcript。左边可以劈出 sessions 侧边栏（`/sidebar`、`F8`、状态行行首的 `◧`），tab 内部可以劈出 sub-agent 观察 pane；整屏 overlay 永远开在主 pane 里。整屏只有一样东西有边框：输入框，它同时是「键盘在不在这儿」的唯一信号。
+- **屏幕**：内容区是一棵 pane 树（`src/pane/`），最常见的形态是它的退化形——一个 pane、一张 transcript。左边可以劈出 sessions 侧边栏（`/sidebar`、`F8`、状态行行首的 `◧`），tab 内部可以劈出 sub-agent 观察 pane；整屏 overlay 永远开在主 pane 里。整屏同一时刻只有一样东西有边框：输入框，它同时是「键盘在不在这儿」的唯一信号（ssh 密码框是同一个框换个颜色顶上去的，输入框那时整个从布局里退出）。
 - **transcript**：一个 ledger 事件一张卡（`render/cards/`），live 与 replay 走同一组卡片。默认折叠：工具输出折、diff 展开、thinking 不画、一串跑完且成功的无身体调用折成一行 run 摘要。换行宽度取**这一栏的**（`useBodyWidth`）而不是终端的。折叠只有两种手势：点头行、browse 模式（`Esc` 进，`j/k` 移动、`Enter`/`Space` 切换）。
 - **输入框上面那一行**：只在有事发生时存在（`WorkingStatus`）——spinner + 正在跑的 tool 名 + 钟 + `esc to cancel` + 这一轮的花费，外加一段可点的 `N background`。静息态整行不画，它也是全前端唯一有动效的一行。
-- **输入框上面那一区**：审批对话框、`/mode` `/with` `/agent` `/env` 四个 picker、context 面板、后台任务面板、插件 panel、queue lane、checkout 授权框与 ssh 密码框都排在这里；谁拿键盘由 `pane/focus.ts` 一处仲裁（trusted zone → 整屏视图 → 插件 panel → browse → 输入框）。
+- **输入框上面那一区**：审批对话框、`/mode` `/with` `/agent` `/env` 四个 picker、context 面板、后台任务面板、插件 panel、queue lane 与 checkout 授权框都排在这里（ssh 密码框不在此列：它占的是输入框自己那一格）；谁拿键盘由 `pane/focus.ts` 一处仲裁（trusted zone → 整屏视图 → 插件 panel → browse → 输入框）。
 - **输入框下面那一行**：一句静态描述——行首 `◧`、mode chip、模型 id（可点 → `/model`）、`tools 1+N`（可点 → `/ext`），右边是 context 环、`◈ 戴着谁`、`⇥ shell 跑在哪`、`step n`、observer 标记，行尾 `⚙`。**没有的东西不占列**；notice 来时盖住整行、按长度停留几秒自己下去。
 - **命令**：内建表在 `commands.ts`（一个概念一个词；`/as` `/resume` `/exit` 是不列出但补全的别名），其后是 activate 了的包自己声明的命令（`/plan` `/ask` `/evolve` `/compact` 都是这一档），再其后是 skill，都不认就原样发给模型。
 - **权限**：永远以 `--gate --stream` spawn step，`ask`（缺省）/ `unsafe` 两档，判断全在 `approvals.ts` 一条链里（§5.7）。问就是输入框上面一个可选可点的对话框，每个答案都能带 note。readonly 天花板（agent 定义的 `permissions`、包的 `contributes.policy`）排在整条链之前，谁都掀不动。
@@ -697,7 +697,7 @@ T0–T115 全部落地，逐条经过与验收标准在归档的实施日志里�
 - **委派**：`.nulya/agents/*.md`（workspace > user > 包自带三层）一个定义就是一组 `session new` 参数；`/agent <name> <task…>` 开一张看得见的新 tab，裸 `/agent` 是只把命令写进输入框、不启动任何东西的 picker。模型自己调 `agent{…}` 时前端只画：委派卡说的是「派了谁、在干什么」而不是它的编号，`↗ watch here` 在**当前 tab 内部**开一块只读的 sub-agent pane。
 - **plugin 层**：声明位（`commands` / `policy` / `tools[].ui` / `contributes.ui.tui`）与代码层（`plugin-api.d.ts`：行渲染、五个注册面、只有人已有的动词）都已接通，`tui.toml` 的 `[extensions] plugins = false` 一键退回纯声明层。compact / handoff / plan / ask 的界面全住在各自的包里——宿主不认识它们的包名、tool 名与 marker。
 - **一场 session 的边界**：开屏是 draft tab，第一条消息才 `session new`，那一刻现读 pin、成员（`session_with`）、开场文本（`session_prompts`）、目录、exec target 与模型。已经开始的 session 什么都不能就地换（身份与 composition 冻在它那个文件里）——`/model` 于是走 `session new --parent <id>:<seq> --carry`：同一条对话带着历史进新 session，模型与今天的成员表一起现解，tab 换过去。
-- **目录与远端**：tab = (workspace, session)；`/cwd` 换 draft 的目录，`no project` 落在 `<NULYA_HOME | ~/.nulya>/home/`；`/env` 选下一场的 shell 跑在哪，remote 档还要在那台机器上选一个目录，`/ext` 上的 `r` 把选中的包 push 过去。
+- **目录与远端**：tab = (workspace, session)；`/cwd` 换 draft 的目录，`no project` 落在 `<NULYA_HOME | ~/.nulya>/home/`；`/env` 选下一场的 shell 跑在哪，remote 档还要在那台机器上选一个目录（那台机器上没有 nulya 时内核会自己装一个，`remote check` 的 stderr 一行行流回来、落在 notice 上，所以那几秒不是一块冻住的屏），`/ext` 上的 `r` 把选中的包 push 过去。
 - **人写的与程序写的分开**：`tui.toml` 是人写的设定（`/settings` 只做最小编辑——换掉一行、绝不重排、绝不删注释），`tui-state.json` 与 `tui-recents.json` 是程序写给自己的便条（上次的模型 / 档 / 目录 / exec target / pin / tab / 最近的 workspace）。
 
 

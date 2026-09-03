@@ -2776,6 +2776,26 @@ export function App(props: AppProps) {
   })
 
   /**
+   * The secret field takes the composer's place on the layout, so it must take
+   * its cursor too: a box that is not drawn must not be the box the terminal is
+   * blinking in. The way back is the same as every dialog's — the keyboard
+   * returns to the composer unless something else has taken it meanwhile.
+   */
+  createEffect(() => {
+    if (passwordRequest()) composer?.blur()
+    else if (
+      !pending() &&
+      !overlay.active() &&
+      !browse.active() &&
+      !pickerUp() &&
+      checkout() === null &&
+      !plugins.panel()
+    ) {
+      composer?.focus()
+    }
+  })
+
+  /**
    * A plugin panel takes the keyboard the same way, applied to a surface this
    * front end did not write: a box that still blinks says "type here", and
    * what is typed there would be eaten by the panel anyway.
@@ -3363,7 +3383,10 @@ export function App(props: AppProps) {
     setNotice(`reaching ${spec}…`)
     let hello: Awaited<ReturnType<typeof remoteCheck>>
     try {
-      hello = await remoteCheck(ws(), spec, undefined, freshSshPassword(spec))
+      // Reaching a machine can mean putting a nulya on it first, which is
+      // seconds of silence unless the kernel's own narration reaches the one
+      // line this screen has for saying what is happening.
+      hello = await remoteCheck(ws(), spec, undefined, freshSshPassword(spec), (line) => setNotice(line))
     } catch (error) {
       const detail = error instanceof CliError ? error.detail : error instanceof Error ? error.message : String(error)
       setRemoteFailure({ tab: owner, detail })
@@ -4638,9 +4661,6 @@ export function App(props: AppProps) {
                     (DESIGN §9, §5.3b point 6). Outermost of the dialogs: it is
                     the only one that grants authority rather than choosing
                     something. */}
-                <Show when={passwordRequest()}>
-                  <SshPasswordPrompt spec={passwordRequest()!.spec} bytes={passwordRequest()!.bytes.length} />
-                </Show>
                 <Show when={checkout()}>
                   <CheckoutPrompt where={workspaceLabel(checkout()!.ws.dir)} plan={checkout()!.plan} />
                 </Show>
@@ -4771,7 +4791,16 @@ export function App(props: AppProps) {
                   )}
                   contributions={live()?.contributions() ?? []}
                 />
+                {/* The secret field, in the composer's own place rather than
+                    stacked above it: it is the only dialog on this screen whose
+                    answer is typed rather than chosen, and while it is up the
+                    composer is off the layout entirely — one input box, and it
+                    is the one the keys go to. */}
+                <Show when={passwordRequest()}>
+                  <SshPasswordPrompt spec={passwordRequest()!.spec} bytes={passwordRequest()!.bytes.length} />
+                </Show>
                 <Composer
+                  hidden={passwordRequest() !== null}
                   onSubmit={submit}
                   onNotice={setNotice}
                   onEmptySubmit={() => takeOverIfOffered()}

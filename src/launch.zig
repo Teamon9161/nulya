@@ -329,6 +329,17 @@ pub const SessionEnvironment = union(enum) {
     }
 };
 
+/// The shell layer's two answers about reaching another machine: where the
+/// story of doing so is told, and how to produce an agent for a machine this
+/// build's own bytes cannot serve. They travel together because a path that
+/// has an opinion about one always has an opinion about the other, and because
+/// the second one's whole job is to narrate a minute of waiting through the first.
+pub const Reach = struct {
+    diag: ext_site.Diag = .{},
+    build_agent: ?remote.AgentBuilder = null,
+    build_id: []const u8 = "",
+};
+
 /// Build the environment a session runs behind. `exec` decides which of the two
 /// it is; everything else applies to the local one. A remote spec CONNECTS here —
 /// transport spawned, handshake completed — so a failure is loud and at the top
@@ -342,7 +353,7 @@ pub fn sessionEnvironment(
     workspace: []const u8,
     ext_store: []const u8,
     ssh_password: ?[]const u8,
-    diag: ext_site.Diag,
+    reach: Reach,
 ) !SessionEnvironment {
     const spec = environment.normalizeExecSpec(exec);
     if (remote.isSpec(spec)) {
@@ -358,11 +369,18 @@ pub fn sessionEnvironment(
                 // holding the ledger, whichever machine runs the command.
                 .session = session,
                 .ssh_password = ssh_password,
+                // A session that cannot reach its own machine is a session that
+                // does not exist, so this is the one path that always makes the
+                // reach work if it can.
+                .install = .auto,
+                .build_agent = reach.build_agent,
+                .build_id = reach.build_id,
+                .diag = reach.diag,
             }),
         };
     }
     if (spec.len != 0) return error.InvalidExecTarget;
-    return .{ .local = try localEnvironment(alloc, io, cfg, session, ext_store, diag) };
+    return .{ .local = try localEnvironment(alloc, io, cfg, session, ext_store, reach.diag) };
 }
 
 /// `<NULYA_HOME | ~/.nulya>/store` — the ONE place built extension versions live

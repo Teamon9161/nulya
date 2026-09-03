@@ -20,8 +20,10 @@ const integrity = @import("../extension/integrity.zig");
 const ext_manifest = @import("../extension/manifest.zig");
 const ext_store = @import("../extension/store.zig");
 const launch = @import("../launch.zig");
+const selfbuild = @import("../selfbuild.zig");
 const lease = @import("../lease.zig");
 const common = @import("common.zig");
+const remote_agent = @import("remote_agent.zig");
 const task_cli = @import("task.zig");
 
 const flagValue = common.flagValue;
@@ -70,13 +72,15 @@ fn open(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?remote
         std.crypto.secureZero(u8, secret);
         alloc.free(secret);
     };
-    return remote.Channel.connectPassword(alloc, io, l, launch.version, .default, password) catch |err| {
-        // The transport already wrote its own diagnostic; this adds which spec.
-        switch (err) {
-            error.RemoteVersionMismatch => try printErrFmt(alloc, io, "{s}: the nulya there speaks a different remote protocol; install a matching build on that machine\n", .{spec}),
-            error.RemoteSpecUnsupportedOnHost => try printErrFmt(alloc, io, "{s}: cannot be reached from this host (wsl needs Windows)\n", .{spec}),
-            else => try printErrFmt(alloc, io, "{s}: could not open a channel ({s})\n", .{ spec, @errorName(err) }),
-        }
+    return remote.Channel.connectWith(alloc, io, l, .{
+        .version = launch.version,
+        .ssh_password = password,
+        .install = .auto,
+        .build_agent = remote_agent.build,
+        .build_id = selfbuild.build_id,
+        .diag = common.stderr_diag,
+    }) catch |err| {
+        try common.printChannelRefusal(alloc, io, spec, err);
         return null;
     };
 }
@@ -300,6 +304,7 @@ fn serveHello(agent: *Agent, req: protocol.Request) !void {
         .ok = true,
         .v = protocol.version,
         .nulya = launch.version,
+        .build = selfbuild.build_id,
         .os = @tagName(builtin.os.tag),
         .arch = @tagName(builtin.cpu.arch),
         .home = host.get("HOME") orelse host.get("USERPROFILE") orelse "",

@@ -16,6 +16,8 @@ const protocol = @import("../environment/remote/protocol.zig");
 const remote = @import("../environment/remote/mod.zig");
 const launch = @import("../launch.zig");
 const common = @import("common.zig");
+const remote_agent = @import("remote_agent.zig");
+const selfbuild = @import("../selfbuild.zig");
 
 const StoreView = common.StoreView;
 const cwdRealPath = common.cwdRealPath;
@@ -89,12 +91,14 @@ pub fn extPush(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         try printErrFmt(alloc, io, "--env {s}: unrecognized (want {s})\n", .{ spec, remote.spec_syntax });
         return 1;
     };
-    var ch = remote.Channel.connect(alloc, io, launcher, launch.version, .default) catch |err| {
-        switch (err) {
-            error.RemoteVersionMismatch => try printErrFmt(alloc, io, "{s}: the nulya there speaks a different remote protocol; install a matching build on that machine\n", .{spec}),
-            error.RemoteSpecUnsupportedOnHost => try printErrFmt(alloc, io, "{s}: cannot be reached from this host (wsl needs Windows)\n", .{spec}),
-            else => try printErrFmt(alloc, io, "{s}: could not open a channel ({s})\n", .{ spec, @errorName(err) }),
-        }
+    var ch = remote.Channel.connectWith(alloc, io, launcher, .{
+        .version = launch.version,
+        .install = .auto,
+        .build_agent = remote_agent.build,
+        .build_id = selfbuild.build_id,
+        .diag = common.stderr_diag,
+    }) catch |err| {
+        try common.printChannelRefusal(alloc, io, spec, err);
         return 1;
     };
     defer ch.deinit();

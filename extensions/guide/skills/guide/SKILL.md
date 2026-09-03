@@ -305,7 +305,15 @@ Store and scope:
   `remote:ssh:<destination>`, or the general `remote:exec:<argv…>` — which is
   simply the command that starts a process over there (a container runtime, or
   a nulya you name by path); `remote serve` is appended for you. The named
-  forms assume a `nulya` on that machine's PATH. Add
+  forms (`wsl` / `ssh`) do not need a `nulya` over there: when none answers,
+  this build sends a binary built for that machine to `~/.nulya/remote-agent` and
+  connects to what it just installed — and replaces it when the one there
+  speaks another protocol, or was built from other source than this binary.
+  When that machine runs a different os or cpu, a binary for it is
+  cross-compiled here first (about a minute, once per target per build; a zig
+  compiler is needed for that, and its absence is refused rather than papered
+  over). The far machine needs a POSIX shell.
+  `remote:exec:` names a program, so it installs nothing. Add
   `--workspace <absolute dir>` to say which directory over there this session
   works in; it is accepted only with a `remote:` spec, and frozen alongside it.
   The far end is a `nulya remote serve` reached through one long-lived channel,

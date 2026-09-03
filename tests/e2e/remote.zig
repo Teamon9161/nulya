@@ -1604,3 +1604,313 @@ test "a step collects the reports of the tasks that report INTO it, not only the
     try std.testing.expect(std.mem.indexOf(u8, step.stdout, "\"source\":\"task\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, step.stdout, "RETARGET-SURVIVOR") != null);
 }
+
+// ── nulya putting itself on the far machine ─────────────────────────────────
+
+/// A stand-in for `ssh` that runs the command it was handed RIGHT HERE, under a
+/// home directory the test owns and a PATH with no nulya on it.
+///
+/// That is exactly the machine the ladder exists for: reachable, POSIX, and
+/// without an agent. Everything the host does to fix that — asking what the
+/// machine is, sending the bytes, launching what landed — happens for real; only
+/// the network is absent.
+/// A machine in the target vocabulary that is definitely NOT the one running
+/// the test, so the cross-build branch is the one taken.
+const foreign_uname = if (builtin.os.tag == .linux and builtin.cpu.arch == .aarch64)
+    "Linux x86_64"
+else
+    "Linux aarch64";
+
+/// The same fixture, except the far machine answers `uname` with something this
+/// build's own bytes cannot run on.
+fn writeForeignSsh(io: std.Io, dir: std.Io.Dir, name: []const u8, home: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    const script = try std.fmt.bufPrint(&buf,
+        \\#!/bin/sh
+        \\for a in "$@"; do cmd="$a"; done
+        \\case "$cmd" in
+        \\  *uname*) echo "{s}"; exit 0 ;;
+        \\esac
+        \\HOME='{s}'
+        \\export HOME
+        \\PATH=/usr/bin:/bin
+        \\export PATH
+        \\exec /bin/sh -c "$cmd"
+        \\
+    , .{ foreign_uname, home });
+    try dir.writeFile(io, .{ .sub_path = name, .data = script });
+    if (std.Io.File.Permissions.has_executable_bit) {
+        try dir.setFilePermissions(io, name, .executable_file, .{});
+    }
+}
+
+/// A compiler that answers `zig build … --prefix <dir>` the way a real one does
+/// — a file at `<dir>/bin/nulya` — and nothing else. A real cross-compile takes
+/// about a minute; what this test is about is which machine gets asked for, and
+/// whether the answer is kept.
+fn writeFakeZig(io: std.Io, dir: std.Io.Dir, name: []const u8, marker: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    const script = try std.fmt.bufPrint(&buf,
+        \\#!/bin/sh
+        \\prefix=""
+        \\while [ $# -gt 0 ]; do
+        \\  if [ "$1" = "--prefix" ]; then prefix="$2"; fi
+        \\  shift
+        \\done
+        \\[ -n "$prefix" ] || exit 3
+        \\# The checkout has to be the cwd, and it has to be a real one.
+        \\[ -f build.zig ] && [ -f src/main.zig ] && [ -f vendor/zig-toml/src/root.zig ] || exit 4
+        \\mkdir -p "$prefix/bin"
+        \\printf '%s' '{s}' > "$prefix/bin/nulya"
+        \\chmod 755 "$prefix/bin/nulya"
+        \\
+    , .{marker});
+    try dir.writeFile(io, .{ .sub_path = name, .data = script });
+    if (std.Io.File.Permissions.has_executable_bit) {
+        try dir.setFilePermissions(io, name, .executable_file, .{});
+    }
+}
+
+fn writeFakeSsh(io: std.Io, dir: std.Io.Dir, name: []const u8, home: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    const script = try std.fmt.bufPrint(&buf,
+        \\#!/bin/sh
+        \\# ssh puts the command last, whatever options came before it.
+        \\for a in "$@"; do cmd="$a"; done
+        \\HOME='{s}'
+        \\export HOME
+        \\# No nulya here: the point of the fixture.
+        \\PATH=/usr/bin:/bin
+        \\export PATH
+        \\exec /bin/sh -c "$cmd"
+        \\
+    , .{home});
+    try dir.writeFile(io, .{ .sub_path = name, .data = script });
+    if (std.Io.File.Permissions.has_executable_bit) {
+        try dir.setFilePermissions(io, name, .executable_file, .{});
+    }
+}
+
+test "a machine with no nulya gets one, says so, and is not installed onto twice" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    try ws.createDir(io, "bin", .default_dir);
+    try ws.createDir(io, "far", .default_dir);
+
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var far_dir = try ws.openDir(io, "far", .{});
+    defer far_dir.close(io);
+    const far_home = try absOf(io, far_dir, &far_buf);
+
+    var bin_dir = try ws.openDir(io, "bin", .{});
+    defer bin_dir.close(io);
+    try writeFakeSsh(io, bin_dir, "ssh", far_home);
+    var bin_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const bin_path = try absOf(io, bin_dir, &bin_buf);
+
+    // The fake goes FIRST, so the spec's literal `ssh` finds it.
+    const host_path = (try envVar(alloc, "PATH")) orelse "";
+    defer if (host_path.len != 0) alloc.free(host_path);
+    const path = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ bin_path, host_path });
+    defer alloc.free(path);
+
+    const first = try runCliStderr(alloc, io, ws, &.{ exe, "remote", "check", "--env", "remote:ssh:box" }, &.{
+        .{ .key = "PATH", .value = path },
+    });
+    defer alloc.free(first);
+    // It said what it was doing, and to which machine.
+    try std.testing.expect(std.mem.indexOf(u8, first, "no nulya on that machine") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "sending a nulya") != null);
+
+    // And there is now an agent over there, executable, at the one path nulya
+    // owns on a machine it installs onto.
+    const landed = try far_dir.statFile(io, ".nulya/remote-agent", .{});
+    try std.testing.expect(landed.size > 0);
+
+    // The second time costs nothing: rung one finds what rung three left.
+    const again = try runCliStderr(alloc, io, ws, &.{ exe, "remote", "check", "--env", "remote:ssh:box" }, &.{
+        .{ .key = "PATH", .value = path },
+    });
+    defer alloc.free(again);
+    try std.testing.expect(std.mem.indexOf(u8, again, "no nulya on that machine") == null);
+    try std.testing.expect(std.mem.indexOf(u8, again, "sending this nulya") == null);
+}
+
+test "a machine of another kind gets a nulya built for it, once, and the build is kept" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    for ([_][]const u8{ "bin", "far", "data" }) |d| try ws.createDir(io, d, .default_dir);
+
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var far_dir = try ws.openDir(io, "far", .{});
+    defer far_dir.close(io);
+    const far_home = try absOf(io, far_dir, &far_buf);
+
+    var data_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var data_dir = try ws.openDir(io, "data", .{ .iterate = true });
+    defer data_dir.close(io);
+    const data_home = try absOf(io, data_dir, &data_buf);
+
+    const marker = "not-a-real-nulya-but-aimed-elsewhere";
+    var bin_dir = try ws.openDir(io, "bin", .{});
+    defer bin_dir.close(io);
+    try writeForeignSsh(io, bin_dir, "ssh", far_home);
+    try writeFakeZig(io, bin_dir, "zig", marker);
+    var bin_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const bin_path = try absOf(io, bin_dir, &bin_buf);
+
+    const host_path = (try envVar(alloc, "PATH")) orelse "";
+    defer if (host_path.len != 0) alloc.free(host_path);
+    const path = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ bin_path, host_path });
+    defer alloc.free(path);
+    const fake_zig = try std.fmt.allocPrint(alloc, "{s}/zig", .{bin_path});
+    defer alloc.free(fake_zig);
+
+    const env: []const support.EnvPair = &.{
+        .{ .key = "PATH", .value = path },
+        .{ .key = "NULYA_ZIG", .value = fake_zig },
+        .{ .key = "XDG_DATA_HOME", .value = data_home },
+    };
+
+    const first = try runCliStderr(alloc, io, ws, &.{ exe, "remote", "check", "--env", "remote:ssh:box" }, env);
+    defer alloc.free(first);
+    // It named both machines before spending a minute of somebody's time.
+    try std.testing.expect(std.mem.indexOf(u8, first, "building a nulya for") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "sending a nulya") != null);
+
+    // What landed over there is the CROSS-BUILT binary, not the one running here.
+    const landed = try far_dir.readFileAlloc(io, ".nulya/remote-agent", alloc, .limited(1 << 20));
+    defer alloc.free(landed);
+    try std.testing.expectEqualStrings(marker, landed);
+
+    // A second reach compiles nothing: the build is kept under this machine's
+    // data directory and found again.
+    const again = try runCliStderr(alloc, io, ws, &.{ exe, "remote", "check", "--env", "remote:ssh:box" }, env);
+    defer alloc.free(again);
+    try std.testing.expect(std.mem.indexOf(u8, again, "reusing the nulya already built") != null);
+    try std.testing.expect(std.mem.indexOf(u8, again, "building a nulya for") == null);
+}
+
+test "without a compiler, a machine of another kind is refused rather than sent the wrong bytes" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    for ([_][]const u8{ "bin", "far", "data" }) |d| try ws.createDir(io, d, .default_dir);
+
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var far_dir = try ws.openDir(io, "far", .{});
+    defer far_dir.close(io);
+    const far_home = try absOf(io, far_dir, &far_buf);
+
+    var data_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var data_dir = try ws.openDir(io, "data", .{});
+    defer data_dir.close(io);
+    const data_home = try absOf(io, data_dir, &data_buf);
+
+    var bin_dir = try ws.openDir(io, "bin", .{});
+    defer bin_dir.close(io);
+    try writeForeignSsh(io, bin_dir, "ssh", far_home);
+    var bin_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const bin_path = try absOf(io, bin_dir, &bin_buf);
+
+    // ONLY the fake ssh on PATH: no zig anywhere, and `NULYA_ZIG` names nothing.
+    const path = try std.fmt.allocPrint(alloc, "{s}", .{bin_path});
+    defer alloc.free(path);
+
+    const out = try runCliStderr(alloc, io, ws, &.{ exe, "remote", "check", "--env", "remote:ssh:box" }, &.{
+        .{ .key = "PATH", .value = path },
+        .{ .key = "NULYA_ZIG", .value = "" },
+        .{ .key = "XDG_DATA_HOME", .value = data_home },
+    });
+    defer alloc.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "without a compiler") != null);
+
+    // Nothing was written to a machine this build could not compile for.
+    try std.testing.expectError(error.FileNotFound, far_dir.statFile(io, ".nulya/remote-agent", .{}));
+}
+
+test "an agent built from other source is replaced, and one built from this source is left alone" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    try ws.createDir(io, "bin", .default_dir);
+    try ws.createDirPath(io, "far/.nulya");
+
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var far_dir = try ws.openDir(io, "far", .{});
+    defer far_dir.close(io);
+    const far_home = try absOf(io, far_dir, &far_buf);
+
+    // An agent that speaks this protocol perfectly and is simply not this build.
+    // Written by hand rather than through `protocol.zig`, so it can say
+    // something the real encoder never would.
+    var hello_buf: [512]u8 = undefined;
+    const impostor = try std.fmt.bufPrint(&hello_buf,
+        \\#!/bin/sh
+        \\read -r _ignored
+        \\printf '{{"ok":true,"v":{d},"nulya":"other","build":"0000000000000000","os":"linux","arch":"x86_64","home":"","cwd":"","dialect":"bash"}}\n'
+        \\
+    , .{support.remote_protocol.version});
+    try far_dir.writeFile(io, .{ .sub_path = ".nulya/remote-agent", .data = impostor });
+    if (std.Io.File.Permissions.has_executable_bit) {
+        try far_dir.setFilePermissions(io, ".nulya/remote-agent", .executable_file, .{});
+    }
+
+    var bin_dir = try ws.openDir(io, "bin", .{});
+    defer bin_dir.close(io);
+    try writeFakeSsh(io, bin_dir, "ssh", far_home);
+    var bin_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const bin_path = try absOf(io, bin_dir, &bin_buf);
+
+    const host_path = (try envVar(alloc, "PATH")) orelse "";
+    defer if (host_path.len != 0) alloc.free(host_path);
+    const path = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ bin_path, host_path });
+    defer alloc.free(path);
+    const env: []const support.EnvPair = &.{.{ .key = "PATH", .value = path }};
+
+    const first = try runCliStderr(alloc, io, ws, &.{ exe, "remote", "check", "--env", "remote:ssh:box" }, env);
+    defer alloc.free(first);
+    try std.testing.expect(std.mem.indexOf(u8, first, "built from other source") != null);
+
+    // The impostor is gone: what stands there now is this binary.
+    const landed = try far_dir.statFile(io, ".nulya/remote-agent", .{});
+    const mine = try std.Io.Dir.cwd().statFile(io, exe, .{});
+    try std.testing.expectEqual(mine.size, landed.size);
+
+    // And the agent this build just installed IS this build, so a second reach
+    // leaves it alone — replacement follows the source, not the clock.
+    const again = try runCliStderr(alloc, io, ws, &.{ exe, "remote", "check", "--env", "remote:ssh:box" }, env);
+    defer alloc.free(again);
+    try std.testing.expect(std.mem.indexOf(u8, again, "built from other source") == null);
+    try std.testing.expect(std.mem.indexOf(u8, again, "replacing it") == null);
+}

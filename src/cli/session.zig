@@ -21,6 +21,8 @@ const composition = @import("../composition.zig");
 const launch = @import("../launch.zig");
 const remote = @import("../environment/remote/mod.zig");
 const common = @import("common.zig");
+const remote_agent = @import("remote_agent.zig");
+const selfbuild = @import("../selfbuild.zig");
 const cli_ext = @import("ext.zig");
 const task_cli = @import("task.zig");
 const session_list = @import("session_list.zig");
@@ -49,7 +51,14 @@ const RemoteTargetProbe = struct {
     fn ask(ptr: *anyopaque) anyerror![]const u8 {
         const self: *RemoteTargetProbe = @ptrCast(@alignCast(ptr));
         if (self.answer) |cached| return cached;
-        var ch = try remote.Channel.connectPassword(self.alloc, self.io, try remote.parseSpec(self.spec), launch.version, .default, self.ssh_password);
+        var ch = try remote.Channel.connectWith(self.alloc, self.io, try remote.parseSpec(self.spec), .{
+            .version = launch.version,
+            .ssh_password = self.ssh_password,
+            .install = .auto,
+            .build_agent = remote_agent.build,
+            .build_id = selfbuild.build_id,
+            .diag = common.stderr_diag,
+        });
         defer ch.deinit();
         const words = try std.fmt.allocPrint(self.alloc, "{s}-{s}", .{ ch.hello.arch, ch.hello.os });
         self.answer = words;
@@ -1140,7 +1149,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var lenv = launch.sessionEnvironment(alloc, io, &cfg, .{
         .session_path = spath,
         .tasks_dir = tasks_dir,
-    }, hdr.value.environment, hdr.value.remote_workspace, ext_store, ssh_password, common.stderr_diag) catch |err| switch (err) {
+    }, hdr.value.environment, hdr.value.remote_workspace, ext_store, ssh_password, remote_agent.reach) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             return stepFail(alloc, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
         },

@@ -848,10 +848,44 @@ Environment { runShell(cmd, dialect) / runExtension(id, version, tool, request_j
 
 ```
 spec  remote:wsl | remote:wsl:<distro> | remote:ssh:<destination> | remote:exec:<argv…>
-argv  wsl.exe [-d D] -e nulya remote serve  /  ssh -o BatchMode=yes <dest> nulya remote serve  /  <argv…> remote serve
+argv  wsl.exe [-d D] -e sh -c <serve 命令>  /  ssh -o BatchMode=yes <dest> <serve 命令>  /  <argv…> remote serve
+serve 命令  [ -x "$HOME/.nulya/remote-agent" ] && exec "$HOME/.nulya/remote-agent" remote serve || exec nulya remote serve
 ```
 
-`remote:exec:` 是**通用形**（另外两个只是常用拼法的便利名）：内核因此永远不必学会 "docker" 这个词，而**离线 e2e 正是靠它把 `--env` 指向本二进制**。它按空格切分、**没有引用规则**——路径带空格拼不出来，这条限制写在 `launcherArgv` 上。命名的两族假定对面 PATH 上有 `nulya`。
+`remote:exec:` 是**通用形**（另外两个只是常用拼法的便利名）：内核因此永远不必学会 "docker" 这个词，而**离线 e2e 正是靠它把 `--env` 指向本二进制**。它按空格切分、**没有引用规则**——路径带空格拼不出来，这条限制写在 `launcherArgv` 上。它的 payload 是**一个程序名**，所以下面那条阶梯与它无关：`exec:` 永远只是"你写的 argv + `remote serve`"。
+
+#### 连接阶梯：那台机器上没有 nulya，就放一个上去（`environment/remote/install.zig`）
+
+命名的两族（`ssh` / `wsl`）交给对面 shell 的是**一条命令**而不是一个程序名，于是"nulya 自己装的那份"与"PATH 上那份"由同一次连接解析完，`$HOME` 由**对面**展开（host 不知道也不许猜那个路径）。三级阶梯，寻常情况停在第一级：
+
+1. 上面那条 serve 命令；
+2. 裸 `nulya remote serve`——对面 shell 不是 POSIX（拿 cmd.exe 迎接命令的 Windows 对端）时仍然认得的那一种，装机制出现之前的所有版本说的就是它；
+3. 把**本 build 自己的二进制**装过去，然后重来第 1 级。
+
+**不是这一份就直接跳到第 3 级**：agent 在那儿、只是不对，PATH 上没有第二个可找。两种"不对"：帧协议 `v` 对不上（`RemoteVersionMismatch`），或者它**是从别的源码建出来的**（`RemoteAgentStale`）。后者靠 hello 多带的一个 `build` 列——`selfbuild.build_id`，build.zig 在 configure 时对三个 embed 的全部字节（含路径）算的 hex；两边各自算自己的，交叉编译出来的那份哈希的是同一棵树，所以**它报的 id 与 host 相同**。空的 `build`（此列出现之前的 agent）永不算不匹配（规则 4）。**跟着源码走而不是跟着时钟走**：空跑一次 `zig build` 不改 id，也就不会白传一次二进制。装的动作是两次往返，都走 launcher 自己的传输而不是帧通道（帧通道要求对面已经有 agent，鸡生蛋）：`uname -sm` 问它是什么，然后 `mkdir -p … && cat > …$$ && chmod 755 … && mv -f …`，字节走 stdin，`mv` 是原子替换（并发的另一场看见的要么是旧文件要么是新文件）。**旧版本不留**——远端那份是传输件，不是 composition 成员。
+
+**同一台机器：不编译、不下载。** nulya 是静态链接的单文件（extensions 与自身源码都 `@embedFile` 在里面），所以当对面的 `(os, arch)` 与本机相同时，要送的字节就是**正在跑的这个二进制**（`NULYA_EXE`）。
+
+**别的机器：现场交叉编译一份**（`cli/remote_agent.zig` + `selfbuild.zig`）。二进制里除了 `src/**`（`src_embed`）与 `extensions/**`（`ext_embed`）之外还带着**其余的 build 输入**（`build_embed`：`build.zig` / `build.zig.zon` / `default.toml` / `vendor/**`，约 170KB），所以 `selfbuild.materialize` 能在任意目录写出一棵**完整的、`zig build` 认的 checkout**——分发仍然只是那一个二进制。远端机器名（`uname -sm`）翻成的就是 §7.4 那张 target 表（`extension/target.zig`：`x86_64|aarch64` × `linux|windows|macos`，abi 由那张表定），所以"给谁编译一个 extension"与"给谁编译一个 agent"说的是同一套词。
+
+产物按 `<data>/agents/<target>-<checkout digest>/bin/nulya` 留住，**键里没有 compiler**：它是缓存而不是身份（问编译器叫什么要多起一个进程，而命中那条路本来一个进程都不起）。编译在一个随机命名的 staging 目录里进行，`bin/` 建好后**一次原子 rename** 落位——两场并发交叉编译不会互相看见半成品，输的那一方发现赢家的结果已经在那儿，而那正是它在算的答案。zig 自己的 cache 放在 `<data>/agents/zig-cache`（跨 target、跨 digest 共用）。送过去的是 `-Dstrip=true` 的 ReleaseSafe（18MB 的调试信息里有 13MB 没人读——`nulya src` 打印的是嵌进去的 checkout，不是 DWARF）。
+
+**造不出来就响亮拒绝**，不发一个跑不了的文件：`uname` 说了一个这张表没有名字的机器是 `RemoteTargetUnknown`；没有 zig、或者编译器拒绝了这次 build，是 `RemoteNoBuildForTarget`（原因由 `Diag` 说出来，error 只是个名字）。**"造"这件事是 shell 层的**：`Options.build_agent` 是一个函数指针，内核只在对面自报了另一个 target 之后调它一次；`resolveZig` / `dataDir` 都在 `cli/` 那一侧，`environment/remote/` 不知道 zig 是什么。
+
+**主机不可达不付三倍等待**：OpenSSH 自己的失败是 exit 255，它跑的命令的退出码原样透传（对面没有 nulya 就是 shell 的 127）。所以 hello 没人应答时先看退出码——255 是 `RemoteTransportFailed`，阶梯就地停下，不再向一台没连上的机器问第二遍。
+
+装与不装是 **shell 层的决定**（`Options.install`，内核只搬运）：今天所有 CLI 路径都传 `.auto`，并同时交下一个 `build_agent`（`launch.Reach` 把这两个决定与 `Diag` 捆在一起，因为对一条 reach 有意见的路径对三者都有意见）。整条阶梯的叙述走 `Diag`（`diag.zig`）→ stderr，所以 `session step` 的 stdout 仍然是纯行协议：
+
+```
+no nulya on that machine; installing one
+that machine is aarch64-linux and this nulya is x86_64-linux
+building a nulya for aarch64-linux — about a minute, and only the first time
+built in 42s
+sending a nulya (4 MB) to aarch64-linux
+installed at $HOME/.nulya/remote-agent
+```
+
+落点是 **`$HOME/.nulya/remote-agent`**：**不叫 `nulya`、外面没有 `bin/`**。那台机器的用户自己也可能装 nulya，`~/.nulya` 正是他的 NULYA_HOME（store 就在旁边），而 `~/.nulya/bin` 恰好是那种会被加进 PATH 的目录——一个叫 `nulya` 的传输件会在他自己的机器上应答 `nulya`。一个文件，名字就是它的角色。
 
 **`remote:ssh:` 的认证**：缺省是完全非交互的 `BatchMode=yes`。只有显式给 `--ssh-password-stdin` 时才改成 `BatchMode=no` + `NumberOfPasswordPrompts=1`，并强制走固定 askpass helper：CLI 从 stdin 有界读取一行、调用结束前覆零；密码由 host 进程内的回环 one-shot broker 交给同一 nulya 二进制的 askpass 启动模式。**密码不进** SSH stdin（那里始终是 framing）、argv、env、文件、header、ledger 或日志；env 里只有回环 endpoint 与随机一次性 capability。`remote check` / `remote ls` / `session new` / `session step` 都认这一个 transient flag，其中 `step --gate` 先消费密码行、随后同一 stdin 照常读 verdict。StrictHostKeyChecking 完全不改。
 

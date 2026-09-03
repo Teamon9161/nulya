@@ -36,6 +36,7 @@ pub fn main(init: std.process.Init) !u8 {
 // Pull unit tests from every module into `zig build test`.
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("diag.zig");
     _ = @import("emit.zig");
     _ = @import("ledger.zig");
     _ = @import("lease.zig");
@@ -59,6 +60,7 @@ test {
     _ = @import("environment/remote/mod.zig");
     _ = @import("environment/remote/protocol.zig");
     _ = @import("environment/remote/ssh_askpass.zig");
+    _ = @import("environment/remote/install.zig");
     _ = @import("config.zig");
     _ = @import("extension/protocol.zig");
     _ = @import("extension/invoke.zig");
@@ -83,7 +85,9 @@ test {
     _ = @import("cli/config.zig");
     _ = @import("cli/skill.zig");
     _ = @import("cli/src.zig");
+    _ = @import("cli/remote_agent.zig");
     _ = @import("cli/toolchain.zig");
+    _ = @import("selfbuild.zig");
     _ = @import("source.zig");
     _ = @import("bundled.zig");
     _ = @import("extension/build/toolchain.zig");

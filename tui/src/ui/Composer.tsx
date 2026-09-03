@@ -34,10 +34,12 @@ import { imagePathIn, max_image_bytes, readImageFile, tooLarge, type PastedImage
 import type { ImageInput } from "../nulya/cli.ts"
 
 /**
- * The composer's border in ascii mode: the one bordered object on screen still
- * has to draw on a font without the box-drawing set.
+ * The input box's border in ascii mode: the one bordered object on screen still
+ * has to draw on a font without the box-drawing set. Exported because the SSH
+ * password field takes this box's place and must be the same object wearing
+ * another colour — a second set of corners would read as a second thing.
  */
-const ascii_border = {
+export const ascii_border = {
   topLeft: "+", topRight: "+", bottomLeft: "+", bottomRight: "+",
   horizontal: "-", vertical: "|",
   topT: "+", bottomT: "+", leftT: "+", rightT: "+", cross: "+",
@@ -199,6 +201,13 @@ export function Composer(props: {
   pluginCommands?: () => readonly { name: string; description: string }[]
   /** The input remains visible, but cannot take focus while a full-screen overlay owns the keyboard. */
   disabled?: boolean
+  /**
+   * Off the layout entirely, buffer and all: the SSH password field stands in
+   * this box's place, and two input boxes at once is a question about which one
+   * is being typed into. `visible={false}` rather than an unmount — the draft
+   * lives in the textarea, and a password prompt is not a reason to lose it.
+   */
+  hidden?: boolean
   onReady?: (api: ComposerApi) => void
 }) {
   const style = useStyle()
@@ -809,7 +818,7 @@ export function Composer(props: {
   }
 
   return (
-    <box flexDirection="column" width="100%" flexShrink={0}>
+    <box flexDirection="column" width="100%" flexShrink={0} visible={!props.hidden}>
       <Show when={reference()} keyed>
         {(open: NonNullable<ReturnType<typeof reference>>) => {
           const cols = () => referenceCols(open.found)

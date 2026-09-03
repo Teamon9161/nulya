@@ -523,6 +523,49 @@ e2e 里一条通道连跑三次并断言每次都答对（`one channel serves ma
    > 命名的传输假定远端 PATH 上有 `nulya`，别的一切用 `remote:exec:<argv…>` 写全。
    > nulya 本体绝不往别的机器写可执行文件；`ext push` 推的是 extension 版本的**数据字节**，不在此列。
    > `remote install` 留给后续轮次。
+   >
+   > **已复议（2026-09-03，人确认）**：上面那条**推翻**。真实使用第一次就撞上了它——`ssh host cmd` 跑的是
+   > 非交互 zsh，只读 `~/.zshenv`，于是"装了但 PATH 看不见"是常态而不是边角；而 `exec:` 那条退路
+   > 又与 `--ssh-password-stdin` 互斥（密码只对 `.ssh` 生效），公钥登不上的机器等于没有退路。
+   > VS Code / Zed 都在远端放服务端，这是这类工具的常态，把它推给人是把成本转移而不是消除。
+   >
+   > **新规则**：命名的两族（`ssh` / `wsl`）自动装、自动升级，落在 `~/.nulya/remote-agent`，
+   > 显式动词一个都不加（没有 `remote install`：一个只在自动路径失败时才有人想起来的动词，
+   > 不如让自动路径把话说清楚）。`exec:` 不变——它的 payload 是一个程序名，没有位置放第二个。
+   >
+   > **原裁决真正在保护的东西保住了**：「别人的机器上不许悄悄多一个会自更新的二进制」——
+   > 装的是**本 build 正在跑的那份字节**（静态链接单文件，`NULYA_EXE`），不编译、不下载、不联网，
+   > 版本对齐是天然的；每一步都由 `Diag` 说出来；target 不同就响亮拒绝而不是发一个跑不了的文件。
+   > 变的是"绝不写可执行文件"这条字面禁令——它本来也不自洽：`ext push` 早就在往对面 store 写
+   > compiled extension 的可执行字节了，只是那些字节不叫 nulya。
+   >
+   > **交叉编译（2026-09-03 同日补上）**：先只覆盖了同 `(os, arch)`，理由是"host 得是一棵源码树，
+   > 而 released 二进制不是"。这条理由**自己就是可以拆掉的**——`src/**` 早就 `@embedFile` 进去了，
+   > 差的只是 `build.zig` / `build.zig.zon` / `default.toml` / `vendor/**` 那 170KB。加上第三个 embed
+   > （`build_embed`）之后，`selfbuild.materialize` 能写出一棵完整 checkout，`zig build -Dtarget=…` 直接过。
+   > 于是"Windows 连 Linux 服务器"这个最常见的组合成立了，而"分发就是那一个二进制"没有被破坏。
+   >
+   > 三处值得记的选择：**target 词表复用 §7.4 的那张**（`extension/target.zig`），不新造一套——
+   > "给谁编译一个 extension"与"给谁编译一个 agent"本来就是同一个问题；**缓存键里没有 compiler**，
+   > 因为那是缓存不是身份，而问编译器叫什么要多起一个进程，命中那条路本来一个进程都不起；
+   > **编译这件事留在 shell 层**（`Options.build_agent` 是函数指针，`resolveZig` / `dataDir` 都在 `cli/`），
+   > 所以 `environment/remote/` 至今不知道 zig 是什么。
+
+   > **自动升级跟着源码走（2026-09-03）**：交叉编译之前，"该不该换掉对面那份"只有一个判据——帧协议 `v`。
+   > 当时的分析是"`build.zig.zon` 的 version 字符串不随重编译改变，比它没意义；要真判得准得让 hello 带一个内容 hash，
+   > 那是改协议"。交叉编译做完之后这个结论**变便宜了**：三个 embed 的摘要本来就要算（缓存键要用），
+   > 于是 `build_id` 由 build.zig 在 configure 时算一次、进 `config_options`，hello 多带一个 `build` 列
+   > （空 = 此列出现之前的 agent，永不算不匹配，规则 4）。
+   >
+   > **判据是源码不是时钟**，这一点是有意的：空跑 `zig build` 不改 id，也就不会白传一次二进制；
+   > 而 `-Doptimize` / `-Dstrip` / build root 在哪，同样都不进 id——**实测**：把整棵树抄到 `/tmp` 下、
+   > 用 ReleaseSafe + strip 重建一份，host 认出它是自己那一份并正常连上；只差一条注释时则报 "built from other source"。
+   > 交叉编译出来的那份哈希的是同一棵树，所以它也不会被自己反复替换掉。
+
+   > **远端那个文件不叫 `nulya`（2026-09-03，人指出）**：原本落在 `~/.nulya/bin/nulya`，
+   > 而那正是对面那台机器的用户**自己装 nulya 时会用的名字与位置**——`~/.nulya` 是他的 NULYA_HOME
+   > （store 就在旁边），`~/.nulya/bin` 又恰好是那种会被加进 PATH 的目录，于是别人 session 的传输件
+   > 会在他自己的机器上应答 `nulya`。改成 `~/.nulya/remote-agent`：**一个文件、没有 `bin/`、名字就是它的角色**。
 4. **`handoff` 的提议从文件变成数据**：这是远端化逼出来的，但它本身是一条独立的收口（`compact` 的 `brief_file` 收字节），
    值不值得先做掉再远端化。
    > **Phase 1 不受影响**：远端场里 extension 根本不跑（明说拒绝），所以 `handoff` 在远端场里只是一个不该被 `--with` 进来的包，

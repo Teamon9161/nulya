@@ -10,6 +10,9 @@ const environment = @import("../environment.zig");
 const ledger = @import("../ledger.zig");
 const launch = @import("../launch.zig");
 const remote = @import("../environment/remote/mod.zig");
+const common = @import("common.zig");
+const remote_agent = @import("remote_agent.zig");
+const selfbuild = @import("../selfbuild.zig");
 const task = @import("task.zig");
 
 // Nobody over there can deposit, so every reading verb in `task.zig` asks that
@@ -118,7 +121,13 @@ pub const Far = struct {
             link.unreached = true;
             return null;
         };
-        link.ch = remote.Channel.connect(self.alloc, self.io, l, launch.version, .default) catch {
+        link.ch = remote.Channel.connectWith(self.alloc, self.io, l, .{
+            .version = launch.version,
+            .install = .auto,
+            .build_agent = remote_agent.build,
+            .build_id = selfbuild.build_id,
+            .diag = common.stderr_diag,
+        }) catch {
             link.unreached = true;
             return null;
         };

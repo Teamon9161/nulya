@@ -20,6 +20,7 @@ const Tree = @import("../environment/tree.zig").Tree;
 const task_remote = @import("task_remote.zig");
 const Far = task_remote.Far;
 const common = @import("common.zig");
+const remote_agent = @import("remote_agent.zig");
 const cwdRealPath = common.cwdRealPath;
 const flagValue = common.flagValue;
 const sliceHasFlag = common.sliceHasFlag;
@@ -867,7 +868,7 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         .session_path = spath,
         .tasks_dir = tasks_dir,
         // No store roots: a task supervisor runs a COMMAND, never an extension.
-    }, hdr.value.environment, hdr.value.remote_workspace, &.{}, null, common.stderr_diag) catch |err| switch (err) {
+    }, hdr.value.environment, hdr.value.remote_workspace, &.{}, null, remote_agent.reach) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return 1;

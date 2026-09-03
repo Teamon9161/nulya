@@ -71,8 +71,7 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     for (flags.rest) |a| {
         if (std.mem.eql(u8, a, "--zig")) {
             want_zig = true;
-        } else if (std.mem.eql(u8, a, "--script")) {
-        } else try positional.append(alloc, a);
+        } else if (std.mem.eql(u8, a, "--script")) {} else try positional.append(alloc, a);
     }
     if (positional.items.len < 1) {
         try printErr(io, "usage: nulya ext init [--zig] [--user] <id> [tool]\n");
@@ -1481,15 +1480,15 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 
 test "every manifest parse/validate error is a draft fault; a host fault is not" {
     for ([_]anyerror{
-        error.InvalidJson,             error.NotAnObject,               error.MissingField,
-        error.WrongType,               error.UnsupportedSchema,         error.InvalidId,
-        error.MissingRuntime,          error.InvalidEntry,              error.InvalidInterpreter,
-        error.NoContributions,         error.InvalidToolName,           error.ReservedToolName,
-        error.DuplicateToolName,       error.InvalidTimeout,            error.InvalidSurface,
-        error.InvalidSkillPath,        error.DuplicateSkillPath,
-        error.InvalidSystemPromptPath, error.DuplicateSystemPromptPath, error.InvalidCommandName,
-        error.InvalidCommandAction,    error.UnknownCommandTool,        error.InvalidUiHost,
-        error.InvalidUiEntry,          error.InvalidUiApi,
+        error.InvalidJson,               error.NotAnObject,        error.MissingField,
+        error.WrongType,                 error.UnsupportedSchema,  error.InvalidId,
+        error.MissingRuntime,            error.InvalidEntry,       error.InvalidInterpreter,
+        error.NoContributions,           error.InvalidToolName,    error.ReservedToolName,
+        error.DuplicateToolName,         error.InvalidTimeout,     error.InvalidSurface,
+        error.InvalidSkillPath,          error.DuplicateSkillPath, error.InvalidSystemPromptPath,
+        error.DuplicateSystemPromptPath, error.InvalidCommandName, error.InvalidCommandAction,
+        error.UnknownCommandTool,        error.InvalidUiHost,      error.InvalidUiEntry,
+        error.InvalidUiApi,
     }) |err| {
         std.testing.expect(isManifestFault(err)) catch |e| {
             std.debug.print("{s} should be reported as a bad manifest\n", .{@errorName(err)});

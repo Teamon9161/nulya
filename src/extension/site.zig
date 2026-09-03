@@ -29,19 +29,10 @@ pub const Layer = enum {
     }
 };
 
-/// Where a repair line goes. A Zig error carries no payload, so which package,
-/// which version and the verb that fixes it have to be SAID separately or lost.
-/// The default reports nothing. `io` is passed at report time, so a sink stays
-/// stateless and owns no lifetime outliving the `Site` it was copied into.
-pub const Diag = struct {
-    ptr: ?*anyopaque = null,
-    reportFn: ?*const fn (ptr: ?*anyopaque, io: std.Io, line: []const u8) void = null,
-
-    pub fn report(self: Diag, io: std.Io, line: []const u8) void {
-        const f = self.reportFn orelse return;
-        f(self.ptr, io, line);
-    }
-};
+/// Where a repair line goes. Defined one level up because the remote channel
+/// narrates its own repairs the same way, and re-exported here because this is
+/// where a `Site` carries one.
+pub const Diag = @import("../diag.zig").Diag;
 
 pub const Site = struct {
     alloc: std.mem.Allocator,

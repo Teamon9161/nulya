@@ -43,7 +43,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 **Provider**：`openai` / `anthropic`（两个 cache_control breakpoint）/ `codex`（ChatGPT 订阅 OAuth）/ `scripted`（离线替身，九档）。三个真实 provider 的 prompt cache 命中由 `zig build integration` 实测。
 
-**执行环境**：`--env local | remote:{wsl,ssh,exec}`。`remote:` 那族把整个工作区搬到别的机器——shell、extension（`ext build --target` + `ext push` 送过去）、spill、后台任务都在那边跑，报告被取回来翻成 inbox 事件。远端那个常驻进程就是 `nulya remote serve`，同一个二进制。老 header 里冻着退役拼法（`wsl[:distro]` / `ssh:<dest>`）的场 resume 时响亮拒绝并指路对应的 `remote:` 写法。
+**执行环境**：`--env local | remote:{wsl,ssh,exec}`。`remote:` 那族把整个工作区搬到别的机器——shell、extension（`ext build --target` + `ext push` 送过去）、spill、后台任务都在那边跑，报告被取回来翻成 inbox 事件。远端那个常驻进程就是 `nulya remote serve`，同一个二进制——**那台机器上没有就自动放一个上去**（连接阶梯：nulya 自己那份 → PATH 上那份 → 装一份再来；协议对不上、或者那份是从别的源码建的（hello 带 `build_id`）都直接换掉，落在 `~/.nulya/remote-agent`——不叫 `nulya`、不在 `bin/`，免得跟对面用户自己那份撞名。对面与本机同 target 时送的就是正在跑的这个静态二进制；不同 target 就现场交叉编译一份，因为整棵 checkout 也 `@embedFile` 在里面）。老 header 里冻着退役拼法（`wsl[:distro]` / `ssh:<dest>`）的场 resume 时响亮拒绝并指路对应的 `remote:` 写法。
 
 **Driver 面**（都不是 LLM tool，经 shell 调用）：`session new|append|note|step|events|cancel|outcome|list|prune` · `task run|list|status|wait|kill|retarget` · `ext *`（含一次性的 `ext migrate`） · `config show|refresh` · `journal append|read` · `src` · `skill list|load` · `remote serve|check|ls`。`session step` 的 stdout 一律是行协议（`--stream` 是留一个版本期的无操作别名），`--gate` 是每个 tool call 的一票否决。TUI（顶层 `tui/`，Bun + OpenTUI）是第一个完整 driver；`drivers/goal.{sh,ps1}` 是最小的那个（各 ≤ 70 行、都不解析 JSON）。
 
@@ -73,7 +73,8 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `tools/shell.zig` | 唯一的永久 builtin | 前台默认 120s / 上限 600s；`background:true` 不夹不缺省，回执立刻返回 |
 | `emit.zig` | 输出预算、UTF-8 边界、超限落盘留指针 | 非法字节换 U+FFFD 并按 truncation 留原始字节——ledger 里的字符串必须是合法 UTF-8 |
 | `environment.zig` + `environment/tree.zig` | `runShell` / `runExtension` / `startShellTask` / `putWorkspaceFile`；进程树与有界等待 | 超时与取消杀**整棵**进程树，否则孙进程攥着管道写端让 drain 等不到 EOF；子进程 env 过 secret denylist |
-| `environment/remote/` | 帧协议 + `nulya remote serve` 的另一半 | 随对面持有的东西一起长的一律走**负载**不走 JSON 头 |
+| `environment/remote/` | 帧协议 + `nulya remote serve` 的另一半 + 连接阶梯与自装（`install.zig`） | 随对面持有的东西一起长的一律走**负载**不走 JSON 头；装那两步走 launcher 自己的传输，不走帧通道（帧通道要求对面已经有 agent）。**这里不知道 zig 是什么**：给别的 target 造二进制是 `Options.build_agent` 那个函数指针的事 |
+| `diag.zig` | error 装不下的那句话的唯一出口 + CLI 的 stderr sink | 默认不发一个字：目的地由壳层选，库里的路径拿到一个才开口 |
 | `provider.zig` `providers/` | `Model` vtable + `TurnCollector`；四个 provider（`openai`/`anthropic`/`codex` 共用 wire 底座，`scripted.zig` 是离线替身），`launch.ScriptedProvider` 是它的重导出 | provider 只能优化序列化，不能破坏 turn 前缀不变量；`reasoning` 原样交回同一 provider |
 | `config.zig` + `default.toml` | `default → system → user → project` 合并 | project 层只能收窄；`[extensions] with` 是唯一的 extension 键，project 层也读（只能在 store 已有的包里挑） |
 | `extension/manifest.zig` | `nulya.extension/v2` schema | 三层听众：内核强制 / driver 声明 / 前端声明。manifest 是 schema 唯一真相，不问 binary |
@@ -87,7 +88,8 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `cli/task.zig` | 后台任务的 supervisor 与读者面（全部动词、`Row` 投影、本机读法） | supervisor 顺序承重：拿租约 → status → spawn → **deposit 后**才写 done。`status.json` 是真相，`starting`/`lost`/`unreachable` 只活在投影里 |
 | `cli/task_remote.zig` | 任务在别的机器上时的那一半：`Far` 连接收集器 + 把远端 poll 答案投成 `Row` | `readRow` 只在已经知道任务是远端的（`Far.isRemote`）才落进这个文件；本机路径与全部动词仍在 `cli/task.zig` |
 | `launch.zig` | session 启动共享件：模型解析、credential 顺序、scratch 路径、这台机器的 store 路径 | 壳层算好路径再交下来，内核不读 config |
-| `source.zig` `bundled.zig` | `nulya src` / `ext seed` 的数据（build.zig `@embedFile`） | 剥 test 块的是**投影**不是存储；靠 zig-fmt 第 0 列 `}` 不变量 |
+| `source.zig` `bundled.zig` `selfbuild.zig` | `nulya src` / `ext seed` 的数据 + 其余 build 输入（build.zig 三个 `@embedFile` 索引）+ `build_id` | 剥 test 块的是**投影**不是存储；靠 zig-fmt 第 0 列 `}` 不变量。三个 embed 合起来必须是一棵 `zig build` 认的完整 checkout——少一个文件就是别人等着的那次远端连接在 configure 阶段炸掉。`build_id` 由 build.zig 在 configure 时算，所以交叉编译出来的那份报的是同一个 id |
+| `cli/remote_agent.zig` | 给另一台机器交叉编译一份 nulya，并留住 | 产物是**缓存不是身份**：键 = target + checkout digest，**不含 compiler**（问它叫什么要多起一个进程，而命中那条路一个都不起）；落位靠一次原子 rename |
 
 ## 构建与测试
 

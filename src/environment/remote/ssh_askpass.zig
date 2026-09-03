@@ -8,6 +8,10 @@ const std = @import("std");
 pub const marker_env = "NULYA_SSH_ASKPASS";
 pub const max_password_bytes: usize = 4096;
 const token_bytes = 32;
+/// How many connections one broker will answer before it stops listening. A
+/// bound on a loop, not a policy: the ladder that opens a channel needs a
+/// handful, and nothing legitimate needs many.
+const max_serves: usize = 32;
 const max_marker_bytes = 6 + token_bytes * 2;
 
 pub const Broker = struct {
@@ -54,9 +58,14 @@ pub const Broker = struct {
     fn serve(self: *Broker) void {
         // A process that guesses the ephemeral port but not the token may cause
         // a refused connection, never disclosure. Leave a few attempts so that
-        // such a race cannot steal the one legitimate askpass exchange.
+        // such a race cannot steal a legitimate askpass exchange.
+        //
+        // Serving does NOT stop at the first success: opening a channel can take
+        // several ssh invocations (find the agent, install one, connect again),
+        // and a person who typed a password once must not be asked again halfway
+        // through. The bound counts every accept, so the loop still ends.
         var attempts: usize = 0;
-        while (attempts < 8) : (attempts += 1) {
+        while (attempts < max_serves) : (attempts += 1) {
             const stream = self.server.accept(self.io) catch return;
             defer stream.close(self.io);
             var read_buf: [256]u8 = undefined;
@@ -72,7 +81,6 @@ pub const Broker = struct {
             writer.interface.writeAll(self.password) catch return;
             writer.interface.writeByte('\n') catch return;
             writer.interface.flush() catch return;
-            return;
         }
     }
 };
@@ -107,7 +115,7 @@ pub fn runHelper(io: std.Io, marker: []const u8) !u8 {
     return 0;
 }
 
-test "broker marker discloses no password and one authenticated exchange returns it" {
+test "broker marker discloses no password, and it answers every authenticated ask" {
     const alloc = std.testing.allocator;
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
@@ -133,5 +141,17 @@ test "broker marker discloses no password and one authenticated exchange returns
     var read_buf: [256]u8 = undefined;
     var reader = stream.reader(io, &read_buf);
     try std.testing.expectEqualStrings(secret, try reader.interface.takeDelimiterExclusive('\n'));
-    if (broker.future) |*future| future.await(io);
+
+    // A second ask is answered too: opening one channel can take several ssh
+    // invocations, and the person typed the password once.
+    const again = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer again.close(io);
+    var write_buf2: [256]u8 = undefined;
+    var writer2 = again.writer(io, &write_buf2);
+    try writer2.interface.writeAll(broker.marker()[colon + 1 ..]);
+    try writer2.interface.writeByte('\n');
+    try writer2.interface.flush();
+    var read_buf2: [256]u8 = undefined;
+    var reader2 = again.reader(io, &read_buf2);
+    try std.testing.expectEqualStrings(secret, try reader2.interface.takeDelimiterExclusive('\n'));
 }

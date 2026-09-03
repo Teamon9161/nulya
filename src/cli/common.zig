@@ -31,14 +31,32 @@ pub const StoreView = struct {
     }
 };
 
-/// Where the kernel's repair lines go on this side of the seam: stderr, so
-/// `session step --stream` keeps stdout pure JSON. Stateless, so a `Site` may
-/// be copied and moved freely once it holds one.
-pub const stderr_diag: site_mod.Diag = .{ .reportFn = writeDiagLine };
-
-fn writeDiagLine(_: ?*anyopaque, io: std.Io, line: []const u8) void {
-    std.Io.File.stderr().writeStreamingAll(io, line) catch {};
+/// Why a channel to `spec` could not be opened, in one sentence naming the
+/// machine and what fixes it.
+///
+/// One function because there are three callers and the answers must not drift
+/// apart: the same failure has to read the same way whether it stopped a
+/// session, a push or a `remote check`.
+pub fn printChannelRefusal(alloc: std.mem.Allocator, io: std.Io, spec: []const u8, err: anyerror) !void {
+    // The transport already wrote its own diagnostic (ssh's "Permission
+    // denied", the install ladder's narration); this adds which spec, and what
+    // is left to do.
+    switch (err) {
+        error.RemoteAgentStale => try printErrFmt(alloc, io, "{s}: the nulya there was built from other source, and this one could not replace it\n", .{spec}),
+        error.RemoteVersionMismatch => try printErrFmt(alloc, io, "{s}: the nulya there speaks a different remote protocol, and this one could not replace it\n", .{spec}),
+        error.RemoteSpecUnsupportedOnHost => try printErrFmt(alloc, io, "{s}: cannot be reached from this host (wsl needs Windows)\n", .{spec}),
+        error.RemoteTransportFailed => try printErrFmt(alloc, io, "{s}: ssh could not reach that machine (see its message above)\n", .{spec}),
+        error.RemoteNoBuildForTarget => try printErrFmt(alloc, io, "{s}: could not produce a nulya for that machine (see above); put one on its PATH instead\n", .{spec}),
+        error.RemoteTargetUnknown => try printErrFmt(alloc, io, "{s}: that machine did not say what it is; put a nulya on its PATH\n", .{spec}),
+        error.RemoteInstallFailed => try printErrFmt(alloc, io, "{s}: could not land a nulya over there; put one on its PATH\n", .{spec}),
+        else => try printErrFmt(alloc, io, "{s}: could not open a channel ({s})\n", .{ spec, @errorName(err) }),
+    }
 }
+
+/// Where the kernel's repair lines go on this side of the seam: stderr, so
+/// `session step` keeps stdout pure line protocol. Stateless, so a `Site` may
+/// be copied and moved freely once it holds one.
+pub const stderr_diag: site_mod.Diag = @import("../diag.zig").to_stderr;
 
 /// Where this machine's store is, and the standing member ids. Caller owns.
 pub fn storeAndWith(alloc: std.mem.Allocator, io: std.Io) !struct {
