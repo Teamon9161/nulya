@@ -30,14 +30,11 @@ pub const scratch_dir = ".nulya/scratch";
 /// filenames inside are deterministic, so the session id is the only thing
 /// keeping two concurrent sessions apart. Caller owns the result.
 pub fn sessionScratchDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
-    // `/` on every OS: this prefix reaches the model in spill footers and task
-    // receipts, where the rest of the path is already spelled that way.
+    // `/` on every OS: this prefix reaches the model in spill footers.
     return emit.joinRel(alloc, &.{ scratch_dir, id });
 }
 
-/// Where that session's background tasks live: `<scratch>/<id>/tasks`, one
-/// directory per task, so a session's byproduct is one removable subtree.
-/// Caller owns it.
+/// `<scratch>/<id>/tasks`, one directory per task. Caller owns it.
 pub fn sessionTasksDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
     const scratch = try sessionScratchDir(alloc, id);
     defer alloc.free(scratch);
@@ -77,9 +74,8 @@ pub const ModelHolder = union(enum) {
 };
 
 /// Resolve `profile_name` (+ an optional model id) into the model IDENTITY frozen
-/// at session creation — the ONE model-resolution decision. Credential-aware, so
-/// what is frozen is what will run: a profile whose credential is not resolvable
-/// freezes the scripted identity.
+/// at session creation. Credential-aware, so what is frozen is what will run: a
+/// profile whose credential is not resolvable freezes the scripted identity.
 ///
 /// The header never holds a secret — only the env var NAME and the profile name;
 /// the credential is re-resolved on every resume. The codex profile's credential
@@ -100,9 +96,8 @@ pub fn resolveDescriptor(
     const chosen = nonEmpty(model_id orelse "", profile.defaultModel());
     const keyed = credentialSource(alloc, io, profile, env) != .none;
     return switch (profile.kind) {
-        // A scripted PROFILE freezes the id it was asked for: the stand-in
-        // ignores it, but `[[models]]` lookups ask the frozen identity what
-        // model this is. The keyless fallbacks below keep the BARE identity.
+        // A scripted PROFILE freezes the id it was asked for: `[[models]]` lookups
+        // ask the frozen identity. The keyless fallbacks keep the BARE identity.
         .scripted => .{ .provider = "scripted", .model = chosen },
         // Only a resolvable credential yields a durable API identity.
         .openai => if (!keyed) scripted else .{
@@ -147,8 +142,7 @@ pub fn credentialSource(
     };
 }
 
-/// Whether `profile` can run right now — the same test `resolveDescriptor`
-/// applies, exposed for pickers.
+/// Whether `profile` can run right now — the test `resolveDescriptor` applies.
 pub fn credentialAvailable(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -233,9 +227,8 @@ pub fn nonEmpty(value: []const u8, fallback: []const u8) []const u8 {
 /// rather than silently running locally under a config that asked for isolation.
 ///
 /// `session` names the durable session background tasks belong to; null means a
-/// `shell {background:true}` has nowhere to report to and says so. `ext_store` is
-/// THIS machine's extension store — resolving `(id, version)` belongs to the
-/// machine holding the bytes; a caller that runs no extension may pass empty.
+/// `shell {background:true}` has nowhere to report to. `ext_store` is THIS
+/// machine's extension store; a caller that runs no extension may pass empty.
 pub fn localEnvironment(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -263,8 +256,7 @@ pub fn isRemoteSpec(exec: []const u8) bool {
 }
 
 /// The sentences the two retired exec-target spellings get. A header frozen with
-/// one of them refuses rather than being re-read as the `remote:` spelling —
-/// that one moves the whole workspace, so the old meaning cannot be guessed.
+/// one refuses rather than being re-read as the `remote:` spelling.
 pub const legacy_ssh_hint =
     "ssh as an exec target was retired; use --env remote:ssh:<destination> instead " ++
     "to move the whole workspace there (see --workspace)";
@@ -292,8 +284,7 @@ pub fn legacyExecHint(spec: []const u8) ?[]const u8 {
 }
 
 /// Say why an `--env` spec cannot be used, or null when it can — so a CLI verb
-/// can refuse BEFORE it creates anything. The wrong machine, a retired spelling
-/// and an unrecognized one are different fixes and told apart.
+/// can refuse BEFORE it creates anything.
 pub fn execTargetRefusal(exec: []const u8) ?[]const u8 {
     const spec = environment.normalizeExecSpec(exec);
     if (spec.len == 0) return null;
@@ -307,8 +298,7 @@ pub fn execTargetRefusal(exec: []const u8) ?[]const u8 {
     return "unrecognized (want " ++ remote.spec_syntax ++ ")";
 }
 
-/// The execution environment a session runs its tools behind: the local backend
-/// or the remote channel. One shape for every verb — build, handle, deinit.
+/// The local backend or the remote channel; one shape for every verb.
 pub const SessionEnvironment = union(enum) {
     local: environment.LocalEnvironment,
     remote: remote.RemoteEnvironment,
@@ -342,8 +332,7 @@ pub const SessionEnvironment = union(enum) {
 /// Build the environment a session runs behind. `exec` decides which of the two
 /// it is; everything else applies to the local one. A remote spec CONNECTS here —
 /// transport spawned, handshake completed — so a failure is loud and at the top
-/// of the step. Anything neither empty (local) nor a `remote:…` spec is
-/// `error.InvalidExecTarget`, never a fallback to running on this host.
+/// of the step. Anything else is `error.InvalidExecTarget`, never a local fallback.
 pub fn sessionEnvironment(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -378,9 +367,6 @@ pub fn sessionEnvironment(
 
 /// `<NULYA_HOME | ~/.nulya>/store` — the ONE place built extension versions live
 /// on this machine. Empty when there is no home directory. Caller owns it.
-///
-/// A workspace holds drafts and `current` pointers under `.nulya/extensions`,
-/// never versions, so a checkout carries source but never bytes that would run.
 pub fn storePath(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) ![]u8 {
     const home = (try userHomeDir(alloc, env)) orelse return alloc.dupe(u8, "");
     defer alloc.free(home);

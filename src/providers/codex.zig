@@ -25,8 +25,7 @@ const backend_url = "https://chatgpt.com/backend-api/codex/responses";
 const token_url = "https://auth.openai.com/oauth/token";
 /// The subscription's model catalogue, authenticated exactly like `/responses`.
 const models_url = "https://chatgpt.com/backend-api/codex/models";
-/// The Codex CLI's public OAuth client id: reusing it lets both tools share the
-/// same `auth.json`.
+/// The Codex CLI's public OAuth client id, so both tools share one `auth.json`.
 const client_id = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 pub const default_model = "gpt-5.5";
@@ -50,8 +49,7 @@ pub const CodexProvider = struct {
     model: []const u8,
     auth: Auth,
     /// `session_id` header / `prompt_cache_key`, in the UUID shape the backend
-    /// expects. Derived from the session id, so every process stepping this
-    /// session sends the same value.
+    /// expects. Derived from the session id, so every process sends the same value.
     session_uuid: [36]u8,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, cfg: Config) InitError!CodexProvider {
@@ -180,7 +178,6 @@ pub const Auth = struct {
         return out;
     }
 
-    /// Whether a subscription credential exists right now.
     pub fn available(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) bool {
         var a = (load(alloc, io, env) catch return false) orelse return false;
         a.deinit(alloc);
@@ -237,8 +234,6 @@ pub const Auth = struct {
         var parsed = try std.json.parseFromSlice(std.json.Value, alloc, text, .{});
         defer parsed.deinit();
         if (parsed.value != .object) return;
-        // Mutate only the token fields: every other key in the file belongs to
-        // the Codex CLI and is written back untouched.
         const tokens = parsed.value.object.getPtr("tokens") orelse return;
         if (tokens.* != .object) return;
         const arena = parsed.arena.allocator();
@@ -266,9 +261,8 @@ fn homePath(alloc: std.mem.Allocator, env: *const std.process.Environ.Map, sub: 
 
 /// The subscription's own model line-up, read from `$CODEX_HOME/models_cache.json`
 /// (else `~/.codex/`). Read only, never configured in `config.toml`. The numbers
-/// are the subscription's, not the public API's — a smaller window, an extra
-/// effort level, its own default — so it cannot fold into the id-keyed
-/// `[[models]]` catalog, where an id is described once for every endpoint.
+/// are the subscription's, not the public API's, so it cannot fold into the
+/// id-keyed `[[models]]` catalog.
 pub const Catalog = struct {
     arena: std.heap.ArenaAllocator,
     /// In the order the file lists them; never empty (no listable model is null).
@@ -314,8 +308,7 @@ fn parse(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}!?[]const
 
     var out: std.ArrayList(config.ModelParams) = .empty;
     for (listed) |m| {
-        // `hide` marks models that exist but are not offered; listing them
-        // would put a choice in a picker that is not the user's to make.
+        // `hide` marks models that exist but are not offered.
         if (!eqlString(wire.string(m, "visibility"), "list")) continue;
         const slug = wire.string(m, "slug") orelse continue;
         if (slug.len == 0) continue;
@@ -391,14 +384,12 @@ pub fn refreshCatalog(
     defer arena.deinit();
     const a = arena.allocator();
     const response = std.json.parseFromSliceLeaky(std.json.Value, a, body, .{}) catch return error.CodexCatalogUnreadable;
-    // Never overwrite a good cache with an answer describing no model — the
-    // same predicate the reader applies.
+    // Never overwrite a good cache with an answer describing no model.
     if ((try parse(a, body)) == null) return error.CodexCatalogEmpty;
     try saveCatalog(alloc, io, env, a, response);
 }
 
-/// A projection is not a step: a catalogue that goes quiet fails in seconds and
-/// leaves the file alone rather than holding `config show` for minutes.
+/// A projection is not a step: a quiet catalogue fails in seconds, file intact.
 const catalog_stall_ms = 15_000;
 
 fn fetchCatalog(alloc: std.mem.Allocator, client: *std.http.Client, auth: *const Auth, url: []const u8) ![]u8 {
@@ -497,8 +488,7 @@ pub fn buildRequestJson(
     try jw.write(true);
     try jw.objectField("store");
     try jw.write(false);
-    // Nothing is stored server-side, so reasoning that must survive to the
-    // next step travels with the response, encrypted.
+    // Nothing is stored server-side, so reasoning travels with the response.
     try jw.objectField("include");
     try jw.beginArray();
     try jw.write("reasoning.encrypted_content");
@@ -543,8 +533,7 @@ fn writeInput(jw: *std.json.Stringify, alloc: std.mem.Allocator, turns: []const 
         .user_text => |u| try writeUserItem(jw, alloc, u),
         .note => |text| try writeMessageItem(jw, "user", "input_text", text),
         .assistant => |as| {
-            // `reasoning` items exactly as they came back, in the position the
-            // model produced them: before the output they preceded.
+            // `reasoning` items exactly as they came back, before the output.
             if (as.reasoning.len != 0) try wire.writeReasoningItems(jw, alloc, as.reasoning);
             if (as.text.len != 0) try writeMessageItem(jw, "assistant", "output_text", as.text);
             for (as.calls) |call| {

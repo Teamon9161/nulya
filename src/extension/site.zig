@@ -31,11 +31,8 @@ pub const Layer = enum {
 
 /// Where a repair line goes. A Zig error carries no payload, so which package,
 /// which version and the verb that fixes it have to be SAID separately or lost.
-/// The kernel never picks a destination: a shell that has one passes a sink in,
-/// and the default reports nothing.
-///
-/// `io` is passed at report time rather than held, so a sink stays stateless
-/// and nothing here owns a lifetime outliving the `Site` it was copied into.
+/// The default reports nothing. `io` is passed at report time, so a sink stays
+/// stateless and owns no lifetime outliving the `Site` it was copied into.
 pub const Diag = struct {
     ptr: ?*anyopaque = null,
     reportFn: ?*const fn (ptr: ?*anyopaque, io: std.Io, line: []const u8) void = null,
@@ -63,9 +60,8 @@ pub const Site = struct {
     pub const Pointer = struct { layer: Layer, version: []const u8 };
     pub const ActiveEntry = struct { id: []const u8, layer: Layer, version: []const u8 };
 
-    /// The single answer to `id[@version] -> manifest -> entry path`. Session
-    /// composition, `ext run` and the skill loader all ask here, so none of
-    /// them can drift on where a frozen entry lives.
+    /// The single answer to `id[@version] -> manifest -> entry path`: session
+    /// composition, `ext run` and the skill loader all ask here.
     pub const Resolved = struct {
         /// Owned.
         id: []const u8,
@@ -100,9 +96,8 @@ pub const Site = struct {
         }
     };
 
-    /// Creating nothing: a machine with no store and a workspace with no
-    /// `.nulya/extensions` are both ordinary. An empty `store_path` means this
-    /// machine has no store at all.
+    /// Creating nothing; both directories may legitimately be absent. An empty
+    /// `store_path` means this machine has no store at all.
     pub fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, store_path: []const u8, diag: Diag) !Site {
         const owned_cwd = try alloc.dupe(u8, cwd);
         errdefer alloc.free(owned_cwd);
@@ -139,8 +134,7 @@ pub const Site = struct {
         };
     }
 
-    /// Silent when nobody is listening, and when the line cannot be built —
-    /// failing to SAY something never changes what happened.
+    /// Silent when nobody is listening, and when the line cannot be built.
     pub fn report(self: *const Site, alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) void {
         if (self.diag.reportFn == null) return;
         const line = std.fmt.allocPrint(alloc, fmt, args) catch return;
@@ -148,8 +142,7 @@ pub const Site = struct {
         self.diag.report(self.io, line);
     }
 
-    /// For a caller with no pointer question — an execution resolver is only
-    /// ever handed an exact version.
+    /// For a caller with no pointer question — handed an exact version.
     pub fn openStore(alloc: std.mem.Allocator, io: std.Io, store_path: []const u8, diag: Diag) !Site {
         var site = try open(alloc, io, ".", store_path, diag);
         if (site.ws_dir) |*d| {
@@ -179,8 +172,7 @@ pub const Site = struct {
         if (self.store_path.len == 0) return error.NoExtensionStore;
         const dir = try ext_store.openOrCreateRoot(self.io, self.cwd, self.store_path);
         self.store_dir = dir;
-        // Now that it exists, `store_path` is what absolute entry paths join
-        // onto.
+        // Now that it exists, `store_path` is what absolute entry paths join onto.
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const resolved = try self.alloc.dupe(u8, buf[0..try dir.realPath(self.io, &buf)]);
         self.alloc.free(self.store_path);
@@ -188,7 +180,6 @@ pub const Site = struct {
         return ext_store.Store.init(self.io, dir);
     }
 
-    /// Created if needed.
     pub fn ensurePointerDir(self: *Site, layer: Layer) !std.Io.Dir {
         switch (layer) {
             .user => return (try self.ensureStore()).root,
@@ -303,8 +294,7 @@ pub const Site = struct {
     pub fn deactivate(self: *const Site, alloc: std.mem.Allocator, layer: Layer, id: []const u8) !void {
         const dir = self.pointerDir(layer) orelse return;
         const st = self.store() orelse {
-            // No store to lease against, and a dangling pointer is exactly
-            // what wants dropping.
+            // No store to lease against, and a dangling pointer wants dropping.
             return ext_store.Store.init(self.io, dir).dropPointer(alloc, id);
         };
         var held = try st.lease(alloc, id);
@@ -318,8 +308,7 @@ pub const Site = struct {
     /// serves its calls. Null when the store holds none; caller owns it.
     ///
     /// No compiler is named: which zig produced that copy is not this session's
-    /// to require, and `findSealed`'s sorted search stays deterministic when
-    /// several qualify.
+    /// to require.
     pub fn resolveForTarget(
         self: *const Site,
         alloc: std.mem.Allocator,

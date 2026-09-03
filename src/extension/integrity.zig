@@ -15,9 +15,8 @@ pub const version_prefix = "v-";
 pub const manifest_file = "extension.json";
 pub const package_dir = "package";
 pub const seal_file = "seal.json";
-/// `target.exeSuffixFor` asked about THIS machine, so the host case is not a
-/// second rule. Callers about to run something here want this; validation wants
-/// the seal's.
+/// `target.exeSuffixFor` asked about THIS machine. Callers about to run
+/// something here want this; validation wants the seal's.
 pub const exe_suffix = target_mod.exeSuffixFor(target_mod.host);
 
 const max_snapshot_file_bytes: usize = 16 * 1024 * 1024;
@@ -308,8 +307,7 @@ pub fn parseSeal(gpa: std.mem.Allocator, bytes: []const u8) !Seal {
     };
 }
 
-/// Keeps host cancellation distinct from corruption while still reporting
-/// descriptive `Version*` errors for everything else.
+/// Keeps host cancellation distinct from corruption.
 inline fn cancelable(err: anytype, comptime fallback: anyerror) (error{Canceled} || @TypeOf(fallback)) {
     return if (err == error.Canceled) error.Canceled else fallback;
 }
@@ -327,8 +325,7 @@ pub fn validateVersionDir(
     m.deinit();
 }
 
-/// `validateVersionDir` handing back what it already parsed: validating the
-/// frozen manifest IS part of validation at either level, so a caller wanting
+/// `validateVersionDir` handing back what it already parsed, so a caller wanting
 /// the manifest need not read the file twice. Caller owns it.
 pub fn openVersion(
     alloc: std.mem.Allocator,
@@ -339,8 +336,6 @@ pub fn openVersion(
     expected_id: []const u8,
     level: Level,
 ) !manifest.Manifest {
-    // I/O failures become descriptive `Version*` errors, but a cancellation is
-    // host execution control, not corruption: `cancelable` re-raises it.
     root.access(io, version_rel, .{}) catch |err| return cancelable(err, error.VersionNotFound);
 
     const seal_sub = try std.fs.path.join(alloc, &.{ version_rel, seal_file });
@@ -386,19 +381,14 @@ pub fn openVersion(
         } else {
             // A compiled entry is never per-OS (`manifest.validate` refuses the
             // object form for `bin/` paths), so the host always has one. The
-            // suffix comes off the SEAL, not this machine: a cross-built
-            // version is validated both where it was produced and where it was
-            // pushed, and asking `builtin` would send both looking for a file
-            // named for the wrong platform.
+            // suffix comes off the SEAL, not this machine: a cross-built version
+            // is validated both where it was produced and where it was pushed.
             const compiled_entry = rt.entry.forHost() orelse return error.VersionEntryNotFound;
             const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ compiled_entry, target_mod.exeSuffixFor(seal.target) });
             defer alloc.free(entry);
             const entry_sub = try std.fs.path.join(alloc, &.{ version_rel, entry });
             defer alloc.free(entry_sub);
             switch (level) {
-                // The built binary is the one unbounded file, so it is where
-                // the levels part: is it there, versus is it byte for byte the
-                // one that was sealed.
                 .structural => {
                     root.access(io, entry_sub, .{}) catch |err| return cancelable(err, error.VersionEntryNotFound);
                     if (seal.binary_digest == null) return error.VersionSealInvalid;
@@ -417,9 +407,8 @@ pub fn openVersion(
     return m;
 }
 
-/// The existence half of what `Level.sealed` proves by digesting. `access`
-/// only: it answers "this directory is complete", never "these are the sealed
-/// bytes".
+/// The existence half of what `Level.sealed` proves by digesting. `access` only:
+/// it answers "this directory is complete", never "these are the sealed bytes".
 fn requireDeclaredPaths(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -589,8 +578,7 @@ fn digestHex(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return finishHex(alloc, &h);
 }
 
-/// Shared so the one-shot and the streamed path cannot drift into two
-/// different spellings of the same digest.
+/// Shared so the one-shot and the streamed path cannot drift.
 fn finishHex(alloc: std.mem.Allocator, h: *std.crypto.hash.sha2.Sha256) ![]u8 {
     var digest: [32]u8 = undefined;
     h.final(&digest);

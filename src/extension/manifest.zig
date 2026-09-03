@@ -142,8 +142,7 @@ pub const SystemPromptSpec = struct {
     }
 };
 
-/// An open vocabulary, never refused by `validate`, read by nobody but whoever
-/// draws a tool's calls on a screen.
+/// Read by nobody but whoever draws a tool's calls on a screen.
 pub const ToolUi = struct {
     /// An OPEN vocabulary (`"checklist"`, `"markdown"`, …), kept as WRITTEN;
     /// an unrecognized word is the reader's decision. Absent is null.
@@ -176,9 +175,7 @@ pub const ToolSpec = struct {
     }
 };
 
-/// A slash command this package offers whoever drives a session. It lives in
-/// the manifest, not a front-end sidecar, so every driver sees the same
-/// commands a session's frozen composition carries.
+/// A slash command this package offers whoever drives a session.
 pub const Command = struct {
     name: []const u8,
     description: []const u8,
@@ -239,9 +236,8 @@ pub const UiHost = struct {
     host: []const u8,
     /// Package-relative (`isSafeRelPath`); a build also checks it exists.
     entry: []const u8,
-    /// The plugin-host API version this module was written against. Linearly
-    /// ordered: a front end asks "is my major version at least this". Zero is
-    /// never a real version, so `validate` refuses it.
+    /// The plugin-host API version this module was written against; a front end
+    /// asks "is my major version at least this". Zero is refused.
     api: u32,
 };
 
@@ -279,9 +275,8 @@ pub const Manifest = struct {
                 if (per_os and !isKnownOsKey(v.os)) return error.InvalidEntry;
                 if (!isSafeRelPath(v.value)) return error.InvalidEntry;
                 // Compiled lives under `bin/` (the build output), script under
-                // `src/` (frozen with the tree). In the per-OS form EVERY
-                // variant must be a script: two implementation kinds cannot
-                // share one version id.
+                // `src/`. In the per-OS form EVERY variant must be a script: two
+                // implementation kinds cannot share one version id.
                 if (per_os or isScript(rt)) {
                     if (!std.mem.startsWith(u8, v.value, "src/")) return error.InvalidEntry;
                 }
@@ -308,7 +303,7 @@ pub const Manifest = struct {
                 if (ms == 0 or ms > tool.Timeouts.extension_max_ms) return error.InvalidTimeout;
             }
             // Refused rather than defaulted: a typo meaning `internal` would
-            // land a driver tool on the model's face.
+            // otherwise land a driver tool on the model's face.
             if (t.surface) |s| {
                 if (Surface.fromString(s) == null) return error.InvalidSurface;
             }
@@ -326,8 +321,7 @@ pub const Manifest = struct {
 
         for (self.system_prompts, 0..) |p, i| {
             if (!isSafeRelPath(p.path)) return error.InvalidSystemPromptPath;
-            // Refused rather than defaulted: a typo would land the prompt in
-            // the wrong band.
+            // Refused rather than defaulted: a typo would pick the wrong band.
             if (p.position) |s| {
                 if (PromptPosition.fromString(s) == null) return error.InvalidPromptPosition;
             }
@@ -341,8 +335,6 @@ pub const Manifest = struct {
             for (self.commands[i + 1 ..]) |other| {
                 if (std.mem.eql(u8, c.name, other.name)) return error.DuplicateCommandName;
             }
-            // The two things asked of an open verb vocabulary: one key, and a
-            // `run` naming a tool this manifest itself declares.
             if (c.action.keys != 1 or c.action.verb.len == 0) return error.InvalidCommandAction;
             if (c.action.runTarget()) |target| {
                 var found = false;
@@ -356,9 +348,6 @@ pub const Manifest = struct {
             }
         }
 
-        // `policy` needs no check: one optional bool cannot say anything a
-        // rule would have to refuse.
-
         for (self.ui) |u| {
             if (!isValidUiHost(u.host)) return error.InvalidUiHost;
             if (!isSafeRelPath(u.entry)) return error.InvalidUiEntry;
@@ -367,8 +356,7 @@ pub const Manifest = struct {
     }
 };
 
-/// A policy that narrows nothing is no contribution, so `{}` reads as `null`
-/// here even though the two stay distinguishable on `Manifest.policy`.
+/// A policy that narrows nothing is no contribution.
 fn policyContributes(p: ?Policy) bool {
     const policy = p orelse return false;
     return policy.readonly != null;
@@ -454,8 +442,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     };
 }
 
-/// `[a-z0-9-]+` — narrower than `isValidId`, because a person types it after
-/// `/` rather than carrying it as an opaque id.
+/// `[a-z0-9-]+` — narrower than `isValidId`.
 fn isValidCommandName(s: []const u8) bool {
     return isLowerDashWord(s);
 }
@@ -624,8 +611,7 @@ fn dupCommands(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError
 }
 
 /// One key whose value is a bare `true` or a string; anything else under it is
-/// a `WrongType`. The key COUNT is `validate`'s to check, so a parse-only
-/// caller still gets the object it was given.
+/// a `WrongType`. The key COUNT is `validate`'s to check.
 fn dupAction(a: std.mem.Allocator, value: std.json.Value) ParseError!Action {
     switch (value) {
         .object => |o| {
@@ -846,8 +832,8 @@ test "entry and interpreter may be written per OS; the host picks, then `default
     try std.testing.expectEqualStrings("powershell", rt.interpreter.?.forOs("windows").?);
     try std.testing.expectEqualStrings("sh", rt.interpreter.?.forOs("macos").?);
 
-    // No `default`: a host outside the list has no entry, a nameable state —
-    // the version still builds and installs, only running there fails.
+    // No `default`: the version still builds and installs, only running on a
+    // host outside the list fails.
     var narrow = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"linux":"src/run.sh"},"interpreter":{"linux":"sh"}},"contributes":{"tools":[{"name":"t","input":{}}]}}
     );
@@ -868,8 +854,7 @@ test "entry and interpreter may be written per OS; the host picks, then `default
 test "the per-OS entry form is scripts only, and its keys must be OS names" {
     const alloc = std.testing.allocator;
 
-    // A `bin/` path inside the object: two implementation kinds under one
-    // version id, which the id cannot be.
+    // A `bin/` path inside the object: two implementation kinds under one id.
     var compiled = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"windows":"bin/a","default":"src/run.sh"}},"contributes":{"tools":[{"name":"t","input":{}}]}}
     );
@@ -882,8 +867,6 @@ test "the per-OS entry form is scripts only, and its keys must be OS names" {
     defer all_compiled.deinit();
     try std.testing.expectError(error.InvalidEntry, all_compiled.validate());
 
-    // A typo'd OS key would otherwise mean "no entry on Windows", a session
-    // later. Refused where the file is read instead.
     var typo = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"win":"src/run.ps1"}},"contributes":{"tools":[{"name":"t","input":{}}]}}
     );
@@ -1055,9 +1038,8 @@ test "a tool's surface is auto, manual or internal; silence means auto and an un
     ));
 }
 
-// A parsed manifest owns ONE arena, so nothing may escape it. A leak only
-// shows when an allocation needs a NEW chunk, so the sweep exists to cross a
-// chunk boundary somewhere — no single size matters.
+// A leak only shows when an allocation needs a NEW chunk, so the sweep exists
+// to cross a chunk boundary somewhere — no single size matters.
 test "parse allocates nothing outside the arena it returns, at any size" {
     const alloc = std.testing.allocator;
     var len: usize = 1;
@@ -1332,8 +1314,6 @@ test "a `run` command must name a tool this same manifest declares; other verbs 
 test "policy is one optional bool, so nothing it can say has to be refused" {
     const alloc = std.testing.allocator;
 
-    // With one narrow-only field the "no widening" rule is carried by the
-    // SHAPE: `allow` is just an unknown key.
     var allow = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"policy":{"allow":["shell"]}}}
     );
@@ -1404,8 +1384,6 @@ test "contributes.ui is keyed by host; each entry needs a safe path and a real a
 }
 
 test "the pre-host flat ui block is not a second shape: it reads as a host whose entry is a string" {
-    // The flat form is a host named `entry` whose value is not an object — a
-    // `WrongType`. Nothing folds it into the keyed shape.
     try std.testing.expectError(error.WrongType, parse(std.testing.allocator,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"ui":{"entry":"tui/panel.ts","api":1}}}
     ));

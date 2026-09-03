@@ -3,9 +3,8 @@
 //! Each subcommand is a separate process over the durable session file, and
 //! only `step` ever WRITES it: `append`, `note` and `cancel` deposit into the
 //! session's siblings (`<id>.inbox/`, `<id>.cancel`) for `step` to consume at
-//! its next step boundary; `events` tails the file read-only. stdout carries
-//! data and success only; refusals go to stderr, except under `--stream`,
-//! where the diagnostic is itself a protocol line on stdout.
+//! its next boundary. stdout carries data and success only; refusals go to
+//! stderr, except under `--stream`, where the diagnostic is a stdout line.
 
 const std = @import("std");
 const environment = @import("../environment.zig");
@@ -23,7 +22,6 @@ const launch = @import("../launch.zig");
 const remote = @import("../environment/remote/mod.zig");
 const common = @import("common.zig");
 const cli_ext = @import("ext.zig");
-/// Only for `sweepRemoteReports`: this file lends it a channel it already has.
 const task_cli = @import("task.zig");
 const session_list = @import("session_list.zig");
 const StepStream = @import("step_stream.zig").StepStream;
@@ -40,8 +38,7 @@ const printRaw = common.printRaw;
 const printErr = common.printErr;
 
 /// Which build target this session's extension calls run on, asked of that
-/// machine at most once per creation, and only when a `compiled` member is
-/// composed. The agent's spelling is a version id's, so this never translates.
+/// machine at most once. Spelled as a version id spells it, so nothing translates.
 const RemoteTargetProbe = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -154,7 +151,6 @@ fn withRefs(
 ) ![]composition.WithRef {
     var out: std.ArrayList(composition.WithRef) = .empty;
     errdefer freeMemberRefs(alloc, out.items);
-    // An entry with no version follows `current`.
     for (configured) |spec| try out.append(alloc, try memberRef(alloc, spec));
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
@@ -176,8 +172,7 @@ fn bareComposition(args: []const []const u8) bool {
 /// file outside it. Null means refused before a session id exists; caller owns.
 fn promptRefs(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?[]ledger.InlinePrompt {
     var out: std.ArrayList(ledger.InlinePrompt) = .empty;
-    // Covers a refusal and an allocation failure both; a successful
-    // `toOwnedSlice` leaves the list empty.
+    // Covers a refusal and an allocation failure both; `toOwnedSlice` empties it.
     defer {
         freePrompts(alloc, out.items);
         out.deinit(alloc);
@@ -211,8 +206,7 @@ fn promptRefs(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?
             try printErrFmt(alloc, io, "--prompt {s}: not valid UTF-8\n", .{path});
             return null;
         }
-        // The same UTF-8 guarantee the text needs: POSIX filenames make no
-        // such promise.
+        // The same UTF-8 guarantee as the text: POSIX filenames make no promise.
         const source = std.fs.path.stem(path);
         if (!std.unicode.utf8ValidateSlice(source)) {
             alloc.free(bytes);
@@ -245,16 +239,14 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     return 0;
 }
 
-/// What creation does when the named profile's credential resolves nowhere:
-/// `refuse` for `session new` (identity is frozen for life, so the session
-/// would name the requested model forever while the offline stand-in answers),
-/// `stand_in` for `nulya demo`.
+/// What creation does when the named profile's credential resolves nowhere.
+/// `session new` refuses: identity is frozen for life, so the session would
+/// name the requested model forever while the offline stand-in answers.
 pub const KeylessPolicy = enum { refuse, stand_in };
 
 /// Create a durable session file from `session new`'s own flags and return its
 /// id (owned by the caller), or null when the request was refused and the
-/// reason printed. `nulya demo` is the other printer over this; `keyless` is
-/// the one thing they differ on.
+/// reason printed. `nulya demo` is the other printer over this.
 pub fn createSession(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -316,9 +308,8 @@ pub fn createSession(
     const model_id = flagValue(args, "--model");
 
     // A fork continues its parent's model unless told otherwise; composition
-    // does NOT come along. `--profile` replaces the parent's; `--model` picks
-    // another id WITHIN a profile. Naming neither takes the parent's frozen
-    // descriptor verbatim — the compaction case.
+    // does NOT come along. `--profile` replaces the parent's, `--model` picks
+    // another id WITHIN one; naming neither takes the parent's descriptor.
     const parent_profile: ?[]const u8 = if (parent_header) |h|
         (if (h.value.model.len != 0) h.value.model else null)
     else
@@ -358,7 +349,6 @@ pub fn createSession(
                 try printErr(io, msg);
                 return null;
             }
-            // `stand_in`: say the same sentence, then what happens instead.
             try printErr(io, msg);
             try printErr(io, "running the offline stand-in instead (this is `nulya demo`)\n");
         }
@@ -367,11 +357,10 @@ pub fn createSession(
     }
 
     // Where this session's `shell` commands and compiled extension calls will
-    // run, for its whole life, checked before a session id exists. A
-    // creation-time identity fact, not composition: `--env` ABSENT with a
-    // `--parent` inherits `environment` AND `remote_workspace` from the
-    // parent's header; naming it at all (including `local`) means this machine.
-    // `--workspace` alone overrides only the directory column.
+    // run, for its whole life, checked before a session id exists. `--env`
+    // ABSENT with a `--parent` inherits `environment` AND `remote_workspace`
+    // from the parent's header; naming it at all (including `local`) means this
+    // machine. `--workspace` alone overrides only the directory column.
     const env_named = flagValue(args, "--env");
     const inherit_env = env_named == null and parent_header != null;
     const exec = if (env_named) |e|
@@ -438,8 +427,7 @@ pub fn createSession(
                 return null;
             },
         };
-        // The pictures come along, so the model taking over has to claim it
-        // can see them.
+        // The pictures come along, so the taking-over model must claim it sees them.
         if (carried.?.has_images and !try visionClaimed(alloc, io, &cfg, identity.model, "--carry")) return null;
     }
 
@@ -480,7 +468,6 @@ pub fn createSession(
 
     const bare = bareComposition(args);
 
-    // A package joins a session only by being on this list.
     const with = try withRefs(alloc, if (bare) &.{} else cfg.extensions.with, args);
     defer freeMemberRefs(alloc, with);
 
@@ -518,18 +505,15 @@ pub fn createSession(
             try printWithFailure(alloc, io, with, "has no such built version (see `nulya ext list`); give it one with `--with <id>@<version>`, or `nulya ext activate <id> <version>`");
             return null;
         },
-        // Resolved through `current` to something unusable; named above.
         error.ActiveExtensionBroken => {
             try printErrFmt(alloc, io, "session new failed: an extension this session names has a broken current version (see the line above)\n", .{});
             return null;
         },
-        // No build for the machine this session's tools run on; named above.
         error.ExecVersionNotFound => {
             try printErrFmt(alloc, io, "session new failed: an extension this session composes has no build for the machine its tools run on (see the line above)\n", .{});
             return null;
         },
-        // The machine must answer before its target is known; no freezing a
-        // session onto a guess.
+        // No freezing a session onto a guess: that machine must answer first.
         error.RemoteChannelLost, error.RemoteChannelStalled, error.RemoteVersionMismatch, error.RemoteSpecUnsupportedOnHost => {
             try printErrFmt(alloc, io, "session new failed: '{s}' did not answer, and this session composes an extension whose build for that machine has to be identified now\n", .{exec});
             return null;
@@ -654,8 +638,7 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         return 1;
     }
 
-    // Three gates: can this session's model see an image at all, is this file
-    // even an image, is it small enough. All refuse BEFORE anything is posted.
+    // All three image gates refuse BEFORE anything is posted.
     var images: std.ArrayList(ledger.Image) = .empty;
     defer {
         for (images.items) |img| alloc.free(img.data);
@@ -672,15 +655,12 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         }
     }
 
-    // `append` never writes the session file (its one writer is `step`): the
-    // turn is deposited and appended at the next boundary, including mid-run.
     const name = try ledger.freshDeliveryName(alloc, io, std.Io.Dir.cwd(), spath, "msg");
     defer alloc.free(name);
     ledger.depositEventLeased(alloc, io, std.Io.Dir.cwd(), spath, name, .{
         .user_text = .{ .text = text, .images = images.items },
     }) catch |err| switch (err) {
-        // A turn this large would be accepted and then unreadable at every
-        // step boundary.
+        // Accepted, then unreadable at every step boundary.
         error.InboxEventTooLarge => {
             try printErrFmt(
                 alloc,
@@ -702,10 +682,9 @@ const note_usage = "usage: nulya session note <id> --source <label> [--meta <jso
 
 /// `nulya session note <id> --source <label> [--meta <json>] (<text>|--file)` —
 /// deposit one machine fact: the counterpart of `append` for everything a
-/// PERSON did not say. Same deposit path, same step boundary, different event.
-/// `--source` is carried, not interpreted; `--meta` must be one valid JSON
-/// value, since the kernel stores its bytes verbatim. The delivery name is
-/// fresh every time: two identical notes are two facts.
+/// PERSON did not say. `--source` is carried, not interpreted; `--meta` must be
+/// one valid JSON value, since the kernel stores its bytes verbatim. The
+/// delivery name is fresh every time: two identical notes are two facts.
 fn sessionNote(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
         try printErr(io, note_usage);
@@ -866,9 +845,8 @@ fn sessionPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     };
     defer leases.close(io);
 
-    // Under both leases, and `heldTaskFor` deposits nothing on the way past:
-    // collecting a far machine's report here would wait for a lease this
-    // process holds. `nulya task status` turns it into a deposit instead.
+    // `heldTaskFor` deposits nothing on the way past: collecting a far
+    // machine's report here would wait for a lease this process holds.
     if (try task_cli.heldTaskFor(alloc, io, session_id)) |held| {
         defer held.deinit(alloc);
         switch (held.why) {
@@ -945,8 +923,7 @@ const max_image_bytes: u64 = 5 << 20;
 const ImageError = error{ UnreadableImage, UnsupportedImageType, ImageTooLarge };
 
 /// Read one image file and inline it as base64. The type comes from the file's
-/// MAGIC, never its extension: a provider rejecting a mislabeled `.png` would
-/// do it mid-run, one step later.
+/// MAGIC, never its extension.
 fn loadImage(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !ledger.Image {
     var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return ImageError.UnreadableImage;
     defer file.close(io);
@@ -964,7 +941,6 @@ fn loadImage(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !ledger.Ima
     return .{ .media_type = media_type, .data = encoder.encode(data, raw) };
 }
 
-/// png / jpeg, by magic — the whole list.
 fn sniffMediaType(bytes: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, bytes, "\x89PNG")) return "image/png";
     if (std.mem.startsWith(u8, bytes, "\xFF\xD8\xFF")) return "image/jpeg";
@@ -1074,9 +1050,8 @@ fn stepFail(
     return 1;
 }
 
-/// Say once, on resume, that this binary's kernel prompt / builtin definitions
-/// are not the ones frozen into the session. Provenance, not a gate — nothing
-/// is refused, and the line goes to stderr, keeping `--stream` stdout pure.
+/// Say once, on resume, that this binary's kernel prompt / builtins are not the
+/// ones frozen into the session. Not a gate; stderr keeps `--stream` pure.
 fn warnKernelDrift(alloc: std.mem.Allocator, io: std.Io, id: []const u8, stamp: ledger.Stamp) !void {
     if (stamp.kernel_hash.len == 0) return;
     const mine = try composition.kernelHash(alloc);
@@ -1110,7 +1085,6 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var stdout = std.Io.File.stdout().writerStreaming(io, &out_buf);
     var stream_state: StepStream = .{ .alloc = alloc, .out = &stdout.interface };
     const stream: *StepStream = &stream_state;
-    // One buffer for the whole run: a verdict line is short.
     var in_buf: [4097]u8 = undefined;
     var stdin = std.Io.File.stdin().readerStreaming(io, &in_buf);
     const ssh_password = if (sliceHasFlag(args[1..], "--ssh-password-stdin"))
@@ -1144,7 +1118,6 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     const cwd_path = try cwdRealPath(io, &cwd_buf);
 
     var hdr = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch |err| {
-        // Too old to read is not a missing session: say which format it reads.
         if (err == error.UnsupportedLedgerVersion) {
             return stepFail(alloc, stream, "session '{s}' was written by a newer nulya; this binary reads ledger v{d}", .{ id, ledger.format_version });
         }
@@ -1158,7 +1131,6 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
 
-    // The session this step's background tasks deposit their reports into.
     const tasks_dir = try launch.sessionTasksDir(alloc, id);
     defer alloc.free(tasks_dir);
     // Where this session's commands run comes from the HEADER, never a flag or
@@ -1173,15 +1145,12 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
             return stepFail(alloc, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
         },
         error.InvalidExecTarget, error.InvalidRemoteSpec, error.RemoteSpecUnsupportedOnHost => {
-            // A retired exec-target spelling gets the same pointer a fresh
-            // `--env` would — never a re-interpretation as `remote:…`.
+            // A retired spelling gets a pointer, never a re-reading as `remote:…`.
             if (launch.legacyExecHint(environment.normalizeExecSpec(hdr.value.environment))) |hint| {
                 return stepFail(alloc, stream, "session '{s}' runs its commands in '{s}', which this binary on this host cannot reach; refusing to run them here instead ({s})", .{ id, hdr.value.environment, hint });
             }
             return stepFail(alloc, stream, "session '{s}' runs its commands in '{s}', which this binary on this host cannot reach; refusing to run them here instead", .{ id, hdr.value.environment });
         },
-        // Named and reachable in principle, but silent — a different fix from
-        // "no way to get there". Its own diagnostic already went to stderr.
         error.RemoteChannelLost, error.RemoteChannelStalled => {
             return stepFail(alloc, stream, "session '{s}' runs its commands on '{s}', which did not answer; nothing was run here instead", .{ id, hdr.value.environment });
         },
@@ -1196,17 +1165,15 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     try lenv.publishSession(spath, id);
     // A background task on another machine cannot deposit its own report — the
     // session file is here. So before stepping, ask that machine and turn a
-    // finished report into the note the inbox understands. The channel is LENT,
-    // so a bare `session step` loop still receives its results.
+    // finished report into the note the inbox understands.
     if (lenv == .remote) {
         var renv = &lenv.remote;
         task_cli.sweepRemoteReports(alloc, io, &renv.ch, id);
     }
 
     // Reconstruct the model frozen at creation, re-resolving only the
-    // credential. No silent fallback: a session whose key is gone fails loudly.
-    // The session id is also the prompt-cache scope, so a provider that keys
-    // its cache keeps hitting it across separate `step` processes.
+    // credential. The session id is also the prompt-cache scope, so a provider
+    // that keys its cache keeps hitting it across separate `step` processes.
     const inline_key = if (cfg.provider.findProfile(hdr.value.model)) |p| p.api_key else null;
     var holder = launch.buildFromDescriptor(alloc, io, hdr.value.model_identity, &host, .{ .cache_key = id, .inline_key = inline_key }) catch |err| switch (err) {
         error.MissingCredential => {
@@ -1330,12 +1297,10 @@ fn sessionEvents(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 /// A read-only tail over a session file's raw lines: every line it prints is
 /// the file's own bytes, and the writer already validated that event line k
 /// carries seq k, so selecting by seq is counting lines past the header. ONE
-/// shape is not verbatim — a `user_text` carrying images is re-encoded with
-/// each image's base64 replaced by `[image <media_type>, N base64 bytes]`; a
-/// line that will not parse is printed raw.
+/// shape is not verbatim — a `user_text` carrying images has each image's
+/// base64 replaced by `[image <media_type>, N base64 bytes]`; unparsable raw.
 const EventTail = struct {
     since: u64,
-    /// Byte offset of the first unread line.
     offset: usize = 0,
     /// Event lines consumed so far (== the seq of the last one).
     seq: u64 = 0,
@@ -1583,7 +1548,6 @@ test "a member spec carries its own tool selection, in either source" {
     try std.testing.expectEqualStrings("read", refs[0].tools.named[0]);
     try std.testing.expectEqualStrings("grep", refs[0].tools.named[1]);
 
-    // `:none` is a member with nothing on the model's face.
     try std.testing.expectEqualStrings("ask", refs[1].id);
     try std.testing.expectEqual(composition.ToolSelection.none, refs[1].tools);
 

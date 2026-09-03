@@ -24,7 +24,6 @@ pub const Options = struct {
     /// A tool whose manifest declares its own passes that instead.
     pub const default_timeout_ms: u32 = tool.Timeouts.extension_ms;
 
-    /// Wall-clock cap for the oneshot call.
     timeout_ms: u32 = default_timeout_ms,
     /// Runner-level capture cap for the child's stdout/stderr.
     max_output_bytes: usize = 1 << 20,
@@ -33,8 +32,7 @@ pub const Options = struct {
     presentation_file: ?[]const u8 = null,
 };
 
-/// The tool's stdout on success, a diagnostic (exit code plus stderr) on a
-/// normal failure. Host faults and cancellation surface as errors, never here.
+/// The tool's stdout on success, a diagnostic (exit code plus stderr) on failure.
 pub const ToolInvocation = struct {
     ok: bool,
     output: []const u8,
@@ -45,10 +43,8 @@ pub const ToolInvocation = struct {
     }
 };
 
-/// Errors from `Environment.runExtension` propagate unchanged: `error.Canceled`
-/// is host execution control and is never folded into a failed invocation. The
-/// result is the child's stdout verbatim; a non-zero exit is an ordinary failed
-/// invocation carrying `exit <n>`, stderr, and whatever it printed.
+/// The result is the child's stdout verbatim; a non-zero exit is an ordinary
+/// failed invocation carrying `exit <n>`, stderr, and whatever it printed.
 ///
 /// The arguments' shape is checked BEFORE anything is spawned.
 pub fn invokeTool(
@@ -75,8 +71,7 @@ pub fn invokeTool(
         .presentation_file = options.presentation_file,
     }) catch |err| {
         // "This machine cannot run that version" is a failed call, not a host
-        // fault: killing the step would take a conversation down for something
-        // one tool could have reported.
+        // fault: killing the step would take a conversation down over one tool.
         if (!exec.isUnrunnableHere(err)) return err;
         var diag: std.Io.Writer.Allocating = .init(alloc);
         errdefer diag.deinit();
@@ -133,8 +128,7 @@ const FakeEnv = struct {
     fn runExtension(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment.ExtensionRequest) anyerror!environment.ExtensionOutcome {
         const self: *FakeEnv = @ptrCast(@alignCast(ptr));
         if (self.err) |e| return e;
-        // The allocation-failure sweep drives this fake many times, so drop
-        // any previous recording before overwriting it.
+        // The allocation-failure sweep drives this fake many times.
         self.dropSaw(alloc);
 
         self.saw_request_json = try alloc.dupe(u8, req.request_json);
@@ -291,9 +285,8 @@ test "no allocation failure is swallowed into a failed invocation" {
             var fake = FakeEnv{ .io = testing.io, .response = "text" };
             defer fake.deinit(alloc);
             const invocation = invokeTool(alloc, fake.handle(), ref_id, ref_version, "t", "ws", "{\"a\":\"b\",\"c\":1}", .{}) catch |err| switch (err) {
-                // An allocating writer reports a denied allocation as
-                // WriteFailed while the sweep only accepts OutOfMemory; both
-                // are host resource faults.
+                // An allocating writer reports a denied allocation as WriteFailed
+                // while the sweep only accepts OutOfMemory.
                 error.WriteFailed => return error.OutOfMemory,
                 else => return err,
             };

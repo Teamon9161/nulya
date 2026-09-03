@@ -6,8 +6,6 @@
 //!   default   a script extension — `src/run.sh` and `src/run.ps1`, selected
 //!             per host by the manifest's per-OS `entry` / `interpreter`.
 //!   `--zig`   a compiled Zig extension, same wire.
-//!
-//! Both are buildable, runnable extensions the moment they are written.
 
 const std = @import("std");
 
@@ -69,10 +67,8 @@ pub const example_test_json =
 ;
 
 /// The generated PowerShell entry, frozen and run as-is. Caller owns the bytes.
-///
-/// `[Console]::Out.Write` rather than `Write-Output`: stdout IS the result the
-/// model sees, so the script decides its own trailing newline instead of a
-/// cmdlet deciding it per platform.
+/// `[Console]::Out.Write` rather than `Write-Output`: stdout IS the result, so
+/// the script decides its own trailing newline instead of a cmdlet.
 pub fn scriptPs1(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc,
         \\# stdin is this call's arguments as JSON; each simple argument is also NULYA_ARG_<key>.

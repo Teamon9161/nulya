@@ -4,9 +4,8 @@
 //! VERSION that serves its calls, adapting it into the kernel's one `tool.Tool`
 //! through the `ToolExecutor` seam.
 //!
-//!   - It never touches the store, `current`, manifests or discovery: which
-//!     version serves this tool was frozen by the caller, and which FILE that
-//!     version means is answered by the machine about to spawn it.
+//!   - It never touches the store, `current`, manifests or discovery: the
+//!     version was frozen by the caller, the file chosen by the spawning machine.
 //!   - `ToolExecutor.ptr` borrows the binding, so it (and its borrowed
 //!     definition strings) must outlive every derived `Tool` and must not move.
 
@@ -23,8 +22,7 @@ pub const Binding = struct {
     ext_id: []const u8,
     /// The frozen version that SERVES a call: the header's `exec_version` (the
     /// sibling build for that target) when the session's tools run elsewhere,
-    /// otherwise the member's own. Chosen once, at freeze time, and only
-    /// carried here.
+    /// otherwise the member's own. Chosen once, at freeze time.
     version: []const u8,
     /// Null takes the host default (`invoke.Options.timeout_ms`).
     timeout_ms: ?u32 = null,

@@ -16,15 +16,13 @@
 
 const std = @import("std");
 
-/// Where a spill's bytes go. `emit` writes no files itself: it hands the
-/// workspace-relative path and the bytes to the session's environment, which
-/// knows which machine the workspace is on.
+/// Where a spill's bytes go. `emit` writes no files itself: it hands the path and
+/// bytes to the environment, which knows which machine the workspace is on.
 pub const FileSink = struct {
     ptr: *anyopaque,
     writeFn: *const fn (ptr: *anyopaque, rel_path: []const u8, bytes: []const u8) anyerror!void,
 
-    /// Write `bytes` at `rel_path`, creating parents. Implementations own that
-    /// promise — `emit` never creates a directory of its own.
+    /// Write `bytes` at `rel_path`, creating parents — the implementation's promise.
     pub fn write(self: FileSink, rel_path: []const u8, bytes: []const u8) anyerror!void {
         return self.writeFn(self.ptr, rel_path, bytes);
     }
@@ -33,8 +31,7 @@ pub const FileSink = struct {
 pub const OutputBudget = struct {
     /// Hard byte ceiling for a single tool result entering context.
     max_bytes: usize = 128 * 1024,
-    /// Per-line byte ceiling. Deliberately huge: prose/config/markdown are
-    /// legitimately long; a low cap mis-fires and costs the model a round-trip.
+    /// Per-line byte ceiling. Deliberately huge: long prose lines are legitimate.
     max_line_bytes: usize = 16384,
     /// Percentage of the body budget reserved for the head on byte overflow.
     head_percent: u8 = 25,
@@ -162,10 +159,9 @@ pub fn utf8Lossy(alloc: std.mem.Allocator, raw: []const u8) !?Lossy {
     return .{ .text = try out.toOwnedSlice(alloc), .replaced = replaced };
 }
 
-/// The head+tail discipline without the spill: `body` trimmed to
-/// `budget.max_bytes` around the same elision marker `emit` uses, on UTF-8 (and
-/// where it can, line) boundaries. For callers whose complete bytes are already
-/// on disk. Caller owns the result.
+/// The head+tail discipline without the spill: `body` trimmed to `budget.max_bytes`
+/// around the same elision marker `emit` uses, on UTF-8 (and where it can, line)
+/// boundaries. Caller owns the result.
 pub fn headTail(alloc: std.mem.Allocator, body: []const u8, budget: OutputBudget) ![]u8 {
     if (body.len <= budget.max_bytes) return alloc.dupe(u8, body);
     var out: std.ArrayList(u8) = .empty;
@@ -255,12 +251,11 @@ pub const StepOutputLimiter = struct {
         };
     }
 
-    /// Charge one result against the step budget, in batch order. The budget
-    /// bounds result BODIES; it never decides which results the model sees. A
-    /// result that no longer fits keeps, whichever is smaller, its own text
-    /// verbatim or a head prefix ending in a COMPLETE pointer to the bytes on
-    /// disk. That footer is the per-result floor and is not charged, so a step's
-    /// visible tool text is `max_bytes` plus at most one footer per call.
+    /// Charge one result against the step budget, in batch order. The budget bounds
+    /// result BODIES; it never decides which results the model sees. A result that
+    /// no longer fits keeps, whichever is smaller, its own text verbatim or a head
+    /// prefix ending in a COMPLETE pointer to the bytes on disk. The footer is the
+    /// per-result floor and is not charged.
     pub fn apply(
         self: *StepOutputLimiter,
         alloc: std.mem.Allocator,
@@ -378,8 +373,7 @@ fn isUtf8Continuation(byte: u8) bool {
 
 // ── tests ───────────────────────────────────────────────────────────────────
 
-/// A sink that keeps what it was handed instead of writing it: the tests want
-/// WHICH path was spilled to and WHAT bytes went there.
+/// A sink that keeps what it was handed instead of writing it.
 const RecordingSink = struct {
     alloc: std.mem.Allocator,
     path: ?[]u8 = null,

@@ -24,8 +24,7 @@ pub const Config = struct {
     base_url: []const u8 = DEFAULT_BASE_URL,
 };
 
-/// True for DeepSeek's OpenAI-compatible endpoint, whose thinking switch and
-/// reasoning replay differ from OpenAI's own.
+/// True for DeepSeek's OpenAI-compatible endpoint.
 pub fn isDeepSeek(base_url: []const u8) bool {
     return std.mem.indexOf(u8, base_url, "deepseek.com") != null;
 }
@@ -160,8 +159,7 @@ pub fn buildRequestJson(
         try jw.write(max);
     }
     // `off` is not an effort level on this wire: DeepSeek takes an explicit
-    // `thinking` switch, everyone else nothing. Any other level is
-    // `reasoning_effort`.
+    // `thinking` switch, everyone else nothing. Any other level is `reasoning_effort`.
     if (request.options.effort) |effort| {
         if (std.mem.eql(u8, effort, "off")) {
             if (deepseek) {
@@ -269,10 +267,9 @@ fn writeAssistantMessage(alloc: std.mem.Allocator, jw: *std.json.Stringify, as: 
         try jw.write(as.text);
     }
     if (as.calls.len != 0) {
-        // DeepSeek requires the CoT of a tool-calling turn on every later
-        // request of that turn (400 otherwise) and ignores it elsewhere, so it
-        // rides only on messages carrying tool_calls. Reasoning of another
-        // provider's shape contributes nothing.
+        // DeepSeek requires the CoT of a tool-calling turn on every later request
+        // of that turn (400 otherwise) and ignores it elsewhere, so it rides only
+        // on messages carrying tool_calls.
         if (as.reasoning.len != 0) {
             const text = try joinReasoningContent(alloc, as.reasoning);
             defer alloc.free(text);
@@ -324,8 +321,7 @@ fn writeTools(jw: *std.json.Stringify, tools: []const tool.ToolDefinition) !void
 }
 
 /// The reasoning item this wire keeps for replay: the turn's whole
-/// `reasoning_content` as one object, handed back verbatim under the same field
-/// name. Opaque to the kernel; only this file reads it.
+/// `reasoning_content` as one object, handed back verbatim under the same field name.
 const reasoning_field = "reasoning_content";
 
 /// Per-stream SSE state. Chat Completions has no terminator other than `[DONE]`,
@@ -356,8 +352,7 @@ pub const SseState = struct {
         return processSseData(self, data);
     }
 
-    /// Emit the accumulated reasoning as one item (and forget it). A no-op when
-    /// the model did not think aloud.
+    /// Emit the accumulated reasoning as one item (and forget it).
     pub fn flushReasoning(self: *SseState) !void {
         const text = self.reasoning.written();
         if (text.len == 0) return;

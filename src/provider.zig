@@ -34,9 +34,8 @@ pub const RetryPolicy = struct {
     initial_backoff_ms: u64 = 1_000,
     max_backoff_ms: u64 = 30_000,
     /// How long the server may send nothing at all before the request counts as
-    /// stalled (a `Transport` fault, retried like one). Byte-level: any line,
-    /// keepalives included, resets it, so this bounds a dead-but-open socket
-    /// without tripping a slow reasoning model. 0 disables.
+    /// stalled (a `Transport` fault, retried like one). Any line, keepalives
+    /// included, resets it. 0 disables.
     stall_timeout_ms: u64 = 120_000,
 
     pub fn backoffMs(self: RetryPolicy, attempt: u32) u64 {
@@ -66,8 +65,7 @@ pub const ToolUseInputDelta = struct {
     fragment: []const u8,
 };
 
-/// Streaming providers normalize their wire events to this shape. The loop can
-/// forward these to a UI or let a `TurnCollector` accumulate them into a turn.
+/// Streaming providers normalize their wire events to this shape.
 pub const StreamEvent = union(enum) {
     started,
     text_delta: []const u8,
@@ -113,9 +111,8 @@ pub const ModelTurn = struct {
     reasoning: []const u8,
     text: []const u8,
     calls: []const ledger.ToolCall,
-    /// Token accounting for this turn. Carries the cache-read counter so the
-    /// loop can MEASURE the cache-generation invariant. No owned allocations —
-    /// `deinit` leaves it untouched.
+    /// Token accounting for this turn. Carries the cache-read counter so the loop
+    /// can MEASURE the cache-generation invariant. No owned allocations.
     usage: Usage = .{},
     /// Why the model stopped. `tool_use` vs `end_turn` drive the loop;
     /// `max_tokens` says the turn was truncated mid-thought.

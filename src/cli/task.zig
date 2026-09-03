@@ -1,11 +1,10 @@
 //! `nulya task …` — the background-task surface: the supervisor that watches
 //! one detached command, and the verbs a model (through `shell`), a driver and
-//! a person all read it with. The kernel's whole share of background work is
-//! `Environment.startShellTask` and the report note the supervisor deposits.
+//! a person all read it with.
 //!
 //! There is no task registry. `status.json` is the truth; `task list` is a
 //! projection of the directories, and two of its states (`starting`, `lost`)
-//! exist only there. `lost` is `state == running` with the lease free.
+//! exist only there.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -33,23 +32,18 @@ const printErr = common.printErr;
 // ── The task directory's five files ─────────────────────────────────────────
 
 pub const status_file = "status.json";
-/// The kill marker, read at the supervisor's poll and before it spawns.
 pub const kill_file = "kill";
 /// Where a task's result goes when it is not the session that started it. A
 /// separate file: another process writes it while the supervisor owns status.
 pub const notify_file = "notify";
 /// What a supervisor with no session file beside it leaves instead of a
-/// deposit: the report text, verbatim, next to the log it quotes. Only a task
-/// on ANOTHER machine has one; it waits until a host verb fetches it.
+/// deposit. Only a task on ANOTHER machine has one; it waits for a host verb.
 pub const report_file = "report.txt";
 /// The host's own note that a far task's report has already become a report
 /// note; it lives on the HOST side because delivery is this machine's fact.
-/// Without it `depositPending` would keep seeing that inbox file, so
-/// `wait --any` would say yes about the same task forever.
 pub const delivered_file = "delivered";
 
 const poll_ms: u32 = 250;
-/// How much of the log's END is read; the whole log is on disk and named.
 const log_read_cap: u64 = 1 << 20;
 
 pub const json_opts: std.json.ParseOptions = .{ .allocate = .alloc_always, .ignore_unknown_fields = true };
@@ -78,8 +72,7 @@ pub const EndedBy = enum { exit, timeout, kill };
 
 /// What a reader sees, which is more than what is written: no status yet is
 /// `starting`, a `running` status whose lease is free is `lost`, and
-/// `unreachable` is a task on another machine this host got no answer about —
-/// not `lost`, not `done`: nothing at all is known.
+/// `unreachable` is a task on another machine this host got no answer about.
 pub const Projected = enum { starting, running, done, lost, @"unreachable" };
 
 pub fn dispatchTask(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -99,9 +92,8 @@ pub fn dispatchTask(alloc: std.mem.Allocator, io: std.Io, args: []const []const 
 
 // ── Naming: a task is `<session-id>/t<N>` ───────────────────────────────────
 
-/// One resolved task: its full name and the directory holding its five files.
-/// Full names everywhere the model can see, because a retargeted task still
-/// has to say which session started it.
+/// Full names everywhere the model can see: a retargeted task still has to say
+/// which session started it.
 const Ref = struct {
     session: []u8,
     slot: []u8,
@@ -237,7 +229,7 @@ fn readNotify(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]u8 {
 ///   0. drop every pipe handle the spawn chain leaked into this process;
 ///   1. take the lease, write `running`;
 ///   2. honour a kill marker that arrived first, WITHOUT spawning anything;
-///   3. run the real command under a `Tree`, so a kill ends the whole subtree;
+///   3. run the real command under a `Tree`;
 ///   4. wait: the child's exit racing a 250 ms poll of kill marker and budget;
 ///   5. DELIVER the report — deposit it into the session's inbox, then re-read
 ///      `notify` and move the deposit if it changed under us (that window is
@@ -250,8 +242,7 @@ fn readNotify(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]u8 {
 fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     closeInheritedStrayPipes();
     const dir = flagValue(args, "--dir") orelse return superviseUsage(io);
-    // Exactly one of these two, and it decides where the report goes: a
-    // `--session` file here means deposit; `--task` means leave it by the log.
+    // Exactly one: `--session` means deposit; `--task` means leave it by the log.
     const session_path = flagValue(args, "--session");
     const task_name = flagValue(args, "--task");
     if ((session_path == null) == (task_name == null)) return superviseUsage(io);
@@ -267,7 +258,6 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     const command = commandAfterDashDash(alloc, args) catch return superviseUsage(io);
     defer alloc.free(command);
 
-    // Who this task is; with `--task` the host already said the name.
     const slot = std.fs.path.basename(dir);
     const full = if (session_path) |p|
         try std.fmt.allocPrint(alloc, "{s}/{s}", .{ std.fs.path.stem(std.fs.path.basename(p)), slot })
@@ -305,8 +295,6 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     var ended: EndedBy = .exit;
     var exit_code: u8 = 0;
 
-    // ② A kill that arrived first: nothing is spawned, the report still
-    // happens.
     if (markerPresent(alloc, io, dir, kill_file)) {
         ended = .kill;
         exit_code = 1;
@@ -361,9 +349,8 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
             deposit_failed = true;
         };
     } else {
-        // No session on this machine to deposit into: the report waits here
-        // and the exit code in `status.json`, so one poll collects both.
-        // Written BEFORE `done`: whoever sees `done` must see the result.
+        // No session on this machine to deposit into: the report waits here,
+        // written BEFORE `done` — whoever sees `done` must see the result.
         const report_path = try std.fs.path.join(alloc, &.{ dir, report_file });
         defer alloc.free(report_path);
         cwd.writeFile(io, .{ .sub_path = report_path, .data = text }) catch |err| {
@@ -405,10 +392,9 @@ const win32 = struct {
 /// 0.16 spawns no other way), so a supervisor at the end of a nested chain
 /// inherits a duplicate of every inheritable pipe UP that chain, and each write
 /// end held here keeps an ancestor's reader from EOF for the task's whole life.
-/// The supervisor legitimately owns no pipes — `startShellTask` gives it the
-/// null device — so every pipe-typed handle except its own stdio is a stray.
-/// Handle values are small multiples of 4 and strays are duplicated at process
-/// creation, so 0x1000 is past all of them.
+/// `startShellTask` gives the supervisor the null device, so every pipe-typed
+/// handle except its own stdio is a stray. Handle values are small multiples of
+/// 4 and strays are duplicated at process creation, so 0x1000 is past them all.
 fn closeInheritedStrayPipes() void {
     if (builtin.os.tag != .windows) return;
     const stdio = [3]std.os.windows.HANDLE{
@@ -425,7 +411,6 @@ fn closeInheritedStrayPipes() void {
     }
 }
 
-/// Everything after `--`, joined by spaces; `startShellTask` passes one.
 fn commandAfterDashDash(alloc: std.mem.Allocator, args: []const []const u8) ![]u8 {
     for (args, 0..) |a, i| {
         if (!std.mem.eql(u8, a, "--")) continue;
@@ -443,8 +428,7 @@ fn currentPid() i64 {
     };
 }
 
-/// Absence answers "no" for every reason: a marker only answers "has this
-/// happened".
+/// Absence answers "no" for every reason: a marker only says whether it happened.
 pub fn markerPresent(alloc: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8) bool {
     const path = std.fs.path.join(alloc, &.{ dir, name }) catch return false;
     defer alloc.free(path);
@@ -463,10 +447,9 @@ const RunRequest = struct {
 
 const RunOutcome = struct { ended: EndedBy, exit_code: u8 };
 
-/// Run the real command with its output going to `output.log`, ending it when
-/// the kill marker appears or the budget runs out. Pipes plus a drain, not the
-/// log file as stdio: on Windows a `.file` stdio is REOPENED per stream, so
-/// stdout and stderr would each start at offset zero and clobber each other.
+/// Pipes plus a drain, not the log file as stdio: on Windows a `.file` stdio is
+/// REOPENED per stream, so stdout and stderr would each start at offset zero
+/// and clobber each other.
 fn runWatched(alloc: std.mem.Allocator, io: std.Io, lenv: *environment.LocalEnvironment, req: RunRequest) !RunOutcome {
     const cwd = std.Io.Dir.cwd();
     var log = try cwd.createFile(io, req.log_path, .{});
@@ -561,8 +544,7 @@ fn flushBuffered(io: std.Io, multi_reader: *std.Io.File.MultiReader, log: *std.I
 const Waited = union(enum) { exited: std.process.Child.Term, killed, timed_out, wait_failed };
 
 /// `child.wait` racing a poller that checks the kill marker every 250 ms and
-/// enforces the optional budget. Without two units of concurrency the wait runs
-/// unguarded: no false kill, no false timeout.
+/// enforces the optional budget. Without concurrency the wait runs unguarded.
 fn waitOrMarker(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -731,8 +713,7 @@ const DepositRequest = struct {
 /// Deposit the report note into the target session's inbox, then close the
 /// retarget window: if `notify` changed while the report was built, the file
 /// just written is renamed into the new target's inbox. The delivery name
-/// carries the OWNER's session id and is deterministic, so two sessions cannot
-/// collide and a redelivery is a no-op under the `origin` column.
+/// carries the OWNER's session id, so a redelivery is a no-op under `origin`.
 pub fn depositReport(alloc: std.mem.Allocator, io: std.Io, req: DepositRequest) !void {
     const target = (try readNotify(alloc, io, req.dir)) orelse try alloc.dupe(u8, req.session_id);
     defer alloc.free(target);
@@ -776,8 +757,7 @@ fn moveDeposit(alloc: std.mem.Allocator, io: std.Io, from: []const u8, to: []con
 // ── Tasks on another machine ────────────────────────────────────────────────
 //
 // The far machine holds the COMMAND — supervisor, log, status, lease — and this
-// one holds the NAME and the DELIVERY, because the name is what the ledger
-// speaks. Reaching that machine and polling it is `task_remote.zig`.
+// one holds the NAME and the DELIVERY, because the name is what the ledger speaks.
 
 pub const sweepRemoteReports = task_remote.sweepRemoteReports;
 
@@ -801,13 +781,10 @@ pub const HeldTask = struct {
     }
 };
 
-/// The first task holding `session_id`'s ground, or null when none does.
-///
-/// Asks the same projection the `task` verbs answer with, so "is this task
-/// running?" has one answer. The scope is `touches`: a task retargeted
-/// elsewhere still writes under this session's scratch tree. A `done` row holds
-/// nothing — unless its result is still on another machine (`report_pending`),
-/// the only record of where it is owed.
+/// The first task holding `session_id`'s ground, or null when none does. The
+/// scope is `touches`: a task retargeted elsewhere still writes under this
+/// session's scratch tree. A `done` row holds nothing — unless its result is
+/// still on another machine (`report_pending`).
 ///
 /// The one reading path that deposits NOTHING: its caller holds the leases.
 pub fn heldTaskFor(alloc: std.mem.Allocator, io: std.Io, session_id: []const u8) !?HeldTask {
@@ -881,9 +858,8 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 
     const tasks_dir = try launch.sessionTasksDir(alloc, session_id);
     defer alloc.free(tasks_dir);
-    // The SAME `startShellTask` the `shell` tool reaches, through the SAME
-    // environment that session's steps run behind, so the two entry points
-    // cannot drift about which machine a command runs on.
+    // The SAME `startShellTask` and environment the `shell` tool reaches, so the
+    // two entry points cannot drift about which machine a command runs on.
     var lenv = launch.sessionEnvironment(alloc, io, &cfg, .{
         .session_path = spath,
         .tasks_dir = tasks_dir,
@@ -910,10 +886,9 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     };
     defer lenv.deinit();
 
-    // Held from here across the start: this creates a supervisor and a
-    // directory under the session's scratch tree that `session prune` removes.
-    // "This session exists" and "a task of it exists" become true as ONE act
-    // under the lease prune settles its own question under.
+    // Held from here across the start: "this session exists" and "a task of it
+    // exists" become true as ONE act, under the lease `session prune` settles
+    // its own question under.
     var held = lease.sessionDeposits(alloc, io, std.Io.Dir.cwd(), spath, .block) catch {
         try printErrFmt(alloc, io, "task run failed: cannot open the inbox of '{s}'\n", .{session_id});
         return 1;
@@ -952,11 +927,10 @@ pub const Row = struct {
     /// The machine this task's command runs on, when it is not this one; null
     /// is local. `dir` and the log path under it are then paths over THERE.
     machine: ?[]const u8 = null,
-    /// Finished, with its result still on the other machine — nobody has turned
-    /// it into the report note its target is owed. A remote task has TWO
-    /// lifetimes and `done` ends only the first (a local supervisor deposits
-    /// before writing `done`, so this is always false there), which is why
-    /// `done` alone is not grounds to delete the ground under it.
+    /// Finished, with its result still on the other machine. A remote task has
+    /// TWO lifetimes and `done` ends only the first (locally the supervisor
+    /// deposits before `done`, so this is always false), which is why `done`
+    /// alone is not grounds to delete the ground under it.
     report_pending: bool = false,
 };
 
@@ -969,8 +943,7 @@ pub const RowRef = struct {
 };
 
 /// One task's state, from whichever machine holds it, with any report it has
-/// left collected on the way past. Null means the row is SKIPPED: a status that
-/// does not parse is a fault, and nothing makes up a state. A real fault
+/// left collected on the way past. Null means the row is SKIPPED. A fault
 /// reading the LEASE is deliberately NOT folded into that null — `lookupRow`
 /// turns a null row into "no such task", and a `.lock` this machine cannot open
 /// is no evidence the task is gone, so it propagates as an error.
@@ -989,16 +962,13 @@ fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef, deliver
     };
 }
 
-/// Which of a session's tasks a reader is asking about.
 const Scope = union(enum) {
-    /// Every task in this workspace.
     all,
     /// The ones whose result arrives in this session: its own, unless it handed
     /// them away, plus the ones another session retargeted here.
     reports_into: []const u8,
     /// Every task this session still TOUCHES: the ones above, plus the ones it
-    /// owns on disk after handing the report elsewhere. `session prune` asks
-    /// this one, being about to delete the directory they write into.
+    /// owns on disk after handing the report elsewhere. `session prune` asks it.
     touches: []const u8,
 };
 
@@ -1212,7 +1182,6 @@ fn writeRowJson(jw: *std.json.Stringify, io: std.Io, row: Row) !void {
     try jw.write(log);
     try jw.objectField("notify");
     if (row.notify) |n| try jw.write(n) else try jw.write(null);
-    // Which machine the log above is ON; null is this one.
     try jw.objectField("machine");
     if (row.machine) |m| try jw.write(m) else try jw.write(null);
     inline for (.{ "command", "cwd", "started" }) |field| {
@@ -1290,7 +1259,6 @@ fn taskStatus(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
         if (s.duration_ms) |d| try printOut(alloc, io, "duration_ms: {d}\n", .{d});
     }
     if (row.notify) |n| try printOut(alloc, io, "notify: {s}\n", .{n});
-    // Printed before the log: on a remote session that path is over THERE.
     if (row.machine) |m| try printOut(alloc, io, "machine: {s}\n", .{m});
     try printOut(alloc, io, "log: {s}/{s}\n", .{ row.dir, environment.task_log_name });
     return 0;
@@ -1337,7 +1305,6 @@ fn taskWait(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     const scope = if (any) try scopeSession(alloc, args) else null;
     defer if (scope) |s| alloc.free(s);
 
-    // One `Far` for the whole wait: a poll every 250 ms is not a connection.
     var far: Far = .init(alloc, io);
     defer far.deinit();
 
@@ -1352,8 +1319,6 @@ fn taskWait(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
             const rows = try collectRows(arena, io, &far, scopeOf(scope));
             var waitable: usize = 0;
             for (rows) |row| {
-                // Counts only while UNREAD, or a driver stepping on exit 0 is
-                // told "finished" forever about the same task.
                 if (row.state == .done and try depositPending(arena, io, row)) {
                     try printFinished(alloc, io, row);
                     return 0;
@@ -1437,8 +1402,7 @@ fn taskKill(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     }
     // A marker, not a signal: the supervisor picks it up at its next poll.
     if (row.machine) |spec| {
-        // The marker belongs beside the command: put down on that machine by
-        // name, never by path. No channel means the request did not arrive.
+        // The marker goes down on that machine by name, never by path.
         const ch = (try far.channelFor(row.session)) orelse {
             try printErrFmt(alloc, io, "task {s}: '{s}' did not answer, so the kill was not delivered\n", .{ row.full, spec });
             return 1;
@@ -1487,17 +1451,15 @@ fn taskRetarget(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     const current_path = try launch.sessionPath(arena, current);
     const to_path = try launch.sessionPath(arena, to);
 
-    // Cheap and not authoritative — the answer that counts is under the leases
-    // below. Here so a mistyped id is refused before an inbox exists for it.
+    // Not authoritative: here so a mistyped id is refused before an inbox exists.
     cwd.access(io, to_path, .{}) catch {
         try printErrFmt(alloc, io, "no such session '{s}'\n", .{to});
         return 1;
     };
 
-    // BOTH inboxes' leases, held across everything below. The `notify` pointer
-    // and an undrained deposit are two halves of one routing fact, so they move
-    // together or not at all; and writing that pointer mutates the
-    // DESTINATION's lifetime graph, which `session prune` reads.
+    // BOTH inboxes' leases, held across everything below: the `notify` pointer
+    // and an undrained deposit are two halves of one routing fact, and writing
+    // that pointer mutates the DESTINATION's lifetime graph `session prune` reads.
     var pair = try lease.depositPair(arena, io, cwd, current_path, to_path, .block);
     defer pair.close(io);
 
@@ -1532,7 +1494,6 @@ fn writeNotify(arena: std.mem.Allocator, io: std.Io, dir: []const u8, to: []cons
     try cwd.rename(tmp, cwd, final, io);
 }
 
-/// The destination was there at the check and gone by the time of the lease.
 fn retargetLostTarget(alloc: std.mem.Allocator, io: std.Io, to: []const u8) !u8 {
     try printErrFmt(alloc, io, "no such session '{s}'\n", .{to});
     return 1;
@@ -1689,7 +1650,6 @@ test "the report frames the output verbatim, and says so when there is none" {
     try std.testing.expect(std.mem.indexOf(u8, text, "line two") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, tail_close_prefix) != null);
 
-    // Killed and timed out say so on the first line, after the exit code.
     const killed = try reportText(alloc, io, .{
         .full = "s-1/t3",
         .command = "sleep 30",
@@ -1716,7 +1676,6 @@ test "the report frames the output verbatim, and says so when there is none" {
     defer alloc.free(expired);
     try std.testing.expect(std.mem.indexOf(u8, expired, "timed out after 1000 ms") != null);
 
-    // Nothing on either stream: one honest line instead of an empty frame.
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = log, .data = "" });
     const quiet = try reportText(alloc, io, .{
         .full = "s-1/t3",

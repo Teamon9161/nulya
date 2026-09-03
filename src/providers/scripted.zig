@@ -40,9 +40,8 @@ pub const ScriptedProvider = struct {
     /// Spelled out, not imported: it lives in a separate artifact.
     pub const wrap_up_opening = "Your step budget is spent";
 
-    /// The files the `wrapdefy` mode's two commands create. Two names because
-    /// the question is which ROUND ran a tool; the ABSENCE of the second is what
-    /// a test asserts.
+    /// The files the `wrapdefy` mode's two commands create. The ABSENCE of the
+    /// second is what a test asserts.
     pub const defiant_before_file = "wrapup-before.txt";
     pub const defiant_after_file = "wrapup-after.txt";
     /// What it says once the refusal is in front of it: a deny is a
@@ -51,8 +50,7 @@ pub const ScriptedProvider = struct {
     const defiant_before_args = "{\"command\":\"echo ran > " ++ defiant_before_file ++ "\"}";
     const defiant_after_args = "{\"command\":\"echo ran > " ++ defiant_after_file ++ "\"}";
 
-    /// What the `background` mode's command prints. `echo` means the same thing
-    /// in both dialects, so the stand-in needs no dialect of its own.
+    /// What the `background` mode's command prints; `echo` works in both dialects.
     pub const background_marker = "scripted-background-marker";
     const background_args =
         \\{"command":"echo scripted-background-marker","background":true}
@@ -173,8 +171,8 @@ pub const ScriptedProvider = struct {
                 try sink.emit(.{ .done = .end_turn });
                 return;
             }
-            // The receipt came back but the task has not finished: end the turn
-            // and leave stepping again to the driver — that is policy.
+            // The receipt came back but the task has not finished; stepping again
+            // is the driver's policy.
             if (hasToolResult(request.prompt_ir.turns)) {
                 try sink.emit(.{ .text_delta = "waiting" });
                 try sink.emit(.{ .done = .end_turn });
@@ -186,8 +184,7 @@ pub const ScriptedProvider = struct {
             return;
         }
         if (self.mode == .handoff) {
-            // The handoff already happened this turn: stop, so a parent stepped
-            // again terminates instead of proposing a second handover.
+            // The handoff already happened this turn: stop.
             if (hasToolResult(request.prompt_ir.turns)) {
                 try sink.emit(.{ .text_delta = "handoff proposed" });
                 try sink.emit(.{ .done = .end_turn });
@@ -226,8 +223,7 @@ fn hasToolResult(turns: []const prompt.Turn) bool {
     return false;
 }
 
-/// Did any tool call in this transcript come back not-ok? In the modes that use
-/// this, a gate refusal is the only way that happens.
+/// Did any tool call come back not-ok? Only a gate refusal does that here.
 fn hasFailedToolResult(turns: []const prompt.Turn) bool {
     for (turns) |turn| switch (turn) {
         .tool_results => |results| for (results) |result| {
@@ -254,8 +250,7 @@ fn hasTaskReport(turns: []const prompt.Turn) bool {
 }
 
 /// Does this transcript open on a brief carried in from another session? A fork
-/// deposits it as an ordinary `user_text`, so "which phase am I in" is a
-/// property of the projection, exactly as it is for a real model.
+/// deposits it as an ordinary `user_text`.
 fn hasCarriedBrief(turns: []const prompt.Turn) bool {
     for (turns) |turn| switch (turn) {
         .user_text => |u| if (std.mem.startsWith(u8, u.text, ScriptedProvider.summary_marker)) return true,

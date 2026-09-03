@@ -114,10 +114,9 @@ pub fn listActive(
     defer site_mod.Site.freeActive(alloc, active);
 
     for (active) |entry| {
-        // Skip broken extensions, but let host cancellation propagate rather
-        // than be misread as a malformed one. `.structural`: a catalog only
-        // names what a complete version declares — nothing here runs, and the
-        // paths that do ask `.sealed` themselves.
+        // Skip broken extensions, but let host cancellation propagate.
+        // `.structural`: a catalog only names what a complete version declares —
+        // nothing here runs, and the paths that do ask `.sealed` themselves.
         const r = site.resolveEntry(alloc, entry, .structural) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
@@ -181,8 +180,7 @@ fn readSkillBody(
 }
 
 fn readFrozenManifest(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !manifest.Manifest {
-    // The single validate+parse path, so `error.Canceled` is preserved rather
-    // than collapsed into a spurious integrity error.
+    // The single validate+parse path, so `error.Canceled` is preserved.
     return store.Store.init(io, root).readManifest(alloc, id, version, .sealed);
 }
 

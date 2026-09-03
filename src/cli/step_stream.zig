@@ -1,7 +1,6 @@
 //! The `session step --stream` line protocol: one JSON object per line on
-//! stdout, written AS the step runs instead of once it is over. A wire format,
-//! not a verb: `session.zig` decides whether to stream, this decides what a
-//! streamed line looks like.
+//! stdout, written AS the step runs instead of once it is over. `session.zig`
+//! decides whether to stream, this decides what a streamed line looks like.
 
 const std = @import("std");
 const ledger = @import("../ledger.zig");
@@ -12,18 +11,15 @@ const printErr = @import("common.zig").printErr;
 /// Lines carrying a `stream` field are transient observations; lines without
 /// one are ledger events in exactly the `session events` shape. Under
 /// `--stream` stdout carries nothing else — diagnostics become
-/// `{"stream":"run","event":"error"}`. `loop.StepObserver` hands it facts, it
-/// turns them into lines; it never touches the session.
+/// `{"stream":"run","event":"error"}`.
 pub const StepStream = struct {
     alloc: std.mem.Allocator,
     out: *std.Io.Writer,
     /// Ledger index of the first event not yet flushed as a line.
     printed: usize = 0,
     /// A read-only handle on the session's ledger, so events can be reported
-    /// the moment they EXIST rather than only when the step is over. The one
-    /// event that exists before the model is asked anything is a `user_text`
-    /// the step boundary drained from the inbox. Absent, every line is emitted
-    /// at `stepEnd`.
+    /// the moment they EXIST rather than only when the step is over. Absent,
+    /// every line is emitted at `stepEnd`.
     ledger_view: ?*const ledger.Ledger = null,
     /// How the most recent step ended, for the `run done` line's `stopped`.
     last_status: loop.StepStatus = .completed,
@@ -52,9 +48,8 @@ pub const StepStream = struct {
         // A complete reasoning item is opaque provider bytes kept for replay;
         // `thinking_delta` is the display channel.
         if (event == .reasoning_item) return;
-        // The turn is under way, so whatever the step boundary drained is
-        // already a ledger fact. Emit it before the first delta, so a reader
-        // sees "the message landed" before the answer to it.
+        // Emit before the first delta, so a reader sees "the message landed"
+        // before the answer to it.
         if (event == .started) {
             if (self.ledger_view) |l| self.flushEvents(l.view()) catch |e| self.note(e);
         }
@@ -152,8 +147,7 @@ pub const StepStream = struct {
         try self.endLine();
     }
 
-    /// The model request failed transiently and the loop is about to send it
-    /// again; a reader drops whatever this turn streamed so far.
+    /// The request failed transiently; a reader drops whatever this turn streamed.
     fn retryLine(self: *StepStream, retry: loop.RetryNotice) !void {
         var jw: std.json.Stringify = .{ .writer = self.out };
         try jw.beginObject();
@@ -188,8 +182,7 @@ pub const StepStream = struct {
         try self.endLine();
     }
 
-    /// `call_id` alone identifies the call — the reader learned its tool from
-    /// the matching `begin`.
+    /// `call_id` alone identifies the call: the reader learned the tool from `begin`.
     fn toolEndLine(self: *StepStream, call: ledger.ToolCall, ok: bool) !void {
         var jw: std.json.Stringify = .{ .writer = self.out };
         try jw.beginObject();
@@ -214,8 +207,7 @@ pub const StepStream = struct {
         try jw.write("end");
         try jw.objectField("status");
         try jw.write(@tagName(step_outcome.status));
-        // Only the reply-was-cut fact is worth a column: end_turn / tool_use
-        // are already visible from the events.
+        // end_turn / tool_use are already visible from the events.
         if (step_outcome.stop_reason == .max_tokens) {
             try jw.objectField("stop");
             try jw.write("max_tokens");
@@ -259,12 +251,10 @@ pub const StepStream = struct {
     }
 };
 
-/// `session step --gate`: the approval half of the protocol.
-///
-/// One request line out on the same stdout the stream uses, then one verdict
-/// line in on stdin, per tool call, while the loop is between calls. It is a
-/// `loop.ToolGate` and nothing more: the driver on the other end decides, and a
-/// denial is an ordinary tool result, so the ledger is legal either way.
+/// `session step --gate`: the approval half of the protocol. One request line
+/// out on the same stdout the stream uses, then one verdict line in on stdin,
+/// per tool call. A denial is an ordinary tool result, so the ledger is legal
+/// either way.
 ///
 /// **Fail closed.** Anything other than a verdict this side understands is a
 /// denial: an unparsable answer, a failed read, and above all end of input — a
@@ -274,8 +264,7 @@ pub const StepGate = struct {
     io: std.Io,
     out: *std.Io.Writer,
     in: *std.Io.Reader,
-    /// stdin is done (EOF, or a failed read): deny from here on, silently —
-    /// the reason was said once, on stderr.
+    /// stdin is done: deny from here on, silently — the reason was said once.
     closed: bool = false,
     /// First write failure, if any. Reported by the caller as a non-zero exit.
     err: ?anyerror = null,
@@ -289,8 +278,7 @@ pub const StepGate = struct {
     fn onReview(ptr: *anyopaque, request: loop.ToolGate.Request) loop.ToolGate.Decision {
         const self: *StepGate = @ptrCast(@alignCast(ptr));
         return self.ask(request) catch |e| {
-            // The channel itself broke. Say so once, then deny everything: a
-            // gate that cannot ask must not answer "allow" for anybody.
+            // A gate that cannot ask must not answer "allow" for anybody.
             if (self.err == null) self.err = e;
             if (!self.closed) {
                 self.closed = true;
@@ -317,15 +305,12 @@ pub const StepGate = struct {
         return .{ .deny = null };
     }
 
-    /// One call, offered for approval, with what this session froze about the
-    /// tool it names. The arguments go out verbatim — the driver can only judge
-    /// a `shell` command or an edit path on the bytes the model wrote.
-    ///
-    /// `tool_id` and `readonly` are the frozen facts: the stable id a pin and
-    /// the usage journal use, and the package's own read-only claim. Both are
-    /// `null` for a name this session's tool face does not declare, and
-    /// `readonly` is `null` for the builtin and for any package that made no
-    /// claim — `null` is not `false`.
+    /// One call, offered for approval. The arguments go out verbatim — the
+    /// driver can only judge a `shell` command or an edit path on the bytes the
+    /// model wrote. `tool_id` and `readonly` are frozen facts: both are `null`
+    /// for a name this session's tool face does not declare, and `readonly` is
+    /// `null` for the builtin and for any package that made no claim — `null`
+    /// is not `false`.
     fn requestLine(self: *StepGate, request: loop.ToolGate.Request) !void {
         var jw: std.json.Stringify = .{ .writer = self.out };
         try jw.beginObject();
@@ -349,8 +334,7 @@ pub const StepGate = struct {
     }
 
     /// Diagnostics go to stderr: `--gate` implies `--stream`, whose stdout is
-    /// pure protocol. Failing to write one changes no verdict, so it is
-    /// dropped.
+    /// pure protocol. Failing to write one changes no verdict, so it is dropped.
     fn say(self: *StepGate, message: []const u8) void {
         printErr(self.io, message) catch {};
     }

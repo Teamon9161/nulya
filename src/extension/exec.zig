@@ -3,23 +3,20 @@
 //!
 //! An `ExtensionRequest` names a frozen version and a tool, never a path. Only
 //! the executing machine can answer which file to run: the entry variant is per
-//! OS, integrity must be checked where the bytes are (or a host would verify
-//! its own copy and run someone else's), and the store is a directory on that
-//! machine. Both execution sides share this resolver.
+//! OS, integrity must be checked where the bytes are, and the store is a
+//! directory on that machine. Both execution sides share this resolver.
 //!
 //! `.sealed` is paid once per (id, version) per resolver, not per call: a
-//! resolver lives as long as its process, so "this process verified this
-//! version before running it" holds.
+//! resolver lives as long as its process.
 
 const std = @import("std");
 const manifest = @import("manifest.zig");
 const site_mod = @import("site.zig");
 const store = @import("store.zig");
 
-/// A failure to resolve the version HERE, rather than a fault of the host
-/// trying to run it: a package this machine does not hold, holds broken, or
-/// declares no entry variant for. That kind becomes an ordinary failed call;
-/// out-of-memory and cancellation propagate, on both sides of the seam.
+/// A failure to resolve the version HERE rather than a fault of the host: a
+/// package this machine does not hold, holds broken, or declares no entry
+/// variant for. It becomes an ordinary failed call; OOM and cancellation do not.
 pub fn isUnrunnableHere(err: anyerror) bool {
     return store.isExtensionFault(err) or
         err == error.EntryUnsupportedOnHost or
@@ -52,8 +49,7 @@ pub const Resolver = struct {
         interpreter: ?[]const u8,
     };
 
-    /// Nothing is opened here: an environment must be constructible on a
-    /// machine with no extensions at all.
+    /// Nothing is opened here: constructible on a machine with no extensions.
     pub fn init(alloc: std.mem.Allocator, io: std.Io, store_path: []const u8, diag: site_mod.Diag) !Resolver {
         return .{ .alloc = alloc, .io = io, .store_path = try alloc.dupe(u8, store_path), .diag = diag };
     }
@@ -146,8 +142,7 @@ test "a version is resolved to an entry on this machine, and verified once" {
     try testing.expect(std.mem.indexOf(u8, first.path, "run.sh") != null);
     try testing.expectEqualStrings("sh", first.interpreter.?);
 
-    // The memo: the same strings and no second digest, which keeps `.sealed` a
-    // per-process price rather than a per-call one.
+    // The memo: the same strings and no second digest.
     const second = try resolver.resolve("scripted", version);
     try testing.expectEqual(first.path.ptr, second.path.ptr);
     try testing.expectEqual(@as(usize, 1), resolver.memo.items.len);

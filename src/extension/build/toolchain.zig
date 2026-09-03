@@ -39,10 +39,8 @@ pub fn isEmbedded() bool {
 
 /// An absolute path to the pinned `zig` (usable as `argv[0]` whatever the
 /// child's cwd), extracted from the embedded archive when this binary carries
-/// one. Idempotent: a completed extraction is marked with a `.ok` file.
-///
-/// A binary without the archive still answers from that directory when a whole
-/// toolchain is already in it (either layout `zigExeAbsPath` accepts).
+/// one. Idempotent: a completed extraction is marked with a `.ok` file. Without
+/// the archive it answers from that directory when a toolchain is already there.
 pub fn ensureExtracted(alloc: std.mem.Allocator, io: std.Io, data_dir: std.Io.Dir) ![]u8 {
     const rel = managed_rel;
     const ok_marker = rel ++ std.fs.path.sep_str ++ ".ok";

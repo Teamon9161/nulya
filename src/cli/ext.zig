@@ -13,7 +13,6 @@ const manifest = @import("../extension/manifest.zig");
 const target_mod = @import("../extension/target.zig");
 const templates = @import("../extension/build/templates.zig");
 const notes = @import("../extension/notes.zig");
-// `tool` is a common local name below (a tool NAME), hence the distinct import.
 const tool_mod = @import("../tool.zig");
 const tool_stats = @import("../journals/tool_stats.zig");
 const launch = @import("../launch.zig");
@@ -82,8 +81,6 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const id = positional.items[0];
     const tool = if (positional.items.len >= 2) positional.items[1] else id;
 
-    // Everything below writes through this handle, so an absolute store path
-    // needs no absolute sub-paths.
     const root_spec = (try draftRootSpec(alloc, flags.user)) orelse {
         try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
         return 1;
@@ -103,8 +100,6 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     try cwd.createDirPath(io, tests_dir);
 
     if (!want_zig) {
-        // Both platforms in ONE version: an entry and interpreter per OS, and
-        // the snapshot carries both files.
         const manifest_bytes = try templates.scriptManifestJson(alloc, id, tool);
         defer alloc.free(manifest_bytes);
         const sh = try templates.scriptSh(alloc, id);
@@ -133,8 +128,6 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     const flags = try takeUserFlag(alloc, args);
     defer alloc.free(flags.rest);
 
-    // Parsed before anything is opened, so an unrecognized spelling can name
-    // the closed set of words it failed against.
     var cross: ?target_mod.Target = null;
     if (flagValue(flags.rest, "--target")) |spec| {
         cross = target_mod.parse(spec) catch {
@@ -173,8 +166,7 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     var dest_root = try store.openOrCreateRoot(io, cwd_path, dest_spec);
     defer dest_root.close(io);
 
-    // A script needs no toolchain, so resolve zig best-effort: the build
-    // reports ZigVersionUnreadable only if it has to compile.
+    // Best-effort: the build reports ZigVersionUnreadable only if it must compile.
     const zig_exe: ?ZigExe = resolveZig(alloc, io) catch null;
     defer if (zig_exe) |z| z.deinit(alloc);
     var zig = build_ext.Zig.init(if (zig_exe) |z| z.path else "");
@@ -187,8 +179,6 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
             try printErrFmt(alloc, io, "ext build --target: '{s}' declares no compiled runtime, and a package without one is the same version on every machine\n", .{ext_dir});
             return 1;
         },
-        // Nothing answered, or what answered could not say its own version —
-        // that difference is the whole repair hint.
         error.ZigVersionUnreadable => {
             const hint = try cli_toolchain.noZigHint(alloc);
             defer alloc.free(hint);
@@ -208,8 +198,6 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
                 try printErrFmt(alloc, io, "ext build: {s}/extension.json is not a valid manifest ({s}); `nulya ext api` prints the wire contract and `nulya ext init` a working manifest\n", .{ ext_dir, @errorName(err) });
                 return 1;
             }
-            // Parses, but names a file this build cannot freeze — and build is
-            // the moment the AUTHOR can learn it.
             if (isDraftFault(err)) {
                 try printErrFmt(alloc, io, "ext build: {s} declares a file this build cannot freeze ({s}); `nulya ext api manifest` says what each contribution must be\n", .{ ext_dir, @errorName(err) });
                 return 1;
@@ -219,8 +207,7 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     };
     defer result.deinit(alloc);
 
-    // `entry_rel` is set only for a COMPILED package — exactly when the
-    // compiler above was used and its identity entered the version id.
+    // `entry_rel` is set only for a COMPILED package.
     if (result.entry_rel != null) {
         if (zig_exe) |z| try noteUnpinnedZig(alloc, io, z);
     }
@@ -239,8 +226,7 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
 }
 
 /// A fault in the `extension.json`, never in the host. Derived by reflection
-/// from `manifest.zig`'s error sets; `OutOfMemory` is left out, because
-/// reporting a resource fault as a bad manifest sends the author nowhere.
+/// from `manifest.zig`'s error sets, minus `OutOfMemory`.
 fn isManifestFault(err: anyerror) bool {
     const Faults = manifest.ValidateError || error{ InvalidJson, NotAnObject, MissingField, WrongType };
     inline for (@typeInfo(Faults).error_set.?) |candidate| {
@@ -249,9 +235,8 @@ fn isManifestFault(err: anyerror) bool {
     return false;
 }
 
-/// The manifest's own rules plus what freezing can find wrong with the files it
-/// names. A host fault is absent, so `ext sync` keeps going past a bad draft
-/// but not past a broken machine.
+/// The manifest's rules plus what freezing finds wrong with the files it names.
+/// No host fault is in here: `ext sync` skips a bad draft, not a broken machine.
 fn isDraftFault(err: anyerror) bool {
     if (isManifestFault(err)) return true;
     return switch (err) {
@@ -282,8 +267,7 @@ fn isDraftFault(err: anyerror) bool {
 /// (`<dir>/<id>/extension.json`) in this workspace's `.nulya/extensions`, or in
 /// the store itself under `--user`. Either way the versions land in the store.
 ///
-/// One draft failing never stops the others. `--activate` is separate because
-/// pointing `current` somewhere is a decision.
+/// One draft failing never stops the others.
 fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const flags = try takeUserFlag(alloc, args);
     defer alloc.free(flags.rest);
@@ -303,8 +287,7 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         }
     }
 
-    // Never `--force`: sync must not overwrite someone's edited draft on their
-    // behalf. `extSeed` owns the printing; its exit code folds into this one's.
+    // Never `--force`: sync must not overwrite someone's edited draft.
     var seed_failed = false;
     if (seed) {
         var seed_args: std.ArrayList([]const u8) = .empty;
@@ -366,8 +349,7 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
                 failed += 1;
                 // Two walls behind one word: no compiler, or one that failed
                 // `zig version` from THIS directory (a version-manager shim
-                // reading build.zig.zon from the cwd does that in a store
-                // root). Name which.
+                // reading build.zig.zon from the cwd does that in a store root).
                 if (zig_exe) |z| {
                     try printOut(alloc, io, "{s}: needs zig (compiled draft; the zig at {s} ({s}) could not report its version from the store root — {s}; {s})\n", .{ draft, z.path, z.origin(), zig.whyUnreadable() orelse "`zig version` failed there", no_zig_hint });
                 } else {
@@ -423,8 +405,7 @@ const SyncMode = struct { activate: bool, dry_run: bool, user: bool };
 
 /// The tail of a sync line. Sync points `current` at a version it just brought
 /// into this root, and at a draft's version for an id with no `current` at all
-/// — never over a `current` naming something else. That pointer was somebody's
-/// decision, and undoing it would make a rollback survive one start-up.
+/// — never over a `current` naming something else.
 fn appendActivation(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -457,10 +438,9 @@ fn appendActivation(
 /// `current` here names. "Here" is this workspace's pointer plus the store's
 /// own; another workspace's is not visible from this one.
 ///
-/// Only a pointer is safe to keep by rule, so an id with NO pointer keeps
-/// everything: guessing (newest? biggest?) would delete the one somebody meant
-/// to roll back to. A session frozen on a deleted version can no longer resume;
-/// the way back is the draft, which rebuilds the same version id.
+/// An id with NO pointer keeps everything. A session frozen on a deleted
+/// version can no longer resume; the way back is the draft, which rebuilds the
+/// same version id.
 fn extPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var dry_run = false;
     var only_id: ?[]const u8 = null;
@@ -617,8 +597,7 @@ fn treeSize(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, sub_path: []
 /// a version's frozen manifest lives further down. Caller owns the result.
 ///
 /// Ordered in TWO groups: drafts needing no compiler first, then the compiled
-/// ones, alphabetically inside each, so a watching reader sees the count move
-/// at once. Presentation only — each draft builds independently.
+/// ones, alphabetically inside each. Presentation only.
 fn draftIds(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir) ![][]u8 {
     const Draft = struct { id: []u8, compiled: bool };
     var out: std.ArrayList(Draft) = .empty;
@@ -703,10 +682,8 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var cwd_real: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_real);
 
-    // One shared lookup does the pointer layers, integrity validation and the
-    // frozen manifest, so this cannot drift from session composition. The
-    // FROZEN manifest is the runtime truth: the source tree's may have changed
-    // while `current` still points at an older version.
+    // The FROZEN manifest is the runtime truth: the source tree's may have
+    // changed while `current` still points at an older version.
     var view = try StoreView.open(alloc, io, cwd_path);
     defer view.deinit(alloc);
     const resolved: site_mod.Site.Resolved = if (with_ref.version) |v|
@@ -755,16 +732,12 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const args_json = owned_args orelse
         if (positional.items.len >= 3) positional.items[positional.items.len - 1] else "{}";
 
-    // The environment gets the same `(id, version, tool)` a session's tool
-    // binding gives it, resolved against this very store — so a CLI call and a
-    // model-face call cannot drift on which file "this version" means.
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .extension_store = view.site.store_path, .diag = common.stderr_diag });
     defer lenv.deinit();
 
     // NO timeout by default: the manifest's `timeout_ms` bounds a MODEL-FACE
-    // call, and a driver opts into its own with `--timeout-ms` (clamped to
-    // `extension_max_ms`). `maxInt(u32)` is the "no bound" sentinel, since that
-    // type carries no explicit "none".
+    // call; a driver opts into its own with `--timeout-ms` (clamped to
+    // `extension_max_ms`). `maxInt(u32)` is the "no bound" sentinel.
     const timeout_ms: u32 = if (timeout_ms_arg) |raw| blk: {
         const parsed = std.fmt.parseInt(u32, raw, 10) catch {
             try printErr(io, "--timeout-ms must be a positive integer\n");
@@ -783,8 +756,6 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     }) catch |err| switch (err) {
         // The resolver already said so on stderr; this sets the exit code.
         error.EntryUnsupportedOnHost => return 1,
-        // The trailing positional IS the arguments, so a malformed one is a
-        // usage error rather than a host fault.
         error.InvalidArgumentsJson, error.ArgumentsNotObject => {
             try printErr(io, "ext run: the last argument must be a JSON object (use '{}' for no arguments), or pass --arg k=v instead\n");
             return 1;
@@ -797,15 +768,12 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // `ToolDefinition.id` carries, so usage accumulates across versions.
     const stable_id = try std.fmt.allocPrint(alloc, "ext:{s}/{s}", .{ id, tool });
     defer alloc.free(stable_id);
-    // `shell`'s env names the live session, so a CLI-invoked tool is
-    // attributed to the same session a natively composed one would be.
     const in_session = try envSessionId(alloc);
     defer if (in_session) |s| alloc.free(s);
     try tool_stats.append(alloc, io, cwd_path, .{
         .tool_id = stable_id,
         .ok = invocation.ok,
         .session = in_session,
-        // The implementation that actually ran — no second lookup.
         .version = resolved.version,
     });
 
@@ -897,8 +865,7 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     };
 
     // Only a version actually IN EFFECT is announced to a live session — a
-    // user-layer activate under a workspace pointer is not. Best-effort: a
-    // failed deposit never fails the activation.
+    // user-layer activate under a workspace pointer is not. Best-effort.
     const effective = try view.site.activePointer(alloc, id);
     defer if (effective) |e| alloc.free(e.version);
     const covered_by: ?site_mod.Site.Pointer = blk: {
@@ -921,9 +888,6 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 /// session only as a member, so the way in is `[extensions] with` or `session
 /// new --with`. The line spells a tool selection when the version declares
 /// `manual` tools, which membership alone does not put on the model's face.
-///
-/// A NOTE and not a write: which packages a person's sessions carry is their
-/// config, and no kernel verb edits that file.
 fn noteMembership(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1044,9 +1008,8 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
         });
     }
 
-    // Ids with versions but no pointer anywhere: `--with <id>@<version>` and
-    // `ext run <id>@<version>` still reach those. A directory with no version
-    // at all is where `<id>/.lock` lives — leftovers, not an extension.
+    // Ids with versions but no pointer anywhere. A directory with no version at
+    // all is where `<id>/.lock` lives — leftovers, not an extension.
     if (view.site.store()) |st| {
         var it = st.root.iterate();
         while (try it.next(io)) |dir_entry| {
@@ -1072,9 +1035,8 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
 /// `\t[tools skills prompt]` for what this frozen version contributes. Empty
 /// when it contributes nothing nameable or cannot be read. Caller owns it.
 fn contributionMarker(alloc: std.mem.Allocator, site: *const site_mod.Site, entry: site_mod.Site.ActiveEntry) ![]u8 {
-    // `.structural`: re-digesting every megabyte of built binary to print
-    // `[tools]` costs most of a second in a store with a few compiled
-    // extensions, and a front end runs this constantly.
+    // `.structural`: re-digesting every built binary to print `[tools]` costs
+    // most of a second, and a front end runs this constantly.
     const resolved = site.resolveEntry(alloc, entry, .structural) catch return alloc.dupe(u8, "");
     defer resolved.deinit(alloc);
     const m = resolved.manifest;
@@ -1126,15 +1088,13 @@ fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     }
     const arg = args[0];
 
-    // As a path first — a bare directory name holding `extension.json` counts
-    // too. A real id cannot collide: `isValidId` forbids a separator.
+    // As a path first — a bare directory name holding `extension.json` counts too.
     if (try draftManifestAtPath(alloc, io, arg)) |bytes| {
         defer alloc.free(bytes);
         try printOut(alloc, io, "{s}\n", .{bytes});
         return 0;
     }
-    // A mistyped path, not an id in disguise: an id lookup would answer a
-    // different question.
+    // A mistyped path, not an id in disguise.
     if (looksLikePathArg(arg)) {
         try printErrFmt(alloc, io, "ext inspect: no readable extension.json in '{s}'\n", .{arg});
         return 1;
@@ -1147,8 +1107,7 @@ fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
 
     const ref = withRef(arg);
     if (ref.version) |v| {
-        // Inspect is a projection, so a malformed version answers rather than
-        // faults.
+        // Inspect is a projection: a malformed version answers rather than faults.
         if (try frozenManifestBytes(alloc, io, st, ref.id, v)) |bytes| {
             defer alloc.free(bytes);
             try printOut(alloc, io, "{s}\n", .{bytes});
@@ -1178,16 +1137,13 @@ fn frozenManifestBytes(alloc: std.mem.Allocator, io: std.Io, st: ?store.Store, i
     return s.root.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch null;
 }
 
-/// `manifest.isValidId` forbids `/` and `\` in an id, so a separator settles
-/// it and this can never misclassify a real id.
+/// `manifest.isValidId` forbids `/` and `\` in an id, so a separator settles it.
 fn looksLikePathArg(arg: []const u8) bool {
     return std.mem.indexOfAny(u8, arg, "/\\") != null;
 }
 
-/// The exact file `ext build <arg>` would freeze next. Null when nothing is
-/// readable there; the caller decides from `looksLikePathArg` whether that
-/// means "fall back to a store lookup" or "report the path as broken".
-/// `error.Canceled` propagates — a host fault, never "not found".
+/// The exact file `ext build <arg>` would freeze next; null when nothing is
+/// readable there. `error.Canceled` propagates — a host fault, never "not found".
 fn draftManifestAtPath(alloc: std.mem.Allocator, io: std.Io, arg: []const u8) !?[]u8 {
     const rel = try std.fs.path.join(alloc, &.{ arg, "extension.json" });
     defer alloc.free(rel);
@@ -1206,9 +1162,8 @@ fn draftManifestAtPath(alloc: std.mem.Allocator, io: std.Io, arg: []const u8) !?
 /// Both move here; the two `current` files follow the layer they meant — the
 /// user root's becomes the store's, the workspace's stays.
 ///
-/// A version already in the store is left alone rather than overwritten: by
-/// content addressing the bytes are the same, so the old copy is what is
-/// removed. Idempotent.
+/// A version already in the store is left alone: by content addressing the
+/// bytes are the same, so the old copy is what is removed. Idempotent.
 fn extMigrate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var dry_run = false;
     for (args) |a| {
@@ -1541,8 +1496,7 @@ test "every manifest parse/validate error is a draft fault; a host fault is not"
             return e;
         };
     }
-    // A host fault must keep propagating: telling the author their manifest is
-    // wrong when the machine ran out of memory sends them nowhere.
+    // A host fault must keep propagating.
     for ([_]anyerror{ error.OutOfMemory, error.AccessDenied, error.Canceled, error.ManifestUnreadable }) |err| {
         try std.testing.expect(!isManifestFault(err));
     }

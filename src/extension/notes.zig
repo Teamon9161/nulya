@@ -6,9 +6,6 @@
 //! names the session file it deposits a `note` into the inbox, which the
 //! session drains at its next step boundary as a plain append. Promotion into
 //! `tools[]` still waits for the next session.
-//!
-//! This module owns only what a note SAYS; the inbox mechanics are in
-//! `ledger.zig`.
 
 const std = @import("std");
 const ledger = @import("../ledger.zig");
@@ -120,8 +117,7 @@ test "noteText is deterministic and names every invocation" {
 
 const session_rel = ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "s.jsonl";
 
-/// A deposit goes into a session that EXISTS, so the tests put a file where the
-/// ledger they drain into would have written one.
+/// A deposit goes into a session that EXISTS.
 fn touchSession(io: std.Io, dir: std.Io.Dir) !void {
     try dir.createDirPath(io, comptime std.fs.path.dirname(session_rel).?);
     try dir.writeFile(io, .{ .sub_path = session_rel, .data = "" });
@@ -154,8 +150,7 @@ test "a deposited note is drained into the ledger and is idempotent" {
     try ledger.drainInbox(alloc, io, &l, tmp.dir, session_rel);
     try std.testing.expectEqual(@as(usize, 1), l.len());
 
-    // A re-deposit reuses the delivery name, the exactly-once key, so the
-    // drain applies nothing.
+    // A re-deposit reuses the delivery name, the exactly-once key.
     try depositActiveNote(alloc, io, tmp.dir, session_rel, root, "demo", version);
     try ledger.drainInbox(alloc, io, &l, tmp.dir, session_rel);
     try std.testing.expectEqual(@as(usize, 1), l.len());

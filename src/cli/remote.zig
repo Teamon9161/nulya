@@ -30,8 +30,7 @@ const printErrFmt = common.printErrFmt;
 const printOut = common.printOut;
 const printRaw = common.printRaw;
 
-/// How many directory entries one `list-dir` reply carries. They travel as
-/// PAYLOAD, so this is not about frame size. Truncation is SAID, never silent.
+/// How many directory entries one `list-dir` reply carries; truncation is SAID.
 const max_entries: usize = 1000;
 const remote_password_buffer_bytes = 4097;
 
@@ -48,8 +47,7 @@ pub fn dispatchRemote(alloc: std.mem.Allocator, io: std.Io, args: []const []cons
 
 // ── the host side ───────────────────────────────────────────────────────────
 
-/// Open a channel from a `--env` spec, or print why not — one answer about a
-/// bad spec for both `check` and `ls`.
+/// Open a channel from a `--env` spec, or print why not.
 fn open(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?remote.Channel {
     const spec = flagValue(args, "--env") orelse {
         try printErrFmt(alloc, io, "--env is required ({s})\n", .{remote.spec_syntax});
@@ -73,8 +71,7 @@ fn open(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?remote
         alloc.free(secret);
     };
     return remote.Channel.connectPassword(alloc, io, l, launch.version, .default, password) catch |err| {
-        // The transport already wrote its own diagnostic to stderr; this adds
-        // which spec produced it.
+        // The transport already wrote its own diagnostic; this adds which spec.
         switch (err) {
             error.RemoteVersionMismatch => try printErrFmt(alloc, io, "{s}: the nulya there speaks a different remote protocol; install a matching build on that machine\n", .{spec}),
             error.RemoteSpecUnsupportedOnHost => try printErrFmt(alloc, io, "{s}: cannot be reached from this host (wsl needs Windows)\n", .{spec}),
@@ -159,11 +156,9 @@ const Agent = struct {
     reader: std.Io.File.Reader,
     arena: std.heap.ArenaAllocator,
     lenv: *environment.LocalEnvironment,
-    /// The one version being pushed into this store: the channel is one
-    /// request at a time.
+    /// The one version being pushed: the channel is one request at a time.
     push: ?StagedPush = null,
-    /// Set when the host closed the channel: the loop stops, and whatever was
-    /// running has already been killed.
+    /// Set when the host closed the channel; whatever ran has been killed.
     stop: bool = false,
 
     fn reply(self: *Agent, rep: protocol.Reply, first: []const u8, second: []const u8) !void {
@@ -187,7 +182,6 @@ const Agent = struct {
 };
 
 /// A version being copied into THIS machine's store, one file per frame.
-///
 /// Staged rather than written into `versions/<v>` directly: a version directory
 /// that exists is one other processes will compose and run, so it may only
 /// appear once these bytes have been checked against their own seal HERE. The
@@ -208,7 +202,6 @@ const StagedPush = struct {
 };
 
 /// Abandon whatever push is open: remove the staging tree, release the lease.
-/// Called on commit, on a second `store-stat`, and when the channel ends.
 fn closePush(agent: *Agent) void {
     var p = agent.push orelse return;
     agent.push = null;
@@ -227,10 +220,9 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
 
-    // The ordinary local environment of THIS machine. No session ref: an agent
-    // runs commands, it does not own a ledger. Its store is resolved the way
-    // every other nulya process here does, so the host never names a directory
-    // over here.
+    // No session ref: an agent runs commands, it does not own a ledger. Its
+    // store is resolved the way every other nulya process here does, so the
+    // host never names a directory over here.
     const ext_store_path = try launch.storePath(alloc, &host);
     defer alloc.free(ext_store_path);
     var lenv = try launch.localEnvironment(alloc, io, &cfg, null, ext_store_path, common.stderr_diag);
@@ -261,8 +253,7 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         const payload = try agent.arena.allocator().alloc(u8, req.bytes);
         if (payload.len != 0) agent.reader.interface.readSliceAll(payload) catch break;
         serveOne(&agent, req, payload) catch |err| {
-            // A write failure means the host is gone; anything else is this
-            // agent's own fault and is worth one line on stderr.
+            // A write failure means the host is gone; anything else is worth a line.
             if (err != error.Canceled) std.debug.print("nulya remote serve: {s}\n", .{@errorName(err)});
             break;
         };
@@ -271,8 +262,7 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 }
 
 fn serveOne(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
-    // Only the IDENTITY exists on this machine — the session file is on the
-    // host — hence `NULYA_SESSION_ID` and not `NULYA_SESSION`.
+    // The session file is on the host, hence `NULYA_SESSION_ID`, not `NULYA_SESSION`.
     if (req.session.len != 0) {
         const known = agent.lenv.env.get("NULYA_SESSION_ID") orelse "";
         if (!std.mem.eql(u8, known, req.session)) try agent.lenv.env.put("NULYA_SESSION_ID", req.session);
@@ -281,8 +271,7 @@ fn serveOne(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
         .hello => try serveHello(agent, req),
         .run_shell => try serveShell(agent, req, payload),
         .list_dir => try serveListDir(agent, req),
-        // A cancel with nothing running: the command already finished, and
-        // that race is legitimate rather than an error.
+        // A cancel with nothing running: a legitimate race, not an error.
         .cancel => try agent.reply(.{ .ok = true }, "", ""),
         .put_file => try servePutFile(agent, req, payload),
         .store_stat => try serveStoreStat(agent, req),
@@ -320,8 +309,7 @@ fn serveHello(agent: *Agent, req: protocol.Request) !void {
 }
 
 /// Runs something while watching for a `cancel` frame, so a canceled step on
-/// the host ends the process HERE. One task for both run verbs: a shell command
-/// and an extension call are the same thing to this side.
+/// the host ends the process HERE. One task for both run verbs.
 const RunTask = struct {
     agent: *Agent,
     req: union(enum) {
@@ -344,8 +332,7 @@ const RunTask = struct {
 
     fn run(self: *RunTask) void {
         const result = self.round();
-        // Canceled leaves `out` null: the tree is already killed and there is
-        // no outcome to report.
+        // Canceled leaves `out` null: the tree is killed, there is no outcome.
         if (result) |_| {} else |err| {
             if (err == error.Canceled) return;
         }
@@ -369,8 +356,7 @@ const RunTask = struct {
 };
 
 /// Reads exactly one control frame while a command runs. The host sends
-/// `cancel` or nothing, so cancelling this read when the command wins cannot
-/// have eaten a partial frame.
+/// `cancel` or nothing, so cancelling this read cannot eat a partial frame.
 const ControlWatch = struct {
     agent: *Agent,
     eof: bool = false,
@@ -399,10 +385,9 @@ fn serveShell(agent: *Agent, req: protocol.Request, command: []const u8) !void {
 }
 
 /// Run one extension tool HERE, against this machine's workspace and store.
-/// The frame named `(id, version, tool)`; everything else is decided on this
+/// The frame names `(id, version, tool)`; everything else is decided on this
 /// side by the same code a local session goes through — the entry variant for
-/// THIS OS, the seal check, and `NULYA_TOOL` / `NULYA_ARG_<k>` from the
-/// payload.
+/// THIS OS, the seal check, and `NULYA_TOOL` / `NULYA_ARG_<k>` from the payload.
 fn serveRunExtension(agent: *Agent, req: protocol.Request, arguments: []const u8) !void {
     if (req.id.len == 0 or req.version.len == 0 or req.tool.len == 0) {
         try agent.refuse("run-extension needs an extension id, a version and a tool");
@@ -427,8 +412,7 @@ fn serveRun(agent: *Agent, request: @FieldType(RunTask, "req")) !void {
     const Race = union(enum) { command: void, control: void };
     var buf: [2]Race = undefined;
     var sel: std.Io.Select(Race) = .init(agent.io, &buf);
-    // Without two units of concurrency the command still runs; only the
-    // mid-command cancel is lost, and losing the command would be worse.
+    // Without concurrency the command still runs; only the cancel watch is lost.
     sel.concurrent(.control, ControlWatch.run, .{&watch}) catch {
         RunTask.run(&task);
         return replyRun(agent, &task);
@@ -447,8 +431,7 @@ fn serveRun(agent: *Agent, request: @FieldType(RunTask, "req")) !void {
     if (task.out != null) return replyRun(agent, &task);
 
     // The control frame (or EOF) won: cancelling the command task made the
-    // local runner kill the whole tree. Answer so the channel stays well
-    // formed — no output, because the kill path has none.
+    // local runner kill the whole tree. Answer so the channel stays well formed.
     agent.stop = watch.eof;
     if (!watch.eof) try agent.reply(.{ .ok = true, .canceled = true, .exit_code = 1 }, "", "");
 }
@@ -473,10 +456,9 @@ fn replyRun(agent: *Agent, task: *RunTask) !void {
 }
 
 /// Write one file into this session's workspace on THIS machine, through
-/// `agent.lenv`'s `putWorkspaceFile` — the same function a local session's
-/// spill goes through. `path` is workspace-relative and `/`-spelled; `cwd` is
-/// where that workspace is here. They are joined exactly once, and only in this
-/// direction.
+/// `agent.lenv`'s `putWorkspaceFile`. `path` is workspace-relative and
+/// `/`-spelled; `cwd` is where that workspace is here. They are joined exactly
+/// once, and only in this direction.
 fn servePutFile(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
     if (req.path.len == 0) {
         try agent.refuse("put-file needs a path");
@@ -501,9 +483,8 @@ fn servePutFile(agent: *Agent, req: protocol.Request, payload: []const u8) !void
 //
 // A remote session's background task is supervised HERE, by the same
 // `nulya task supervise` a local one is, with the log, the status and the lease
-// in this workspace. The host keeps the NAME and the delivery, because the
-// ledger the report belongs in is over there. No path crosses: each side turns
-// `<sid>/t<N>` into a directory of its own.
+// in this workspace. The host keeps the NAME and the delivery. No path crosses:
+// each side turns `<sid>/t<N>` into a directory of its own.
 
 /// Where a task's files are on THIS machine. Null is not a task name at all.
 fn taskPaths(agent: *Agent, req: protocol.Request) !?struct { cwd: []const u8, dir: []u8 } {
@@ -511,9 +492,8 @@ fn taskPaths(agent: *Agent, req: protocol.Request) !?struct { cwd: []const u8, d
     return .{ .cwd = if (req.cwd.len != 0) req.cwd else ".", .dir = dir };
 }
 
-/// Start a supervisor for one background task here, deliberately detached from
-/// this channel: a task outliving the connection that asked for it is the whole
-/// point of `background: true`.
+/// Start a supervisor for one background task here, detached from this channel:
+/// a task outliving the connection is the whole point of `background: true`.
 fn serveStartTask(agent: *Agent, req: protocol.Request, command: []const u8) !void {
     if (command.len == 0) {
         try agent.refuse("start-task needs a command");
@@ -543,8 +523,7 @@ fn serveStartTask(agent: *Agent, req: protocol.Request, command: []const u8) !vo
     environment.spawnSupervisor(agent.alloc, agent.io, &agent.lenv.env, .{
         .exe = exe,
         .dir_rel = paths.dir,
-        // No session file here — the report is left beside the log and the host
-        // collects it.
+        // No session file here: the report is left beside the log for the host.
         .task_name = req.task,
         .cwd = paths.cwd,
         .timeout_ms = req.timeout_ms,
@@ -561,9 +540,8 @@ fn serveStartTask(agent: *Agent, req: protocol.Request, command: []const u8) !vo
 /// Everything the host needs to know about one task here, in one round: the
 /// status its supervisor wrote, the report it left if it has finished, and
 /// whether a supervisor still holds the lease. A directory with nothing in it
-/// is answered as nothing, not as a refusal — the same `starting` a local
-/// statusless task reports. But a real I/O fault reading either file is refused
-/// rather than folded into that silence.
+/// is answered as nothing, not as a refusal. But a real I/O fault reading
+/// either file is refused rather than folded into that silence.
 fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
     const paths = (try taskPaths(agent, req)) orelse {
         try agent.refuse("task-poll needs a task named <session>/t<N>");
@@ -592,13 +570,11 @@ fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
     const report = if (cleaned) |c| c.text else raw_report;
 
     // Same probe `task list` uses locally, pointed at this agent's already-open
-    // workspace handle — one implementation for both machines.
-    //
-    // ONLY once a status exists, and that guard is safety rather than thrift:
-    // the probe takes the lease itself for the instant it is open, and a
-    // supervisor whose own acquire lands there would be told "another
-    // supervisor already owns this" and EXIT. A supervisor writes its first
-    // status only after it holds the lease, so requiring one closes that
+    // workspace handle. ONLY once a status exists, and that guard is safety
+    // rather than thrift: the probe takes the lease itself for the instant it
+    // is open, and a supervisor whose own acquire lands there would be told
+    // "another supervisor already owns this" and EXIT. A supervisor writes its
+    // first status only after it holds the lease, so requiring one closes that
     // window. A real fault reading `.lock` becomes `unreachable`, never `lost`.
     const lease_held: ?bool = if (status.len == 0)
         null
@@ -612,9 +588,8 @@ fn serveTaskPoll(agent: *Agent, req: protocol.Request) !void {
     try agent.reply(.{ .ok = true, .bytes = body.len }, body, "");
 }
 
-/// Read one task file here, `arena`-owned. `error.FileNotFound` answers empty —
-/// the "nothing written yet" a statusless directory reports locally — but every
-/// other failure propagates: an I/O fault must not read as `starting`.
+/// Read one task file here, `arena`-owned. `error.FileNotFound` answers empty,
+/// but every other failure propagates: an I/O fault must not read as `starting`.
 fn readTaskFile(
     agent: *Agent,
     ws: std.Io.Dir,
@@ -632,8 +607,7 @@ fn readTaskFile(
 }
 
 /// Put the kill marker down beside the command, which is here. Refused when
-/// there is no such task: a marker written into nothing is a request nobody
-/// reads, reported as success.
+/// there is no such task: a marker written into nothing would report success.
 fn serveTaskKill(agent: *Agent, req: protocol.Request) !void {
     const paths = (try taskPaths(agent, req)) orelse {
         try agent.refuse("task-kill needs a task named <session>/t<N>");
@@ -663,12 +637,10 @@ fn serveTaskKill(agent: *Agent, req: protocol.Request) !void {
 // ── receiving an extension version (`nulya ext push`) ───────────────────────
 //
 // The far side of a push is thin: open a staging directory, take bytes, then
-// ask `integrity.validateVersionDir` — the same function activation, `ext run`
-// and a donor copy ask — whether what arrived is that version.
+// ask `integrity.validateVersionDir` whether what arrived is that version.
 
 /// Where a pushed version lands: this machine's store, the only place version
-/// bytes live here. The host resolving a path over here would be the host
-/// modelling another machine's file system.
+/// bytes live here. The host never resolves a path over here.
 fn openUserStore(agent: *Agent) !?std.Io.Dir {
     const spec = try common.storePath(agent.alloc);
     defer agent.alloc.free(spec);
@@ -679,8 +651,7 @@ fn openUserStore(agent: *Agent) !?std.Io.Dir {
 }
 
 /// A version-relative path this agent is willing to write, or null: a directory
-/// filled from a stream may only grow inwards, since a `..` or an absolute path
-/// would put bytes where nothing would ever validate them.
+/// filled from a stream may only grow inwards, or bytes land unvalidated.
 fn safeVersionRel(path: []const u8) ?[]const u8 {
     if (path.len == 0) return null;
     if (std.fs.path.isAbsolute(path)) return null;
@@ -758,8 +729,7 @@ fn serveStorePut(agent: *Agent, req: protocol.Request, payload: []const u8) !voi
         try agent.refuseFmt("could not write '{s}': {s}", .{ rel, @errorName(err) });
         return;
     };
-    // The mode a copy would have carried. Refused rather than shrugged off: a
-    // binary that is there and cannot run is what a push exists to avoid.
+    // A binary that is there and cannot run is what a push exists to avoid.
     if (req.exec and std.Io.File.Permissions.has_executable_bit) {
         p.root.setFilePermissions(agent.io, dest, .executable_file, .{}) catch |err| {
             try agent.refuseFmt("could not make '{s}' executable: {s}", .{ rel, @errorName(err) });
@@ -787,8 +757,7 @@ fn serveStoreCommit(agent: *Agent) !void {
     defer agent.alloc.free(version_rel);
     const versions_dir = std.fs.path.dirname(version_rel).?;
     try p.root.createDirPath(agent.io, versions_dir);
-    // Only reached when this root held no VALID copy, so anything replaced is
-    // a broken one.
+    // Only reached when this root held no VALID copy: anything replaced is broken.
     p.root.deleteTree(agent.io, version_rel) catch {};
     p.root.rename(p.staging_rel, p.root, version_rel, agent.io) catch |err| {
         try agent.refuseFmt("could not install {s}@{s}: {s}", .{ p.id, p.version, @errorName(err) });
@@ -833,15 +802,13 @@ fn serveListDir(agent: *Agent, req: protocol.Request) !void {
     } else if (skipped != 0) {
         note = try std.fmt.allocPrint(a, "{d} entries were left out: their names are not valid UTF-8", .{skipped});
     }
-    // The listing is the payload: it grows with what this machine holds, and a
-    // header may not.
+    // The listing is payload: it grows with what this machine holds, a header may not.
     const body = try protocol.encodeEntries(a, entries.items);
     try agent.reply(.{ .ok = true, .bytes = body.len, .message = note }, body, "");
 }
 
 /// Why a run did not happen, in that machine's own words: an extension gets the
-/// sentence naming the missing version and the command that delivers it. The
-/// host turns this into an ordinary failed call, so the model reads it.
+/// sentence naming the missing version and the command that delivers it.
 fn runFailure(agent: *Agent, request: @FieldType(RunTask, "req"), err: anyerror) ![]const u8 {
     switch (request) {
         .shell => return std.fmt.allocPrint(agent.arena.allocator(), "could not run the command: {s}", .{@errorName(err)}),

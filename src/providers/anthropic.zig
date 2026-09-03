@@ -280,8 +280,7 @@ fn roleOf(turn: prompt.Turn) Role {
     };
 }
 
-/// Consecutive same-role turns become ONE message, which keeps roles
-/// alternating.
+/// Consecutive same-role turns become ONE message, keeping roles alternating.
 fn writeMessages(jw: *std.json.Stringify, alloc: std.mem.Allocator, turns: []const prompt.Turn) !void {
     try jw.beginArray();
     var i: usize = 0;
@@ -358,15 +357,13 @@ fn writeMessage(jw: *std.json.Stringify, alloc: std.mem.Allocator, role: Role, r
         },
     };
     // A pure-empty assistant turn would leave `content: []`, which the API
-    // rejects; give it a body so projection and wire history stay one-to-one.
-    // Thinking blocks are a body of their own.
+    // rejects. Thinking blocks are a body of their own.
     if (eligible == 0 and !hasReasoning(run)) try writeTextBlock(jw, "", false);
     try jw.endArray();
     try jw.endObject();
 }
 
-/// Whether the block about to be written carries the breakpoint, advancing the
-/// position as it answers.
+/// Whether the block about to be written carries the breakpoint; advances `seen`.
 fn takes(breakpoint: ?usize, seen: *usize) bool {
     defer seen.* += 1;
     return breakpoint != null and breakpoint.? == seen.*;

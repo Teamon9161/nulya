@@ -18,7 +18,6 @@ const builtin = @import("builtin");
 /// A closed set: every member is a promise this build can produce that binary.
 pub const Arch = enum { x86_64, aarch64 };
 
-/// The operating systems `--target` accepts.
 pub const Os = enum { linux, windows, macos };
 
 pub const Target = struct {
@@ -71,8 +70,7 @@ pub fn effectiveTriple(requested: ?Target) ?[]const u8 {
     return tripleFor(requested, host);
 }
 
-/// Host words handed in, so the machine-dependent branch can be exercised for
-/// machines that are not this one.
+/// Host words handed in, so the machine-dependent branch is testable.
 fn tripleFor(requested: ?Target, host_words: []const u8) ?[]const u8 {
     if (requested) |t| return t.zigTriple();
     const parsed = parse(host_words) catch return null;
@@ -90,9 +88,8 @@ pub fn parse(spec: []const u8) error{UnknownTarget}!Target {
 
 /// A property of the TARGET, not the machine asking: a version cross-built for
 /// Windows has `bin/x.exe` wherever it is stored, which is why validation reads
-/// it off the seal rather than off `builtin`. Words this module does not know —
-/// a host pair outside the enums, or the empty string a data/script version
-/// records — answer "no suffix".
+/// it off the seal. Words this module does not know — a host pair outside the
+/// enums, or the empty string a data/script version records — answer "no suffix".
 pub fn exeSuffixFor(target_words: []const u8) []const u8 {
     const dash = std.mem.lastIndexOfScalar(u8, target_words, '-') orelse return "";
     return if (std.mem.eql(u8, target_words[dash + 1 ..], @tagName(Os.windows))) ".exe" else "";

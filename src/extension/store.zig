@@ -19,8 +19,7 @@ const integrity = @import("integrity.zig");
 const testkit = @import("testkit.zig");
 
 pub const version_prefix = integrity.version_prefix;
-/// Every read below takes one EXPLICITLY: `.structural` and `.sealed` are
-/// different questions, and a default would answer one with the other.
+/// Every read below takes one EXPLICITLY: `.structural` and `.sealed` differ.
 pub const Level = integrity.Level;
 const current_file = "current";
 const versions_dir = "versions";
@@ -35,7 +34,6 @@ pub const Store = struct {
         return .{ .io = io, .root = root };
     }
 
-    /// Identical inputs -> identical version id.
     pub const VersionInputs = struct {
         snapshot: []const u8,
         compiler: []const u8,
@@ -88,9 +86,8 @@ pub const Store = struct {
 
     /// The version's entry, dispatching on runtime kind. Caller owns it.
     ///
-    /// `error.EntryUnsupportedOnHost` when the frozen manifest declares entries
-    /// per OS and names none for this one — a valid version that simply does
-    /// not run here, so its own error rather than an integrity fault.
+    /// `error.EntryUnsupportedOnHost` when the frozen manifest names no entry for
+    /// this OS — a valid version that does not run here, not an integrity fault.
     pub fn versionRuntimeEntryPath(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, rt: manifest.Runtime) ![]u8 {
         const entry = rt.entry.forHost() orelse return error.EntryUnsupportedOnHost;
         if (manifest.isScript(rt)) return self.versionScriptEntryPath(alloc, id, version, entry);
@@ -102,8 +99,7 @@ pub const Store = struct {
         return true;
     }
 
-    /// Held for the whole of a build, activate or deactivate; closing the
-    /// returned handle releases it.
+    /// Held for the whole of a build, activate or deactivate; the handle releases it.
     pub fn lease(self: Store, alloc: std.mem.Allocator, id: []const u8) !std.Io.File {
         if (!manifest.isValidId(id)) return error.InvalidId;
         return lease_mod.extensionStore(alloc, self.io, self.root, id);
@@ -145,9 +141,8 @@ pub const Store = struct {
     }
 
     /// Parse and validate a built version's frozen manifest at `level`; caller
-    /// owns it. `.structural` is what a listing wants (is this complete, and
-    /// what does it declare), `.sealed` what running or freezing these bytes
-    /// wants. Nothing here picks for the caller.
+    /// owns it. `.structural` is what a listing wants, `.sealed` what running or
+    /// freezing these bytes wants. Nothing here picks for the caller.
     pub fn readManifest(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, level: Level) !manifest.Manifest {
         // Not through `versionExists`: that boolean collapses every error to
         // `false`, including `error.Canceled`, which must propagate.
@@ -196,14 +191,12 @@ pub const Store = struct {
     /// bytes built for `target` — and, when the caller names one, by that
     /// compiler. Null when this root holds no such version; caller owns it.
     ///
-    /// Without a compiler identity several builds of one source can match, so
-    /// the search runs over SORTED version ids: which copy answers must not
-    /// depend on directory listing order. A half-written or broken version
-    /// directory is skipped; host faults propagate.
+    /// Without a compiler identity several builds of one source can match, so the
+    /// search runs over SORTED version ids: which copy answers must not depend on
+    /// listing order. A broken version directory is skipped; host faults propagate.
     ///
-    /// The check is `.structural`, not `.sealed`: whoever is about to run or
-    /// freeze these bytes validates them itself, and re-digesting every built
-    /// binary here would hash the whole store on every `ext sync --dry-run`.
+    /// The check is `.structural`, not `.sealed`: re-digesting here would hash the
+    /// whole store on every `ext sync --dry-run`.
     pub fn findSealed(
         self: Store,
         alloc: std.mem.Allocator,
@@ -279,16 +272,11 @@ pub const Store = struct {
     }
 };
 
-/// Faults meaning "this directory is not a usable extension". What a caller
-/// does with one is its own rule: a listing skips it, composition fails on it,
-/// a lookup keeps searching. Anything else — cancellation, `OutOfMemory`, real
-/// I/O failures — is a host fault and must propagate.
-///
-/// Derived by reflection from `manifest.zig`'s error sets, so a new
-/// `ValidateError` member is covered the moment it is added.
+/// Faults meaning "this directory is not a usable extension". What a caller does
+/// with one is its own rule: a listing skips it, composition fails on it, a
+/// lookup keeps searching. Anything else — cancellation, `OutOfMemory`, real I/O
+/// failures — is a host fault. Derived by reflection from `manifest.zig`.
 pub fn isExtensionFault(err: anyerror) bool {
-    // Both manifest sets: a mistyped field is as broken a draft as one failing
-    // a rule. `OutOfMemory` arrives via `Allocator.Error` and is a host fault.
     const Faults = manifest.ParseError || manifest.ValidateError ||
         error{
             InvalidVersion,
@@ -317,9 +305,8 @@ test "isExtensionFault covers every manifest parse/validate member, but never OO
     try std.testing.expect(!isExtensionFault(error.OutOfMemory));
 }
 
-/// Creating it and its parents if absent — what the WRITE side needs, so a
-/// machine with no store gets one the first time something is built into it.
-/// Read paths use `openRoot`, which skips what is absent.
+/// Creating it and its parents if absent — what the WRITE side needs. Read
+/// paths use `openRoot`, which skips what is absent.
 pub fn openOrCreateRoot(io: std.Io, cwd: []const u8, spec: []const u8) !std.Io.Dir {
     if (std.fs.path.isAbsolute(spec)) {
         try std.Io.Dir.cwd().createDirPath(io, spec);
@@ -567,8 +554,7 @@ test "the two levels answer different questions: a tampered binary passes struct
     try std.testing.expect(store.versionExists(alloc, "demo", version, .structural));
     try std.testing.expect(store.versionExists(alloc, "demo", version, .sealed));
 
-    // Tampered: the directory is still COMPLETE (all a listing asks), but no
-    // longer the bytes that were sealed.
+    // Tampered: still COMPLETE (all a listing asks), no longer the sealed bytes.
     try tmp.dir.writeFile(io, .{ .sub_path = entry_sub, .data = "tampered" });
     try std.testing.expect(store.versionExists(alloc, "demo", version, .structural));
     try std.testing.expect(!store.versionExists(alloc, "demo", version, .sealed));
@@ -579,8 +565,7 @@ test "the two levels answer different questions: a tampered binary passes struct
     }
     try std.testing.expectError(error.VersionSealInvalid, store.readManifest(alloc, "demo", version, .sealed));
 
-    // Missing entirely: incomplete, so BOTH refuse. Structural is about
-    // completeness, never about trust.
+    // Missing entirely: incomplete, so BOTH refuse.
     try tmp.dir.deleteFile(io, entry_sub);
     try std.testing.expect(!store.versionExists(alloc, "demo", version, .structural));
     try std.testing.expect(!store.versionExists(alloc, "demo", version, .sealed));
@@ -644,9 +629,8 @@ test "listVersions returns every built version" {
 }
 
 /// Test-only: consume the first cancelation at a deterministic gate, re-arm it
-/// via `io.recancel()`, then call `readManifest` so the pending cancelation
-/// lands on its first filesystem syscall. `recancel` must never appear in
-/// production control flow, which propagates `error.Canceled` instead.
+/// via `io.recancel()`, then call `readManifest` so the pending cancelation lands
+/// on its first filesystem syscall. `recancel` never appears in production.
 fn readManifestAfterRecancel(
     alloc: std.mem.Allocator,
     st: Store,

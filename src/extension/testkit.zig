@@ -2,7 +2,6 @@
 //!
 //! The snapshot -> canonical -> versionId -> freeze -> seal dance in one place,
 //! so fixtures cannot drift from the real definitions in `integrity.zig`.
-//! Fixture *shape* (which manifest, which files) stays local to each test.
 
 const std = @import("std");
 const integrity = @import("integrity.zig");
@@ -12,8 +11,7 @@ const target_mod = @import("target.zig");
 
 const compiler = "zig test";
 /// A fixture's binary is written with the HOST's exe suffix, so its seal must
-/// say so: validation reads the suffix off `seal.target`, and a made-up target
-/// word would send it looking for `bin/demo` next to a `bin/demo.exe`.
+/// say so: validation reads the suffix off `seal.target`.
 const target = target_mod.host;
 const default_main = "pub fn main() void {}\n";
 const stub_binary = "stub-binary\n";
@@ -75,9 +73,8 @@ pub fn writeFrozenVersion(
 
     var binary_digest: ?[]u8 = null;
     defer if (binary_digest) |d| alloc.free(d);
-    // A SCRIPT version has no separately-built binary: its entry is frozen
-    // inside `package/` and covered by the package digest, so its seal must
-    // record no binary digest at all.
+    // A SCRIPT version has no separately-built binary, so its seal must record
+    // no binary digest.
     if (if (m.runtime) |rt| (if (manifest.isScript(rt)) null else rt) else null) |rt| {
         const host_entry = rt.entry.forHost() orelse return error.EntryUnsupportedOnHost;
         const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ host_entry, integrity.exe_suffix });
@@ -110,12 +107,10 @@ pub fn writeSkillVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir,
     return writeFrozenVersion(alloc, io, root, id, manifest_bytes, &.{.{ .rel = "skills/demo/SKILL.md", .bytes = body }});
 }
 
-/// Point `current` at a written version.
 pub fn activate(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !void {
     return store.Store.init(io, root).activate(alloc, id, version);
 }
 
-/// Drop `current` — the other direction of `activate`.
 pub fn deactivate(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8) !void {
     return store.Store.init(io, root).deactivate(alloc, id);
 }

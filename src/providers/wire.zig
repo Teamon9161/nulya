@@ -9,8 +9,7 @@ const std = @import("std");
 
 /// Write every item of a turn's `reasoning` (the JSON array a `TurnCollector`
 /// joined from the provider's `reasoning_item`s) as one JSON value each, into
-/// whatever array `jw` is inside. Re-serialized from the parsed value, which
-/// keeps key order.
+/// whatever array `jw` is inside. Re-serialized from the parsed value, key order kept.
 pub fn writeReasoningItems(jw: *std.json.Stringify, alloc: std.mem.Allocator, reasoning: []const u8) !void {
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, reasoning, .{}) catch return error.CorruptReasoning;
     defer parsed.deinit();
@@ -47,8 +46,7 @@ pub fn uint(v: std.json.Value, name: []const u8) u64 {
     };
 }
 
-/// Splice an already-serialized JSON document (a tool's `input_schema`) into the
-/// stream without reparsing it.
+/// Splice an already-serialized JSON document into the stream without reparsing.
 pub fn writeRaw(jw: *std.json.Stringify, raw: []const u8) !void {
     try jw.beginWriteRaw();
     try jw.writer.writeAll(raw);
@@ -60,8 +58,7 @@ pub fn writeRaw(jw: *std.json.Stringify, raw: []const u8) !void {
 pub const Post = struct {
     url: []const u8,
     body: []const u8,
-    /// Every model request is a POST; the one exception is the Codex model
-    /// catalogue, a GET that is otherwise the same exchange (`getJson`).
+    /// Every model request is a POST; the Codex model catalogue is a GET (`getJson`).
     method: std.http.Method = .POST,
     /// Full `Authorization` header value (e.g. `Bearer sk-…`); null omits it.
     authorization: ?[]const u8 = null,
@@ -95,8 +92,7 @@ const Heartbeat = struct {
     }
 };
 
-/// Returns once `stall_ms` passed with no beat. Being canceled (the exchange
-/// finished first) is simply the end of the watch.
+/// Returns once `stall_ms` passed with no beat; cancellation ends the watch.
 fn watchdog(hb: *Heartbeat, stall_ms: u64) void {
     while (true) {
         const idle = Heartbeat.nowMs(hb.io) - hb.last_ms.load(.monotonic);
@@ -108,8 +104,7 @@ fn watchdog(hb: *Heartbeat, stall_ms: u64) void {
 /// Run `exchange(args…, *Heartbeat)` under the stall watchdog. Both are their own
 /// tasks so whichever finishes first cancels the other; a stalled exchange is
 /// interrupted in its blocking read. Our own cancellation arrives at `await`,
-/// cancels both, propagates. Without units of concurrency for the pair, the
-/// exchange runs unguarded rather than falsely stalling.
+/// cancels both, propagates. Without concurrency for the pair, it runs unguarded.
 fn Watched(comptime R: type) type {
     return struct {
         const Race = union(enum) { exchange: R, stall: void };
@@ -245,8 +240,7 @@ fn exchangeSse(
         line.clearRetainingCapacity();
         _ = reader.streamDelimiterEnding(&line.writer, '\n') catch |err| return transport(err, hb);
         hb.beat();
-        // At end of stream nothing is buffered; otherwise the next byte is the
-        // delimiter we just stopped at.
+        // At end of stream nothing is buffered; otherwise the next byte is the delimiter.
         const at_end = reader.bufferedLen() == 0;
         if (!at_end) reader.toss(1);
 

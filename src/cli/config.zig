@@ -30,31 +30,26 @@ pub fn dispatchConfig(alloc: std.mem.Allocator, io: std.Io, args: []const []cons
 const ShowOptions = struct {
     as_json: bool,
     /// Ask each usable codex profile's endpoint for its live model catalogue
-    /// and write it to the Codex CLI's cache before projecting. Set only by
-    /// `config refresh`, the one verb here that goes to the network.
+    /// and write it to the Codex CLI's cache before projecting.
     refresh: bool = false,
 };
 
 /// The projection a picker reads: the EFFECTIVE provider profiles after the
 /// whole config chain, each with whether its credential is usable right now,
-/// plus the model catalog. Never a secret — only the env var NAME and a
-/// boolean. It shows what `session new` would see.
+/// plus the model catalog. It shows what `session new` would see.
 const ConfigView = struct {
     /// Where the chain reads from, so a front end writes where it shows.
     paths: Paths,
     active_profile: []const u8,
     profiles: []const ProfileView,
     models: []const config.ModelParams,
-    /// The merged `[registry]` — the tool face this workspace opens a session
-    /// with. Effective values only; typed as `config.Registry`, so the names
-    /// printed are the keys to write back.
+    /// The merged `[registry]`. Effective values only; typed as
+    /// `config.Registry`, so the names printed are the keys to write back.
     registry: config.Registry,
-    /// Which packages are a member of every session opened here. Projected for
-    /// the same reason as the pins: a reader who cannot see it here goes and
-    /// reads the config files, one of which may hold an inline `api_key`.
-    ///
-    /// `extensions.paths` is deliberately not projected: it names directories
-    /// this machine will run code from.
+    /// Which packages are a member of every session opened here. Projected so a
+    /// reader need not go read the config files, one of which may hold an
+    /// inline `api_key`. `extensions.paths` is deliberately not projected: it
+    /// names directories this machine will run code from.
     extensions: ExtensionsView,
 
     const ExtensionsView = struct {
@@ -78,17 +73,14 @@ const ConfigView = struct {
         /// `config` (the profile's own api_key), `env` (api_key_env is set),
         /// `login` (codex auth file), `builtin` (scripted), `none`.
         credential_source: []const u8,
-        /// The default model id and the selectable list (never empty for a
-        /// real provider: at least the default).
+        /// The default model id, and the selectable list (never empty).
         model: []const u8,
         models: []const []const u8,
         effort: ?[]const u8,
         /// What THIS profile's own endpoint says about the ids in `models`,
         /// parallel to it (`catalog[i]` describes `models[i]`). Null — every
-        /// profile but codex — means "look the id up in the top-level catalog".
-        /// A ChatGPT subscription serves several of the same ids with a smaller
-        /// window, an extra effort level and its own defaults, so only its own
-        /// `codex.Catalog` describes what a session on it would get.
+        /// profile but codex — means "look the id up in the top-level catalog":
+        /// a ChatGPT subscription serves the same ids with its own numbers.
         catalog: ?[]const config.ModelParams = null,
     };
 };
@@ -170,9 +162,8 @@ fn configShow(alloc: std.mem.Allocator, io: std.Io, opts: ShowOptions) !u8 {
 }
 
 /// The catalogue this profile's own endpoint publishes, when it publishes one
-/// and the profile has not been told what it serves: today, a codex profile
-/// with no `models` list reads the Codex CLI's cache. An explicit `models` in
-/// any config layer wins — a discovered list never overrules a written one.
+/// and the profile has not been told what it serves: a codex profile with no
+/// `models` list reads the Codex CLI's cache. An explicit `models` wins.
 fn endpointCatalog(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -183,8 +174,7 @@ fn endpointCatalog(
     return codex.Catalog.load(alloc, io, env);
 }
 
-/// The catalogue as the two parallel lists the view carries, the profile's
-/// default model first: `models[0]` is what a picker opens on.
+/// The two parallel lists the view carries; `models[0]` is the default.
 fn orderByDefault(
     a: std.mem.Allocator,
     params: []const config.ModelParams,
@@ -211,8 +201,7 @@ fn orderByDefault(
 
 /// `nulya config refresh`: fetch today's catalogue for every codex profile
 /// whose subscription credential is present right now, and write it to the file
-/// the projection reads. False means it did not happen, which the caller turns
-/// into exit 1; the projection is still printed either way.
+/// the projection reads. False means it did not happen: the caller exits 1.
 fn refreshCodexCatalogs(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -395,7 +384,6 @@ test "config show projects profiles with credential availability and the catalog
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "ds ") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "no key") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "effort off|low|high|max (default auto)") != null);
-    // Under the config file's own key names, so reading is enough to write.
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "max_tools            6") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "with                 guide, std:read,grep") != null);
 }
@@ -444,20 +432,17 @@ test "config show: a codex profile's model list and parameters come from the sub
     try std.testing.expectEqual(@as(usize, 2), listed.ids.len);
     try std.testing.expectEqualStrings("gpt-5.5", listed.ids[0]);
     try std.testing.expectEqualStrings("gpt-5.6-sol", listed.ids[1]);
-    // `catalog[i]` describes `models[i]`, with the subscription's own numbers.
     try std.testing.expectEqualStrings(listed.ids[1], listed.params[1].id);
     try std.testing.expectEqual(@as(u64, 258_400), listed.params[1].context_window.?);
     try std.testing.expectEqualStrings("xhigh", listed.params[1].efforts[3]);
     try std.testing.expectEqualStrings("low", listed.params[1].default_effort.?);
 
-    // A discovered list never overrules an explicit `models`.
     var told: config.ProviderProfile = profile;
     told.models = &.{"gpt-5.5"};
     try std.testing.expect((try endpointCatalog(alloc, io, &env, told)) == null);
     try std.testing.expect((try endpointCatalog(alloc, io, &env, .{ .name = "openai", .kind = .openai })) == null);
 
-    // No cache here: the profile still projects its default model, described by
-    // the shared `[[models]]` catalog (catalog stays null).
+    // No cache: the profile still projects its default model, catalog stays null.
     var bare: std.process.Environ.Map = .init(alloc);
     defer bare.deinit();
     const empty_home = try std.fs.path.join(a, &.{ codex_home, "empty" });

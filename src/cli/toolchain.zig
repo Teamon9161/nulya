@@ -45,22 +45,18 @@ pub fn dispatchToolchain(alloc: std.mem.Allocator, io: std.Io, args: []const []c
     };
 }
 
-/// A resolved compiler and where it came from — the second half matters,
-/// because only one of the three sources (`path`) is unpinned.
+/// A resolved compiler and where it came from; only `path` is unpinned.
 pub const ZigExe = struct {
     path: []u8,
-    /// `managed` = nulya's own toolchain directory, whether this binary
-    /// extracted the compiler into it or found it already there.
+    /// `managed` = nulya's own toolchain directory, extracted or already there.
     source: enum { env, managed, path },
 
     pub fn deinit(self: ZigExe, alloc: std.mem.Allocator) void {
         alloc.free(self.path);
     }
 
-    /// Where this path came from, for a sentence a person has to act on.
-    /// `NULYA_ZIG` is taken verbatim and unchecked while the other two answer
-    /// only after finding a file, so without this word a broken `NULYA_ZIG` and
-    /// a vanished toolchain read alike.
+    /// Where this path came from: `NULYA_ZIG` is taken verbatim and unchecked
+    /// while the other two answer only after finding a file.
     pub fn origin(self: ZigExe) []const u8 {
         return switch (self.source) {
             .env => "from NULYA_ZIG",
@@ -73,11 +69,9 @@ pub const ZigExe = struct {
 /// Resolve a zig executable, in this order: `NULYA_ZIG`, the managed toolchain
 /// directory (extracted from the embedded archive when there is one), then a
 /// `zig` on PATH. Caller owns the path; `error.NoZigToolchain` means none of
-/// the three answered.
-///
-/// Taking a PATH zig is safe because a compiled version's id hashes the
-/// compiler identity: a different zig yields a *different version*, never a
-/// silently different binary under the same id.
+/// the three answered. Taking a PATH zig is safe because a compiled version's
+/// id hashes the compiler identity: a different zig yields a *different
+/// version*, never a silently different binary under the same id.
 pub fn resolveZig(alloc: std.mem.Allocator, io: std.Io) !ZigExe {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
@@ -114,8 +108,7 @@ pub fn managedDirPath(alloc: std.mem.Allocator) ![]u8 {
 }
 
 /// The two pinned ways out of "no usable compiler", with the directory spelled
-/// out — every verb that can hit the wall prints this same sentence. Caller
-/// owns the result.
+/// out — every verb that can hit the wall prints it. Caller owns the result.
 pub fn noZigHint(alloc: std.mem.Allocator) ![]u8 {
     const dir = try managedDirPath(alloc);
     defer alloc.free(dir);
@@ -151,8 +144,7 @@ fn zigOnPath(alloc: std.mem.Allocator, io: std.Io, host: *const std.process.Envi
         if (dir.len == 0 or !std.fs.path.isAbsolute(dir)) continue;
         const candidate = try std.fs.path.join(alloc, &.{ dir, exe_name });
         errdefer alloc.free(candidate);
-        // `execute` is what matters: a `zig` directory or a non-executable
-        // file on PATH is not a compiler.
+        // A `zig` directory or a non-executable file on PATH is not a compiler.
         if (std.Io.Dir.accessAbsolute(io, candidate, .{ .execute = true })) |_| return candidate else |err| switch (err) {
             error.Canceled => return err,
             else => alloc.free(candidate),

@@ -1,7 +1,6 @@
 //! Plumbing every `nulya` verb file shares: stdout/stderr writing, argv
-//! scanning, the workspace cwd, and the store-plus-pointer-layers view each
-//! `ext` / `skill` / `session` command opens. A helper lands here exactly when
-//! two verb files need it.
+//! scanning, the workspace cwd, and the store-plus-pointer-layers view. A
+//! helper lands here exactly when two verb files need it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -11,13 +10,11 @@ const composition = @import("../composition.zig");
 const launch = @import("../launch.zig");
 const environment = @import("../environment.zig");
 
-/// This invocation's view of the machine: the one store, the workspace's
-/// pointer layer, and the standing member list, all opened once.
+/// This invocation's view of the machine, all opened once.
 pub const StoreView = struct {
     site: site_mod.Site,
     /// The merged config's `[extensions] with` — the ids that are a member of
-    /// every session opened here. The store says where an id's code lives,
-    /// this says whether a session gets it.
+    /// every session opened here.
     with: []const []const u8,
 
     pub fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) !StoreView {
@@ -64,8 +61,7 @@ pub fn storePath(alloc: std.mem.Allocator) ![]u8 {
     return launch.storePath(alloc, &host);
 }
 
-/// Copy a config-arena string list into caller-owned memory — the config dies
-/// with the load, and `StoreView` outlives it.
+/// Copy a config-arena string list out: the config dies with the load.
 fn dupeOwnedList(alloc: std.mem.Allocator, list: []const []const u8) ![]const []const u8 {
     const out = try alloc.alloc([]const u8, list.len);
     errdefer alloc.free(out);
@@ -76,8 +72,7 @@ fn dupeOwnedList(alloc: std.mem.Allocator, list: []const []const u8) ![]const []
 }
 
 /// Where a draft-side command writes: the store under `--user`, else this
-/// workspace's `.nulya/extensions`. Null means `--user` on a machine with no
-/// home. Caller owns the result.
+/// workspace's `.nulya/extensions`. Null = `--user` with no home. Caller owns.
 pub fn draftRootSpec(alloc: std.mem.Allocator, user: bool) !?[]u8 {
     if (!user) return try alloc.dupe(u8, site_mod.workspace_rel);
     const path = try storePath(alloc);
@@ -101,16 +96,14 @@ pub fn takeUserFlag(alloc: std.mem.Allocator, args: []const []const u8) !struct 
 
 /// Which pointer layer an `ext activate` writes: `--user` says the store's own
 /// `current` outright; otherwise the workspace layer when this workspace
-/// already has a `<id>/`, and the store layer when it does not. One rule, so
-/// "where did my activate land" is predictable from what is on disk.
+/// already has a `<id>/`, and the store layer when it does not.
 pub fn activateLayer(site: *const site_mod.Site, id: []const u8, user: bool) site_mod.Layer {
     if (user) return .user;
     return if (site.workspaceHas(id)) .workspace else .user;
 }
 
 /// Which pointer layer an `ext deactivate` drops: `--user` the store's own,
-/// otherwise the layer whose pointer is IN EFFECT — dropping any other would
-/// succeed and change nothing.
+/// otherwise the layer whose pointer is IN EFFECT — any other changes nothing.
 pub fn deactivateLayer(alloc: std.mem.Allocator, site: *const site_mod.Site, id: []const u8, user: bool) !?site_mod.Layer {
     if (user) return .user;
     const active = (try site.activePointer(alloc, id)) orelse return null;
@@ -119,11 +112,9 @@ pub fn deactivateLayer(alloc: std.mem.Allocator, site: *const site_mod.Site, id:
 }
 
 /// The id of the session this process is running INSIDE, or null: `session
-/// step` publishes it as `NULYA_SESSION_ID`. Caller owns the result.
-///
-/// The ID, not the stem of `NULYA_SESSION`: callers here want an identity, and
-/// a session whose workspace lives on another machine has an identity there but
-/// no session file. `NULYA_SESSION` stays for callers that need the file.
+/// step` publishes it as `NULYA_SESSION_ID`. Caller owns the result. The ID,
+/// not the stem of `NULYA_SESSION`: a session whose workspace lives on another
+/// machine has an identity there but no session file.
 pub fn envSessionId(alloc: std.mem.Allocator) !?[]u8 {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
@@ -151,9 +142,7 @@ pub fn withRef(spec: []const u8) composition.WithRef {
 /// `session new --with` and config `[extensions] with` share. Neither an id nor
 /// a version contains `:`, so the first one starts the tool selection. `:none`
 /// and an empty selection both mean "a member with nothing on the tool face".
-///
-/// Every string is BORROWED from `spec`; only the names array is allocated, and
-/// `freeMemberRefs` releases it.
+/// Every string is BORROWED from `spec`; `freeMemberRefs` releases the array.
 pub fn memberRef(alloc: std.mem.Allocator, spec: []const u8) !composition.WithRef {
     const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return withRef(spec);
     var ref = withRef(spec[0..colon]);
@@ -220,8 +209,7 @@ pub fn writeInto(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_dir:
 //
 // One block per verb family, so a bare `nulya ext` prints exactly its own lines
 // and `nulya help` prints all of them in order: one text, so the two can never
-// disagree. Model-facing (it arrives through `shell`), so every line states
-// behaviour and usage and cites no document.
+// disagree. Model-facing, so every line states behaviour and cites no document.
 
 pub const ext_usage =
     \\  nulya ext init [--zig] [--user] <id> [tool]       scaffold a draft: a script by default, --zig for a compiled one

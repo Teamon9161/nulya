@@ -2,9 +2,8 @@
 //! supervisors over an already-open channel, and turning what they answer into
 //! the same `Row` a local task reads as.
 //!
-//! `task.zig` owns naming, `status.json` and every verb; it reaches in here
-//! only through `Far` and `readRemoteRow`. A task's machine is `Far.linkFor`'s
-//! answer — that session's frozen header, not a guess made per call.
+//! `task.zig` owns naming, `status.json` and every verb. A task's machine is
+//! that session's frozen header, not a guess made per call.
 
 const std = @import("std");
 const environment = @import("../environment.zig");
@@ -15,16 +14,13 @@ const task = @import("task.zig");
 
 // Nobody over there can deposit, so every reading verb in `task.zig` asks that
 // machine about the tasks it started there and turns any undelivered finished
-// report into the report note the session's inbox already understands: a driver
-// still sees only an inbox event at a step boundary. Whichever verb asks first
-// does it — `task list`, `task wait`, `task status`, or a `session step` over
-// its own already-open channel — and it is idempotent twice over (the
+// report into the report note the session's inbox already understands.
+// Whichever verb asks first does it, and it is idempotent twice over (the
 // `delivered` marker here, the ledger's `origin` column behind it).
 
 /// The machines this verb has had to ask, one channel each. Opened lazily and
 /// closed when the verb ends. A machine that does not answer costs ONE attempt,
-/// not one per task: the failure is remembered, and its tasks read
-/// `unreachable`.
+/// not one per task; its tasks read `unreachable`.
 pub const Far = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -64,8 +60,7 @@ pub const Far = struct {
         self.links.deinit(self.alloc);
     }
 
-    /// What is known about where `session_id`'s tasks run, from that session's
-    /// frozen HEADER — the one place "where does this run" is recorded.
+    /// Where `session_id`'s tasks run, from that session's frozen HEADER.
     fn linkFor(self: *Far, session_id: []const u8) !*Link {
         for (self.links.items) |l| {
             if (std.mem.eql(u8, l.session, session_id)) return l;
@@ -102,8 +97,7 @@ pub const Far = struct {
     }
 
     /// Hand this collector a channel the caller already has open; it stays the
-    /// caller's. The spec comes from `linkFor` — that session's own header — so
-    /// lending cannot introduce a second answer to "where does this run".
+    /// caller's. The spec still comes from `linkFor`, never from the lender.
     fn lend(self: *Far, session_id: []const u8, ch: *remote.Channel) !void {
         const link = try self.linkFor(session_id);
         if (link.spec.len == 0) return; // a local session has no machine to lend
@@ -141,26 +135,22 @@ pub const Far = struct {
 };
 
 /// What one far task's own machine had to say. `bytes` is its `status.json`,
-/// verbatim, and empty means its supervisor has not written one yet — the same
-/// `starting` a local statusless directory reports. `lease_held` rides the SAME
-/// poll so a far `lost` costs no second question; null only when the far agent
-/// predates the column. `report_present` says that machine is still holding a
-/// report file; whether THIS machine has taken it is the `delivered` marker.
+/// verbatim, and empty means its supervisor has not written one yet.
+/// `lease_held` rides the SAME poll so a far `lost` costs no second question;
+/// null only when the far agent predates the column. `report_present` says that
+/// machine still holds a report file; whether THIS one took it is `delivered`.
 const FarAnswer = union(enum) {
     status: struct { bytes: []const u8, lease_held: ?bool, report_present: bool },
-    /// This host could not get an answer. Nothing is known about the task —
-    /// not that it is running, not that it died.
+    /// This host got no answer: nothing is known, not even that the task died.
     unreached,
 };
 
 /// Ask one machine about one task, and deliver its report if it left one that
 /// has not been delivered yet. `host_dir` is the task's directory on THIS
-/// machine — where `notify` and `delivered` live. The returned bytes belong to
-/// `arena`.
-///
-/// `deliver` false asks the state and nothing else: `session prune` asks while
-/// holding a deposit lease, and delivering into that very session would wait
-/// for a lease this process itself is holding.
+/// machine — where `notify` and `delivered` live; returned bytes belong to
+/// `arena`. `deliver` false asks the state and nothing else: `session prune`
+/// asks while holding a deposit lease, and delivering into that very session
+/// would wait for a lease this process itself is holding.
 fn pollAndDeliver(
     alloc: std.mem.Allocator,
     arena: std.mem.Allocator,
@@ -186,9 +176,8 @@ fn pollAndDeliver(
 
     // The far side writes its report BEFORE it says `done`, so one poll can
     // land in between: report present, `status.json` still `running` with a
-    // null exit code. Depositing on report-presence alone would read THAT
-    // status for the exit code — wrong, and permanently, since `delivered` is
-    // then written. `state == .done` is what finished means.
+    // null exit code. Depositing then would record that wrong exit code
+    // permanently, since `delivered` is written after. `.done` is finished.
     const parsed = std.json.parseFromSlice(task.Status, alloc, std.mem.trim(u8, status_bytes, " \t\r\n"), task.json_opts) catch
         return answer;
     defer parsed.deinit();
@@ -215,8 +204,7 @@ fn pollAndDeliver(
     return answer;
 }
 
-/// `readRow`'s remote branch: same contract, reached only once `task.zig` has
-/// established `far.isRemote(ref.session)`.
+/// `readRow`'s remote branch; reached only once `far.isRemote` said yes.
 pub fn readRemoteRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: task.RowRef, deliver: bool) !?task.Row {
     var row: task.Row = .{
         .full = ref.full,
@@ -243,18 +231,16 @@ pub fn readRemoteRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: task.
     const status = std.json.parseFromSliceLeaky(task.Status, arena, std.mem.trim(u8, outcome.bytes, " \t\r\n"), task.json_opts) catch
         return null;
     row.status = status;
-    // The far lease answer rides the SAME `task-poll` round: a done status wins
-    // outright, a free lease on a not-done status is `lost`, and a held or
-    // unknown (older peer) lease reports `running` — not knowing is no grounds
-    // to claim the task died.
+    // A done status wins outright, a free lease on a not-done status is `lost`,
+    // and a held or unknown (older peer) lease reports `running` — not knowing
+    // is no grounds to claim the task died.
     row.state = if (status.state == .done)
         .done
     else if (outcome.lease_held == false)
         .lost
     else
         .running;
-    // Asked after the poll, so a delivery this very call made counts: the
-    // marker goes down only once the deposit landed.
+    // Asked after the poll, so a delivery this very call made counts.
     row.report_pending = outcome.report_present and row.state == .done and
         !task.markerPresent(far.alloc, io, ref.dir, task.delivered_file);
     return row;
@@ -264,14 +250,11 @@ pub fn readRemoteRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: task.
 /// channel that is ALREADY open — what `session step` does before it steps, so
 /// a driver that never runs a `task` verb still gets its results.
 ///
-/// This is `task list --session <id>` with the rows thrown away: which tasks
-/// report into a session has exactly one answer, and it is not "the ones under
-/// this session's own directory" — a task another session retargeted here
-/// reports here. The caller's channel is lent, not adopted: an owner on a
-/// DIFFERENT machine still costs a connection.
-///
-/// Best effort: a report that cannot be fetched now is fetched by the next
-/// asker, and a step must not fail because a task's machine hiccuped.
+/// Which tasks report into a session is not "the ones under this session's own
+/// directory": a task another session retargeted here reports here. The
+/// caller's channel is lent, not adopted, so an owner on a DIFFERENT machine
+/// still costs a connection. Best effort: a report that cannot be fetched now
+/// is fetched by the next asker.
 pub fn sweepRemoteReports(
     alloc: std.mem.Allocator,
     io: std.Io,

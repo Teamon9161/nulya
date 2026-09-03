@@ -42,8 +42,7 @@ pub const ShellDialect = enum {
 };
 
 /// A profile says HOW to reach a provider and WHICH model ids it serves; the
-/// ids' intrinsic properties live in the `[[models]]` catalog, so a model
-/// reached through two endpoints is described once.
+/// ids' intrinsic properties live in the `[[models]]` catalog.
 pub const ProviderProfile = struct {
     name: []const u8,
     kind: ProviderKind = .openai,
@@ -55,8 +54,7 @@ pub const ProviderProfile = struct {
     base_url: []const u8 = "",
     api_key_env: []const u8 = "",
     api_key: ?[]const u8 = null,
-    /// Profile-wide effort override; `Config.defaultEffort` prefers it over the
-    /// catalog's `default_effort`.
+    /// Profile-wide effort override, preferred over the catalog's `default_effort`.
     effort: ?[]const u8 = null,
 
     /// The model id a session gets when none is named. `""` means "let the
@@ -68,8 +66,7 @@ pub const ProviderProfile = struct {
 };
 
 /// Intrinsic properties of one model id, independent of which profile serves it.
-/// Purely descriptive — the kernel never reads it; the shell uses it to default
-/// a session's effort and to project a picker.
+/// Purely descriptive — the kernel never reads it.
 pub const ModelParams = struct {
     id: []const u8,
     label: []const u8 = "",
@@ -81,8 +78,7 @@ pub const ModelParams = struct {
     default_effort: ?[]const u8 = null,
     context_window: ?u64 = null,
     /// Whether this model accepts images in a user turn. Explicit opt-in: an id
-    /// that does not say so does not accept them, and `--image` refuses rather
-    /// than letting the provider 400 mid-run.
+    /// that does not say so makes `--image` refuse, rather than a provider 400.
     vision: bool = false,
 };
 
@@ -121,9 +117,8 @@ pub const Environment = struct {
 
 pub const Extensions = struct {
     /// The members of every session opened in this workspace — skills, system
-    /// prompts, CLI-reachable tools, and the tools the entry selects on the
-    /// model's tool face. The standing half of the ONE axis; `session new --with`
-    /// is the per-session half, joined by the shell before composition sees them.
+    /// prompts, CLI-reachable tools, and the tools the entry selects on the model's
+    /// tool face. `session new --with` is the per-session half of the same axis.
     ///
     /// Each entry is `<id>[@<version>][:<tool>,<tool>…]`. Leaving the version out
     /// makes the member follow `current`, so `ext activate` still moves it.
@@ -160,15 +155,13 @@ pub const Config = struct {
     }
 
     /// The effort a session runs with when its driver names none: the profile's
-    /// override first, then the catalog default for the model id, else nothing
-    /// (provider default). Both inputs are what a session header carries, so a
-    /// step can re-derive this without the config being frozen.
+    /// override first, then the catalog default for the model id, else nothing.
+    /// Both inputs are what a session header carries, so a step can re-derive it.
     pub fn defaultEffort(self: *const Config, profile_name: []const u8, model_id: []const u8) ?[]const u8 {
         if (self.provider.findProfile(profile_name)) |p| {
             if (p.effort) |e| return e;
-            // A codex profile stops here: the catalog describes an id as the
-            // public API serves it, while the subscription serves the same ids
-            // with their own per-model default, applied when nothing is sent.
+            // A codex profile stops here: the subscription serves the same ids with
+            // their own per-model default, applied when nothing is sent.
             if (p.kind == .codex) return null;
         }
         if (self.findModel(model_id)) |m| return m.default_effort;
@@ -340,9 +333,8 @@ fn mergeProject(cfg: *Config, raw: RawConfig) !void {
         }
     }
 
-    // `extensions.with` IS read here: a member names a version this machine
-    // already built into its store, so a checkout can only select among what is
-    // here, never introduce code.
+    // `extensions.with` IS read here: a member names a version this machine already
+    // built, so a checkout can only select among what is here, never add code.
     if (raw.extensions) |extensions| {
         if (extensions.with) |with| cfg.extensions.with = try dupeStringList(arena, with);
     }
