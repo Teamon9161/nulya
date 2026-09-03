@@ -20,8 +20,7 @@
  * nesting: a provider that cannot run is offered no model row at all
  * (`pickableRows`), plus — whatever its state — the provider of the pick in
  * force, so the row marked `current` always has somewhere to sit. The provider
- * stays a column on every row: that is how "this provider's model" reads at a
- * glance without a level to descend into.
+ * is the heading over its own models: said once, with no level to descend into.
  *
  * The list is `nulya config show --json`: the kernel's shell projects the
  * effective config chain once, so nothing here re-derives profiles or guesses
@@ -29,6 +28,17 @@
  *
  * Effort is not frozen either way — it is a per-step generation option — so it
  * rides along with whatever Enter does here, and `/effort` changes it alone.
+ *
+ * `s` is the screen's second sentence: put a SUB-AGENT on the highlighted row.
+ * It asks by offering the personas this machine defines — nobody remembers a
+ * list of names they never wrote, so the question is a list to choose from and
+ * never a field to type into. What is written is a RUNG on the profile in
+ * force, because the rung table hangs on the PROFILE the main model runs on:
+ * that is why picking a model under another provider moves the whole team at
+ * once, and why a rung may name a model on a different provider
+ * (`<profile>/<id>`) — the main model on one endpoint and its explore on
+ * another is a fleet, not a mistake. The team in force is drawn on the rows it
+ * lands on.
  *
  * Every line on this screen is laid out by us and never by the terminal: cells
  * are cut to their column, sentences are broken at their ` · ` joints, and the
@@ -44,6 +54,8 @@ import { createHover, onClick, rowBackground, rowGutter, rowText } from "../rows
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { blockedReason, keyable, modelIdsOf } from "./providers.ts"
 import { configShow, type ConfigView, type ModelView as ModelParams, type ProfileView } from "../../nulya/cli.ts"
+import { validRungName, writeRung } from "../../nulya/credentials.ts"
+import type { RungChoice } from "../../agents.ts"
 import type { ModelPick } from "../../state/tui_state.ts"
 import type { Workspace } from "../../nulya/bin.ts"
 
@@ -104,7 +116,16 @@ export function pickerRows(config: ConfigView): PickerRow[] {
  */
 export function pickableRows(config: ConfigView, current: ModelPick | null): PickerRow[] {
   return config.profiles
-    .filter((profile) => profile.credential || (current !== null && current.profile === profile.name))
+    .filter((profile) => {
+      if (current !== null && current.profile === profile.name) return true
+      // The offline stand-in is not an endpoint anybody configures or would
+      // choose on purpose — it exists so a machine with no key still runs, and
+      // `launch.ts` lands you on it by itself when that happens (and then the
+      // clause above keeps it). `/provider` still lists it: that screen is the
+      // inventory of endpoints, this one is the list of what to spend on.
+      if (profile.kind === "scripted") return false
+      return profile.credential
+    })
     .flatMap((profile) => modelRows(config, profile))
 }
 
@@ -209,6 +230,53 @@ export function providerDetail(profile: ProfileView): string {
   return parts.join(" · ")
 }
 
+/**
+ * Where a rung value lands: `<model-id>` is one of `owner`'s own models,
+ * `<profile>/<model-id>` is somebody else's. The same grammar `extensions/agent`
+ * resolves, which is why a fleet can cross endpoints at all — the main model on
+ * one provider, a rung on another.
+ */
+export function rungLanding(owner: string, value: string): { profile: string; model: string } {
+  const at = value.indexOf("/")
+  if (at <= 0 || at === value.length - 1) return { profile: owner, model: value }
+  return { profile: value.slice(0, at), model: value.slice(at + 1) }
+}
+
+/**
+ * The profile a rung is written to: the one in FORCE, never whichever row the
+ * cursor is passing over. The team hangs on the model this conversation runs
+ * on, so staffing a rung with a model from another provider is the ordinary
+ * case, not a special one — `s` on a DeepSeek row while running on codex means
+ * "my explore runs on DeepSeek", and that is what `<profile>/<id>` is for.
+ *
+ * With nothing in force at all, the row's own provider: picking it is what
+ * would put it in force anyway.
+ */
+export function rungAnchor(current: ModelPick | null, row: PickerRow | null): string {
+  return current?.profile ?? row?.profile.name ?? ""
+}
+
+/** What a rung on `anchor` must say to land on `row`. */
+export function rungValue(anchor: string, row: PickerRow): string {
+  return row.profile.name === anchor ? row.model : `${row.profile.name}/${row.model}`
+}
+
+/**
+ * The rungs OF THE FLEET IN FORCE that land on this row — the team that will
+ * actually run, wherever its members live. `s` writes one, so the answer to
+ * "did that take, and who runs on this row" is on the row itself rather than
+ * only in the config file.
+ */
+export function rungsOn(fleet: ProfileView | undefined, row: PickerRow): string {
+  const names: string[] = []
+  for (const role of fleet?.roles ?? []) {
+    const at = rungLanding(fleet!.name, role.model)
+    const name = `@${role.name}`
+    if (at.profile === row.profile.name && at.model === row.model && !names.includes(name)) names.push(name)
+  }
+  return names.join(" ")
+}
+
 /** The line for a row whose provider lost (or never had) its credential. */
 export function cannotRun(profile: ProfileView): string {
   const fix = keyable(profile) ? " · /provider to paste a key" : ""
@@ -244,6 +312,13 @@ export function ModelView(props: {
   onClose: () => void
   /** Test seam: the loader defaults to the real `nulya config show --json`. */
   load?: () => Promise<ConfigView>
+  /**
+   * The rungs `s` may staff, asked for only when somebody presses it: reading
+   * them means running the package that owns the definitions, and a screen
+   * nobody has asked a question of must not spend a subprocess. Absent = this
+   * caller has no way to know, and `s` says so instead of guessing.
+   */
+  rungs?: () => Promise<readonly RungChoice[]>
 }) {
   const style = useStyle()
   const screen = useScreen()
@@ -258,6 +333,19 @@ export function ModelView(props: {
   const [dials, setDials] = createSignal<ReadonlyMap<string, number>>(new Map())
   const hover = createHover()
   const help = createKeyHelp()
+  /**
+   * Who to put on the highlighted row. The row already carries both halves of
+   * the answer — a model and a dial turned to something — so the only question
+   * left is whose, and it is asked as a list: null while it is not being asked.
+   */
+  const [choices, setChoices] = createSignal<readonly RungChoice[] | null>(null)
+  const [choiceAt, setChoiceAt] = createSignal(0)
+
+  /** The profile whose team `s` writes to, and whose rungs the rows are marked with. */
+  const anchor = () => rungAnchor(props.current, row())
+  const fleet = () => config()?.profiles.find((profile) => profile.name === anchor())
+  /** What the fleet in force staffs this rung with today, if anything. */
+  const fleetRung = (name: string) => fleet()?.roles.find((role) => role.name === name)?.model
 
   const rows = createMemo<PickerRow[]>(() => {
     const loaded = config()
@@ -295,12 +383,22 @@ export function ModelView(props: {
    * brief says only that.
    */
   const footer = (): { brief: string; more: string[] } => {
-    if (empty()) return { brief: "Enter · p opens /provider · Esc close", more: ["r reload"] }
+    if (empty())
+      return { brief: "Enter · p opens /provider · Esc close", more: ["r reload"] }
+    if (choices()) {
+      return {
+        brief: "↑↓ who · Enter puts them here · Esc cancel",
+        more: [
+          "a persona rides a rung of the profile in force, so this follows the conversation from provider to provider — and a persona that names a model of its own is not on this list, because it already answered",
+        ],
+      }
+    }
     const enter = props.live ? "Enter continues this here" : "Enter starts a session"
     return {
-      brief: `↑↓ model · ←→ effort · ${enter} · Esc close`,
+      brief: `↑↓ model · ←→ effort · ${enter} · s puts an agent here · Esc close`,
       more: [
         "j/k and h/l do the same · r reload · /provider (F6) is where keys and endpoints are",
+        "s offers the sub-agents this machine defines: the one you pick runs on this row, on this provider or another one",
         props.live
           ? "the history comes along in a new session; the old reasoning does not, and the prompt cache starts cold"
           : "the effort dial is per step, not frozen · click a row to select it, again to start on it",
@@ -373,18 +471,28 @@ export function ModelView(props: {
   const cols = createMemo(() => {
     const list = rows()
     const labelWant = columnWidth(list.map(labelOf), 2, 26)
-    const [label, id, ctx, dial, mark] = squeeze(
+    const [label, id, ctx, dial, team, mark] = squeeze(
       [
         labelWant,
         columnWidth(list.map(idOf), 2, 30),
         columnWidth(list.map((row) => contextOf(row.params)), 2, 10),
         columnWidth(list.map(widestDial), 2, 16),
+        // Zero-wide when no rung is staffed anywhere, which is most configs:
+        // the column appears the moment there is something in it.
+        columnWidth(list.map((row) => rungsOn(fleet(), row)), 2, 20),
         columnWidth(list.map(currentMark), 0, 12),
       ],
-      [Math.min(labelWant, 20), 0, 0, 6, 0],
+      [Math.min(labelWant, 20), 0, 0, 6, 0, 0],
       inner() - 4,
     )
-    return { label: label!, id: id!, ctx: ctx!, dial: dial!, mark: mark! }
+    return {
+      label: label!,
+      id: id!,
+      ctx: ctx!,
+      dial: dial!,
+      team: team!,
+      mark: mark!,
+    }
   })
 
   /**
@@ -442,8 +550,63 @@ export function ModelView(props: {
     props.onPick({ profile: here.profile.name, model: here.model, effort: slot === AUTO ? undefined : slot })
   }
 
+  /**
+   * Name the highlighted row as a rung of its own provider, in the person's
+   * config — the same file, and the same marked-block discipline, that a pasted
+   * key is written with. What is saved is what is on the row: this model, and
+   * the effort the dial is turned to (`auto` says nothing, which is not the
+   * same instruction as a level).
+   */
+  const staff = (rung: string) => {
+    const here = row()
+    const loaded = config()
+    const on = anchor()
+    if (!here || !loaded || on.length === 0) return
+    if (!validRungName(rung)) {
+      return props.onNotice(`a rung is named with letters, digits, - or _ (not '${rung}')`)
+    }
+    const slot = effortOf(here)
+    const lands = rungValue(on, here)
+    try {
+      writeRung(loaded.paths.user, on, rung, lands, slot === AUTO ? undefined : slot)
+      setChoices(null)
+      props.onNotice(`${on} · ${rung} → ${lands}${slot === AUTO ? "" : ` (${slot})`}`)
+      void refresh()
+    } catch (err) {
+      props.onNotice(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  /**
+   * Ask who should run on this row. The definitions live in a package, so this
+   * is a subprocess — spent when somebody presses `s` and never on the way in.
+   */
+  const offer = async () => {
+    if (!props.rungs) return props.onNotice("this screen was opened without a way to read the sub-agent definitions")
+    try {
+      const found = await props.rungs()
+      if (found.length === 0) {
+        return props.onNotice("no sub-agent asks for a model of its own · /agent lists what this machine defines")
+      }
+      setChoiceAt(0)
+      setChoices(found)
+    } catch (err) {
+      props.onNotice(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   useKeyboard((key) => {
     if (help.consume(key)) return
+    // While the question is up it owns the list keys: they move the answer,
+    // not the models underneath.
+    const asked = choices()
+    if (asked) {
+      if (key.name === "escape") return setChoices(null)
+      if (key.name === "return") return staff(asked[choiceAt()]?.name ?? "")
+      if (key.name === "j" || key.name === "down") return setChoiceAt(Math.min(choiceAt() + 1, asked.length - 1))
+      if (key.name === "k" || key.name === "up") return setChoiceAt(Math.max(choiceAt() - 1, 0))
+      return
+    }
     if (key.name === "escape") return props.onClose()
     if (key.name === "j" || key.name === "down") return move(1)
     if (key.name === "k" || key.name === "up") return move(-1)
@@ -455,6 +618,7 @@ export function ModelView(props: {
     // endpoints are a command of their own now, not a level of this one.
     if (empty() && (key.name === "return" || key.name === "p")) return props.onOpenProviders()
     if (key.name === "return") return pick()
+    if (key.name === "s" && row() !== null) return void offer()
   })
 
   return (
@@ -474,107 +638,174 @@ export function ModelView(props: {
       </For>
       <box height={1} />
 
-      <box flexDirection="column" flexGrow={1} flexShrink={1}>
-        <Show when={range().start > 0}>
-          <text fg={style.theme.dim} height={1}>
-            {"  "}
-            {style.glyphs.foldClosed} {range().start} more above
-          </text>
-        </Show>
-        <For each={lines().slice(range().start, range().end)}>
-          {(line) => {
-            // A provider heading: said once, and everything under it belongs to
-            // it. Not selectable — the cursor only ever lands on a model.
-            if (line.kind === "provider") {
-              return (
-                <text fg={line.profile.credential ? style.theme.muted : style.theme.warn} height={1}>
-                  {fit(providerHeadline(line.profile), inner())}
-                </text>
-              )
-            }
-            const index = line.at
-            const row = rows()[index]!
-            const selected = () => index === at()
-            const tone = () => ({ selected: selected(), hovered: hover.at() === index })
-            const gutter = () => rowGutter(style, tone())
-            const ready = row.profile.credential
-            // Starting a session is the one action in this view that spends
-            // money, so it takes two clicks: land, then confirm on the row.
-            const click = onClick(() => (selected() ? pick() : setAt(index)))
-            return (
-              <box
-                flexDirection="row"
-                width="100%"
-                height={1}
-                flexShrink={0}
-                backgroundColor={rowBackground(style, tone())}
-                onMouseDown={click.onMouseDown}
-                onMouseUp={click.onMouseUp}
-                {...hover.row(index)}
-              >
-                <text fg={gutter().fg} flexShrink={0}>
-                  {`  ${gutter().text}`}
-                </text>
-                <box width={cols().label} flexShrink={0}>
-                  <text
-                    fg={rowText(
-                      style,
-                      tone(),
-                      isCurrentModel(row) ? style.theme.accent.user : ready ? style.theme.fg : style.theme.dim,
-                    )}
-                  >
-                    {fit(labelOf(row), cols().label - 2)}
-                  </text>
-                </box>
-                <box width={cols().id} flexShrink={0}>
-                  <text fg={rowText(style, tone(), style.theme.muted)}>{fit(idOf(row), cols().id - 2)}</text>
-                </box>
-                <box width={cols().ctx} flexShrink={0}>
-                  <text fg={rowText(style, tone(), style.theme.dim)}>{fit(contextOf(row.params), cols().ctx - 2)}</text>
-                </box>
-                <box width={cols().dial} flexShrink={0}>
-                  <text fg={rowText(style, tone(), selected() ? style.theme.accent.evolve : style.theme.dim)}>
-                    {fit(dialOf(row, effortOf(row)), cols().dial - 2)}
-                  </text>
-                </box>
-                <box width={cols().mark} flexShrink={0}>
-                  <text fg={rowText(style, tone(), style.theme.ok)}>{fit(currentMark(row), cols().mark)}</text>
-                </box>
-              </box>
-            )
-          }}
-        </For>
-        <Show when={range().end < lines().length}>
-          <text fg={style.theme.dim} height={1}>
-            {"  "}
-            {style.glyphs.foldOpen} {lines().length - range().end} more below
-          </text>
-        </Show>
-
-        <Show when={config() === null && error() === null}>
-          <text fg={style.theme.dim} height={1}>
-            reading the kernel's config…
-          </text>
-        </Show>
-        <For each={error() ? wrapWords(`could not read config: ${error()}`, inner()) : []}>
-          {(line) => (
-            <text fg={style.theme.err} height={1}>
-              {line}
+      {/* One region, two questions: while `s` is being answered the models are
+          not what the keys mean, so they are not what the screen shows. */}
+      <Show when={choices()}>
+        {(asked: () => readonly RungChoice[]) => (
+          <box flexDirection="column" flexGrow={1} flexShrink={1}>
+            <text fg={style.theme.accent.evolve} height={1}>
+              {fit(
+                `who runs on ${labelOf(row()!)}${effortOf(row()!) === AUTO ? "" : ` (${effortOf(row()!)})`}? · saved on ${anchor()}`,
+                inner(),
+              )}
             </text>
-          )}
-        </For>
-        {/* No rows is not an empty list, it is an unfinished setup — so the one
-            line here names the screen that finishes it rather than apologising. */}
-        <Show when={empty()}>
-          <For each={wrapWords(nothing_runs, inner())}>
+            <For each={asked()}>
+              {(choice, index) => {
+                const tone = () => ({
+                  selected: index() === choiceAt(),
+                  hovered: false,
+                })
+                const click = onClick(() => (index() === choiceAt() ? staff(choice.name) : setChoiceAt(index())))
+                // Who rides this rung, said next to it: the name is the thing
+                // written to the config, the riders are how a person recognises
+                // it. Identical when a persona rides its own name, which is the
+                // common case and reads as one fact rather than two.
+                const riders = () =>
+                  choice.riders.length === 1 && choice.riders[0] === choice.name ? "" : choice.riders.join(", ")
+                const lands = () => rungLanding(anchor(), fleetRung(choice.name) ?? "").model
+                return (
+                  <box
+                    flexDirection="row"
+                    width="100%"
+                    height={1}
+                    flexShrink={0}
+                    backgroundColor={rowBackground(style, tone())}
+                    onMouseDown={click.onMouseDown}
+                    onMouseUp={click.onMouseUp}
+                  >
+                    <text fg={rowGutter(style, tone()).fg} flexShrink={0}>
+                      {`  ${rowGutter(style, tone()).text}`}
+                    </text>
+                    <box width={22} flexShrink={0}>
+                      <text fg={rowText(style, tone(), style.theme.fg)}>{fit(choice.name, 20)}</text>
+                    </box>
+                    <box width={26} flexShrink={0}>
+                      <text fg={rowText(style, tone(), style.theme.dim)}>{fit(riders(), 24)}</text>
+                    </box>
+                    <text fg={rowText(style, tone(), style.theme.muted)} flexShrink={0}>
+                      {fit(lands().length > 0 ? `now on ${lands()}` : "inherits today", Math.max(0, inner() - 52))}
+                    </text>
+                  </box>
+                )
+              }}
+            </For>
+          </box>
+        )}
+      </Show>
+
+      <Show when={choices() === null}>
+        <box flexDirection="column" flexGrow={1} flexShrink={1}>
+          <Show when={range().start > 0}>
+            <text fg={style.theme.dim} height={1}>
+              {"  "}
+              {style.glyphs.foldClosed} {range().start} more above
+            </text>
+          </Show>
+          <For each={lines().slice(range().start, range().end)}>
+            {(line) => {
+              // A provider heading: said once, and everything under it belongs to
+              // it. Not selectable — the cursor only ever lands on a model.
+              if (line.kind === "provider") {
+                return (
+                  <text fg={line.profile.credential ? style.theme.muted : style.theme.warn} height={1}>
+                    {fit(providerHeadline(line.profile), inner())}
+                  </text>
+                )
+              }
+              const index = line.at
+              const row = rows()[index]!
+              const selected = () => index === at()
+              const tone = () => ({
+                selected: selected(),
+                hovered: hover.at() === index,
+              })
+              const gutter = () => rowGutter(style, tone())
+              const ready = row.profile.credential
+              // Starting a session is the one action in this view that spends
+              // money, so it takes two clicks: land, then confirm on the row.
+              const click = onClick(() => (selected() ? pick() : setAt(index)))
+              return (
+                <box
+                  flexDirection="row"
+                  width="100%"
+                  height={1}
+                  flexShrink={0}
+                  backgroundColor={rowBackground(style, tone())}
+                  onMouseDown={click.onMouseDown}
+                  onMouseUp={click.onMouseUp}
+                  {...hover.row(index)}
+                >
+                  <text fg={gutter().fg} flexShrink={0}>
+                    {`  ${gutter().text}`}
+                  </text>
+                  <box width={cols().label} flexShrink={0}>
+                    <text
+                      fg={rowText(
+                        style,
+                        tone(),
+                        isCurrentModel(row) ? style.theme.accent.user : ready ? style.theme.fg : style.theme.dim,
+                      )}
+                    >
+                      {fit(labelOf(row), cols().label - 2)}
+                    </text>
+                  </box>
+                  <box width={cols().id} flexShrink={0}>
+                    <text fg={rowText(style, tone(), style.theme.muted)}>{fit(idOf(row), cols().id - 2)}</text>
+                  </box>
+                  <box width={cols().ctx} flexShrink={0}>
+                    <text fg={rowText(style, tone(), style.theme.dim)}>
+                      {fit(contextOf(row.params), cols().ctx - 2)}
+                    </text>
+                  </box>
+                  <box width={cols().dial} flexShrink={0}>
+                    <text fg={rowText(style, tone(), selected() ? style.theme.accent.evolve : style.theme.dim)}>
+                      {fit(dialOf(row, effortOf(row)), cols().dial - 2)}
+                    </text>
+                  </box>
+                  <box width={cols().team} flexShrink={0}>
+                    <text fg={rowText(style, tone(), style.theme.accent.evolve)}>
+                      {fit(rungsOn(fleet(), row), cols().team - 2)}
+                    </text>
+                  </box>
+                  <box width={cols().mark} flexShrink={0}>
+                    <text fg={rowText(style, tone(), style.theme.ok)}>{fit(currentMark(row), cols().mark)}</text>
+                  </box>
+                </box>
+              )
+            }}
+          </For>
+          <Show when={range().end < lines().length}>
+            <text fg={style.theme.dim} height={1}>
+              {"  "}
+              {style.glyphs.foldOpen} {lines().length - range().end} more below
+            </text>
+          </Show>
+
+          <Show when={config() === null && error() === null}>
+            <text fg={style.theme.dim} height={1}>
+              reading the kernel's config…
+            </text>
+          </Show>
+          <For each={error() ? wrapWords(`could not read config: ${error()}`, inner()) : []}>
             {(line) => (
-              <text fg={style.theme.dim} height={1}>
+              <text fg={style.theme.err} height={1}>
                 {line}
               </text>
             )}
           </For>
-        </Show>
-      </box>
+          {/* No rows is not an empty list, it is an unfinished setup — so the one
+            line here names the screen that finishes it rather than apologising. */}
+          <Show when={empty()}>
+            <For each={wrapWords(nothing_runs, inner())}>
+              {(line) => (
+                <text fg={style.theme.dim} height={1}>
+                  {line}
+                </text>
+              )}
+            </For>
+          </Show>
+        </box>
+      </Show>
 
       {/* The detail of the highlighted row, then the keys — both broken at
           their ` · ` joints, so neither can wrap into the composer below. */}

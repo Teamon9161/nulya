@@ -65,7 +65,11 @@ export function AgentPicker(props: {
             const parts: string[] = []
             if (def.description.length > 0) parts.push(def.description)
             if (def.readonly) parts.push("read-only")
-            if (def.model.length > 0) parts.push(def.model)
+            // A rung is said with where it lands, because the name alone does
+            // not say what will run — and a rung this provider does not staff
+            // is a delegation on the model it inherits, which is worth seeing.
+            if (def.rung.length > 0) parts.push(def.rung_model.length > 0 ? `@${def.rung} → ${def.rung_model}` : `@${def.rung} → inherits`)
+            else if (def.model.length > 0) parts.push(def.model)
             else if (def.profile.length > 0) parts.push(def.profile)
             // Where it came from, said only when it is not this checkout's:
             // `builtin` is the answer to "I never wrote this, why is it here".

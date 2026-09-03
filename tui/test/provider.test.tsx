@@ -405,6 +405,38 @@ test("credentials: a pasted key lands as a marked block in the user config, repl
   }
 })
 
+test("credentials: a rung is its own marked block, so re-pointing one leaves the rest of the team alone", () => {
+  const dir = mkdtempSync(join(tmpdir(), "nulya-home-"))
+  const path = join(dir, "config.toml")
+  try {
+    const { writeRung } = require("../src/nulya/credentials.ts")
+    require("node:fs").writeFileSync(path, `# mine\n[provider]\nactive_profile = "openai"\n`)
+
+    writeRung(path, "openai", "explore", "gpt-5.6-luna")
+    const both = writeRung(path, "openai", "review", "gpt-5.6-terra", "high")
+    // An absent effort and a chosen one are different instructions, so the key
+    // is written only when there is one.
+    expect(both).toContain(`explore = { model = "gpt-5.6-luna" }`)
+    expect(both).toContain(`review = { model = "gpt-5.6-terra", effort = "high" }`)
+
+    // Re-pointing one rung replaces that block and nothing else — not the other
+    // rung, and not what the person wrote.
+    const moved = writeRung(path, "openai", "explore", "gpt-5.6-sol", "low")
+    expect(moved).not.toContain("gpt-5.6-luna")
+    expect(moved).toContain(`explore = { model = "gpt-5.6-sol", effort = "low" }`)
+    expect(moved).toContain(`review = { model = "gpt-5.6-terra", effort = "high" }`)
+    expect(moved).toContain("# mine")
+
+    // A dot would make it a DOTTED key — a table called `a` holding `b`, which
+    // is not a rung at all.
+    expect(() => writeRung(path, "openai", "a.b", "m")).toThrow()
+    expect(() => writeRung(path, "openai", "explore", "   ")).toThrow()
+    expect(() => writeRung(path, "bad name", "explore", "m")).toThrow()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("credentials: an added profile is one marked block, replaced whole (not by line count) next time", () => {
   const dir = mkdtempSync(join(tmpdir(), "nulya-home-"))
   const path = join(dir, "config.toml")

@@ -244,7 +244,7 @@ fn list(ctx: *const Ctx) !rpc.Outcome {
     var payload: []const u8 = "";
     var here: []const u8 = "";
     for (found) |entry| {
-        if (entry.def.role.len == 0) continue;
+        if (defs.rungOf(entry.def).len == 0) continue;
         const shown = proc.run(alloc, ctx.io, &.{ ctx.exe, "config", "show", "--json" }) catch break;
         if (shown.code != 0) break;
         payload = shown.stdout;
@@ -278,15 +278,18 @@ fn list(ctx: *const Ctx) !rpc.Outcome {
         try jw.write(entry.def.profile);
         try jw.objectField("model");
         try jw.write(entry.def.model);
-        try jw.objectField("role");
-        try jw.write(entry.def.role);
+        // The rung this persona RIDES — the one it named, or its own name when
+        // it named no model at all, so every persona is something a profile can
+        // staff. Empty only on one that already answered with a model of its
+        // own (or a runner with no nulya profiles).
+        try jw.objectField("rung");
+        try jw.write(defs.rungOf(entry.def));
         // Where that rung lands on the profile a delegation would inherit right
-        // now. Empty on a definition that names no rung — and on one whose rung
-        // this profile does not staff, which is the case somebody has to see: a
-        // `role` with no `role_model` runs on the model it inherits, and a
-        // misspelled rung looks exactly like that.
-        try jw.objectField("role_model");
-        try jw.write(if (entry.def.role.len == 0) "" else landing(alloc, payload, here, entry.def.role));
+        // now. Empty when this profile staffs no such rung, which is the case
+        // somebody has to see: a rung with no landing runs on the model it
+        // inherits, and a misspelled `@rung` looks exactly like that.
+        try jw.objectField("rung_model");
+        try jw.write(landing(alloc, payload, here, defs.rungOf(entry.def)));
         try jw.objectField("runner_model");
         try jw.write(entry.def.runner_model);
         try jw.objectField("max_steps");
@@ -505,7 +508,7 @@ fn newDelegation(
         // "that profile's explore". The call's rung beats the definition's, like
         // every other level; a profile that staffs neither leaves this alone,
         // which is plain inheritance.
-        const rung = if (asked_rung.len != 0) asked_rung else m.def.role;
+        const rung = if (asked_rung.len != 0) asked_rung else if (ref != null) "" else defs.rungOf(m.def);
         if (rungOn(alloc, ctx, profile, rung)) |staffed| {
             if (staffed.profile.len != 0) profile = staffed.profile;
             model = staffed.model;

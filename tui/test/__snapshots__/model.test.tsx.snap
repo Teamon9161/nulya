@@ -6,8 +6,8 @@ exports[`/model is models and only models: grouped under their provider, nothing
  deepseek                                                                                                               
    ▾ DeepSeek V4 Flash  deepseek-v4-flash  1M ctx  ‹ auto ›  ✓ current                                                  
      DeepSeek V4 Pro    deepseek-v4-pro    1M ctx  ‹ auto ›                                                             
- scripted · offline stand-in                                                                                            
-     scripted-demo                                 no dial                                                              
+                                                                                                                        
+                                                                                                                        
                                                                                                                         
                                                                                                                         
                                                                                                                         
@@ -30,7 +30,7 @@ exports[`/model is models and only models: grouped under their provider, nothing
                                                                                                                         
                                                                                                                         
  deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set                                               
- ↑↓ model · ←→ effort · Enter starts a session · Esc close · ? keys                                                     
+ ↑↓ model · ←→ effort · Enter starts a session · s puts an agent here · Esc close · ? keys                              
 "
 `;
 
@@ -42,8 +42,7 @@ exports[`the model table is cut to its columns at 76: one row each, a gutter tha
  deepseek                                                                   
    ▾ DeepSeek V4 Flash  deepseek-v4-flash  1M ctx  ‹ auto ›                 
      DeepSeek V4 Pro    deepseek-v4-pro    1M ctx  ‹ auto ›                 
- scripted · offline stand-in                                                
-     scripted-demo                                 no dial                  
+                                                                            
                                                                             
                                                                             
                                                                             
@@ -64,6 +63,7 @@ exports[`the model table is cut to its columns at 76: one row each, a gutter tha
                                                                             
                                                                             
  deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set   
- ↑↓ model · ←→ effort · Enter starts a session · Esc close · ? keys         
+ ↑↓ model · ←→ effort · Enter starts a session · s puts an agent here       
+ Esc close · ? keys                                                         
 "
 `;

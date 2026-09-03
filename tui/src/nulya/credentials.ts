@@ -39,6 +39,31 @@ export function validProfileName(name: string): boolean {
   return /^[A-Za-z0-9_.-]+$/.test(name)
 }
 
+/**
+ * A rung is written as a TOML bare key, where a dot would make it a DOTTED one
+ * — `a.b = {…}` is a table named `a` holding `b`, not a rung called `a.b`. So
+ * this is the profile charset minus the dot.
+ */
+export function validRungName(name: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(name)
+}
+
+function rungMarker(profile: string, rung: string): string {
+  return `# nulya: rung "${rung}" on profile "${profile}" (written by the TUI; edit or delete freely)`
+}
+
+export function rungBlock(profile: string, rung: string, model: string, effort?: string): string {
+  const dial = effort && effort.length > 0 ? `, effort = ${tomlString(effort)}` : ""
+  return [
+    rungMarker(profile, rung),
+    "[[provider.profiles]]",
+    `name = ${tomlString(profile)}`,
+    "[provider.profiles.roles]",
+    `${rung} = { model = ${tomlString(model)}${dial} }`,
+    "",
+  ].join("\n")
+}
+
 export function keyBlock(profile: string, key: string): string {
   return `${keyMarker(profile)}\n[[provider.profiles]]\nname = ${tomlString(profile)}\napi_key = ${tomlString(key)}\n`
 }
@@ -102,6 +127,31 @@ function write(path: string, text: string): string {
 
 function read(path: string): string {
   return existsSync(path) ? readFileSync(path, "utf8") : ""
+}
+
+/**
+ * Write (or replace) one rung of `profile`'s team.
+ *
+ * One block per rung, each with its own marker, so re-pointing `explore` cannot
+ * disturb `review` — and so a person can delete exactly the one they no longer
+ * want. The block names the profile and nothing else about it: same-name
+ * profiles merge field by field within a layer, and a profile's `roles` merge
+ * rung by rung, so everything the person wrote about that endpoint survives.
+ *
+ *     # nulya: rung "explore" on profile "openai" (written by the TUI; edit or delete freely)
+ *     [[provider.profiles]]
+ *     name = "openai"
+ *     [provider.profiles.roles]
+ *     explore = { model = "gpt-5.6-luna", effort = "low" }
+ *
+ * `effort` is written only when the dial was on a rung of its own, because an
+ * absent effort and a chosen one are different instructions to the kernel.
+ */
+export function writeRung(path: string, profile: string, rung: string, model: string, effort?: string): string {
+  if (!validProfileName(profile)) throw new Error(`profile name '${profile}' cannot be written to config`)
+  if (!validRungName(rung)) throw new Error(`a rung is named with letters, digits, - or _ (got '${rung}')`)
+  if (model.trim().length === 0) throw new Error("a rung names a model")
+  return write(path, placeBlock(read(path), rungMarker(profile, rung), rungBlock(profile, rung, model.trim(), effort)))
 }
 
 /**

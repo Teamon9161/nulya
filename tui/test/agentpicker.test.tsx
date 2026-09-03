@@ -34,6 +34,8 @@ function def(over: Partial<AgentEntry> & { name: string }): AgentEntry {
     source: `${over.name}.md`,
     profile: "",
     model: "",
+    rung: "",
+    rung_model: "",
     max_steps: 0,
     max_exchanges: 0,
     agents: [],
@@ -58,6 +60,27 @@ test("the ordinary runner says nothing; a non-nulya one is the one fact every ro
     // second runner does not exist yet — says so, visibly, before it is picked.
     const foreignRow = rows.find((row) => row.includes("remote-review"))!
     expect(foreignRow).toContain("runner: codex")
+  } finally {
+    setup.renderer.destroy()
+  }
+})
+
+test("a rung is shown with where it lands, and a rung nobody staffs says so", async () => {
+  const defs: AgentEntry[] = [
+    def({ name: "scout", rung: "explore", rung_model: "gpt-5.6-luna" }),
+    def({ name: "ghost", rung: "nosuch", rung_model: "" }),
+  ]
+  const setup = await mount(() => <AgentPicker defs={defs} selected={0} onSelect={() => {}} onPick={() => {}} />)
+  try {
+    const rows = (await settle(setup, 2)).split("\n")
+    // The name alone does not say what will run, so the landing point rides
+    // with it.
+    expect(rows.find((row) => row.includes("scout"))!).toContain("gpt-5.6-luna")
+    // Named but landing nowhere: this delegation runs on the model it inherits,
+    // which is also what a misspelled rung looks like — so it is not silent.
+    const ghost = rows.find((row) => row.includes("ghost"))!
+    expect(ghost).toContain("nosuch")
+    expect(ghost).toContain("inherits")
   } finally {
     setup.renderer.destroy()
   }

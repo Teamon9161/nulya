@@ -173,8 +173,10 @@ import {
   listAgents,
   renderAgent,
   readonlyCeiling,
+  rungChoices,
   usableAgents,
   type AgentEntry,
+  type RungChoice,
   type RenderedAgent,
 } from "../agents.ts"
 import { createKeymap, matches, type Action } from "../keymap.ts"
@@ -2998,6 +3000,13 @@ export function App(props: AppProps) {
     }
   }
 
+  /**
+   * The rungs `/model`'s `s` may staff, for the tab in front. The same reading
+   * `/agent` does, spent only when somebody presses that key — which is why it
+   * is handed over as a function and never computed on the way in.
+   */
+  const rungsHere = async (): Promise<RungChoice[]> => rungChoices((await agentsIn(ws())).defs)
+
   // Deliberately NOT on mount: reading the definitions means building the
   // package, which is a compiled build, and a compiled build on the way in
   // does not belong on the critical path. It happens when
@@ -4622,6 +4631,7 @@ export function App(props: AppProps) {
         // on this tab — as its draft, or as the session it continues into.
         ws={ws()}
         current={currentPick()}
+        rungs={rungsHere}
         live={live() !== null}
         notice={guide() ?? undefined}
         focusProfile={focusProfile()}

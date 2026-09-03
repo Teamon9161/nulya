@@ -1438,6 +1438,7 @@ test "bundled agent: a rung is resolved against the profile the delegation inher
         \\models = ["scripted-demo", "scripted-swift"]
         \\[provider.profiles.roles]
         \\explore = { model = "scripted-swift", effort = "high" }
+        \\plain = { model = "scripted-swift" }
         \\
     });
 
@@ -1455,6 +1456,18 @@ test "bundled agent: a rung is resolved against the profile the delegation inher
         \\---
         \\description: rides a rung nobody staffs
         \\model: @nosuch
+        \\max_steps: 1
+        \\---
+        \\You only read.
+        \\
+    });
+
+    // Names no model at all, so the rung it rides is its OWN NAME - which is
+    // what lets a front end offer the personas it found as a list to pick from
+    // rather than asking somebody to remember a rung name and type it.
+    try ws.writeFile(io, .{ .sub_path = ".nulya/agents/plain.md", .data =
+        \\---
+        \\description: names no model, so its name is its rung
         \\max_steps: 1
         \\---
         \\You only read.
@@ -1512,6 +1525,14 @@ test "bundled agent: a rung is resolved against the profile the delegation inher
         try std.testing.expect(found_effort);
     }
 
+    const plain_file = try delegateTo(alloc, io, ws, exe_abs, ref, in_parent, parent, "plain", "look");
+    defer alloc.free(plain_file);
+    {
+        const header = try support.readSessionFile(alloc, io, ws, std.fs.path.stem(plain_file));
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"model\":\"scripted-swift\"") != null);
+    }
+
     // And the catalogue says where each rung lands, so a misspelled one is
     // visible rather than silently inherited.
     {
@@ -1522,21 +1543,29 @@ test "bundled agent: a rung is resolved against the profile the delegation inher
         defer parsed.deinit();
         var saw_scout = false;
         var saw_ghost = false;
+        var saw_plain = false;
         for (parsed.value.array.items) |entry| {
             const name = entry.object.get("name").?.string;
             if (std.mem.eql(u8, name, "scout")) {
                 saw_scout = true;
-                try std.testing.expectEqualStrings("explore", entry.object.get("role").?.string);
-                try std.testing.expectEqualStrings("scripted-swift", entry.object.get("role_model").?.string);
+                try std.testing.expectEqualStrings("explore", entry.object.get("rung").?.string);
+                try std.testing.expectEqualStrings("scripted-swift", entry.object.get("rung_model").?.string);
             }
             if (std.mem.eql(u8, name, "ghost")) {
                 saw_ghost = true;
                 // Named, and landing nowhere: that pair is the whole signal.
-                try std.testing.expectEqualStrings("nosuch", entry.object.get("role").?.string);
-                try std.testing.expectEqualStrings("", entry.object.get("role_model").?.string);
+                try std.testing.expectEqualStrings("nosuch", entry.object.get("rung").?.string);
+                try std.testing.expectEqualStrings("", entry.object.get("rung_model").?.string);
+            }
+            if (std.mem.eql(u8, name, "plain")) {
+                saw_plain = true;
+                // Nobody wrote `@plain` anywhere: the persona's own name is the
+                // rung, so it is offerable and staffable without editing a file.
+                try std.testing.expectEqualStrings("plain", entry.object.get("rung").?.string);
+                try std.testing.expectEqualStrings("scripted-swift", entry.object.get("rung_model").?.string);
             }
         }
-        try std.testing.expect(saw_scout and saw_ghost);
+        try std.testing.expect(saw_scout and saw_ghost and saw_plain);
     }
 }
 // ── the Codex runner ─────────────────────────────────────────────────────────

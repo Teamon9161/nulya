@@ -143,6 +143,21 @@ pub const ModelRef = struct { profile: []const u8, model: []const u8 };
 
 /// The sigil that makes `model:` name a rung instead of a model. One character,
 /// and it cannot collide: a profile name is `[A-Za-z0-9_.-]+`.
+/// The rung this definition RIDES: the one it named (`model: @explore`), or —
+/// when it named no model at all — its own name.
+///
+/// A persona IS a role, so "what does this profile run `scout` on" is a
+/// question a profile can answer without anyone editing the definition file.
+/// That is what lets a front end offer the personas it found as a list to pick
+/// from, instead of asking somebody to remember and type a name. A definition
+/// that named a profile or a model has already answered, and rides nothing.
+pub fn rungOf(def: Def) []const u8 {
+    if (!def.runner.usesNulyaModels()) return "";
+    if (def.role.len != 0) return def.role;
+    if (def.profile.len != 0 or def.model.len != 0) return "";
+    return def.name;
+}
+
 pub const role_sigil = '@';
 
 /// `@<rung>` — the third shape of the same field, and the only one whose answer

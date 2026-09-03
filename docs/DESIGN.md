@@ -791,7 +791,8 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
   **不变量一条都不出去**（租约与 release-and-recheck、record 与 exchange 计数、mailbox 与它的顺序、报告框架、readonly 的拒绝全部留在 `extensions/agent`）；出去的只有"怎么跟那个 harness 说话"。**两段文本走路径，其余走值**（Windows 把整条命令行封在 32 KiB）。
 - **`model`、委派白名单、深度**：`model` 形态与定义里的 `model:` 逐字相同（`<profile>`、`<profile>/<model-id>` 或 `@<rung>`），**一处解析**（`defs.parseModelRef` / `defs.parseRole`），优先级 **这次调用 > 定义 > 继承发起它的那一场**，**取的是一对而不是拼一对**；`session` 形态给 `model` 是一次失败的调用。
   - **`@<rung>` 是档位不是模型**（§9.5 的 `roles` 表）：它问的是"这一场所在的 profile 管这一档叫什么"，所以**先由上面那条优先级定下 profile，再拿档位去问**——`model: @explore` 写在一个也写了 profile 的定义上，就是"那个 profile 的 explore"。查表经 `nulya config show --json`（`extensions/agent/src/fleet.zig`），**这个包挨着会话跑**（§8.2 的 `runs_on: "session"`），所以读的是人写档位表的那份 config 链。
-  - **查不到的档位退化成继承，不是拒绝**：换到一个没写这一档的 profile 时，跟着主模型走是正确且可用的行为。代价是拼错一个档位名与没写这一档长得一样，所以 **`ext run agent list` 有 `role` / `role_model` 两列**：名字在、落点空，就是"它在继承"。
+  - **一个什么模型都没写的定义，骑的是它自己的名字那一档**（`defs.rungOf`）：persona 本身就是一个 role，所以"这个 profile 让 `scout` 跑在哪"是 profile 答得出来的问题，**不必有人去改定义文件**——这条正是让前端能把"发现的 persona"摆成一张可选列表、而不是让人凭记忆敲一个档位名的东西。写了 `model:` 的定义已经自己答过了，不骑任何一档。
+  - **查不到的档位退化成继承，不是拒绝**：换到一个没写这一档的 profile 时，跟着主模型走是正确且可用的行为。代价是拼错一个档位名与没写这一档长得一样，所以 **`ext run agent list` 有 `rung` / `rung_model` 两列**：名字在、落点空，就是"它在继承"。
   - **档位可以自带 effort**，那是它唯一能带的第二样东西。effort 不是身份、不冻进 header，所以它冻在 delegation record 的 `created` 行里，由 runner **每一轮**加到子场的 `session step --effort` 上。
   - **外置 runner 不认档位**：`runner_model` 是那个 harness 自己的词汇，`@…` 在定义里被 `crossCheck` 丢弃并点名，在调用参数上是一次响亮的拒绝——否则一个档位名会被当成 Codex 的模型名发出去。**能不能委派，是被委派者定义里的 `agents: [name, …]`，空 = leaf**——非空时那一场才额外带 `--with agent@<自身版本>`，一个不能委派的子场干脆就不带这个 tool；校验从**本场冻结 header 里那个 `agent-<name>` prompt** 反查定义（header 是权威）。`NULYA_AGENT_DEPTH` 是**防环兜底不是安全边界**（≥3 拒绝；absent = 0，present-but-invalid = `max_depth`）。
 

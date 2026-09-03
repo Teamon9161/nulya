@@ -61,6 +61,22 @@ export interface AgentEntry {
   source: string
   profile: string
   model: string
+  /**
+   * The rung this persona RIDES: the one its definition named
+   * (`model: @explore`), or — when it named no model at all — its own name, so
+   * every persona is something a profile can staff without editing a file.
+   * Empty only on one that answered with a model of its own. What a rung means
+   * is a profile's business, so the package answers both halves: this name, and
+   * where it lands.
+   */
+  rung: string
+  /**
+   * Where `rung` lands on the profile a delegation would inherit right now,
+   * empty when that profile staffs no such rung — which is what a delegation
+   * running on the model it inherits looks like, and also what a misspelled
+   * `@rung` looks like. Named-but-nowhere is the pair worth showing.
+   */
+  rung_model: string
   max_steps: number
   /** Follow-up turns one delegation may take; 0 = no limit. */
   max_exchanges: number
@@ -104,12 +120,45 @@ export async function listAgents(ws: Workspace, pkg: WithRef): Promise<AgentEntr
     source: row.source ?? "",
     profile: row.profile ?? "",
     model: row.model ?? "",
+    // A build without the two columns names no rungs at all.
+    rung: row.rung ?? "",
+    rung_model: row.rung_model ?? "",
     max_steps: typeof row.max_steps === "number" ? row.max_steps : 0,
     max_exchanges: typeof row.max_exchanges === "number" ? row.max_exchanges : 0,
     agents: Array.isArray(row.agents) ? row.agents : [],
     with: Array.isArray(row.with) ? row.with : [],
     warnings: Array.isArray(row.warnings) ? row.warnings : [],
   }))
+}
+
+/** One rung a front end can offer, and who rides it. */
+export interface RungChoice {
+  /** The name a profile staffs (`[provider.profiles.roles]`). */
+  name: string
+  /** The personas riding it — a rung name must never be a memory test. */
+  riders: string[]
+}
+
+/**
+ * The rungs the personas on this machine actually ride, deduped, each with who
+ * rides it.
+ *
+ * This is what a front end offers instead of asking somebody to type a name: a
+ * rung nothing asks for staffs nothing, and nobody remembers a list of names
+ * they never wrote. Which rung a persona rides is the package's answer
+ * (`rung`), not a rule re-derived here.
+ */
+export function rungChoices(entries: readonly AgentEntry[]): RungChoice[] {
+  const by = new Map<string, string[]>()
+  for (const entry of usableAgents(entries)) {
+    if (entry.rung.length === 0) continue
+    const riders = by.get(entry.rung) ?? []
+    if (!riders.includes(entry.name)) riders.push(entry.name)
+    by.set(entry.rung, riders)
+  }
+  return [...by]
+    .map(([name, riders]) => ({ name, riders }))
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 /** The ones a caller may actually name: the winner of each name. */

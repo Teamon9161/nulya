@@ -11,7 +11,7 @@
  * kernel actually prints is the shape the picker reads.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createSignal, type JSX } from "solid-js"
@@ -25,6 +25,10 @@ import {
   modelParamsFor,
   modelRows,
   pickableRows,
+  rungAnchor,
+  rungLanding,
+  rungValue,
+  rungsOn,
   pickerRows,
   providerDetail,
   teamOf,
@@ -193,6 +197,53 @@ test("a provider's team is said on its detail line; no team says nothing at all"
   expect(teamSummary(undefined)).toBe("")
 })
 
+test("a fleet can cross providers: the rung says where it lands, and the row it lands on says so", () => {
+  // The case this whole feature exists for: the main model on one endpoint,
+  // one of its rungs on another.
+  const fleet: ProfileView = {
+    ...fake.profiles[0]!,
+    roles: [
+      { name: "explore", model: "deepseek/deepseek-v4-flash", effort: "low" },
+      { name: "review", model: "gpt-5.6-luna", effort: null },
+    ],
+  }
+  expect(rungLanding("openai", "deepseek/deepseek-v4-flash")).toEqual({
+    profile: "deepseek",
+    model: "deepseek-v4-flash",
+  })
+  // No slash is one of the owner's own models — and a slash at either end is
+  // not a pair, so it stays one id rather than becoming a profile called "".
+  expect(rungLanding("openai", "gpt-5.6-luna")).toEqual({ profile: "openai", model: "gpt-5.6-luna" })
+  expect(rungLanding("openai", "/x").profile).toBe("openai")
+
+  const rows = pickerRows({ ...fake, profiles: [fleet, fake.profiles[1]!] })
+  const at = (profile: string, model: string) => rows.find((r) => r.profile.name === profile && r.model === model)!
+  // The rung is written on openai and drawn under deepseek, because that is
+  // where the model it names actually is.
+  expect(rungsOn(fleet, at("deepseek", "deepseek-v4-flash"))).toContain("@explore")
+  expect(rungsOn(fleet, at("openai", "gpt-5.6-luna"))).toContain("@review")
+  expect(rungsOn(fleet, at("deepseek", "deepseek-v4-pro"))).toBe("")
+  // Nothing in force, and a binary that never heard of the field: both empty,
+  // neither a crash.
+  expect(rungsOn(undefined, at("openai", "gpt-5.6-luna"))).toBe("")
+  expect(rungsOn({ ...fleet, roles: undefined } as unknown as ProfileView, at("openai", "gpt-5.6-luna"))).toBe("")
+})
+
+test("a rung is written to the profile in force, and says the provider when the model is elsewhere", () => {
+  const rows = pickerRows(fake)
+  const luna = rows.find((row) => row.model === "gpt-5.6-luna")!
+  const flash = rows.find((row) => row.model === "deepseek-v4-flash")!
+  // The cursor moving over another provider's row does not move the team: it
+  // is still the team of the model this conversation runs on.
+  expect(rungAnchor({ profile: "openai", model: "gpt-5.6-sol" }, flash)).toBe("openai")
+  expect(rungValue("openai", luna)).toBe("gpt-5.6-luna")
+  expect(rungValue("openai", flash)).toBe("deepseek/deepseek-v4-flash")
+  // Nothing in force yet: the row's own provider, since picking it is what
+  // would put it in force.
+  expect(rungAnchor(null, flash)).toBe("deepseek")
+  expect(rungAnchor(null, null)).toBe("")
+})
+
 test("the team summary is one line: spelled out while it is short, counted once it is not", () => {
   const staffing = (count: number): ProfileView => ({
     ...fake.profiles[1]!,
@@ -205,17 +256,23 @@ test("the team summary is one line: spelled out while it is short, counted once 
 })
 
 test("pickableRows: only the providers that can run — plus the one in force, whatever its state", () => {
-  // openai and codex have no credential: not a model row between them.
+  // openai and codex have no credential: not a model row between them. The
+  // offline stand-in can always run and is still not offered — nobody chooses
+  // it on purpose.
   expect(pickableRows(fake, null).map((row) => `${row.profile.name}/${row.model}`)).toEqual([
     "deepseek/deepseek-v4-flash",
     "deepseek/deepseek-v4-pro",
-    "scripted/scripted-demo",
   ])
   // The pick in force stays on screen even after its key went away, so the
   // `current` mark has a row to sit on (Enter there says why it cannot run).
   expect(
     pickableRows(fake, { profile: "openai", model: "gpt-5.6-sol" }).map((row) => `${row.profile.name}/${row.model}`),
-  ).toEqual(["openai/gpt-5.6-sol", "openai/gpt-5.6-luna", "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro", "scripted/scripted-demo"])
+  ).toEqual(["openai/gpt-5.6-sol", "openai/gpt-5.6-luna", "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"])
+  // Landed on the stand-in because nothing else could run: it must be visible,
+  // or the screen would say nothing about where this session actually is.
+  expect(
+    pickableRows(fake, { profile: "scripted", model: "scripted-demo" }).map((row) => row.profile.name),
+  ).toContain("scripted")
 })
 
 async function pickerFrame(node: () => JSX.Element, width = 120, height = 30) {
@@ -263,9 +320,8 @@ test("/model is models and only models: grouped under their provider, nothing ab
     expect(frame).toContain("✓ current")
     expect(frame).not.toContain("GPT-5.6 Sol")
     expect(frame).not.toContain("gpt-5.5")
-    // The offline stand-in can run, so it is a group of its own — and the fact
-    // that it is a stand-in belongs to the provider, so it is on the heading.
-    expect(frame).toContain("scripted · offline stand-in")
+    // The offline stand-in is not on this list: this session is not on it.
+    expect(frame).not.toContain("scripted")
     // No providers row, and none of the provider keys are advertised here.
     // Credentials are a command of their own, not the tail of this list.
     expect(frame).not.toContain("providers ·")
@@ -275,6 +331,28 @@ test("/model is models and only models: grouped under their provider, nothing ab
     // The cursor opened on the pick in force, and its endpoint is the detail line.
     expect(frame).toContain("deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set")
     expect(frame).toMatchSnapshot()
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("landed on the stand-in, the screen says so: its own group, and the heading carries what it is", async () => {
+  const setup = await pickerFrame(() => (
+    <ModelView
+      ws={ws}
+      current={{ profile: "scripted", model: "scripted-demo", effort: undefined }}
+      onPick={() => {}}
+      onNotice={() => {}}
+      onOpenProviders={() => {}}
+      onClose={() => {}}
+      load={async () => fake}
+    />
+  ))
+  try {
+    await until(() => setup.captureCharFrame().includes("scripted-demo"), 10_000)
+    // Being a stand-in is a fact about the provider, so it sits on the heading
+    // rather than on each of its models.
+    expect(setup.captureCharFrame()).toContain("scripted · offline stand-in")
   } finally {
     setup.renderer.destroy()
   }
@@ -336,9 +414,9 @@ test("the model table is cut to its columns at 76: one row each, a gutter that s
     const lines = frame.split("\n").map((line) => line.replace(/\s+$/, ""))
     for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(76)
 
-    // A model row is complete when its dial is on it; the two deepseek rows and
-    // the stand-in each have theirs, and nothing wrapped a cell to a second line.
-    expect(lines.filter((line) => /‹ \w+ ›|no dial/.test(line)).length).toBe(3)
+    // A model row is complete when its dial is on it; the two deepseek rows
+    // each have theirs, and nothing wrapped a cell to a second line.
+    expect(lines.filter((line) => /‹ \w+ ›|no dial/.test(line)).length).toBe(2)
     // The notice is broken at its joints, by us, one `<text>` per line.
     expect(frame).toContain("openai has no API key · this session is the offline stand-in")
     expect(frame).toContain("pick a model that can run")
@@ -389,7 +467,132 @@ test("the models level: ←→ turns the dial, Enter picks the row it is on", as
     // Down past the last row stops there: this list has no tail row any more.
     for (let i = 0; i < 10; i++) setup.mockInput.pressKey("j")
     await settle(setup, 2)
-    expect(setup.captureCharFrame()).toMatch(/▾ scripted-demo/)
+    expect(setup.captureCharFrame()).toMatch(/▾ DeepSeek V4 Pro/)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("s asks who, not what to call it: the personas are the list, and picking one staffs the fleet in force", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nulya-rung-"))
+  const path = join(dir, "config.toml")
+  const notices: string[] = []
+  const setup = await pickerFrame(() => (
+    <ModelView
+      ws={ws}
+      current={{ profile: "openai", model: "gpt-5.6-sol", effort: undefined }}
+      onPick={() => {}}
+      onNotice={(message) => notices.push(message)}
+      onOpenProviders={() => {}}
+      onClose={() => {}}
+      load={async () => ({ ...fake, paths: { ...fake.paths, user: path } })}
+      rungs={async () => [
+        { name: "explore", riders: ["explore", "scout"] },
+        { name: "review", riders: ["review"] },
+      ]}
+    />
+  ))
+  try {
+    await until(() => setup.captureCharFrame().includes("DeepSeek V4 Flash"), 10_000)
+    // Down onto a DeepSeek row while this conversation runs on openai: the
+    // combination this feature exists for.
+    while (!setup.captureCharFrame().match(/▾ DeepSeek V4 Flash/)) {
+      setup.mockInput.pressKey("j")
+      await settle(setup, 2)
+    }
+    setup.mockInput.pressKey("s")
+    await until(() => setup.captureCharFrame().includes("who runs on"), 10_000)
+    const asking = await settle(setup, 2)
+    // Nobody is asked to remember a rung name: the personas are on screen, and
+    // a rung several of them ride says who rides it.
+    expect(asking).toContain("explore")
+    expect(asking).toContain("scout")
+    expect(asking).toContain("review")
+    // The models are not what the keys mean now, so they are not on screen.
+    expect(asking).not.toContain("gpt-5.6-terra")
+
+    setup.mockInput.pressEnter()
+    await until(() => notices.length > 0, 10_000)
+    const written = readFileSync(path, "utf8")
+    expect(written).toContain(`name = "openai"`)
+    // Written on the profile in force, naming the other provider — the main
+    // model on one endpoint, this rung on another.
+    expect(written).toContain(`explore = { model = "deepseek/deepseek-v4-flash" }`)
+    expect(notices[0]).toContain("deepseek/deepseek-v4-flash")
+    // And the question is down, with the models back.
+    await until(() => setup.captureCharFrame().includes("GPT-5.6 Sol"), 10_000)
+  } finally {
+    setup.renderer.destroy()
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 60_000)
+
+test("with no persona asking for a model, s says so and writes nothing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nulya-rung-"))
+  const path = join(dir, "config.toml")
+  const notices: string[] = []
+  const setup = await pickerFrame(() => (
+    <ModelView
+      ws={ws}
+      current={{ profile: "deepseek", model: "deepseek-v4-flash", effort: undefined }}
+      onPick={() => {}}
+      onNotice={(message) => notices.push(message)}
+      onOpenProviders={() => {}}
+      onClose={() => {}}
+      load={async () => ({ ...fake, paths: { ...fake.paths, user: path } })}
+      rungs={async () => []}
+    />
+  ))
+  try {
+    await until(() => setup.captureCharFrame().includes("DeepSeek V4 Flash"), 10_000)
+    setup.mockInput.pressKey("s")
+    await until(() => notices.length > 0, 10_000)
+    // Nothing to choose from is not an empty list to stare at: it is one
+    // sentence naming the screen that explains what would fill it.
+    expect(notices[0]).toContain("/agent")
+    expect(existsSync(path)).toBe(false)
+    // …and the list is still the list, still listening.
+    setup.mockInput.pressKey("j")
+    await settle(setup, 2)
+    expect(setup.captureCharFrame()).toMatch(/▾ DeepSeek V4 Pro/)
+  } finally {
+    setup.renderer.destroy()
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 60_000)
+
+test("the question takes the list keys, and cancelling gives them back", async () => {
+  const setup = await pickerFrame(() => (
+    <ModelView
+      ws={ws}
+      current={{ profile: "deepseek", model: "deepseek-v4-flash", effort: undefined }}
+      onPick={() => {}}
+      onNotice={() => {}}
+      onOpenProviders={() => {}}
+      onClose={() => {}}
+      load={async () => fake}
+      rungs={async () => [{ name: "explore", riders: ["explore"] }]}
+    />
+  ))
+  try {
+    await until(() => setup.captureCharFrame().includes("DeepSeek V4 Flash"), 10_000)
+    await settle(setup, 3)
+    expect(setup.captureCharFrame()).toMatch(/\u25be DeepSeek V4 Flash/)
+
+    // With the question up, `j` moves the answer and not the models under it.
+    setup.mockInput.pressKey("s")
+    await until(() => setup.captureCharFrame().includes("who runs on"), 10_000)
+    setup.mockInput.pressKey("j")
+    await settle(setup, 2)
+    expect(setup.captureCharFrame()).not.toMatch(/DeepSeek V4 Pro/)
+
+    // Escape ends the question and nothing else — the list is still there and
+    // still listening, which `j` moving again is the whole proof of.
+    setup.mockInput.pressEscape()
+    await settle(setup, 2)
+    setup.mockInput.pressKey("j")
+    await settle(setup, 2)
+    expect(setup.captureCharFrame()).not.toMatch(/\u25be DeepSeek V4 Flash/)
   } finally {
     setup.renderer.destroy()
   }
@@ -542,15 +745,23 @@ test("picking in /model writes the draft, not a session", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nulya-tui-state-"))
   const statePath = join(dir, "tui-state.json")
   const before = (await sessionList(ws)).length
+  // The draft opens on the stand-in, which is what `launch.ts` hands over on a
+  // machine with no key at all — and the pick in force always has a row, so
+  // there is one here to press Enter on whatever this machine's environment has.
   const setup = await testRender(
-    () => <App ws={ws} style={style} driver={{ env: scripted_env }} statePath={statePath} />,
+    () => (
+      <App
+        ws={ws}
+        style={style}
+        driver={{ env: scripted_env }}
+        statePath={statePath}
+        pick={{ profile: "scripted", model: "scripted-demo" }}
+      />
+    ),
     { width: 120, height: 24 },
   )
   try {
     await settle(setup, 3)
-    // Open the picker and go to the bottom: scripted is the last profile in
-    // default.toml and the only runnable one here without keys, so the last row
-    // is its model whether or not this machine has a key in its environment.
     await setup.mockInput.typeText("/model")
     setup.mockInput.pressEnter()
     await until(() => setup.captureCharFrame().includes("model · what "), 15_000)
@@ -767,8 +978,8 @@ test("/model on a started session continues it in a new one, and the chips follo
     await setup.mockInput.typeText("/model")
     setup.mockInput.pressEnter()
     await until(() => setup.captureCharFrame().includes("model · what this conversation runs on"), 15_000)
-    // Down to the last row: `scripted` is the last profile in default.toml and
-    // the one provider that always runs.
+    // Down to the last row: another model on the provider this session already
+    // runs on, so the fork needs nothing this machine does not have.
     for (let i = 0; i < 40; i++) setup.mockInput.pressKey("j")
     await settle(setup, 2)
     setup.mockInput.pressEnter()
@@ -779,7 +990,7 @@ test("/model on a started session continues it in a new one, and the chips follo
       async () => (await sessionList(ws)).some((row) => row.id !== id && row.parent?.session === id),
       20_000,
     )
-    await until(() => statusLine(setup).includes("scripted-demo"), 20_000)
+    await until(() => statusLine(setup).includes("deepseek-v4-pro"), 20_000)
   } finally {
     setup.renderer.destroy()
     restore()

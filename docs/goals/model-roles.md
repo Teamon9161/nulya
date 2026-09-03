@@ -90,11 +90,19 @@ cheap   = "deepseek/deepseek-v4-flash"
 
 **"读到哪台机器的 config"这个顾虑随 [runs-on.md](runs-on.md) 一起消失**：`agent` 包声明 `runs_on: "session"`，于是它永远跑在**持有会话的那台机器**上，读的就是人写 roles 表的那份 config chain。两件事同一轮落地，不留窗口。
 
+## 3b. 档位名从哪来（已定）
+
+**一个什么模型都没写的定义，骑的是它自己的名字那一档**（`defs.rungOf`）。`model: @explore` 仍然是显式写法，用来把几个 persona 放到同一档上。
+
+为什么补这一条：原来的形状要求"先有人去 `.nulya/agents/<name>.md` 里写 `model: @explore`，才谈得上配这一档"，于是屏幕上唯一能问的问题是"这一档叫什么名字"——一个要打字的框。**没人记得自己没写过的档位名**，这个提问方向本身是错的。让 persona 名字就是档位名之后，问题反过来了：**发现的 persona 就是一张可选的表**，选一个就是"让它跑在这一行上"。
+
+`persona 本身就是一个 role` 是这条规则的全部依据，所以它落在 `extensions/agent`（谁骑哪一档是这个包的语义），内核那张 `roles` 表一个字都没改。写了 `model:` 的定义已经自己答过了，不骑任何一档。
+
 ## 4. 验收
 
 守机制，不守细枝末节：
 
 - config：roles 按 key 合并（不是整表替换）；project 层写 roles 不生效；裸串与表形解析成同一个东西。
-- agent：四级解析顺序；未定义的档位退化成继承（**不是**报错）；`<profile>/<model>` 形式确实换 profile；外置 runner 上的档位被警告并丢弃。
+- agent：四级解析顺序；未定义的档位退化成继承（**不是**报错）；`<profile>/<model>` 形式确实换 profile；外置 runner 上的档位被警告并丢弃；**没写 `model:` 的定义按自己的名字被 staff 到**（且 `list` 的 `rung` 列报得出来）。
 - effort：档位带 effort 时子 session 的 step 真的带上了 `--effort`。
 - 不断言具体文案、不逐一枚举档位组合。

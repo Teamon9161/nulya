@@ -414,9 +414,13 @@ Store and scope:
   profile the delegation ends up on (see `[provider.profiles.roles]` above), so
   `model: @explore` follows the conversation from provider to provider, and a
   profile staffing no such rung leaves it running on the model it inherits.
-  `nulya ext run agent list` shows each definition's rung beside where it lands
-  right now — a name with no landing point is one that is being inherited, which
-  is also what a misspelled rung looks like. Leave `max_steps` out unless you mean it: without
+  **A definition that names no model at all rides the rung of its OWN NAME**, so
+  `[provider.profiles.roles] scout = "..."` staffs the persona `scout` without
+  anyone editing its file — write `model: @<rung>` only to put several personas
+  on one rung. `nulya ext run agent list` shows each definition's rung beside
+  where it lands right now (`rung` / `rung_model`) — a name with no landing
+  point is one that is being inherited, which is also what a misspelled rung
+  looks like. Leave `max_steps` out unless you mean it: without
   it a sub-agent runs on the kernel's own runaway guard, which is what the
   bundled personas do, and a small one cuts the investigation off in the middle
   where everything it found is in a session the caller never reads. `runner:` says which harness holds the
