@@ -179,10 +179,20 @@ export interface SessionExtras {
   /** `--with <id>[@<version>][:<tool>,…]`: this session's members. */
   with?: readonly string[]
   /**
-   * `--bare`: ignore the config's standing `[extensions] with`, composing from
-   * these flags alone. A
-   * sub-agent tab is what wants it, and it comes from the agent package's own
-   * `render` rather than being decided here (`agents.ts`).
+   * `--bare`: compose from these flags alone — no standing list rides along,
+   * neither the kernel config's `[extensions] with` (which is what the flag
+   * itself says) nor this front end's own remembered members below.
+   *
+   * BOTH, because they are the same kind of thing: a list somebody wrote down
+   * once, for the machine they were on at the time. A `remote:` session is the
+   * case that made the distinction untenable — the front end's `/ext` picks
+   * kept riding along, so the model was handed `std`'s file tools for a store
+   * that machine has no copy of, and every call answered `ext push it first`.
+   * The way to have them there is to put that machine's own list in
+   * `[env.remote]` (`state/envprofile.ts`), which says it on purpose.
+   *
+   * A sub-agent tab wants this too, and gets it from the agent package's own
+   * `render` rather than from a decision here (`agents.ts`).
    */
   bare?: boolean
   /**
@@ -551,7 +561,7 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
       return tab
     },
     async carryFork(from, at, pick, extra = {}) {
-      const members = [...sessionMembers(statePath), ...(extra.with ?? [])]
+      const members = [...(extra.bare ? [] : sessionMembers(statePath)), ...(extra.with ?? [])]
       const id = await sessionNew(from.ws, {
         parent: { session: from.id, seq: at },
         carry: true,
@@ -575,7 +585,7 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
       // a second ago) must be the truth here, not whatever this process saw when
       // the draft was opened.
       const members = [
-        ...sessionMembers(statePath),
+        ...(extra.bare ? [] : sessionMembers(statePath)),
         ...(bring ? withOptions(bring).with ?? [] : []),
         ...(extra.with ?? []),
       ]

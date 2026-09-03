@@ -27,6 +27,7 @@ pub const reach: launch.Reach = .{
     .diag = common.stderr_diag,
     .build_agent = build,
     .build_id = selfbuild.build_id,
+    .ssh_control_dir = common.sshControlDir,
 };
 
 /// Where cross-built agents live, under this machine's data directory.

@@ -254,7 +254,7 @@ tui/
 
 （**驱动侧的失败不在这一行**：`error · see transcript` 写在上面那一行（§4.4b），原文整段在 transcript 末尾，§4.2 `ErrorNotice`。）
 
-**权限 mode**（`ask` / `unsafe`，**行首**，可点 → mode picker（再点一下收起），§5.7；`unsafe` 是 warn 色——它是屏幕上每个 tool call 被裁决的立场，该在 model 之前读到） · `<model-id> [(effort)]`（**主语**，`muted`，可点 → `/model`；已开场的读 `state/session.ts` 的 `runningModel`（header 那一列，整场不变），draft 读它的 pick；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`，可点 → `/ext`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config `[extensions] with` 选中的 tool ∪ `tui-state.json` 的 `session_with` 选中的 ∪ **每一场都被组合进来的那些包（config `[extensions] with` / `tui.toml` `session_with`）active 版本的 `surface: "auto"` tool**，再 ∪ 那几个包声明的 `surface: "manual"` tool（由 `sessionExtras` 在 `session new` 那一刻写进同一条 `--with`））。**token 累计不在这一行**——它在 §4.4b，只在跑着的时候写（`state/session.ts` 的 `usageLabel`，来源是 ledger 的 `assistant.usage`；`/usage` 里是全部账）。右：**context ring**（`◕ 72%`，可点 → `/context` 面板） · `↓ N more below` · **`◈ <id>`**（这一场戴着的、contribute 了 system prompt 的包，`accent.evolve`，可点 → `/ext`；draft 读 `--with` 的 ref，已开场的读冻结 `contributions` 与 header 的 inline prompt——顶上那张卡默认折着，不写这一格就一个字都没有） · **`⇥ <spec>`**（shell 跑在哪，warn 色，可点 → `/env`；local 就整格不写，§5.11） · **workspace chip**（只在屏幕上开着第二个 workspace、或这个 tab 是 `no project` 时才占列，§5.11） · `step n`（**跑过步才写**）· `observer · driven elsewhere`（§5.6；**只有例外说自己**——当写者是常态，`driver` 那个词在每个人的每一场里都一模一样，一格恒定的东西不是信息）。离开底部时插入 `↓ 3 new`。
+**权限 mode**（`ask` / `unsafe`，**行首**，可点 → mode picker（再点一下收起），§5.7；`unsafe` 是 warn 色——它是屏幕上每个 tool call 被裁决的立场，该在 model 之前读到） · `<model-id> [(effort)]`（**主语**，`muted`，可点 → `/model`；已开场的读 `state/session.ts` 的 `runningModel`（header 那一列，整场不变），draft 读它的 pick；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`，可点 → `/ext`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config `[extensions] with` 选中的 tool ∪ `tui-state.json` 的 `session_with` 选中的（这两张常驻单子在 `bare` 的档下一起丢掉，remote 缺省就是，§5.11）∪ **每一场都被组合进来的那些包（config `[extensions] with` / `tui.toml` `session_with`）active 版本的 `surface: "auto"` tool**，再 ∪ 那几个包声明的 `surface: "manual"` tool（由 `sessionExtras` 在 `session new` 那一刻写进同一条 `--with`））。**token 累计不在这一行**——它在 §4.4b，只在跑着的时候写（`state/session.ts` 的 `usageLabel`，来源是 ledger 的 `assistant.usage`；`/usage` 里是全部账）。右：**context ring**（`◕ 72%`，可点 → `/context` 面板） · `↓ N more below` · **`◈ <id>`**（这一场戴着的、contribute 了 system prompt 的包，`accent.evolve`，可点 → `/ext`；draft 读 `--with` 的 ref，已开场的读冻结 `contributions` 与 header 的 inline prompt——顶上那张卡默认折着，不写这一格就一个字都没有） · **`⇥ <spec>`**（shell 跑在哪，warn 色，可点 → `/env`；local 就整格不写，§5.11） · **workspace chip**（只在屏幕上开着第二个 workspace、或这个 tab 是 `no project` 时才占列，§5.11） · `step n`（**跑过步才写**）· `observer · driven elsewhere`（§5.6；**只有例外说自己**——当写者是常态，`driver` 那个词在每个人的每一场里都一模一样，一格恒定的东西不是信息）。离开底部时插入 `↓ 3 new`。
 
 **没有的东西不占列**：没跑过步就不写 `step 0`，是写者就不写 `driver`。**键位提示也不在这里**：一个永远在那儿的提醒过了第一个小时就没人再读，而它占的是屏幕上最挤的一行；它在开屏那一屏，一次一条 tip（§4.1、`Welcome.tips`）。
 
@@ -434,8 +434,8 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 
 - **前端只做三件事**：把选择放进 `session new --env`（落点是 `sessionExtras()`，与 `session_with` / `session_prompts` 同一处同一时刻）· 记住它（`tui-state.json` 的 `exec_env`——**内核没有对应的 config 键、也不该有**：给 `[environment]` 加一个默认值就要回答「这个目标比 `local` 更严还是更松」，而 config 链的收窄规则对这个问题没有诚实答案；记住一个选择是前端的事，给目标排序不是）· 用状态行上的 `⇥ <spec>` 说出来（非 local 才占列；已开场的读冻结 header，draft 读待定选择——`/env` 动不了已经开始的那一场）。**不校验拼写**：`session new` 已经会拒绝并带上整套词表，这边再写一个 parser 就是一个问题两个答案。
 - **picker 列的是探测出来的东西**（`state/targets.ts`）：`local` 恒在 · Windows 上 `wsl.exe -l -q` 的每个发行版，产 `remote:wsl:<name>` 行 · `~/.ssh/config` 里非模式的 `Host`，产 `remote:ssh:<host>` 行（`Host *` 是一段缺省不是一台机器，`Include` 不跟——那正是最后一行存在的理由）。最后一行 `somewhere else…` **不是一个 target**，它把 `/env ` 写进输入框——一个 picker 最不该做的事就是暗示它列出来的就是全部。
-- **remote 档要两次回答**：选机器只是一半，另一半是**那台机器上的哪个目录**（内核的 `--workspace` 是独立的一个 flag）。选中 `remote:` 行之后 `nulya remote check --env <spec> --json` 开一次真通道取 `home` 当起点，接上**同一个** `DirBrowser`（换的只是一个 `DirSource`：`list` / `exists` / `join` / `dirname` 四件事——远端永远用 posix 拼路径，Windows 宿主上 `node:path.join` 对一条要发给 Linux 的路径是错的字节）。check 失败就原样显示内核的话、**浏览器不开**——对一台连不上的机器展示「选个目录」只是同一个失败的第二次重复。spec 与 workspace **同一次调用成对写入、成对清空**（§7）。
-- **remote 场里的工具面另配一份**（`tui.toml` 的 `[env.<kind>]`，§7）：缺省 `bare = true` + 空的 `with` / `session_prompts`——`std` 的 read/grep/glob 读的是**本地**盘、`ground` 渲染的是**本地**事实，把它们放到一场工作区在别处的 session 上只会制造 not-found 与假话。
+- **remote 档要两次回答**：选机器只是一半，另一半是**那台机器上的哪个目录**（内核的 `--workspace` 是独立的一个 flag）。选中 `remote:` 行之后 `nulya remote check --env <spec> --json` 开一次真通道取 `home` 当起点，接上**同一个** `DirBrowser`（换的只是一个 `DirSource`：`list` / `exists` / `join` / `dirname` 四件事——远端永远用 posix 拼路径，Windows 宿主上 `node:path.join` 对一条要发给 Linux 的路径是错的字节）。check 失败就原样显示内核的话、**浏览器不开**——对一台连不上的机器展示「选个目录」只是同一个失败的第二次重复。**只有一种失败不这样显示：ssh 的认证被拒**。一台要密码的机器必然先拒掉 key（这正是「要密码」被发现的方式，之前没有别的可试），把它当失败展示，等于在每一次密码框弹出来之前先甩一块写着 `Permission denied` 的红字，还把人自己的 key 配置指成问题——所以它走的是密码框那条路，只留一行 notice 说是哪台机器（已经带着密码还被拒，说的是另一句话：那个密码不对）。spec 与 workspace **同一次调用成对写入、成对清空**（§7）。在这两次回答之间，`shell` 那一行说 `<spec> · connecting…` 而不是继续说 `this machine`；内核那几行叙述（探测、交叉编译、安装）落在**输入框上面那条活动行**（§4.4b 的 `WorkingStatus`，带自己的秒表），不落在 notice——notice 是新闻、会自己下线（`noticeHold` 上限九秒），而第一次连一台机器要交叉编译一个 nulya 送过去，是一分钟；notice 会在这一分钟中间过期，把屏幕留成「什么都没在发生」的样子。这跟启动那趟 store pass 用同一条行、同一个理由。远端的 `DirBrowser` 另外两处与本地不同：标题带 `· on <spec>`（远端的路径与本地的长得一模一样，常常连 home 都同名），以及一次 listing 在飞时的 `· listing…`——那是一整条 ssh 连接，「空目录」和「还没回来」差着好几秒。
+- **remote 场里的工具面另配一份**（`tui.toml` 的 `[env.<kind>]`，§7）：缺省 `bare = true` + 空的 `with` / `session_prompts`——`ground` 渲染的是**本地**事实；`std` 的 read/grep/glob 自 Phase 3 起读的是**持有工作区那台**机器的盘（这是对的），但那台机器有它自己的 store，这边组合进来的版本它没有一份拷贝，模型拿到的就是一个每次调用都答「先 push」的工具。**`bare` 连前端自己那份常驻成员表一起丢下**（`tui-state.json` 的 `session_with`，也就是 `/ext` 上勾的那些）：它和 config 的 `[extensions] with` 是同一种东西——某个人在某台机器上写下的一张单子。要让它们过去，是 `/ext` 的 `r` 先 push、再在 `[env.remote] with` 里点名，那是一句有意说出来的话。draft 屏那一行 `tools 1+N` 与真正 `session new` 读的是同一份 profile，所以远端 draft 上写的就是 `tools 1+0`。
 - **包也要过去**：`/ext` 的 `r` = `ext push <id>@<v> --env <spec>`，只在这一场是 remote 时存在（§5.3）。
 
 ## 6. 视觉规范（设计语言）
@@ -625,8 +625,9 @@ plugins       = true        # 代码层总开关（T40）：加载已激活/本�
 # 写了的字段整体替换缺省，没写的沿用——与 session_with 那条「替换不合并」同一条纪律。
 [env.local]                 # 不写 = local 的缺省：bare=false，用 [extensions] 那两个列表
 [env.remote]                # 不写 = { bare = true, with = [], session_prompts = [] }
-# bare = true                 # 缺省已是 true；config 的 `[extensions] with` 不读
-# with  = []                  # 缺省已是 []；想在远端场里也带某个包，写它的 id
+# bare = true                 # 缺省已是 true；两张常驻单子都不读：config 的 `[extensions] with`，
+#                             #   以及 tui-state.json 的 session_with（`/ext` 上勾的那些）
+# with  = []                  # 缺省已是 []；想在远端场里也带某个包：先 `/ext` 的 r push 过去，再在这里点名
 # session_prompts = []        # 缺省已是 []；ground 的本地事实对远端没有意义
 
 [keys]                      # 覆盖默认键；名字表见 keymap.ts
@@ -639,7 +640,7 @@ cancel = "escape"
 
 **`tui-recents.json`（T71）**：user 层下**第二个**由程序写的文件，JSON `{"recent": ["<绝对路径>", …]}`（新的在前，上限 12）。为什么不是 `tui-state.json` 的一个键：那个文件在其它每一处都是 **workspace 层**的事实（这个项目的成员表、它的侧边栏、它的档），而这一条是**关于好几个目录**的事实——一份别的目录的清单不能住在其中一个目录里面。**只在真的建起一场 session 时写**：浏览到一个地方不等于在那儿工作过。读不出来 = 没记住，永不阻止启动。
 
-**`tui-state.json`（D10）**：同目录（user 层）下由程序写的文件，记的全是**人在屏幕上做过的选择**——`model{profile,model,effort}` · `mode`（权限档）· `session_with` · `exec_env` 与 `exec_workspace`（**同一次调用成对写入、成对清空**：一个 spec 配着上一次别的 spec 选的目录是错配）· `remote_cwd`（每台机器自己的浏览起点）· `remote_pushed`（上次这个前端 push 了什么、内核说了什么——一句关于过去的陈述，不是一句关于现在的主张）· `sidebar{open,ratio}`（**人要什么**，不是屏幕上是什么：窄终端自己把 rail 收起来，宽回去再放出来）· `tabs: [{ws, session?}]`（tab 是一对，所以记也记一对；恢复只做**第一个之后的那些**，第一个仍由这一趟启动决定）· `asked_stores` / `asked_agents` / `trusted_agents`（checkout 的那两句只问一次）· `plugins`（每个包自己的一格）。`/model` 的 Enter 与 `/effort` 会更新它；启动无 `--profile` 时的默认选择就是它（`launch.planLaunch`：命令行 > 上次选择 > 内核 `active_profile`；每一层都要 `config show` 说它有 credential 才算数，否则落到离线 scripted 并开屏弹选择器讲原因）。缺失或损坏 = 没记住，永不阻止启动。为什么不放进 `tui.toml`：那是人写的；程序回写人的文件会碰注释与排版（tcode 用 toml_edit 才做到），这里不值得。为什么不进内核 config：内核不需要知道"上次选了谁"（不是 substrate）。
+**`tui-state.json`（D10）**：同目录（user 层）下由程序写的文件，记的全是**人在屏幕上做过的选择**——`model{profile,model,effort}` · `mode`（权限档）· `session_with` · `exec_env` 与 `exec_workspace`（**同一次调用成对写入、成对清空**：一个 spec 配着上一次别的 spec 选的目录是错配；**`remote:` 那种在启动时被丢掉**——本地选择是一个偏好，远端选择是一条连接的近端，而连接不跨进程：记住它只买到下一趟的第一条消息去 dial 一台没人问过密码的机器然后失败。`remote_cwd` 有意留着，那是「那台机器上的哪里」，再选中同一台就还落在上次那个目录）· `remote_cwd`（每台机器自己的浏览起点）· `remote_pushed`（上次这个前端 push 了什么、内核说了什么——一句关于过去的陈述，不是一句关于现在的主张）· `sidebar{open,ratio}`（**人要什么**，不是屏幕上是什么：窄终端自己把 rail 收起来，宽回去再放出来）· `tabs: [{ws, session?}]`（tab 是一对，所以记也记一对；恢复只做**第一个之后的那些**，第一个仍由这一趟启动决定）· `asked_stores` / `asked_agents` / `trusted_agents`（checkout 的那两句只问一次）· `plugins`（每个包自己的一格）。`/model` 的 Enter 与 `/effort` 会更新它；启动无 `--profile` 时的默认选择就是它（`launch.planLaunch`：命令行 > 上次选择 > 内核 `active_profile`；每一层都要 `config show` 说它有 credential 才算数，否则落到离线 scripted 并开屏弹选择器讲原因）。缺失或损坏 = 没记住，永不阻止启动。为什么不放进 `tui.toml`：那是人写的；程序回写人的文件会碰注释与排版（tcode 用 toml_edit 才做到），这里不值得。为什么不进内核 config：内核不需要知道"上次选了谁"（不是 substrate）。
 
 ## 8. 测试
 
@@ -697,7 +698,7 @@ T0–T115 全部落地，逐条经过与验收标准在归档的实施日志里�
 - **委派**：`.nulya/agents/*.md`（workspace > user > 包自带三层）一个定义就是一组 `session new` 参数；`/agent <name> <task…>` 开一张看得见的新 tab，裸 `/agent` 是只把命令写进输入框、不启动任何东西的 picker。模型自己调 `agent{…}` 时前端只画：委派卡说的是「派了谁、在干什么」而不是它的编号，`↗ watch here` 在**当前 tab 内部**开一块只读的 sub-agent pane。
 - **plugin 层**：声明位（`commands` / `policy` / `tools[].ui` / `contributes.ui.tui`）与代码层（`plugin-api.d.ts`：行渲染、五个注册面、只有人已有的动词）都已接通，`tui.toml` 的 `[extensions] plugins = false` 一键退回纯声明层。compact / handoff / plan / ask 的界面全住在各自的包里——宿主不认识它们的包名、tool 名与 marker。
 - **一场 session 的边界**：开屏是 draft tab，第一条消息才 `session new`，那一刻现读 pin、成员（`session_with`）、开场文本（`session_prompts`）、目录、exec target 与模型。已经开始的 session 什么都不能就地换（身份与 composition 冻在它那个文件里）——`/model` 于是走 `session new --parent <id>:<seq> --carry`：同一条对话带着历史进新 session，模型与今天的成员表一起现解，tab 换过去。
-- **目录与远端**：tab = (workspace, session)；`/cwd` 换 draft 的目录，`no project` 落在 `<NULYA_HOME | ~/.nulya>/home/`；`/env` 选下一场的 shell 跑在哪，remote 档还要在那台机器上选一个目录（那台机器上没有 nulya 时内核会自己装一个，`remote check` 的 stderr 一行行流回来、落在 notice 上，所以那几秒不是一块冻住的屏），`/ext` 上的 `r` 把选中的包 push 过去。
+- **目录与远端**：tab = (workspace, session)；`/cwd` 换 draft 的目录，`no project` 落在 `<NULYA_HOME | ~/.nulya>/home/`；`/env` 选下一场的 shell 跑在哪，remote 档还要在那台机器上选一个目录（那台机器上没有 nulya 时内核会自己装一个——必要时先交叉编译一份，`remote check` 的 stderr 一行行流回来、落在输入框上面那条活动行上，所以那一分钟不是一块冻住的屏），`/ext` 上的 `r` 把选中的包 push 过去。
 - **人写的与程序写的分开**：`tui.toml` 是人写的设定（`/settings` 只做最小编辑——换掉一行、绝不重排、绝不删注释），`tui-state.json` 与 `tui-recents.json` 是程序写给自己的便条（上次的模型 / 档 / 目录 / exec target / pin / tab / 最近的 workspace）。
 
 
@@ -720,3 +721,17 @@ T0–T115 全部落地，逐条经过与验收标准在归档的实施日志里�
 快照只churn了一处且正是修复本身：`subpane.test.tsx` 的分栏帧里，右栏 composition 头行从被切的 `session · ---------------- · frozen` 变成整段让掉的 `session · ----------------`，即 `title()` 注释承诺的行为。`bun run typecheck` 通过。
 
 **合并时补的一处**：T114 的 `RebindCard` 是这次扫除分叉之后才出现的卡，同样画在 transcript 里、同样按终端宽度算 `room()` —— 一并改成 `useBodyWidth()`。这条规则的检验方式因此写成"`src/render/` 下 `useScreen()` 归零"而不是一张文件名单：名单会被下一张新卡绕过。
+
+### T116 · 远端那条路上的四件事：一次连接说得出话，一次选择不越界（2026-09-03）
+
+**内核零改动，只动 `tui/`。** 四条来自真实使用的报告，追下去是四个独立的原因，只有第三条彼此相关。
+
+**① 每次弹密码框之前先甩一块红字。** `beginRemoteBrowse` 先不带密码开一次通道——这是「这台机器要密码」被发现的唯一方式，没有别的可先试。但它把那次拒绝当**失败**渲染（`remoteFailure` → transcript 的错误区），于是每一次密码框出现之前，屏幕上先有一块 `Permission denied (publickey,password).`，还捎着 OpenSSH 10 对着旧服务器每条连接都写的三行 post-quantum 警告。两句都不是这个人做错了什么。**现在：ssh 的认证拒绝走密码框那条路，不进失败区**——它是这个流程在提问，不是这个流程失败了。已经带着密码还被拒是另一回事，notice 说的是「那个密码不对」（`carrying` 在密码字节被移交给调用之前读，之后就读不到了）。其余每一种拒绝照旧原样显示。
+
+**② 远端状态被记住，下一趟必炸。** `tui-state.json` 的 `exec_env` 记住了 `remote:ssh:<host>`，但握着那条连接的进程已经没了，密码从来就没被写到任何地方——所以下一趟启动的第一条消息直奔 `session new --env remote:…`，dial、被拒、失败。记住一个远端目标只买到一次注定失败的首次尝试。**现在 `forgetRemoteEnv()` 在 `main.tsx` 里、任何东西读它之前丢掉它**（连同成对的 `exec_workspace`）：本地选择是一个偏好，远端选择是一条连接的近端。`remote_cwd` 有意留着——「那台机器上的哪个目录」不随连接消失，再选中同一台就还落在上次那里。
+
+**③ 连接期间屏幕说不出自己在干什么。** 内核那几行叙述（探测、交叉编译一分钟、送过去、装上）本来落在 notice 上，而 notice 是新闻、按长度停留最多九秒就自己下线——正好在那一分钟的中间。屏幕于是变成「什么都没在发生」的样子，然后突然进了远程。**现在它落在输入框上面那条活动行**（`WorkingStatus`，与启动那趟 store pass 同一条行、同一个理由，`ReachProgress` 排在「等你回答」之下、其余一切之上，带自己的秒表）。同时 `shell` 那一行继续说 `<spec> · connecting…`。还多了一道筛子（`reachNarration`）：`remote check` 的 stderr 是两个声音共用一根管子——内核自己的叙述，和 ssh 顺路说的话；那三行 post-quantum 警告会在交叉编译的整整一分钟里霸着这条行。筛掉的只是**这条行上显示什么**，失败时 `CliError.detail` 里的完整 stderr 一个字节都没少。
+
+**④ 远端场里模型看得见 `std`，一调就说「这台机器上没有这个版本的拷贝」。** `[env.remote]` 的缺省早就是 `bare = true` + 空 `with`，但 `state/tabs.ts` 的 `materialize` / `carryFork` 自己又读了一遍 `tui-state.json` 的 `session_with`（`/ext` 上勾的那些）并无条件并进去——profile 说了不带，另一处把它带上了。**现在 `bare` 连这张单子一起丢下**：它和 config 的 `[extensions] with` 是同一种东西，一张某个人在某台机器上写下的常驻单子，而那台机器有它自己的 store。draft 屏的 `tools 1+N` 与真正 `session new` 读同一份 profile，所以远端 draft 现在写 `tools 1+0`，而不是列出六个一调就失败的工具。要让它们过去仍然是两步、都得说出口：`/ext` 的 `r` push，再在 `[env.remote] with` 里点名。
+
+测试各钉机制不钉措辞：`workingstatus.test.ts` 三条（reach 说哪台机器与内核最后那句话、它压过 step 与 store pass 但让位于「等你回答」、ssh 的警告不上这条行而认证拒绝上）· `tuistate.test.ts` 两条（启动丢掉 remote 与它的 workspace、留下 `remote_cwd`；本地选择与别的字段不动）· `tabs.test.ts` 一条（拿一个谁都解析不出来的成员 id 当探针：非 bare 的 `session new` 被拒、bare 的开得起来——把 `bare ? [] :` 去掉就变红）。`bun run typecheck` 通过。

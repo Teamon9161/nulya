@@ -384,6 +384,34 @@ export function rememberExecEnv(spec: string, path = tuiStatePath(), workspace?:
 }
 
 /**
+ * Drop a `remote:` target on the way in, so a new run starts on this machine.
+ *
+ * A local `/env` choice is a preference and survives; a remote one is the near
+ * end of a CONNECTION, and a connection does not survive a process. What the
+ * file remembered was a spec whose channel was gone and whose password had
+ * never been written down anywhere — so the first message of the next run went
+ * to `session new --env remote:…`, which dialed, was refused for want of a
+ * password nobody had been asked for, and failed. Remembering a remote target
+ * only ever bought a wrong first attempt.
+ *
+ * `remote_cwd` is deliberately left alone: WHERE on a machine is worth
+ * remembering per spec, and picking that machine again lands in the same
+ * directory as before rather than back at its home.
+ *
+ * Called once at start-up, so a choice made during a run still persists across
+ * that run's own tabs and processes. Two TUIs at once share this file and
+ * always have: the second one starting resets the first one's next-session
+ * target, which is the same thing `/env` in either window already does.
+ */
+export function forgetRemoteEnv(path = tuiStatePath()): void {
+  const state = loadTuiState(path)
+  if (!(state.exec_env ?? "").startsWith("remote:")) return
+  delete state.exec_env
+  delete state.exec_workspace
+  saveTuiState(state, path)
+}
+
+/**
  * Where the remote directory browser last left off for `spec` — the seed for
  * the next time that same target is picked.
  */

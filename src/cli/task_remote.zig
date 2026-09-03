@@ -126,6 +126,7 @@ pub const Far = struct {
             .install = .auto,
             .build_agent = remote_agent.build,
             .build_id = selfbuild.build_id,
+            .ssh_control_dir = common.sshControlDir,
             .diag = common.stderr_diag,
         }) catch {
             link.unreached = true;

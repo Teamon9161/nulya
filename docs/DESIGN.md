@@ -887,7 +887,11 @@ installed at $HOME/.nulya/remote-agent
 
 落点是 **`$HOME/.nulya/remote-agent`**：**不叫 `nulya`、外面没有 `bin/`**。那台机器的用户自己也可能装 nulya，`~/.nulya` 正是他的 NULYA_HOME（store 就在旁边），而 `~/.nulya/bin` 恰好是那种会被加进 PATH 的目录——一个叫 `nulya` 的传输件会在他自己的机器上应答 `nulya`。一个文件，名字就是它的角色。
 
-**`remote:ssh:` 的认证**：缺省是完全非交互的 `BatchMode=yes`。只有显式给 `--ssh-password-stdin` 时才改成 `BatchMode=no` + `NumberOfPasswordPrompts=1`，并强制走固定 askpass helper：CLI 从 stdin 有界读取一行、调用结束前覆零；密码由 host 进程内的回环 one-shot broker 交给同一 nulya 二进制的 askpass 启动模式。**密码不进** SSH stdin（那里始终是 framing）、argv、env、文件、header、ledger 或日志；env 里只有回环 endpoint 与随机一次性 capability。`remote check` / `remote ls` / `session new` / `session step` 都认这一个 transient flag，其中 `step --gate` 先消费密码行、随后同一 stdin 照常读 verdict。StrictHostKeyChecking 完全不改。
+**`remote:ssh:` 的认证**：缺省是完全非交互的 `BatchMode=yes`。只有显式给 `--ssh-password-stdin` 时才改成 `BatchMode=no` + `NumberOfPasswordPrompts=1`，并强制走固定 askpass helper：CLI 从 stdin 有界读取一行、调用结束前覆零；密码由 host 进程内的回环 one-shot broker 交给同一 nulya 二进制的 askpass 启动模式。**密码不进** SSH stdin（那里始终是 framing）、argv、env、文件、header、ledger 或日志；env 里只有回环 endpoint 与随机一次性 capability。`remote check` / `remote ls` / `session new` / `session step` 都认这一个 transient flag，其中 `step --gate` 先消费密码行、随后**同一个 reader** 照常读 verdict——"一行"含它的换行符，`readSshPassword` 读完必须把 `\n` 也吃掉，否则 gate 的第一次读拿到的是空行，而空行不是 verdict：**每一场带密码的远端 session 的每个 step 都会拒掉自己的第一个 tool call**，还署名"denied by the user"（`tests/e2e/remote.zig` 有守这条的 e2e）。StrictHostKeyChecking 完全不改。
+
+**一条连接大家共用**（`ControlDir` / `controlOption`）：`ssh` 那一族每次调用都带 `-o ControlMaster=auto -o ControlPath=<dir>/<digest> -o ControlPersist=60`，于是第一次拨号+认证之后，同一目的地的后续每一次（阶梯的每一级、`uname` 探测、装二进制、`remote ls` 的每一层目录、每一个 `session step`）都落在已经开着的那条上。**实测**（本机 sshd）：三次冷连 0.40s → 三次热连 0.036s；`ControlPersist` 是**空闲计时器**，每次复用都重置，最后一次用完 60 秒后 master 自己退出——所以关掉终端、结束 session 都不需要任何人去收拾它，也没有第二个生命周期要管。**60 秒是有意的短**：它要盖住的是「一层层翻目录」「check 完紧接着 new」这种成串的动作；刻意不去跨两个 model turn 之间的几分钟——重拨大约一秒且不需要人（driver 还握着密码），而一条活过工作本身的共享连接，在一台靠密码登录的机器上正好就是一条绕过密码的路。
+
+socket 的名字是**nulya 自己算的摘要**而不是 ssh 的 `%C`：这是 unix socket，长度上限约 104 字节，而 `%C` 多长是实现的事——超限的路径换来的是每一次连接都打一行警告、而且照样各拨各的。落点由**壳层**给（`common.sshControlDir`：`<NULYA_HOME | ~/.nulya>/ssh`，Windows 上答 null （Win32 OpenSSH 没有 ControlMaster），路径放不下也答 null），内核只负责拼那三个 `-o`。`wsl` 在本机起进程、`exec:` 的 payload 是别人写的程序，两者都没有「一条连接」可共用。
 
 **四个动词都搬走了**：`runShell` / `runExtension` / `putWorkspaceFile` / `startShellTask` 全部过通道。帧里过去的是**身份**（`(id, version, tool)`）与参数 JSON；对面按自己的 OS 选 entry 变体、按自己的 `.sealed` 复验、拼自己的 store 路径，并从同一份参数派生 `NULYA_TOOL` / `NULYA_ARG_<k>`（**一份实现两台机器**）。`presentation_file` **不下传**。**对面没有这个版本**时答一句点名 `ext push` 的拒绝，host 把它答成一次**失败的调用**——模型读得到、usage journal 记下一个真实的 `ok=false`，而不是让整个 step 死掉。
 
@@ -1331,7 +1335,7 @@ stdout **只有一种形状**：一行一个 JSON，写完即 flush，跑的过�
 {"stream":"gate","event":"request","call_id":"c1","tool":"shell","tool_id":"builtin.shell","readonly":null,"args":"{\"command\":\"…\"}"}
 ```
 
-然后**阻塞读 stdin 一行**：`allow` / `deny` / `deny <note>`。note 原样进那个 call 的 marker 结果，模型看得见。`args` 是模型写的原文；`tool_id` / `readonly` 是**这一场冻结的声明**（§4），`readonly` 的 `null` 是"没说"不是 `false`，本场工具面没有这个名字时两列都是 `null`——有了这两列，答题人不必再去开 manifest 反推。**fail closed**：认不出的答案、读失败、以及最要紧的 **EOF**（答的人走了）→ 一律 deny，EOF 之后的每个 call 不再问；每种情况在 stderr 说一句（stdout 保持纯协议）。**不带 `--gate` 的行协议输出逐字节不变**。
+然后**阻塞读 stdin 一行**：`allow` / `deny` / `deny <note>`。note 原样进那个 call 的 marker 结果，模型看得见。`args` 是模型写的原文；`tool_id` / `readonly` 是**这一场冻结的声明**（§4），`readonly` 的 `null` 是"没说"不是 `false`，本场工具面没有这个名字时两列都是 `null`——有了这两列，答题人不必再去开 manifest 反推。**fail closed**：认不出的答案、读失败、以及最要紧的 **EOF**（答的人走了）→ 一律 deny，EOF 之后的每个 call 不再问；每种情况在 stderr 说一句（stdout 保持纯协议）。**这三种拒绝带 note**，而人按下的那个 deny 不必带：裸 deny 读起来就是「有人说不」，而这三种没有人被问过；stderr 那句属于一个退出码仍是 0 的进程，所以 note 是这个事实唯一到得了模型（与读 transcript 的人）面前的地方。**不带 `--gate` 的行协议输出逐字节不变**。
 
 ### `nulya task *`（`cli/task.zig`，全部是壳层；远端轮询在 `cli/task_remote.zig`，§8.2）
 

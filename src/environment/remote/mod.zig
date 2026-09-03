@@ -135,6 +135,7 @@ pub fn launcherArgv(
     launch: Launch,
     password: bool,
     entry: install.Entry,
+    control: ?[]const u8,
 ) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     errdefer argv.deinit(alloc);
@@ -151,6 +152,7 @@ pub fn launcherArgv(
             // the askpass helper; the default stays non-interactive.
             try argv.appendSlice(alloc, &.{ "ssh", "-o", if (password) "BatchMode=no" else "BatchMode=yes" });
             if (password) try argv.appendSlice(alloc, &.{ "-o", "NumberOfPasswordPrompts=1" });
+            try appendControl(alloc, &argv, control);
             // One argv word: ssh joins what follows the destination with spaces
             // and the far login shell parses the result, so the whole command
             // has to arrive as a single word to survive that round trip.
@@ -178,6 +180,7 @@ pub fn farCommandArgv(
     launch: Launch,
     password: bool,
     command: []const u8,
+    control: ?[]const u8,
 ) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     errdefer argv.deinit(alloc);
@@ -190,6 +193,7 @@ pub fn farCommandArgv(
         .ssh => |dest| {
             try argv.appendSlice(alloc, &.{ "ssh", "-o", if (password) "BatchMode=no" else "BatchMode=yes" });
             if (password) try argv.appendSlice(alloc, &.{ "-o", "NumberOfPasswordPrompts=1" });
+            try appendControl(alloc, &argv, control);
             try argv.appendSlice(alloc, &.{ dest, command });
         },
         .exec => return error.InvalidRemoteSpec,
@@ -246,6 +250,10 @@ pub const Options = struct {
     /// serve. Null refuses that machine instead — which is what a caller that
     /// has not opted into installing wants anyway.
     build_agent: ?AgentBuilder = null,
+    /// Where ssh's multiplexing sockets may live, asked at most once per
+    /// connect and only for an `ssh` launch. Null — and a provider answering
+    /// null — means each connection authenticates and dials on its own.
+    ssh_control_dir: ?ControlDir = null,
     /// Which build this side is (`selfbuild.build_id`). An agent answering with
     /// a different one is serving another source tree, and — when installing is
     /// allowed — is replaced. Empty compares equal to everything, so a caller
@@ -274,18 +282,95 @@ pub const AgentBuilder = *const fn (
     diag: Diag,
 ) anyerror![]u8;
 
+/// Where the shell layer will let ssh keep its multiplexing sockets — an
+/// absolute directory that exists, or null for "not on this machine".
+///
+/// A function for the same reason `AgentBuilder` is one: answering means making
+/// a directory and knowing where this machine keeps nulya's things, and neither
+/// is a question the kernel gets to have an opinion about. Caller owns the
+/// result.
+pub const ControlDir = *const fn (alloc: std.mem.Allocator, io: std.Io) anyerror!?[]u8;
+
+/// How long ssh keeps a shared connection alive after the last thing that used
+/// it. An IDLE timer, refreshed by every reuse — so nothing here has to notice
+/// a closed terminal or a finished session: the door shuts by itself this long
+/// after the last person walks through it.
+///
+/// A minute covers what the cost was actually being paid on — a directory
+/// browsed a level at a time, a `remote check` and the `session new` right
+/// after it, a run of quick steps. It deliberately does NOT try to span the
+/// minutes between one model turn and the next: re-dialing costs about a
+/// second and needs no one's attention (the driver still holds the password),
+/// while a shared connection that outlives the work is, on a password-authed
+/// host, exactly a way past the password.
+const control_persist_seconds = 60;
+
+/// How many characters `controlOption` puts after the directory it is given —
+/// a separator and the digest. Exported because the shell layer has to leave
+/// room for it, and a length budget split across two files is a length budget
+/// one of them will get wrong.
+pub const control_name_bytes = 1 + 16;
+
 /// Read exactly one password line from a CLI stdin stream. The caller owns the
 /// mutable result and must wipe it before freeing; the reader stays outside so
 /// `session step --gate` can keep consuming verdict lines afterwards.
+///
+/// "One line" INCLUDES its newline. `takeDelimiterExclusive` leaves the
+/// delimiter buffered, and the next reader of this stream is the gate, which
+/// reads a line per tool call: a `\n` left behind is an empty first verdict,
+/// which is not a word the gate knows and therefore a denial of a call nobody
+/// was asked about.
 pub fn readSshPassword(alloc: std.mem.Allocator, reader: *std.Io.Reader) ![]u8 {
     const line = reader.takeDelimiterExclusive('\n') catch |err| switch (err) {
         error.EndOfStream => return error.SshPasswordMissing,
         else => return err,
     };
+    // Only reached when the delimiter was found, so there is exactly one byte
+    // of it sitting there.
+    reader.toss(1);
     const password = std.mem.trimEnd(u8, line, "\r");
     if (password.len == 0) return error.SshPasswordMissing;
     if (password.len > ssh_askpass.max_password_bytes) return error.SshPasswordTooLong;
     return alloc.dupe(u8, password);
+}
+
+/// The three options that make several `ssh` invocations share ONE connection.
+///
+/// `control` is the whole `ControlPath=…` word, built by the caller and outliving
+/// the argv, because every other word here is a literal or a subslice of the
+/// spec and one allocated word would make that contract a maybe.
+fn appendControl(alloc: std.mem.Allocator, argv: *std.ArrayList([]const u8), control: ?[]const u8) !void {
+    const path = control orelse return;
+    try argv.appendSlice(alloc, &.{
+        "-o", "ControlMaster=auto",
+        "-o", path,
+        "-o", std.fmt.comptimePrint("ControlPersist={d}", .{control_persist_seconds}),
+    });
+}
+
+/// The `ControlPath=…` word for one destination, or null when the shell layer
+/// offers nowhere to put a socket. Caller owns the result.
+///
+/// The socket's NAME is a digest nulya computes rather than ssh's own `%C`,
+/// because this is a unix socket and the limit is about a hundred bytes: `%C`'s
+/// length is the implementation's business, and a path over the limit costs a
+/// warning on every single connection — which is how a speedup becomes noise.
+/// Only `ssh` has any of this; `wsl` starts a process on this machine and
+/// `exec:`'s payload is a program somebody else wrote.
+fn controlOption(alloc: std.mem.Allocator, io: std.Io, launch: Launch, opts: Options) !?[]u8 {
+    const dest = switch (launch) {
+        .ssh => |d| d,
+        else => return null,
+    };
+    const provider = opts.ssh_control_dir orelse return null;
+    const dir = (try provider(alloc, io)) orelse return null;
+    defer alloc.free(dir);
+
+    var h = std.crypto.hash.Blake3.init(.{});
+    h.update(dest);
+    var digest: [control_name_bytes / 2]u8 = undefined;
+    h.final(&digest);
+    return try std.fmt.allocPrint(alloc, "ControlPath={s}{c}{x}", .{ dir, std.fs.path.sep, &digest });
 }
 
 /// One open channel to an agent: the transport child plus the framing.
@@ -296,6 +381,9 @@ pub const Channel = struct {
     read_buf: []u8,
     reader: std.Io.File.Reader,
     argv: []const []const u8,
+    /// The one word of `argv` this channel had to allocate (`ControlPath=…`),
+    /// kept so that every word in `argv` really does outlive it.
+    control: ?[]u8 = null,
     env: std.process.Environ.Map,
     arena: std.heap.ArenaAllocator,
     bounds: Bounds = .default,
@@ -347,11 +435,18 @@ pub const Channel = struct {
             marker = broker.?.marker();
         }
 
+        // Computed ONCE and used by every connection this call makes — the
+        // ladder's rungs, the `uname` probe, the install — because sharing one
+        // ssh connection between them is the entire point: the first dials and
+        // authenticates, the rest arrive on what it opened.
+        const control = try controlOption(alloc, io, launch, opts);
+        defer if (control) |word| alloc.free(word);
+
         // `exec:` names a program, not a shell: there is nothing to install
         // into and no second spelling to try.
         const may_install = opts.install == .auto and launch != .exec;
 
-        if (attemptOnce(alloc, io, launch, marker, .installed_or_path, opts)) |ch| {
+        if (attemptOnce(alloc, io, launch, marker, .installed_or_path, opts, control)) |ch| {
             return ch;
         } else |first| switch (first) {
             error.RemoteChannelLost => {},
@@ -361,8 +456,8 @@ pub const Channel = struct {
                     "the nulya over there was built from other source; replacing it\n"
                 else
                     "the nulya over there speaks another protocol; replacing it\n");
-                try installAgent(alloc, io, launch, marker, opts);
-                return attemptOnce(alloc, io, launch, marker, .installed_or_path, opts);
+                try installAgent(alloc, io, launch, marker, opts, control);
+                return attemptOnce(alloc, io, launch, marker, .installed_or_path, opts, control);
             },
             else => return first,
         }
@@ -370,7 +465,7 @@ pub const Channel = struct {
         // `exec:` ignores `entry` — its argv IS the program — so rung two
         // would ask the identical question a second time.
         if (launch != .exec) {
-            if (attemptOnce(alloc, io, launch, marker, .path, opts)) |ch| {
+            if (attemptOnce(alloc, io, launch, marker, .path, opts, control)) |ch| {
                 return ch;
             } else |second| switch (second) {
                 error.RemoteChannelLost => {},
@@ -380,8 +475,8 @@ pub const Channel = struct {
 
         if (!may_install) return error.RemoteChannelLost;
         opts.diag.report(io, "no nulya on that machine; installing one\n");
-        try installAgent(alloc, io, launch, marker, opts);
-        return attemptOnce(alloc, io, launch, marker, .installed_or_path, opts);
+        try installAgent(alloc, io, launch, marker, opts, control);
+        return attemptOnce(alloc, io, launch, marker, .installed_or_path, opts, control);
     }
 
     pub fn deinit(self: *Channel) void {
@@ -397,6 +492,7 @@ pub const Channel = struct {
         self.env.deinit();
         self.alloc.free(self.read_buf);
         self.alloc.free(self.argv);
+        if (self.control) |word| self.alloc.free(word);
         self.* = undefined;
     }
 
@@ -517,8 +613,13 @@ fn attemptOnce(
     marker: ?[]const u8,
     entry: install.Entry,
     opts: Options,
+    control: ?[]const u8,
 ) anyerror!Channel {
-    const argv = try launcherArgv(alloc, launch, marker != null, entry);
+    // A copy per channel: the caller's word is freed when its ladder ends, and
+    // a channel outlives that.
+    const control_owned: ?[]u8 = if (control) |word| try alloc.dupe(u8, word) else null;
+    errdefer if (control_owned) |word| alloc.free(word);
+    const argv = try launcherArgv(alloc, launch, marker != null, entry, control_owned);
     errdefer alloc.free(argv);
 
     var env = try transportEnv(alloc, io, marker);
@@ -550,6 +651,7 @@ fn attemptOnce(
         .read_buf = read_buf,
         .reader = child.stdout.?.readerStreaming(io, read_buf),
         .argv = argv,
+        .control = control_owned,
         .env = env,
         .arena = .init(alloc),
         .bounds = opts.bounds,
@@ -626,9 +728,10 @@ fn installAgent(
     launch: Launch,
     marker: ?[]const u8,
     opts: Options,
+    control: ?[]const u8,
 ) anyerror!void {
     var probe_buf: [512]u8 = undefined;
-    const probe = try runFar(alloc, io, launch, marker, install.probe_command, "", &probe_buf);
+    const probe = try runFar(alloc, io, launch, marker, install.probe_command, "", &probe_buf, control);
     const far = install.parseUname(probe_buf[0..probe.out_len]) orelse {
         opts.diag.reportFmt(io, "that machine calls itself \"{s}\", which this build has no binary for\n", .{
             std.mem.trim(u8, probe_buf[0..probe.out_len], " \t\r\n"),
@@ -664,7 +767,7 @@ fn installAgent(
 
     opts.diag.reportFmt(io, "sending a nulya ({d} MB) to {s}\n", .{ bytes.len / (1024 * 1024), far.words() });
     var sink: [256]u8 = undefined;
-    const landed = try runFar(alloc, io, launch, marker, install.install_command, bytes, &sink);
+    const landed = try runFar(alloc, io, launch, marker, install.install_command, bytes, &sink, control);
     if (landed.exit_code != 0) return error.RemoteInstallFailed;
     opts.diag.reportFmt(io, "installed at {s}\n", .{install.far_exe});
 }
@@ -688,8 +791,9 @@ fn runFar(
     command: []const u8,
     stdin_bytes: []const u8,
     out: []u8,
+    control: ?[]const u8,
 ) anyerror!struct { exit_code: u8, out_len: usize } {
-    const argv = try farCommandArgv(alloc, launch, marker != null, command);
+    const argv = try farCommandArgv(alloc, launch, marker != null, command, control);
     defer alloc.free(argv);
 
     var env = try transportEnv(alloc, io, marker);
@@ -904,6 +1008,8 @@ pub const RemoteEnvironment = struct {
         build_agent: ?AgentBuilder = null,
         /// Which build this side is; see `Options.build_id`.
         build_id: []const u8 = "",
+        /// Where ssh may share one connection; see `Options.ssh_control_dir`.
+        ssh_control_dir: ?ControlDir = null,
         /// Where the connect ladder narrates itself. Silent by default.
         diag: Diag = .{},
         bounds: Bounds = .default,
@@ -923,6 +1029,7 @@ pub const RemoteEnvironment = struct {
             .install = opts.install,
             .build_agent = opts.build_agent,
             .build_id = opts.build_id,
+            .ssh_control_dir = opts.ssh_control_dir,
             .diag = opts.diag,
         });
         errdefer ch.deinit();
@@ -1201,10 +1308,84 @@ test "the remote vocabulary parses into three launchers, and nothing else does" 
     }
 }
 
+test "one ssh connection is shared, and only ssh has one to share" {
+    const alloc = std.testing.allocator;
+    const control = "ControlPath=/home/x/.nulya/ssh/abc";
+
+    const ssh = try launcherArgv(alloc, .{ .ssh = "me@box" }, false, .installed_or_path, control);
+    defer alloc.free(ssh);
+    // Every option that makes a second `ssh` arrive on the first one's
+    // connection, and the path itself passed through untouched.
+    try std.testing.expect(hasWord(ssh, "ControlMaster=auto"));
+    try std.testing.expect(hasWord(ssh, control));
+    try std.testing.expect(hasWord(ssh, "ControlPersist=60"));
+    // …before the destination, which is where ssh stops reading options.
+    const dest_at = indexOfWord(ssh, "me@box").?;
+    try std.testing.expect(indexOfWord(ssh, control).? < dest_at);
+
+    // A one-shot command over the same transport joins the same connection —
+    // the probe and the install are most of what the sharing is for.
+    const far = try farCommandArgv(alloc, .{ .ssh = "me@box" }, false, "uname -sm", control);
+    defer alloc.free(far);
+    try std.testing.expect(hasWord(far, control));
+
+    // `wsl` starts a process on this machine and `exec:`'s payload is somebody
+    // else's program: neither has an ssh connection to share, whatever is
+    // offered.
+    const wsl = try launcherArgv(alloc, .{ .wsl = "" }, false, .installed_or_path, control);
+    defer alloc.free(wsl);
+    try std.testing.expect(!hasWord(wsl, control));
+    const exec = try launcherArgv(alloc, .{ .exec = "docker exec -i box nulya" }, false, .installed_or_path, control);
+    defer alloc.free(exec);
+    try std.testing.expect(!hasWord(exec, control));
+
+    // Offered nothing, ssh is spelled exactly as it was before sharing existed.
+    const alone = try launcherArgv(alloc, .{ .ssh = "me@box" }, false, .installed_or_path, null);
+    defer alloc.free(alone);
+    try std.testing.expect(!hasWord(alone, "ControlMaster=auto"));
+}
+
+fn indexOfWord(argv: []const []const u8, want: []const u8) ?usize {
+    for (argv, 0..) |word, at| {
+        if (std.mem.eql(u8, word, want)) return at;
+    }
+    return null;
+}
+
+fn hasWord(argv: []const []const u8, want: []const u8) bool {
+    return indexOfWord(argv, want) != null;
+}
+
+test "the password is one line, and the stream is left at the next one" {
+    const alloc = std.testing.allocator;
+    // Exactly what `session step --gate --ssh-password-stdin` is handed: the
+    // password, then the verdicts for that step's tool calls.
+    var reader: std.Io.Reader = .fixed("hunter2\nallow\ndeny too risky\n");
+
+    const password = try readSshPassword(alloc, &reader);
+    defer alloc.free(password);
+    try std.testing.expectEqualStrings("hunter2", password);
+
+    // The next read is the FIRST verdict, not the empty tail of the password's
+    // own line — an empty line is no verdict, and would deny a call nobody was
+    // asked about.
+    try std.testing.expectEqualStrings("allow", (try reader.takeDelimiter('\n')).?);
+    try std.testing.expectEqualStrings("deny too risky", (try reader.takeDelimiter('\n')).?);
+
+    var crlf: std.Io.Reader = .fixed("hunter2\r\nallow\n");
+    const trimmed = try readSshPassword(alloc, &crlf);
+    defer alloc.free(trimmed);
+    try std.testing.expectEqualStrings("hunter2", trimmed);
+    try std.testing.expectEqualStrings("allow", (try crlf.takeDelimiter('\n')).?);
+
+    var empty: std.Io.Reader = .fixed("\n");
+    try std.testing.expectError(error.SshPasswordMissing, readSshPassword(alloc, &empty));
+}
+
 test "each launcher argv starts an agent, and the destination is never interpolated" {
     const alloc = std.testing.allocator;
 
-    const ssh = try launcherArgv(alloc, .{ .ssh = "me@box" }, false, .installed_or_path);
+    const ssh = try launcherArgv(alloc, .{ .ssh = "me@box" }, false, .installed_or_path, null);
     defer alloc.free(ssh);
     try std.testing.expectEqualStrings("ssh", ssh[0]);
     // The destination is its own word — never interpolated into a command.
@@ -1214,7 +1395,7 @@ test "each launcher argv starts an agent, and the destination is never interpola
     try std.testing.expectEqual(@as(usize, 5), ssh.len);
     try std.testing.expect(std.mem.indexOf(u8, ssh[4], "remote serve") != null);
 
-    const password_ssh = try launcherArgv(alloc, .{ .ssh = "me@box" }, true, .installed_or_path);
+    const password_ssh = try launcherArgv(alloc, .{ .ssh = "me@box" }, true, .installed_or_path, null);
     defer alloc.free(password_ssh);
     var has_batch_no = false;
     var has_one_prompt = false;
@@ -1231,22 +1412,22 @@ test "each launcher argv starts an agent, and the destination is never interpola
 
     // The rung a peer with no POSIX shell still answers to: no test, no
     // `$HOME`, nothing but the program name every earlier build used.
-    const bare = try launcherArgv(alloc, .{ .ssh = "me@box" }, false, .path);
+    const bare = try launcherArgv(alloc, .{ .ssh = "me@box" }, false, .path, null);
     defer alloc.free(bare);
     try std.testing.expect(std.mem.indexOf(u8, bare[4], "$HOME") == null);
     try std.testing.expectEqualStrings("nulya remote serve", bare[4]);
 
-    const wsl = try launcherArgv(alloc, .{ .wsl = "Ubuntu" }, false, .installed_or_path);
+    const wsl = try launcherArgv(alloc, .{ .wsl = "Ubuntu" }, false, .installed_or_path, null);
     defer alloc.free(wsl);
     try std.testing.expectEqualStrings("-d", wsl[1]);
     try std.testing.expectEqualStrings("Ubuntu", wsl[2]);
-    const wsl_default = try launcherArgv(alloc, .{ .wsl = "" }, false, .installed_or_path);
+    const wsl_default = try launcherArgv(alloc, .{ .wsl = "" }, false, .installed_or_path, null);
     defer alloc.free(wsl_default);
     try std.testing.expectEqual(wsl.len - 2, wsl_default.len);
 
     // `exec:` names a program, so it keeps the shape it always had: the words
     // as written, then the verb.
-    const exec = try launcherArgv(alloc, .{ .exec = "docker exec -i box /usr/bin/nulya" }, false, .installed_or_path);
+    const exec = try launcherArgv(alloc, .{ .exec = "docker exec -i box /usr/bin/nulya" }, false, .installed_or_path, null);
     defer alloc.free(exec);
     try std.testing.expectEqualStrings("docker", exec[0]);
     try std.testing.expectEqualStrings("/usr/bin/nulya", exec[exec.len - 3]);
@@ -1257,12 +1438,12 @@ test "each launcher argv starts an agent, and the destination is never interpola
 test "a one-shot far command carries the command, and exec: cannot host one" {
     const alloc = std.testing.allocator;
 
-    const ssh = try farCommandArgv(alloc, .{ .ssh = "me@box" }, false, "uname -sm");
+    const ssh = try farCommandArgv(alloc, .{ .ssh = "me@box" }, false, "uname -sm", null);
     defer alloc.free(ssh);
     try std.testing.expectEqualStrings("me@box", ssh[3]);
     try std.testing.expectEqualStrings("uname -sm", ssh[4]);
 
-    const wsl = try farCommandArgv(alloc, .{ .wsl = "" }, false, "uname -sm");
+    const wsl = try farCommandArgv(alloc, .{ .wsl = "" }, false, "uname -sm", null);
     defer alloc.free(wsl);
     try std.testing.expectEqualStrings("sh", wsl[2]);
     try std.testing.expectEqualStrings("-c", wsl[3]);
@@ -1271,7 +1452,7 @@ test "a one-shot far command carries the command, and exec: cannot host one" {
     // The payload of `exec:` is a program; nothing can ask it to be a shell.
     try std.testing.expectError(
         error.InvalidRemoteSpec,
-        farCommandArgv(alloc, .{ .exec = "docker exec -i box nulya" }, false, "uname -sm"),
+        farCommandArgv(alloc, .{ .exec = "docker exec -i box nulya" }, false, "uname -sm", null),
     );
 }
 

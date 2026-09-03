@@ -19,11 +19,12 @@
  * Phase 3 a SESSION's extension calls run on the
  * machine holding the workspace, so a pinned `ext:std/read` there would read
  * the far filesystem, correctly — it is not pointed at the host any more. What
- * actually keeps it off this list is that the far machine needs a build of
- * `std` for ITS target pushed first, or `session new`'s `exec_version` lookup
- * fails and the session does not open at all. Same default, honest reason: the
- * old one read as "a remote session cannot have file tools in principle", and
- * it is one `ext push` away.
+ * actually keeps it off this list is that the far machine has its own store:
+ * without a build of `std` for ITS target pushed there first, every call the
+ * model makes comes back "no copy of that version on this machine". Same
+ * default, honest reason: the old one read as "a remote session cannot have
+ * file tools in principle", and it is one `ext push` plus one `[env.remote]
+ * with` away.
  *
  * `local` has neither problem — it IS the host filesystem, so a `std` pin or
  * `ground`'s facts are exactly as true there as anywhere.
@@ -90,7 +91,14 @@ export interface EnvProfiles {
 
 /** The profile after defaults and override have been merged — always complete. */
 export interface ResolvedEnvProfile {
-  /** `--bare`: skip the config's standing `[extensions] with`. */
+  /**
+   * Nothing standing rides along: not the kernel config's `[extensions] with`
+   * (which is what the `--bare` flag itself says) and not this front end's own
+   * remembered members either (`tui-state.json`'s `session_with`, the `/ext`
+   * picks — `state/tabs.ts`'s `SessionExtras.bare`). One word for both,
+   * because they are the same kind of thing: a list somebody wrote down once,
+   * for the machine they were on at the time.
+   */
   bare: boolean
   /**
    * Members to bring in with `--with` (in place of `extensions.session_with`),
@@ -107,11 +115,11 @@ export interface ResolvedEnvProfile {
  * behaviour verbatim — the front end's `session_with` / `session_prompts`
  * lists, the standing table left alone.
  * `remote` only has `shell`/the workspace itself: no members, no renderers,
- * and `--bare` so the config's own standing packages (which were configured
- * with a local filesystem in mind) do not creep in either — this is a
- * different machine's filesystem, `std`'s read/grep/glob would answer
- * questions about the wrong one, and `ground`'s facts (this cwd, this branch)
- * would describe the host, not the workspace the session is actually about.
+ * and `bare` so neither standing list creeps in either — not the config's
+ * `[extensions] with`, not this front end's own `/ext` picks. Both were
+ * written down with a local machine in mind: `ground`'s facts (this cwd, this
+ * branch) would describe the host rather than the workspace the session is
+ * about, and `std` is not in that machine's store at all.
  */
 function defaultProfile(
   kind: ExecTargetKind,

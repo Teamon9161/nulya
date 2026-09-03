@@ -10,6 +10,7 @@ import { join } from "node:path"
 import {
   execEnv,
   execWorkspace,
+  forgetRemoteEnv,
   lastPush,
   loadTuiState,
   remoteCwd,
@@ -168,6 +169,38 @@ test("a file with malformed remote_cwd / remote_pushed entries drops only the ma
     expect(state_read.remote_pushed).toEqual({
       good: { spec: "remote:ssh:box", said: "pushed", at: "2026-08-29T00:00:00Z" },
     })
+  } finally {
+    state.cleanup()
+  }
+})
+
+test("start-up forgets a remote target and its workspace, and keeps everything else", () => {
+  const state = statePath()
+  try {
+    rememberExecEnv("remote:ssh:box", state.path, "/srv/app")
+    rememberRemoteCwd("remote:ssh:box", "/srv/app", state.path)
+    forgetRemoteEnv(state.path)
+    // The connection is gone with the process that held it, and so is the
+    // password that opened it: a remembered spec only buys a first message
+    // that fails.
+    expect(execEnv(state.path)).toBe("")
+    expect(execWorkspace(state.path)).toBe("")
+    // WHERE on that machine is worth keeping — picking it again lands there.
+    expect(remoteCwd("remote:ssh:box", state.path)).toBe("/srv/app")
+  } finally {
+    state.cleanup()
+  }
+})
+
+test("start-up leaves a local choice alone", () => {
+  const state = statePath()
+  try {
+    rememberExecEnv("local", state.path)
+    forgetRemoteEnv(state.path)
+    expect(execEnv(state.path)).toBe("")
+    rememberPush("std", "remote:ssh:box", "pushed", state.path)
+    forgetRemoteEnv(state.path)
+    expect(lastPush("std", state.path)?.said).toBe("pushed")
   } finally {
     state.cleanup()
   }

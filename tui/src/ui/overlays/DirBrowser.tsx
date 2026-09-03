@@ -67,6 +67,13 @@ export function DirBrowser(props: {
   label?: (dir: string) => string
   /** Whether a directory already holds a `.nulya/`. Defaults to `holdsWorkspace` (a local `stat`); omit for a remote source, which cannot answer this without a round trip per row it has no use for (`remoteDirSource`'s own doc). */
   isWorkspace?: (dir: string) => boolean
+  /**
+   * WHICH MACHINE these directories are on, when it is not this one. A remote
+   * listing looks exactly like a local one — same paths, same names, often the
+   * same home directory — so without this the one thing a person needs to know
+   * before choosing is the one thing the screen does not say.
+   */
+  on?: string
 }) {
   const style = useStyle()
   const screen = useScreen()
@@ -78,6 +85,8 @@ export function DirBrowser(props: {
   let list: ScrollBoxRenderable | null = null
 
   const inner = () => Math.max(24, screen().width - 2)
+  /** What the title line carries AFTER the path, so the path is cut for exactly that much and not for a guess. */
+  const titleSuffix = () => `${props.on ? ` · on ${props.on}` : ""}${listing() ? " · listing…" : ""}`
   const source = () => props.source ?? localDirSource()
   const home = props.homeDir ?? homeWorkspaceDir()
 
@@ -99,13 +108,23 @@ export function DirBrowser(props: {
     filter: "",
     children: [],
   })
+  /**
+   * Whether a listing is in flight. Over a channel that is a whole ssh
+   * connection per directory, so the difference between "empty" and "not back
+   * yet" is seconds long and the screen must not read as the first while it is
+   * the second. Locally it settles within a microtask and nobody sees it.
+   */
+  const [listing, setListing] = createSignal(false)
   let seq = 0
   createEffect(() => {
     const input = typed()
     const src = source()
     const mine = ++seq
+    setListing(true)
     void browseAt(input, props.start, src).then((result) => {
-      if (mine === seq) setBrowsed(result)
+      if (mine !== seq) return
+      setBrowsed(result)
+      setListing(false)
     })
   })
   const where = () => ({ dir: browsed().dir, filter: browsed().filter })
@@ -188,9 +207,20 @@ export function DirBrowser(props: {
           point: the field is what has been typed and the title is what is
           being listed. They agree until somebody types half a name, and then
           the title is the answer to "what am I looking at". */}
-      <text fg={style.theme.accent.evolve} height={1} flexShrink={0}>
-        {fit(`directory · ${where().dir}`, inner())}
-      </text>
+      <box flexDirection="row" width="100%" height={1} flexShrink={0}>
+        <text fg={style.theme.accent.evolve} flexShrink={1}>
+          {fit(`directory · ${where().dir}`, Math.max(8, inner() - displayWidth(titleSuffix())))}
+        </text>
+        {/* The machine, in the warn colour every other surface uses for
+            "not here" — a path on somebody else's disk reads identically to
+            one on this one. */}
+        <Show when={props.on}>
+          <text fg={style.theme.warn} flexShrink={0}>{` · on ${props.on}`}</text>
+        </Show>
+        <Show when={listing()}>
+          <text fg={style.theme.dim} flexShrink={0}>{" · listing…"}</text>
+        </Show>
+      </box>
       <box height={1} flexShrink={0} />
       <box flexDirection="row" width="100%" height={1} flexShrink={0}>
         <text fg={style.theme.accent.evolve} flexShrink={0}>

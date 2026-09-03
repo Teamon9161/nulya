@@ -11,8 +11,14 @@
  * not a chain of JSX ternaries.
  */
 import { expect, test } from "bun:test"
-import { activityOf, elapsedLabel, stepActivity, type SyncProgress } from "../src/ui/WorkingStatus.tsx"
-import { noticeHold } from "../src/ui/App.tsx"
+import {
+  activityOf,
+  elapsedLabel,
+  stepActivity,
+  type ReachProgress,
+  type SyncProgress,
+} from "../src/ui/WorkingStatus.tsx"
+import { noticeHold, reachNarration } from "../src/ui/App.tsx"
 import { shimmerColor, mixHex, createStyle } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { approachCount, no_snapshot, type SessionSnapshot, type ToolItem, type TranscriptItem } from "../src/state/session.ts"
@@ -30,6 +36,7 @@ function facts(over: {
   awaiting?: boolean
   background?: number
   syncing?: SyncProgress | null
+  reaching?: ReachProgress | null
 }) {
   return {
     status: over.status ?? "idle",
@@ -39,10 +46,13 @@ function facts(over: {
     awaiting: over.awaiting ?? false,
     background: over.background ?? 0,
     syncing: over.syncing ?? null,
+    reaching: over.reaching ?? null,
   }
 }
 
 const sync: SyncProgress = { what: "building std", done: 2, total: 8, since: 1000 }
+
+const reach: ReachProgress = { spec: "remote:ssh:box", said: "", since: 1000 }
 
 function tool(over: Partial<ToolItem> & { tool: string; state: ToolItem["state"] }): ToolItem {
   return {
@@ -305,4 +315,32 @@ test("pickTip: deterministic for a fixed source, and reaches both ends of the li
   expect(named(glyphs)).toContain(glyphs.sidebar)
   expect(named(ascii.glyphs)).toContain(ascii.glyphs.sidebar)
   expect(named(ascii.glyphs)).not.toContain(glyphs.sidebar)
+})
+
+test("a reach in flight says which machine, and says what the kernel last said about it", () => {
+  expect(activityOf(facts({ reaching: reach }))?.text).toBe("reaching remote:ssh:box")
+  const building = activityOf(facts({ reaching: { ...reach, said: "building a nulya for aarch64-linux" } }))
+  expect(building?.text).toBe("remote:ssh:box · building a nulya for aarch64-linux")
+  // Its own clock, not the driver's: nothing has been stepped yet.
+  expect(building?.since).toBe(1000)
+  expect(building?.moving).toBe(true)
+})
+
+test("a reach outranks a step and a store pass, and yields only to a question", () => {
+  expect(activityOf(facts({ reaching: reach, status: "stepping" }))?.text).toBe("reaching remote:ssh:box")
+  expect(activityOf(facts({ reaching: reach, syncing: sync }))?.text).toBe("reaching remote:ssh:box")
+  expect(activityOf(facts({ reaching: reach, awaiting: true }))?.text).toBe("waiting for your answer")
+})
+
+test("a reach line is the kernel's narration, not ssh's own commentary", () => {
+  // What the kernel says while it works — all of it reaches the line.
+  expect(reachNarration("building a nulya for aarch64-linux")).toBe("building a nulya for aarch64-linux")
+  expect(reachNarration("  installed at $HOME/.nulya/remote-agent\r")).toBe("installed at $HOME/.nulya/remote-agent")
+  // OpenSSH writes these to every connection to an older server, and one of
+  // them would otherwise hold the line for the whole minute of a cross-build.
+  expect(reachNarration("** WARNING: connection is not using a post-quantum key exchange algorithm.")).toBeNull()
+  expect(reachNarration("Warning: Permanently added 'box' to the list of known hosts.")).toBeNull()
+  expect(reachNarration("")).toBeNull()
+  // An authentication refusal is not commentary: it is what happened.
+  expect(reachNarration("teamon@box: Permission denied (publickey,password).")).not.toBeNull()
 })

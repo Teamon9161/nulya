@@ -88,6 +88,23 @@ export interface SyncProgress {
 }
 
 /**
+ * A remote channel being opened, and the last thing the kernel said about it.
+ *
+ * Same reason as `SyncProgress` above, one flow further along: reaching a
+ * machine for the first time can mean cross-building a nulya and sending it,
+ * which is a minute in which the only news is one narration line every twenty
+ * seconds. A notice would expire between two of them, and the screen a person
+ * would be reading while they wait would say nothing at all.
+ */
+export interface ReachProgress {
+  /** The `remote:` spec being reached — which machine, in the words that were picked. */
+  spec: string
+  /** The kernel's own latest line about it, or empty before it has said anything. */
+  said: string
+  since: number
+}
+
+/**
  * What part of the current step the user is waiting on. `activeTool` is still
  * the kernel's direct "executor is inside this call" signal; the transcript
  * tail fills in the two gaps around it: while the model is still spelling out a
@@ -128,6 +145,7 @@ export function activityOf(facts: {
   awaiting: boolean
   background: number
   syncing?: SyncProgress | null
+  reaching?: ReachProgress | null
 }): Activity | null {
   // Every branch below but the last one is about something OTHER than the
   // background count, and a background task does not stop existing just
@@ -139,6 +157,18 @@ export function activityOf(facts: {
   // The kernel is stopped on a call, waiting for a verdict. It
   // outranks everything: nothing else can be happening while it is true.
   if (facts.awaiting) return withBackground({ text: "waiting for your answer", tone: "warn", moving: false })
+  // Directly under the question addressed to the person, and above everything
+  // else including a step in flight: this is the one thing on the list they
+  // asked for a moment ago and are sitting still waiting on.
+  if (facts.reaching) {
+    const { spec, said, since } = facts.reaching
+    return withBackground({
+      text: said.length > 0 ? `${spec} · ${said}` : `reaching ${spec}`,
+      tone: "run",
+      moving: true,
+      since,
+    })
+  }
   // The message is in the transcript in full (`ErrorNotice`); this is the
   // pointer to it, for when the transcript has been scrolled away.
   if (facts.snapshot.error) return withBackground({ text: "error · see transcript", tone: "err", moving: false })

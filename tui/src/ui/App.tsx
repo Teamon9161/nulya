@@ -341,6 +341,29 @@ export function noticeHold(text: string): number {
 const ctrl_c_ms = 3000
 
 /**
+ * Which line of a reach's stderr is worth putting on the activity line, if any.
+ *
+ * `remote check` writes with two voices down one pipe: the kernel's own
+ * narration (probing, cross-building, installing) and whatever ssh said on the
+ * way through. OpenSSH 10 writes a three-line notice about a server too old for
+ * post-quantum key exchange to EVERY connection, and it would then sit on that
+ * line for the whole minute of a cross-build — an alarming sentence, about
+ * something nobody asked about, in the one place that is supposed to say what
+ * is happening right now.
+ *
+ * Nothing is discarded by this: a refusal still shows the complete stderr
+ * (`CliError.detail`), which is where a warning belongs when the connection
+ * did fail. This only picks what a person watching a connect is told.
+ */
+export function reachNarration(line: string): string | null {
+  const said = line.trim()
+  if (said.length === 0) return null
+  // `** WARNING: …` — ssh's own banner, and the only thing that writes it.
+  if (said.startsWith("*")) return null
+  return /^(warning|debug\d*[:\s]|kex_|ssh:)/i.test(said) ? null : said
+}
+
+/**
  * The heartbeat echo going this stale means the reactive layer is dead — the
  * beat is written every second, so five missed echoes is not a busy loop, it
  * is a broken one.
@@ -676,6 +699,22 @@ export function App(props: AppProps) {
   const [wearables, setWearables] = createSignal<Wearable[]>([])
   /** Bare `/env`: where this machine can run a shell (`EnvPicker`). */
   const [envPicker, setEnvPicker] = createSignal(false)
+  /**
+   * The `remote:` target a reach is in flight for.
+   *
+   * Choosing one is only half a decision (the workspace is the other half), so
+   * nothing is applied until a directory is picked — which used to leave the
+   * `shell` row saying `this machine` through a connect that can take a minute.
+   * A pending target belongs where the settled one goes: in the row whose whole
+   * job is naming where commands run.
+   *
+   * `said` is the kernel's own latest narration line, and it goes to the
+   * ACTIVITY line (`WorkingStatus`), not to a notice: reaching a machine for
+   * the first time cross-builds a nulya and sends it, and a notice expires
+   * (`noticeHold`) in the middle of that minute — leaving the screen silent
+   * for the rest of it, which reads as nothing happening. Progress is not news.
+   */
+  const [reaching, setReaching] = createSignal<{ spec: string; said: string; since: number } | null>(null)
   const [envChoice, setEnvChoice] = createSignal(0)
   const [envTargets, setEnvTargets] = createSignal<ExecChoice[]>([])
   /**
@@ -1569,6 +1608,7 @@ export function App(props: AppProps) {
       awaiting: pending() !== null,
       background: runningTasks(),
       syncing: syncing(),
+      reaching: reaching(),
     }),
   )
 
@@ -1995,10 +2035,13 @@ export function App(props: AppProps) {
   const plannedFaceTools = createMemo((): string[] => {
     planTick()
     const profile = envProfile(execEnv(props.statePath))
-    const face = profile.bare ? [] : [...(props.configTools ?? [])]
-    for (const id of sessionSelection(props.statePath)) if (!face.includes(id)) face.push(id)
+    // `--bare` takes BOTH standing lists with it — the kernel config's and
+    // this front end's own `/ext` picks (`tabs.ts`'s `SessionExtras.bare`) —
+    // so a `remote:` draft counts what it would actually get and not what a
+    // session on this machine would have.
+    const face = profile.bare ? [] : [...(props.configTools ?? []), ...sessionSelection(props.statePath)]
     for (const id of composedWithTools()) if (!face.includes(id)) face.push(id)
-    return face
+    return face.filter((id, at) => face.indexOf(id) === at)
   })
 
   /** The tool face this tab shows beside the builtin. */
@@ -3369,7 +3412,9 @@ export function App(props: AppProps) {
    *. A check that fails is shown exactly as it
    * came back and the browser never opens — a directory listing over a
    * channel that just refused would be a screen of round trips that can only
-   * fail the same way again.
+   * fail the same way again. The one refusal that is not shown that way is an
+   * ssh authentication one, which is this flow asking a question rather than
+   * failing at it (below).
    *
    * The starting point is whatever this front end remembered for `spec` last
    * time (`tui_state.ts`'s `remote_cwd`), or the agent's own home when there
@@ -3380,26 +3425,47 @@ export function App(props: AppProps) {
     const owner = tab().key
     if (sshPassword()?.spec !== spec) clearSshWorkflow()
     setRemoteFailure(null)
-    setNotice(`reaching ${spec}…`)
+    // The row says WHERE and that it is not settled yet; the activity line
+    // above the composer carries what is happening, one kernel line at a time.
+    // Neither alone was enough: a row that still reads `this machine` while a
+    // connect runs is telling the truth about the state and nothing about the
+    // intent, and a row that says `connecting…` for a minute says nothing
+    // about how far along it is.
+    setReaching({ spec, said: "", since: Date.now() })
+    // Whether this attempt is carrying one already, read before the bytes are
+    // moved into the call: `Permission denied` means two different things
+    // either side of that, and only one of them is worth a second prompt.
+    const carrying = sshPassword()?.spec === spec
     let hello: Awaited<ReturnType<typeof remoteCheck>>
     try {
       // Reaching a machine can mean putting a nulya on it first, which is
       // seconds of silence unless the kernel's own narration reaches the one
       // line this screen has for saying what is happening.
-      hello = await remoteCheck(ws(), spec, undefined, freshSshPassword(spec), (line) => setNotice(line))
+      hello = await remoteCheck(ws(), spec, undefined, freshSshPassword(spec), (line) => {
+        const said = reachNarration(line)
+        if (said) setReaching((at) => (at && at.spec === spec ? { ...at, said } : at))
+      })
     } catch (error) {
+      setReaching(null)
       const detail = error instanceof CliError ? error.detail : error instanceof Error ? error.message : String(error)
-      setRemoteFailure({ tab: owner, detail })
+      // An ssh destination that wants a password refuses the keys FIRST — that
+      // is how asking for one is discovered, and there is nothing else to try
+      // before asking. Showing that refusal as a failure put a red block with
+      // `Permission denied` on screen before every single password prompt, and
+      // named a person's key setup as the problem when the flow was working
+      // exactly as designed. So it is a failure only when it is not a question.
       if (spec.startsWith("remote:ssh:") && /Permission denied|authentication failed/i.test(detail)) {
         clearSshPassword()
         replacePasswordRequest({ spec, bytes: new Uint8Array() })
-        setNotice(`password required for ${spec}`)
+        setNotice(carrying ? `${spec} refused that password` : `${spec} took no key · password?`)
       } else {
+        setRemoteFailure({ tab: owner, detail })
         setNotice(error instanceof Error ? error.message : String(error))
       }
       return
     }
     replacePasswordRequest(null)
+    setReaching(null)
     const home = hello.home.length > 0 ? hello.home : hello.cwd
     setRemoteBrowse({ spec, start: remoteCwd(spec, props.statePath) ?? home, home })
     setNotice(null)
@@ -3444,6 +3510,7 @@ export function App(props: AppProps) {
   }
 
   const cancelSshPassword = () => {
+    setReaching(null)
     clearSshWorkflow()
     setRemoteFailure(null)
     setNotice("SSH password entry canceled")
@@ -3462,7 +3529,16 @@ export function App(props: AppProps) {
     rememberExecEnv(at.spec, props.statePath, dir)
     setRemoteBrowse(null)
     closeOverlay()
-    setNotice(`next session's shell and workspace run on ${at.spec} · ${dir}`)
+    // What rides along is worth saying at the moment the target is taken,
+    // because the answer for a `remote:` one is "nothing does": that machine
+    // has its own store, and a package composed here whose bytes were never
+    // pushed there is a tool the model would be handed and could not run.
+    const profile = envProfile(at.spec)
+    const alone = profile.bare && profile.with.length === 0
+    setNotice(
+      `next session's shell and workspace run on ${at.spec} · ${dir}` +
+        (alone ? " · shell only · [env.remote] with composes packages you have pushed there" : ""),
+    )
     // Same bump `setExecEnv` makes: the tool-face count and the `⇥` chip both
     // read `tui-state.json` through functions Solid cannot see as reactive.
     setPlanTick((tick) => tick + 1)
@@ -4408,7 +4484,7 @@ export function App(props: AppProps) {
           // Always a value on this screen, `this machine` included: here it is
           // still a decision. The status line below says the opposite
           // thing by staying silent about the ordinary answer.
-          shell={runsIn() || "this machine"}
+          shell={reaching() ? `${reaching()!.spec} · connecting…` : runsIn() || "this machine"}
           onPickEnv={() => void openEnvPicker()}
           onPickModel={() => openOverlay("model")}
           onOpenSession={(id) => openSession(id, ws())}
@@ -4567,6 +4643,7 @@ export function App(props: AppProps) {
           recents={[]}
           homeDir={at.home}
           label={(dir) => dir}
+          on={at.spec}
           source={remoteDirSource(ws(), at.spec, () => freshSshPassword(at.spec))}
           onChoose={applyRemoteWorkspace}
           onClose={() => {

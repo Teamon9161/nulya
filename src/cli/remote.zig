@@ -78,6 +78,7 @@ fn open(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?remote
         .install = .auto,
         .build_agent = remote_agent.build,
         .build_id = selfbuild.build_id,
+        .ssh_control_dir = common.sshControlDir,
         .diag = common.stderr_diag,
     }) catch |err| {
         try common.printChannelRefusal(alloc, io, spec, err);

@@ -16,6 +16,9 @@
  * its own concern) — only the mechanism: position, survival, kind.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { createTabStore } from "../src/state/tabs.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { sessionAppend, sessionEvents, sessionNew } from "../src/nulya/cli.ts"
@@ -163,3 +166,25 @@ test("a continuation opened as its driver drains the carried summary without ano
     store.disposeAll()
   }
 }, 60_000)
+
+test("a bare session leaves this front end's standing members behind too", async () => {
+  // A member id nothing can resolve, so "did it ride along" is answerable
+  // without building a package: `session new` refuses the composition when it
+  // does, and opens when it does not.
+  const dir = mkdtempSync(join(tmpdir(), "nulya-tui-standing-"))
+  const statePath = join(dir, "tui-state.json")
+  writeFileSync(statePath, JSON.stringify({ session_with: ["no-such-package"] }))
+  try {
+    const pick = { profile: "scripted", model: "scripted-demo" }
+    const store = createTabStore(ws, { kind: "draft", pick }, { statePath, env: scripted_env })
+    const first = store.tabs()[0]!
+    if (first.kind !== "draft") throw new Error("the first tab is the draft")
+    await expect(store.materialize(first)).rejects.toThrow()
+    // The same list, the same draft, with `--bare`: nothing standing rides —
+    // not the kernel config's `[extensions] with`, not this list.
+    const started = await store.materialize(store.draft({ pick }), { bare: true })
+    expect(started.kind).toBe("session")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

@@ -44,6 +44,7 @@ const templates = support.templates;
 const runCli = support.runCli;
 const runCliEnv = support.runCliEnv;
 const runCliStderr = support.runCliStderr;
+const runCliStdin = support.runCliStdin;
 const readSessionFile = support.readSessionFile;
 
 /// What `NULYA_SCRIPTED_MODE=finish`'s one `shell` call prints. Spelled out
@@ -1913,4 +1914,75 @@ test "an agent built from other source is replaced, and one built from this sour
     defer alloc.free(again);
     try std.testing.expect(std.mem.indexOf(u8, again, "built from other source") == null);
     try std.testing.expect(std.mem.indexOf(u8, again, "replacing it") == null);
+}
+
+test "a password on the step's stdin does not eat the first gate verdict" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    try ws.createDir(io, "bin", .default_dir);
+    try ws.createDir(io, "far", .default_dir);
+
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var far_dir = try ws.openDir(io, "far", .{});
+    defer far_dir.close(io);
+    const far_home = try absOf(io, far_dir, &far_buf);
+
+    var bin_dir = try ws.openDir(io, "bin", .{});
+    defer bin_dir.close(io);
+    try writeFakeSsh(io, bin_dir, "ssh", far_home);
+    var bin_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const bin_path = try absOf(io, bin_dir, &bin_buf);
+
+    const host_path = (try envVar(alloc, "PATH")) orelse "";
+    defer if (host_path.len != 0) alloc.free(host_path);
+    const path = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ bin_path, host_path });
+    defer alloc.free(path);
+    const env: []const support.EnvPair = &.{
+        .{ .key = "PATH", .value = path },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const new = try runCliStdin(
+        alloc,
+        io,
+        ws,
+        &.{ exe, "session", "new", "--profile", "scripted", "--env", "remote:ssh:box", "--ssh-password-stdin" },
+        "hunter2\n",
+        env,
+    );
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = std.mem.trim(u8, new.stdout, " \r\n");
+
+    const appended = try runCli(alloc, io, ws, &.{ exe, "session", "append", id, "probe" });
+    defer alloc.free(appended.stdout);
+    try std.testing.expectEqual(@as(u8, 0), appended.code);
+
+    // The password and the verdicts share ONE reader. A password line whose
+    // newline was left behind reads as an empty first verdict, and an empty
+    // verdict is not a word the gate knows — so every step of every
+    // password-bearing session would deny its first tool call, blaming a person
+    // who was never asked.
+    const stepped = try runCliStdin(
+        alloc,
+        io,
+        ws,
+        &.{ exe, "session", "step", id, "--max-steps", "1", "--gate", "--ssh-password-stdin" },
+        "hunter2\nallow\n",
+        env,
+    );
+    defer alloc.free(stepped.stdout);
+    try std.testing.expectEqual(@as(u8, 0), stepped.code);
+    // It RAN. Not "the marker is in there somewhere" — the command the model
+    // wrote is echoed back in the gate's own request line, so that string is
+    // present either way. A refusal is what must be absent.
+    try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "not executed") == null);
 }

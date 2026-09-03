@@ -338,6 +338,7 @@ pub const Reach = struct {
     diag: ext_site.Diag = .{},
     build_agent: ?remote.AgentBuilder = null,
     build_id: []const u8 = "",
+    ssh_control_dir: ?remote.ControlDir = null,
 };
 
 /// Build the environment a session runs behind. `exec` decides which of the two
@@ -375,6 +376,7 @@ pub fn sessionEnvironment(
                 .install = .auto,
                 .build_agent = reach.build_agent,
                 .build_id = reach.build_id,
+                .ssh_control_dir = reach.ssh_control_dir,
                 .diag = reach.diag,
             }),
         };

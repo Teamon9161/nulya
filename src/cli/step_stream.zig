@@ -290,17 +290,17 @@ pub const StepGate = struct {
                 self.closed = true;
                 self.say("gate: the approval channel failed; denying every remaining call\n");
             }
-            return .{ .deny = null };
+            return .{ .deny = channel_failed };
         };
     }
 
     fn ask(self: *StepGate, request: loop.ToolGate.Request) !loop.ToolGate.Decision {
-        if (self.closed) return .{ .deny = null };
+        if (self.closed) return .{ .deny = channel_failed };
         try self.requestLine(request);
         const line = (try self.in.takeDelimiter('\n')) orelse {
             self.closed = true;
             self.say("gate: stdin closed before a verdict; denying this call and every one after it\n");
-            return .{ .deny = null };
+            return .{ .deny = channel_failed };
         };
         const verdict = std.mem.trim(u8, line, " \t\r\n");
         if (std.mem.eql(u8, verdict, "allow")) return .allow;
@@ -308,8 +308,18 @@ pub const StepGate = struct {
         if (std.mem.startsWith(u8, verdict, "deny ")) return .{ .deny = verdict["deny ".len..] };
         // Not a verdict. The safe reading of an answer nobody can parse is "no".
         self.say("gate: unrecognized verdict (want `allow`, `deny`, or `deny <note>`); denying this call\n");
-        return .{ .deny = null };
+        return .{ .deny = unreadable_verdict };
     }
+
+    /// The two refusals NOBODY chose, said out loud.
+    ///
+    /// A bare deny reads as a person's answer, and for these it is not one: the
+    /// driver never spoke, or spoke something that is not a verdict. That note
+    /// is the only place either fact reaches the model — and, through the tool
+    /// result, the only place it reaches a person reading the transcript, since
+    /// the stderr line above belongs to a process whose exit code is still 0.
+    const channel_failed = "the approval channel gave no answer, so nothing could be asked; this was not a person's decision";
+    const unreadable_verdict = "the approval channel answered with something that is not a verdict; this was not a person's decision";
 
     /// One call, offered for approval. The arguments go out verbatim — the
     /// driver can only judge a `shell` command or an edit path on the bytes the

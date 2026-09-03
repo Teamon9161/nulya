@@ -20,7 +20,7 @@ import { configShow } from "./nulya/cli.ts"
 import { sessionExists } from "./nulya/files.ts"
 import { selectedToolIds } from "./with.ts"
 import { loadSettings } from "./state/settings.ts"
-import { loadTuiState, rememberAgentsAnswer, rememberStoreAsked } from "./state/tui_state.ts"
+import { forgetRemoteEnv, loadTuiState, rememberAgentsAnswer, rememberStoreAsked } from "./state/tui_state.ts"
 import { planLaunch } from "./launch.ts"
 import {
   applyStoreAction,
@@ -96,6 +96,10 @@ async function main() {
     process.stderr.write(`no such session '${id}' in ${ws.dir}\n`)
     process.exit(1)
   }
+
+  // Before anything reads it: a `remote:` target left in the state file is the
+  // near end of a connection this process does not have (`forgetRemoteEnv`).
+  forgetRemoteEnv()
 
   let effort = args.effort
   let pick: ModelPick | undefined

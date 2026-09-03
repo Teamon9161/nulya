@@ -9,6 +9,7 @@ const config = @import("../config.zig");
 const composition = @import("../composition.zig");
 const launch = @import("../launch.zig");
 const environment = @import("../environment.zig");
+const remote = @import("../environment/remote/mod.zig");
 
 /// This invocation's view of the machine, all opened once.
 pub const StoreView = struct {
@@ -216,6 +217,44 @@ pub fn dataDir(alloc: std.mem.Allocator, host: *const std.process.Environ.Map) !
     const home = host.get("HOME") orelse ".";
     return std.fs.path.join(alloc, &.{ home, ".local", "share", "nulya" });
 }
+
+/// Where ssh may keep its multiplexing sockets on this machine, or null when it
+/// may not (`remote.ControlDir`). Caller owns the result.
+///
+/// **Not on Windows.** Win32 OpenSSH has no ControlMaster at all; asking for it
+/// there buys a warning on every connection and no shared connection.
+///
+/// **Not when the path would be too long.** This is a unix socket, and the
+/// `sockaddr_un` limit is about 104 bytes — a path over it is a warning ssh
+/// prints on every single connection while dialing separately anyway, which is
+/// worse than not asking. `remote.controlOption` appends a separator and a
+/// 16-character digest, so that much room has to be left.
+pub fn sshControlDir(alloc: std.mem.Allocator, io: std.Io) anyerror!?[]u8 {
+    if (builtin.os.tag == .windows) return null;
+
+    var host = try environment.hostEnvironMap(alloc);
+    defer host.deinit();
+    const home = (try launch.userHomeDir(alloc, &host)) orelse return null;
+    defer alloc.free(home);
+
+    const dir = try std.fs.path.join(alloc, &.{ home, "ssh" });
+    if (dir.len + remote.control_name_bytes > max_unix_socket_path) {
+        alloc.free(dir);
+        return null;
+    }
+    // The socket ssh puts here is its own 0600; what this has to guarantee is
+    // only that there is a directory to put it in.
+    std.Io.Dir.cwd().createDirPath(io, dir) catch {
+        alloc.free(dir);
+        return null;
+    };
+    return dir;
+}
+
+/// `sockaddr_un.sun_path` is 104 bytes on macOS and 108 on Linux, minus the
+/// terminator; the smaller one, with a little room left, is the number that has
+/// to hold on every machine this runs on.
+const max_unix_socket_path = 100;
 
 pub fn writeInto(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_dir: []const u8, name: []const u8, data: []const u8) !void {
     const path = try std.fs.path.join(alloc, &.{ sub_dir, name });
