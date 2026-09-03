@@ -109,6 +109,7 @@ export const fake_config: ConfigView = {
       models: ["gpt-5.6-sol", "gpt-5.6-luna"],
       effort: null,
       catalog: null,
+      roles: [],
     },
     {
       name: "deepseek",
@@ -121,9 +122,10 @@ export const fake_config: ConfigView = {
       models: ["deepseek-v4-flash", "deepseek-v4-pro"],
       effort: null,
       catalog: null,
+      roles: [],
     },
-    { name: "codex", kind: "codex", base_url: "", api_key_env: "", credential: false, credential_source: "none", model: "gpt-5.5", models: ["gpt-5.5"], effort: "low", catalog: null },
-    { name: "scripted", kind: "scripted", base_url: "", api_key_env: "", credential: true, credential_source: "builtin", model: "scripted-demo", models: ["scripted-demo"], effort: null, catalog: null },
+    { name: "codex", kind: "codex", base_url: "", api_key_env: "", credential: false, credential_source: "none", model: "gpt-5.5", models: ["gpt-5.5"], effort: "low", catalog: null, roles: [] },
+    { name: "scripted", kind: "scripted", base_url: "", api_key_env: "", credential: true, credential_source: "builtin", model: "scripted-demo", models: ["scripted-demo"], effort: null, catalog: null, roles: [] },
   ],
   models: [
     { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", efforts: ["low", "medium", "high"], default_effort: "medium", context_window: 1_050_000, vision: false },

@@ -987,6 +987,22 @@ pub const RemoteEnvironment = struct {
     tasks_dir: ?[]u8 = null,
     dialect_val: environment_mod.Dialect,
     bounds: Bounds = .default,
+    /// Where THIS machine keeps extension versions, copied. Only the members
+    /// that land here need it; empty means none can.
+    ext_store: []u8 = &.{},
+    /// The members whose calls stay on this machine. Absent until the shell
+    /// layer says which those are, which it cannot do before composition has
+    /// answered — so an extension call arriving before that crosses the
+    /// channel, as every call did before.
+    host_side: ?HostSide = null,
+
+    /// The members landing beside the session, and the backend they run
+    /// through: the ordinary local one, so there is a single implementation of
+    /// "spawn a frozen version on this machine".
+    const HostSide = struct {
+        ids: [][]u8,
+        env: environment_mod.LocalEnvironment,
+    };
 
     pub const ConnectOptions = struct {
         spec: []const u8,
@@ -998,6 +1014,10 @@ pub const RemoteEnvironment = struct {
         /// The durable session this environment's background tasks belong to;
         /// the shell layer computes both halves.
         session: ?environment_mod.SessionRef = null,
+        /// Where THIS machine keeps extension versions. Which version means
+        /// which file over THERE is the far agent's own answer; this is for the
+        /// members that never go there (`useHostSide`).
+        extension_store: []const u8 = "",
         /// Transient SSH password, owned and wiped by the caller.
         ssh_password: ?[]const u8 = null,
         /// May nulya put a copy of itself on that machine to make this session
@@ -1047,6 +1067,8 @@ pub const RemoteEnvironment = struct {
             session_path = try alloc.dupe(u8, s.session_path);
             tasks_dir = try alloc.dupe(u8, s.tasks_dir);
         }
+        const ext_store = try alloc.dupe(u8, opts.extension_store);
+        errdefer alloc.free(ext_store);
 
         // The far side says which shell reads its commands. A word this build
         // does not know is refused, never guessed.
@@ -1067,17 +1089,69 @@ pub const RemoteEnvironment = struct {
             .tasks_dir = tasks_dir,
             .dialect_val = dialect_val,
             .bounds = opts.bounds,
+            .ext_store = ext_store,
         };
     }
 
     pub fn deinit(self: *RemoteEnvironment) void {
         self.ch.deinit();
+        if (self.host_side) |*h| {
+            for (h.ids) |id| self.alloc.free(id);
+            self.alloc.free(h.ids);
+            h.env.deinit();
+        }
+        self.alloc.free(self.ext_store);
         self.alloc.free(self.spec);
         self.alloc.free(self.workspace);
         if (self.session_path) |p| self.alloc.free(p);
         if (self.tasks_dir) |p| self.alloc.free(p);
         if (self.session_id.len != 0) self.alloc.free(self.session_id);
         self.* = undefined;
+    }
+
+    /// Name the members whose calls stay on THIS machine — the answer belongs to
+    /// composition, which is built after this environment, so it arrives here
+    /// second rather than at `connect`. An empty list undoes nothing that was
+    /// set before, and calling it twice replaces the set.
+    ///
+    /// The set is the shell layer's to compute: a manifest is answered by the
+    /// machine holding the bytes, and this object is a handle to another one.
+    pub fn useHostSide(self: *RemoteEnvironment, ids: []const []const u8) !void {
+        if (self.host_side) |*h| {
+            for (h.ids) |id| self.alloc.free(id);
+            self.alloc.free(h.ids);
+            h.env.deinit();
+            self.host_side = null;
+        }
+        if (ids.len == 0) return;
+
+        var owned = try self.alloc.alloc([]u8, ids.len);
+        var filled: usize = 0;
+        errdefer {
+            for (owned[0..filled]) |id| self.alloc.free(id);
+            self.alloc.free(owned);
+        }
+        for (ids, owned) |id, *slot| {
+            slot.* = try self.alloc.dupe(u8, id);
+            filled += 1;
+        }
+
+        var env = try environment_mod.LocalEnvironment.init(self.alloc, self.io, .{
+            .extension_store = self.ext_store,
+        });
+        errdefer env.deinit();
+        // A package running here IS beside the session file, so it gets the path
+        // as well as the id — the whole reason it asked to land on this side.
+        try env.publishSession(self.session_path orelse "", self.session_id);
+        self.host_side = .{ .ids = owned, .env = env };
+    }
+
+    fn hostSideEnv(self: *RemoteEnvironment, id: []const u8) ?*environment_mod.LocalEnvironment {
+        const h = if (self.host_side) |*x| x else return null;
+        for (h.ids) |named| {
+            if (std.mem.eql(u8, named, id)) return &h.env;
+        }
+        return null;
     }
 
     /// Tell the far side which session its commands belong to. Only the id
@@ -1185,6 +1259,11 @@ pub const RemoteEnvironment = struct {
     /// reaches the model the way every failed extension call does.
     fn runExtensionImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment_mod.ExtensionRequest) anyerror!environment_mod.ExtensionOutcome {
         const self: *RemoteEnvironment = @ptrCast(@alignCast(ptr));
+        // A member that declared it lands beside the session never reaches the
+        // channel: it runs here, against this workspace, with the caller's cwd
+        // (a path on THIS machine) and the presentation file the front end
+        // reads — everything the far side has to drop.
+        if (self.hostSideEnv(req.id)) |local| return local.environment().runExtension(alloc, req);
         const captured = try self.runBounded(alloc, .{
             .op = protocol.Op.run_extension.wire(),
             .id = req.id,
@@ -1216,8 +1295,8 @@ pub const RemoteEnvironment = struct {
     /// machine; the log, the status file and the lease sit beside the command.
     /// Both sides spell the directory from the same name with the same rule, so
     /// no path crosses the channel. The host directory holds what only this
-    /// machine can know: a retarget (`notify`) and whether a report was
-    /// delivered.
+    /// machine can know: which machine took the command (`machine`), a retarget
+    /// (`notify`) and whether a report was delivered.
     ///
     /// The task outlives this channel: closing it ends the agent, not the task,
     /// and the report is collected by whoever next asks.
@@ -1230,6 +1309,10 @@ pub const RemoteEnvironment = struct {
 
         var claimed = try environment_mod.claimTaskSlot(alloc, self.io, tasks_dir, session_id);
         errdefer claimed.deinit(alloc);
+        // Before the start, not after: a task started but unplaceable is a task
+        // whose report nothing collects. A session may hold tasks on both
+        // machines, so the header no longer answers this.
+        try environment_mod.markTaskMachine(self.io, alloc, claimed.dir_rel, self.spec);
 
         const rep = self.ch.controlRound(.{
             .op = protocol.Op.start_task.wire(),

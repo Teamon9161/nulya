@@ -423,7 +423,7 @@ schema 恒定 `{ command, cwd?, timeout_ms?, background? }`。命令用哪种语
 
 **它是 `shell` 上的一个 flag 而不是另一个 CLI 动词**：gate 与前端的审批规则读的是 `shell` 自己的 `command`（§4/§9），一层包装会让它们同时失明。
 
-本地 session 的后台与前台跑在同一台机器上；**`remote:` 一族（§8.2）下连 supervisor 都在对面**，log 与 status 在对面的工作区。两条路上 `nulya task run` 都从那一场的 header 读同一个字段并建同一个 environment（`launch.sessionEnvironment`）。
+本地 session 的后台与前台跑在同一台机器上；**`remote:` 一族（§8.2）下连 supervisor 都在对面**，log 与 status 在对面的工作区。两条路上 `nulya task run` 都从那一场的 header 读同一个字段并建同一个 environment（`launch.sessionEnvironment`）——**除了显式 `--runs-on session`**，那条把 supervisor 起在会话这一侧（§8.2）。
 
 三条与前台相反的纪律：**没有缺省 timeout、没有上限**（收口靠 `task kill`）· **取消 step 不碰任务** · **usage journal 记的是那次发射**（`ok=true`、耗时≈spawn）。没有 session 可报告 → `ok=false` + 一句教学式文案，**什么都不启动**；`background` 不是 bool 就当场拒绝。
 
@@ -520,7 +520,8 @@ manifest 讲给三种听众，字段按哪个听众读它分成三层，每层�
   "id": "web.search",
   "runtime": {
     "entry": { "windows": "src/run.ps1", "default": "src/run.sh" },
-    "interpreter": { "windows": "powershell", "default": "sh" }
+    "interpreter": { "windows": "powershell", "default": "sh" },
+    "runs_on": "workspace"
   },
   "contributes": {
     "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }, "timeout_ms": 60000, "readonly": true, "surface": "manual", "ui": { "render": "checklist", "panel": true } }],
@@ -540,6 +541,7 @@ manifest 讲给三种听众，字段按哪个听众读它分成三层，每层�
 - `timeout_ms` 若写了必须是正数且 ≤ `tool.Timeouts.extension_max_ms`（600s），否则 `InvalidTimeout`。
 - `surface` 必须是 `auto` / `manual` / `internal` 之一，否则 `InvalidSurface`——**词表封闭**：一个想写 `internal` 的错字若被读成缺省，那个 driver tool 就上了模型面。
 - `entry` / `interpreter` 按平台声明成对象时只许脚本实现（`InvalidEntry`），且宿主 os 必须能选出一个变体（`EntryUnsupportedOnHost`，§7.1）。
+- `runtime.runs_on` 必须是 `workspace` / `session` 之一，否则 `InvalidRunsOn`——**词表封闭**，同 `surface` 的理由：一个想写 `session` 的错字被读成缺省，那个包就被送去它工作不了的机器上（§8.2）。
 - `entry` / skill / system_prompt / 每个 `ui` 条目的 `entry` 路径不能逃出包目录。
 - `system_prompts` 的条目若写成对象，`position` 必须是 `early` / `normal` / `late` 之一（`InvalidPromptPosition`）。
 - 命令 `name` 必须是 `[a-z0-9-]+` 且包内不重复（`InvalidCommandName` / `DuplicateCommandName`），`action` 必须**恰有一个键**（`InvalidCommandAction`），键是 `run` 时值必须是本包声明的 tool（`UnknownCommandTool`）。
@@ -756,6 +758,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 - **persona 是 `--prompt` 不是 extension**（§5.6）：字节冻进 header，什么都不安装、什么都没有版本。`agent-` 前缀只是这个包自己的写/读约定（`render` 写这个文件名，`wornPersona` 从 header 的 `composition.prompts[].source` 剥它）；内核对这个标签一无所知。
 - **子场一律 `--bare`**（§5.1）：定义里的 `with` 就是它的全部 composition。
+- **子场与父场同构**：父场 header 的 `environment` / `remote_workspace` 原样传给子场的 `session new`，所以两场跑在同一个工作区上、两份 ledger 并排在驱动它们的那台机器上（§8.2）。这不是一个决定而是继承——一个 sub-agent 在别的 checkout 上干活没有意义。
 - **报告走后台任务**：委派是一种"欠答案"的机制，而内核里**已经有且只有一个**这样的回路（supervisor 把报告 note 投进 inbox，下一个 step 边界排干，§6.1 / §3.1），用它意味着每个 driver 都已经会收这个答案。**报告是数据不是指令**：`run` 打到 stdout 的是那一轮最后一条 assistant 文本，包在 `<agent-report agent=… session="d-…">` 里，底下一句合同说明它是待评估的发现而不是命令。
 
 包自己的世界观（细节与全部不变量在 `docs/goals/agent-runner.md`、`background.md`，契约在 `extensions/agent/src/external.zig` 的模块注释与 guide skill）：
@@ -786,7 +789,11 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 | `round` | remote + `message_file` 路径 + interrupt 标记路径 | `{"text":"…"}`，被打断时 `{"text":"","interrupted":true}` | 这一轮没跑成，消息**留在 `<d>/inbox/`** 等下一轮 |
 
   **不变量一条都不出去**（租约与 release-and-recheck、record 与 exchange 计数、mailbox 与它的顺序、报告框架、readonly 的拒绝全部留在 `extensions/agent`）；出去的只有"怎么跟那个 harness 说话"。**两段文本走路径，其余走值**（Windows 把整条命令行封在 32 KiB）。
-- **`model`、委派白名单、深度**：`model` 形态与定义里的 `model:` 逐字相同（`<profile>` 或 `<profile>/<model-id>`），**一处解析**（`defs.parseModelRef`），优先级 **这次调用 > 定义 > 继承发起它的那一场**，**取的是一对而不是拼一对**；`session` 形态给 `model` 是一次失败的调用。**能不能委派，是被委派者定义里的 `agents: [name, …]`，空 = leaf**——非空时那一场才额外带 `--with agent@<自身版本>`，一个不能委派的子场干脆就不带这个 tool；校验从**本场冻结 header 里那个 `agent-<name>` prompt** 反查定义（header 是权威）。`NULYA_AGENT_DEPTH` 是**防环兜底不是安全边界**（≥3 拒绝；absent = 0，present-but-invalid = `max_depth`）。
+- **`model`、委派白名单、深度**：`model` 形态与定义里的 `model:` 逐字相同（`<profile>`、`<profile>/<model-id>` 或 `@<rung>`），**一处解析**（`defs.parseModelRef` / `defs.parseRole`），优先级 **这次调用 > 定义 > 继承发起它的那一场**，**取的是一对而不是拼一对**；`session` 形态给 `model` 是一次失败的调用。
+  - **`@<rung>` 是档位不是模型**（§9.5 的 `roles` 表）：它问的是"这一场所在的 profile 管这一档叫什么"，所以**先由上面那条优先级定下 profile，再拿档位去问**——`model: @explore` 写在一个也写了 profile 的定义上，就是"那个 profile 的 explore"。查表经 `nulya config show --json`（`extensions/agent/src/fleet.zig`），**这个包挨着会话跑**（§8.2 的 `runs_on: "session"`），所以读的是人写档位表的那份 config 链。
+  - **查不到的档位退化成继承，不是拒绝**：换到一个没写这一档的 profile 时，跟着主模型走是正确且可用的行为。代价是拼错一个档位名与没写这一档长得一样，所以 **`ext run agent list` 有 `role` / `role_model` 两列**：名字在、落点空，就是"它在继承"。
+  - **档位可以自带 effort**，那是它唯一能带的第二样东西。effort 不是身份、不冻进 header，所以它冻在 delegation record 的 `created` 行里，由 runner **每一轮**加到子场的 `session step --effort` 上。
+  - **外置 runner 不认档位**：`runner_model` 是那个 harness 自己的词汇，`@…` 在定义里被 `crossCheck` 丢弃并点名，在调用参数上是一次响亮的拒绝——否则一个档位名会被当成 Codex 的模型名发出去。**能不能委派，是被委派者定义里的 `agents: [name, …]`，空 = leaf**——非空时那一场才额外带 `--with agent@<自身版本>`，一个不能委派的子场干脆就不带这个 tool；校验从**本场冻结 header 里那个 `agent-<name>` prompt** 反查定义（header 是权威）。`NULYA_AGENT_DEPTH` 是**防环兜底不是安全边界**（≥3 拒绝；absent = 0，present-but-invalid = `max_depth`）。
 
 #### `std`：一场编码 session 最先伸手的那几样
 
@@ -895,6 +902,27 @@ socket 的名字是**nulya 自己算的摘要**而不是 ssh 的 `%C`：这是 u
 
 **四个动词都搬走了**：`runShell` / `runExtension` / `putWorkspaceFile` / `startShellTask` 全部过通道。帧里过去的是**身份**（`(id, version, tool)`）与参数 JSON；对面按自己的 OS 选 entry 变体、按自己的 `.sealed` 复验、拼自己的 store 路径，并从同一份参数派生 `NULYA_TOOL` / `NULYA_ARG_<k>`（**一份实现两台机器**）。`presentation_file` **不下传**。**对面没有这个版本**时答一句点名 `ext push` 的拒绝，host 把它答成一次**失败的调用**——模型读得到、usage journal 记下一个真实的 `ok=false`，而不是让整个 step 死掉。
 
+#### `runs_on`：一个包声明它要挨着**会话**还是挨着**工作区**
+
+`.nulya/` 的每一个子树在这一族下都已经**按谁读它**切过一刀：session 文件、两条 journal、store 的宿主面、`tool-presentation/` 都因为"读者在 host"而留在 host。缺的是最后一个自由度——**扩展进程本身**。`runtime.runs_on`（§7.2.1，缺省 `workspace`）把它补上：
+
+- `workspace`：挨着命令要碰的那些文件。**缺省，而且是读写文件的包唯一的答案**（`std` 必须在文件那边）。
+- `session`：挨着 ledger，在驱动这一场的那台机器上。给**工作本身就是这一场会话**的包——它开子会话、读 session 文件、起宿主侧任务（`agent` 是今天唯一一个）。
+
+**不能做成全局开关**，这正是 §8.1 否决"只搬命令"那条轴的同一个理由：两类包要的是相反的东西，而这个差别只有包自己知道，内核无从推导。
+
+**它也不是发明一个新位置**：`nulya ext run` 一直无条件用 `LocalEnvironment`（`cli/ext.zig` 的 `extRun`）——CLI 路径的扩展本来就在本机跑。过去的不对称是：手敲 `nulya ext run agent …` 好好的，模型调同一个 tool 却被送去对面，然后死在那儿（`agent` 要的 `NULYA_SESSION` 不过通道，而它起后台任务要走的 `task run` 要读只有 host 才有的 session 文件——**打通前一道也走不通**）。
+
+**分流在 `RemoteEnvironment` 内部**：`Environment` 的 vtable 仍是四个动词，`ToolContext` 不加字段。落点集合由壳层在**composition 之后、第一个 step 之前**交下来（`cli/session.zig` 的 `sessionStep` → `useHostSideExtensions`）——落点是 manifest 说的，而 manifest 只有持有字节的那台机器答得出，所以 `RemoteEnvironment` 自己绝不去读它。
+
+**`exec_version` 对 `runs_on: session` 的成员恒空**（`composition.freshExecVersions` 跳过 target 反查，连"对面是什么机器"都不问），所以 `--env remote: --with agent` 不再要求先给它 `ext build --target` + `ext push`。
+
+**没有第二道门，而这是想过之后的结论**：拒绝 workspace 层的这个声明看起来像一道门，其实不是——workspace 层是**指针不是字节来源**（版本字节一台机器只有一处，只能由有人在本机 `ext build` 放进去），而那件事按 §9 已经与 `shell` 的权限同级。落点因此只是包的**公开声明**（`ext inspect` 打的就是 manifest 原文）。
+
+**任务也要分侧**：`nulya task run --runs-on session`（缺省 `workspace` = 读 header 那个字段，今天的行为）在 host 起 supervisor。名字**本来就在 host claim**（`claimTaskSlot`），所以这里没有新的命名机制；变的只是 spawn 哪一侧。于是一场 session 的任务可以落在两台机器上，读者靠 claim 目录里的 `machine` 标记分侧（**存在即"去了别的机器"**，里面写着是哪台；本机是缺省、不需要文件）——**不靠"有没有 `status.json`"去猜**，那和 `starting` 这个投影状态撞车。
+
+**三处代价，写下来而不是藏起来**：① 宿主侧的包按 **host 的 cwd** 解析它自己那层文件，所以远端会话里 workspace 层的 `.nulya/agents/*.md` 来自 **host 那个目录**而不是远端 checkout（user 层与 builtin persona 不受影响）——**不为此发明第二条查找路径**；② 同理，外置 runner（codex / claude / pi）在**会话那台机器**上起 harness，看见的是 host 的文件系统——留在远端工作区里干活的是 nulya 子场；③ `emit` 的溢出仍走 `putWorkspaceFile`，落在**远端**工作区。
+
 #### `exec_version`：哪一份字节服务这一场，创建时就冻死
 
 一个 compiled 包的 version id 含 target（§7.4），所以"给远端 linux 建的 std"天生是**同一个包的另一个版本**。于是 header 冻两列（§3.4）：**成员**是 `(id, v_host)`（manifest / prompt / skills / `ext run` 说的都是它），**服务调用的**是 `exec_version`；data / script 包两者相等，那一列恒空。
@@ -955,6 +983,7 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Site.resolv
 - extension 与 shell 共享同一个 session authority（≈ 当前用户全权限）。明说，不给虚假安全感。不变量：`extension_permissions ⊆ session_authority`。
 - **env 净化**：子进程 env 过 `isSecretKey` denylist（大小写不敏感子串：`SECRET / TOKEN / PASSWORD / API_KEY / ACCESS_KEY / PRIVATE_KEY / CREDENTIAL / SSH_AUTH_SOCK …`）。非 secret 变量（PATH / HOME）照传。host env 的**来源**是 `environment.registerHostEnviron`（std 0.16 删掉了全局 environ，`main` 启动时注册一次，所有读 host env 的层都走 `environment.hostEnvironMap`）。边界是"无明显 secret 泄漏"，**不是**完全不继承、也不是 fs 隔离。
 - **exec target 不是权限边界**：把工作区搬到另一台机器改变的是命令**在哪跑**，不是它**能碰什么**。`SSH_AUTH_SOCK` 在 denylist 上，所以 `remote:ssh:` 用不了本机的 ssh-agent。
+- **`runs_on: "session"` 是这条上的一次显式取舍**（§8.2）。声明它的包跑在 host，而同一场的 `shell` 跑在对面——`extension_permissions ⊆ session_authority` 的**字面**因此不再成立。它站在上一条上：既然 exec target 从来不是权限边界，这里撑开的不是一条守住过的边界，而是一条从未主张过的。代价必须**显式**：落点是包在 manifest 里的公开声明（不是内核替某个 id 开的后门），`ext inspect` 读得到。**没有第二道门**：想过按指针层拒绝（workspace 层不许声明），但那条轴是错的——workspace 层是指针不是字节来源，而把字节放进 store 的那一步本来就与 `shell` 同级（上面第五条）。真要一道门，它的轴是"这一场允不允许宿主侧扩展"，不是指针层。
 - **driver 手上有一票否决**（§4 的 gate）。这**不是** sandbox：它拦的是"这一次要不要发生"，不是"发生时能碰什么"。manifest 的 `readonly` 同理是**给答题人的提示**。
 - **workspace 里没有可执行的字节**：一个 checkout 能带的只有 draft 源码（§7.2）。checkout 里的一个 draft 一旦有人在本机 `ext build` 它就进了 store——那与 `shell` 已有的权限同级，是一次人或 agent 的动作，不是 clone 的副作用。
 - OS 强制（sandbox）见 PLAN §3.8。
@@ -974,7 +1003,7 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Site.resolv
 
 | 键 | 内容 |
 |---|---|
-| `provider.profiles[]` | `{name, kind=openai\|anthropic\|codex\|scripted, model, models[]?, base_url, api_key_env, api_key?, effort?}` |
+| `provider.profiles[]` | `{name, kind=openai\|anthropic\|codex\|scripted, model, models[]?, base_url, api_key_env, api_key?, effort?, roles?}` |
 | `provider.retry` | `{max_retries, initial_backoff_ms, max_backoff_ms, stall_timeout_ms}`（§13；描述的是线路不是模型，全 profile 一份、只认 trusted 层） |
 | `models[]` | `{id, label, efforts[], default_effort?, context_window?, vision?}`——按 `id` 合并、**只认 trusted 层** |
 | `registry` | `{max_tools}`（§5.1）；没有排序权重——内核不排序 |
@@ -984,6 +1013,12 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Site.resolv
 `default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目；其中收图片的那些写了 `vision = true`——**这一列是主张不是猜测**，自带目录只替它查得准的模型说话。
 
 **两张表描述模型。** profile 说**怎么连**和**它服务哪些 model id**（`ProviderProfile.defaultModel()`：`model` 非空取它，否则 `models[0]`，否则 provider 内置默认）；`[[models]]` 目录说一个 id **是什么**（label、effort 档位、context window、`vision`），一个 id 不管经几个端点都只写一次。目录是纯描述：kernel 不读它；`launch` / `cli` 用它给 session 默认 effort（`Config.defaultEffort(profile, model_id)` = `profile.effort ?? catalog.default_effort ?? 无`）。
+
+**第三张（挂在 profile 上）：`roles` 档位表。** 一个档位是一个**有名字的模型选择**：`explore = "gpt-5.6-luna"`，或带上只属于这一档的 effort：`review = { model = "gpt-5.6-terra", effort = "high" }`。裸词是**这个 profile 自己的**一个 model id；带 `/` 的读作 `<profile>/<model-id>`，跨到另一个 profile 去（`extensions/agent` 的 `model:` 里裸词是 profile 名——两处的裸词含义相反，各自在自己的位置上无歧义：一个档位值写在某个 profile 的**里面**）。
+
+档位名是**开放词表**，内核不认识任何一个具体的词，也**不读这张表**——它与 `[[models]]` 的 label / vision 同类，config 携带、上面的人消费。**唯一的消费者是委派**（§12）：一个 sub-agent 的定义按档位名要模型，拿到的是**当前 profile** 对那个档位的答案。于是——**换主模型就是换整支队伍**，不需要第二个手势，也不需要任何东西冻进 header。
+
+按**档位名**逐条合并（重述一个档位只替换那一条），**只认 trusted 层**（project 层连 profile 都改不了，档位自动落在同一条边界内：一个 checkout 不能把某一档改指向另一个 endpoint）。表形缺 `model`、或 `model` / `effort` 不是字符串，都是**硬失败**——悄悄编一个 id 出来，最后会进到某个子场的 header 里，那是事后谁也看不见的错。失败经 `Diag` 点名是哪个 profile 的哪个档位；`config.load` 的 sink 由**壳层**交下来（`cli/` 的每个动词都给 stderr，`.{}` 是给没有地方放这句话的调用方的）。
 
 **第三种来源：端点自己报的目录（今天只有 codex）。** 一个订阅服务哪些模型、每个什么窗口什么档位，是订阅自己的事实——写进 config 当天就会过期，所以它**不配置、去读**：`kind = "codex"` 且**没有 `models` 列表**的 profile，它的可选列表与参数来自 Codex CLI 的 `models_cache.json`（`$CODEX_HOME` 否则 `~/.codex/`，`providers/codex.zig` 的 `Catalog`）。映射：只取 `visibility == "list"`；窗口 = `context_window × effective_context_window_percent / 100`（缺 `context_window` 就不主张窗口而不是丢掉这个模型）；efforts = `supported_reasoning_levels[].effort`，默认 = `default_reasoning_level`，label = `display_name`；`vision` 恒为 false。**任何一层写了 `models` 就以它为准**；**读不出 = 这台机器说不出，绝不等于"订阅没有模型"**。
 
@@ -1199,9 +1234,10 @@ nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--carry] [--
           | prune <id> [--force]                 ← **唯一一个删 session 的动词**（见下）
           | outcome <id> <success|partial|failure> [--note <text>] [--seq N]   ← 只写 outcome journal（§3.3）
           | list [--json]                        ← `.nulya/sessions/` 的只读投影
-nulya task run [--session <id>] [--cwd <dir>] [--timeout-ms N] -- <command>
+nulya task run [--session <id>] [--cwd <dir>] [--timeout-ms N] [--runs-on workspace|session] -- <command>
                                                 ← 起一个脱离本 step 的命令，打印 `<sid>/t<N>` 与 log 路径（`shell {background:true}` 的 CLI 孪生）
-                                                  命令跑在**那一场 session 跑的地方**（读它的 header `environment`，§8.1）
+                                                  缺省命令跑在**那一场 session 跑的地方**（读它的 header `environment`，§8.1）；
+                                                  `--runs-on session` 改成挨着 session 文件那一侧起（§8.2 的宿主侧任务）
           | list [--session <id>] [--running] [--json]
                                                 ← starting | running | done | lost | unreachable，一行一个
                                                   `--json` 另有 `machine` 列（远端任务的 `log` 是那台机器上的路径，§8.2）

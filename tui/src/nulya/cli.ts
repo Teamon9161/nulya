@@ -334,6 +334,20 @@ export interface ProfileView {
    * entry and falls back to the catalog (`ModelView.modelRows`).
    */
   catalog: ModelView[] | null
+  /**
+   * The rungs this profile staffs, sorted by name — what a delegated agent gets
+   * when it asks for one by name. Empty is the common case and means every
+   * delegation runs on the model it inherits.
+   */
+  roles: RoleView[]
+}
+
+/** One rung of a profile's team: a name the config chose, and what it resolves to. */
+export interface RoleView {
+  name: string
+  /** A bare id is this profile's own model; `<profile>/<id>` crosses providers. */
+  model: string
+  effort: string | null
 }
 
 /** Where the kernel's config chain reads from — so we write where it reads. */
@@ -423,9 +437,22 @@ export async function configShow(ws: Workspace, env?: Record<string, string>): P
       // Absent (an older binary) or malformed is "this endpoint says nothing",
       // which is exactly what every non-codex profile means by it.
       catalog: Array.isArray(p.catalog) ? p.catalog.map(model) : null,
+      roles: roles(p.roles),
     })),
     models: models.map(model),
   }
+}
+
+/**
+ * A profile's team. Absent (an older binary) is no team at all, which is what
+ * most profiles mean by it anyway. An entry missing either half names nothing,
+ * so it is dropped rather than drawn as an arrow with a blank on one side.
+ */
+function roles(value: unknown): RoleView[] {
+  if (!Array.isArray(value)) return []
+  return (value as RoleView[])
+    .filter((role) => typeof role?.name === "string" && role.name.length > 0 && typeof role?.model === "string" && role.model.length > 0)
+    .map((role) => ({ name: role.name, model: role.model, effort: role.effort ?? null }))
 }
 
 /** One catalog entry, with the optional columns filled in. Two callers: the

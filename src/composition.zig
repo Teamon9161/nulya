@@ -93,6 +93,13 @@ pub const FrozenExtension = struct {
     /// prompts, skills, `ext run`), `exec_version` is which build runs over
     /// there. One version id still names exactly one compiled implementation.
     exec_version: ?[]const u8 = null,
+    /// Which machine serves a call to this member, as its frozen manifest
+    /// declared. `.session` members never leave the machine holding the ledger,
+    /// so they have no `exec_version` and nothing to push.
+    ///
+    /// Not a header column: the member's version is already frozen there, and
+    /// the answer travels with that version's manifest.
+    runs_on: manifest.RunsOn = .workspace,
 };
 
 /// Narrow, config-agnostic selection input: the composition never learns where
@@ -318,7 +325,9 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, site: *const site_mod.S
 /// Which build of each member will serve a call, for a FRESH session. Null
 /// everywhere when the session's tools run on this machine; otherwise, for every
 /// `compiled` member, the sibling version built for that machine's target.
-/// `data` and `script` members stay null. The probe is asked lazily.
+/// `data` and `script` members stay null, and so does a `runs_on: session` one:
+/// it never leaves this machine, so no other machine's build is required of it.
+/// The probe is asked lazily.
 fn freshExecVersions(
     gpa: std.mem.Allocator,
     a: std.mem.Allocator,
@@ -332,6 +341,7 @@ fn freshExecVersions(
 
     var target: ?[]const u8 = null;
     for (extensions, out) |r, *slot| {
+        if (manifest.runsOn(r.manifest) == .session) continue;
         if (manifest.implementationKind(r.manifest) != .compiled) continue;
         if (target == null) target = try p.ask();
         // `gpa` for the search's scratch, the arena only for the answer.
@@ -643,9 +653,9 @@ fn resolveCurrent(
     const active = (try site.activePointer(alloc, id)) orelse return error.WithVersionNotFound;
     defer alloc.free(active.version);
     const entry: site_mod.Site.ActiveEntry = .{ .id = id, .layer = active.layer, .version = active.version };
-    return site.resolveEntry(alloc, entry, .sealed) catch |err| switch (err) {
+    const r = site.resolveEntry(alloc, entry, .sealed) catch |err| switch (err) {
         // A host fault must propagate as itself, never as a broken extension.
-        error.Canceled => error.Canceled,
+        error.Canceled => return error.Canceled,
         else => {
             if (!isExtensionFault(err)) return err;
             // What the error code cannot carry: which version is unusable,
@@ -658,6 +668,7 @@ fn resolveCurrent(
             return error.ActiveExtensionBroken;
         },
     };
+    return r;
 }
 
 /// Resolve exactly the frozen (id, version) pairs from a session header: never
@@ -686,6 +697,7 @@ fn copyFrozenExtensions(
         .version = try a.dupe(u8, r.version),
         // Already arena-owned by both paths, so carried rather than recopied.
         .exec_version = exec,
+        .runs_on = manifest.runsOn(r.manifest),
     };
     return out;
 }
@@ -1572,6 +1584,64 @@ test "a broken version under the workspace pointer fails the session rather than
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), comp.extensions.len);
     try std.testing.expectEqualStrings(user_v, comp.extensions[0].version);
+}
+
+/// A compiled member declaring it lands beside the SESSION rather than beside
+/// the workspace.
+fn writeSessionSideExtension(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    id: []const u8,
+    tool_name: []const u8,
+) ![]u8 {
+    const manifest_bytes = try std.fmt.allocPrint(alloc,
+        \\{{"schema":"nulya.extension/v2","id":"{s}","runtime":{{"entry":"bin/run","runs_on":"session"}},"contributes":{{"tools":[{{"name":"{s}","description":"d","input":{{"type":"object"}}}}]}}}}
+    , .{ id, tool_name });
+    defer alloc.free(manifest_bytes);
+    return testkit.writeFrozenVersion(alloc, io, root, id, manifest_bytes, &.{});
+}
+
+/// Refuses to answer: reaching it at all is the failure these tests watch for.
+const NeverProbe = struct {
+    asked: bool = false,
+
+    fn ask(ptr: *anyopaque) anyerror![]const u8 {
+        const self: *NeverProbe = @ptrCast(@alignCast(ptr));
+        self.asked = true;
+        return error.ProbeShouldNotBeAsked;
+    }
+
+    fn handle(self: *NeverProbe) ExecTargetProbe {
+        return .{ .ptr = self, .askFn = ask };
+    }
+};
+
+test "a member landing beside the session keeps its exec_version empty and never asks which machine the commands run on" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const beside_session = try writeSessionSideExtension(alloc, io, tmp.dir, "agent", "delegate");
+    defer alloc.free(beside_session);
+    try testkit.activate(alloc, io, tmp.dir, "agent", beside_session);
+
+    var probe: NeverProbe = .{};
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{
+        .with = &.{.{ .id = "agent" }},
+        .exec_target = probe.handle(),
+    });
+    defer comp.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), comp.extensions.len);
+    try std.testing.expectEqual(manifest.RunsOn.session, comp.extensions[0].runs_on);
+    try std.testing.expect(comp.extensions[0].exec_version == null);
+    try std.testing.expect(!probe.asked);
+    // The call still goes to the version this machine holds.
+    try std.testing.expectEqualStrings(beside_session, comp.extension_tool_bindings[0].version);
 }
 
 test "a member's manual tool is not natively visible without a selection" {

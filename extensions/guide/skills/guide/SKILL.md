@@ -59,6 +59,22 @@ help` in PowerShell. Below, `nulya` means whichever of the two applies.
 - Two tables describe models. `[[provider.profiles]]` says how to reach a
   provider (kind, base URL, which env var holds the key) and which ids it
   serves; `[[models]]` says what an id is (label, effort dial, context window).
+- A profile may also staff **rungs** — named model choices a delegation asks for
+  by name:
+
+  ```toml
+  [provider.profiles.roles]
+  explore = "gpt-5.6-luna"
+  review  = { model = "gpt-5.6-terra", effort = "high" }
+  ```
+
+  A bare value is one of this profile's own model ids; one with a `/` reads
+  `<profile>/<model-id>` and crosses to another profile. The names mean nothing
+  to the kernel — an agent definition asks for `@explore` and gets whatever the
+  profile it runs on calls that, so changing the model a conversation runs on
+  changes what its delegations run on, in one move. A profile that staffs no
+  such rung is not an error: that delegation runs on the model it inherits.
+  Trusted layers only, like `[[models]]`.
 - `[extensions] with = ["<id>[@<version>][:<tool>,…]"]` is the standing member
   list: which packages every session opened here composes, and which of their
   tools take a slot on the model's tool face. Each selected tool costs a slot of
@@ -104,7 +120,13 @@ printf 'hello %s\n' "${NULYA_ARG_name:-world}"
   --zig` scaffolds one); anything under `src/` is frozen and run as it is.
   `runtime.interpreter` names what runs it (`sh`, `powershell`, `python`). Both
   may be written per OS — `{"windows": "src/run.ps1", "default": "src/run.sh"}`
-  — so one version runs everywhere.
+  — so one version runs everywhere. `runtime.runs_on` answers a question only a
+  session whose commands run on another machine can ask (`--env remote:…`):
+  `workspace` (**the default**) puts a call beside the files the commands touch,
+  `session` beside the ledger, on the machine driving the conversation. Choose
+  `session` only if the package's work IS the conversation — it opens
+  sub-sessions, reads the session file, starts tasks that report into it.
+  Anything that reads or writes the checkout wants the default.
 - `contributes.tools[]` — `{name, description, input, surface?, timeout_ms?,
   readonly?, ui?}`. `input` is the JSON Schema the model sees. `surface` answers
   one question — *given that this package is a session member, does this tool
@@ -387,8 +409,14 @@ Store and scope:
 - Where the bundled `agent` package is in play, a sub-agent is a markdown file:
   `.nulya/agents/<name>.md` (or the same under this machine's nulya home). Its
   front matter is a set of `session new` arguments — `permissions`, `with`,
-  `model: <profile>[/<id>]`, `max_steps`, `max_exchanges`, `agents` — and its
-  body is the system prompt. Leave `max_steps` out unless you mean it: without
+  `model: <profile>[/<id>]` or `model: @<rung>`, `max_steps`, `max_exchanges`,
+  `agents` — and its body is the system prompt. A rung is asked of whichever
+  profile the delegation ends up on (see `[provider.profiles.roles]` above), so
+  `model: @explore` follows the conversation from provider to provider, and a
+  profile staffing no such rung leaves it running on the model it inherits.
+  `nulya ext run agent list` shows each definition's rung beside where it lands
+  right now — a name with no landing point is one that is being inherited, which
+  is also what a misspelled rung looks like. Leave `max_steps` out unless you mean it: without
   it a sub-agent runs on the kernel's own runaway guard, which is what the
   bundled personas do, and a small one cuts the investigation off in the middle
   where everything it found is in a session the caller never reads. `runner:` says which harness holds the

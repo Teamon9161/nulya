@@ -74,6 +74,9 @@ const Settled = struct {
     agent: []const u8,
     permissions: record.Permissions,
     max_steps: u32,
+    /// The effort every step of this delegation sends, from the rung that named
+    /// one. Empty leaves the flag off, and the kernel's own default decides.
+    effort: []const u8,
     depth: u32,
     env: *const std.process.Environ.Map,
 };
@@ -152,6 +155,7 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
         .agent = state.created.agent,
         .permissions = state.created.permissions,
         .max_steps = state.created.max_steps,
+        .effort = state.created.effort,
         .depth = args.depth,
         .env = args.env,
     };
@@ -475,6 +479,9 @@ fn driveNulyaRound(
     const wrapping_up = mode == .wrap_up;
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(alloc, &.{ exe, "session", "step", args.remote, "--stream" });
+    // Every round, because effort is a per-step generation option and nothing
+    // about it is frozen in the child's header.
+    if (args.effort.len != 0) try argv.appendSlice(alloc, &.{ "--effort", args.effort });
     if (wrapping_up) {
         // TWO turns, because a deny IS that call's `tool_results`: with a budget
         // of one, a sub-agent that reaches for a tool spends its only turn on the

@@ -66,7 +66,7 @@ pub fn storeAndWith(alloc: std.mem.Allocator, io: std.Io) !struct {
 } {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
-    var cfg = try config.load(alloc, io, &host);
+    var cfg = try config.load(alloc, io, &host, stderr_diag);
     defer cfg.deinit();
     const path = try launch.storePath(alloc, &host);
     errdefer alloc.free(path);
@@ -313,9 +313,10 @@ pub const session_usage =
 ;
 
 pub const task_usage =
-    \\  nulya task run [--session <id>] [--cwd <dir>] [--timeout-ms N] -- <command>
+    \\  nulya task run [--session <id>] [--cwd <dir>] [--timeout-ms N] [--runs-on workspace|session] -- <command>
     \\                                                    start a detached command that outlives this step; you are told when
-    \\                                                    it finishes, and its whole output is kept in a log
+    \\                                                    it finishes, and its whole output is kept in a log. --runs-on session
+    \\                                                    runs it beside the session file instead of beside the workspace
     \\  nulya task list [--session <id>] [--running] [--json] | status <task> [--json] | wait (<task> | --any) [--timeout-ms N] | kill <task> | retarget <task> --to <id>
     \\                                                    watch them; wait exits 0 finished / 2 timed out / 3 nothing to wait
     \\                                                    for; kill ends the whole tree; retarget delivers the result elsewhere

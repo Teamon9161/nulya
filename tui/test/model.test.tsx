@@ -16,7 +16,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
-import { configShow, type ConfigView } from "../src/nulya/cli.ts"
+import { configShow, type ConfigView, type ProfileView } from "../src/nulya/cli.ts"
 import {
   AUTO,
   ModelView,
@@ -26,6 +26,9 @@ import {
   modelRows,
   pickableRows,
   pickerRows,
+  providerDetail,
+  teamOf,
+  teamSummary,
 } from "../src/ui/overlays/ModelView.tsx"
 import { blockedReason } from "../src/ui/overlays/providers.ts"
 import { displayWidth } from "../src/ui/columns.ts"
@@ -159,6 +162,46 @@ test("modelParamsFor: the one lookup the picker and the status bar gauge both ca
   expect(modelParamsFor(fake.models, fake.profiles[1]!, "deepseek-v4-flash")).toEqual(globalFlash)
   // Named nowhere, by either: null, not a guess.
   expect(modelParamsFor(fake.models, codexWithCatalog, "no-such-model")).toBeNull()
+})
+
+test("a provider's team is said on its detail line; no team says nothing at all", () => {
+  const staffed: ProfileView = {
+    ...fake.profiles[1]!,
+    roles: [
+      { name: "explore", model: "deepseek-v4-pro", effort: null },
+      { name: "review", model: "openai/gpt-5.6-sol", effort: "high" },
+    ],
+  }
+  // Every rung, what it resolves to, and the effort when the rung pins one:
+  // picking this provider's model picks these with it.
+  expect(teamOf(staffed)).toHaveLength(2)
+  expect(teamOf(staffed)[0]).toContain("explore")
+  expect(teamOf(staffed)[0]).toContain("deepseek-v4-pro")
+  expect(teamOf(staffed)[1]).toContain("openai/gpt-5.6-sol")
+  expect(teamOf(staffed)[1]).toContain("high")
+  const detail = providerDetail(staffed)
+  for (const rung of teamOf(staffed)) expect(detail).toContain(rung)
+  // …and with no rungs the line is exactly the provider facts it always was:
+  // an empty team is not an announcement.
+  expect(providerDetail({ ...staffed, roles: [] })).toBe(providerDetail(fake.profiles[1]!))
+  expect(teamSummary(fake.profiles[1]!)).toBe("")
+  // A profile from a binary that never heard of the field, and a profile name
+  // nothing answers to (the notice looks its profile up by name): both empty,
+  // neither a crash.
+  const older = { ...fake.profiles[1]!, roles: undefined } as unknown as ProfileView
+  expect(teamOf(older)).toEqual([])
+  expect(teamSummary(undefined)).toBe("")
+})
+
+test("the team summary is one line: spelled out while it is short, counted once it is not", () => {
+  const staffing = (count: number): ProfileView => ({
+    ...fake.profiles[1]!,
+    roles: Array.from({ length: count }, (_, at) => ({ name: `rung${at}`, model: "deepseek-v4-pro", effort: null })),
+  })
+  expect(teamSummary(staffing(2))).toContain("rung1")
+  const crowded = teamSummary(staffing(9))
+  expect(crowded).toContain("9")
+  expect(crowded).not.toContain("rung0")
 })
 
 test("pickableRows: only the providers that can run — plus the one in force, whatever its state", () => {
@@ -415,6 +458,9 @@ test("configShow reads the real binary: scripted is always runnable, the catalog
   // A profile that does not describe its own endpoint says so with null — and
   // a binary that has never heard of the field reads back the same way.
   expect(deepseek?.catalog ?? null).toBeNull()
+  // The team is always a list to walk, whether this binary projects roles or
+  // has never heard of them: `/model` maps over it without asking which.
+  for (const p of config.profiles) expect(Array.isArray(p.roles)).toBe(true)
   for (const p of config.profiles) {
     if (p.catalog === null) continue
     expect(Array.isArray(p.catalog)).toBe(true)

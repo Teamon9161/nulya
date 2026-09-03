@@ -737,6 +737,21 @@ pub const LocalEnvironment = struct {
 /// The environment tells the caller where it is; `task supervise` writes it.
 pub const task_log_name = "output.log";
 
+/// Written into a claimed task's directory when the command will run on ANOTHER
+/// machine, naming it. Its PRESENCE is the whole dispatch: one session may hold
+/// tasks on both sides, and a far task's host directory is otherwise
+/// indistinguishable from a local one whose supervisor has not written a status
+/// yet.
+pub const task_machine_file = "machine";
+
+/// Written under the claim, before anything is started over there: a task the
+/// reader cannot place is a task whose report never comes home.
+pub fn markTaskMachine(io: std.Io, alloc: std.mem.Allocator, dir_rel: []const u8, spec: []const u8) !void {
+    const path = try std.fs.path.join(alloc, &.{ dir_rel, task_machine_file });
+    defer alloc.free(path);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = spec });
+}
+
 /// One claimed `t<N>`: the directory, the full name, and the log the receipt
 /// points at. All three are workspace-relative and `/`-spelled, so they are true
 /// on whichever machine that workspace lives on.

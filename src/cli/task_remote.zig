@@ -2,8 +2,9 @@
 //! supervisors over an already-open channel, and turning what they answer into
 //! the same `Row` a local task reads as.
 //!
-//! `task.zig` owns naming, `status.json` and every verb. A task's machine is
-//! that session's frozen header, not a guess made per call.
+//! `task.zig` owns naming, `status.json` and every verb. WHICH tasks are over
+//! there is the `machine` marker their claim wrote; WHERE "there" is comes from
+//! the owning session's frozen header, never a guess made per call.
 
 const std = @import("std");
 const environment = @import("../environment.zig");
@@ -135,10 +136,6 @@ pub const Far = struct {
         return &link.ch.?;
     }
 
-    pub fn isRemote(self: *Far, session_id: []const u8) !bool {
-        return (try self.linkFor(session_id)).spec.len != 0;
-    }
-
     pub fn cwdFor(self: *Far, session_id: []const u8) ![]const u8 {
         return (try self.linkFor(session_id)).cwd;
     }
@@ -214,7 +211,10 @@ fn pollAndDeliver(
     return answer;
 }
 
-/// `readRow`'s remote branch; reached only once `far.isRemote` said yes.
+/// `readRow`'s remote branch; reached only once that task's own `machine`
+/// marker said it went elsewhere. A session whose header has no machine to name
+/// leaves `spec` empty, and every row of it then reads `unreachable` — which is
+/// the honest answer to a marker nothing can be asked about.
 pub fn readRemoteRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: task.RowRef, deliver: bool) !?task.Row {
     var row: task.Row = .{
         .full = ref.full,

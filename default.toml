@@ -1,8 +1,9 @@
 # Built-in configuration — the base layer of the chain (DESIGN §9.5). The user
 # file `~/.nulya/config.toml` (Windows: `%USERPROFILE%\.nulya\config.toml`;
 # `NULYA_HOME` relocates the directory) overlays it: scalars are replaced,
-# `[[provider.profiles]]` merge by `name`, `[[models]]` merge by `id`. Project
-# `.nulya/config.toml` may only pick a profile and tighten limits.
+# `[[provider.profiles]]` merge by `name`, `[[models]]` merge by `id`, and a
+# profile's `roles` merge by role name. Project `.nulya/config.toml` may only
+# pick a profile and tighten limits.
 #
 # Two tables describe models. A profile says HOW to reach a provider — kind,
 # endpoint, credential — and WHICH model ids it serves; the `[[models]]` catalog
@@ -42,6 +43,18 @@ model = "gpt-5.6-sol"
 models = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
+# Named model choices this profile serves. Whatever delegates asks for a role
+# by name and gets what THIS profile calls it, so picking the main model picks
+# the whole line-up in one move. The names are yours — no word here means
+# anything to the kernel, which never reads this table.
+#
+# A value is either a model id or a table naming one plus an `effort` for that
+# role alone. A bare id is served BY THIS PROFILE; an id with a `/` reads
+# `<profile>/<model-id>` and crosses to another profile — the inverse of the
+# bare word in an agent definition's `model:`, which names a profile there.
+[provider.profiles.roles]
+explore = "gpt-5.6-luna"
+review = { model = "gpt-5.6-terra", effort = "high" }
 
 [[provider.profiles]]
 name = "anthropic"
@@ -73,6 +86,9 @@ model = "deepseek-v4-flash"
 models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
+[provider.profiles.roles]
+explore = "deepseek-v4-flash"
+review = { model = "deepseek-v4-pro", effort = "max" }
 
 [[provider.profiles]]
 name = "deepseek-anthropic"

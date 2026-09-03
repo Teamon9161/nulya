@@ -97,5 +97,8 @@ pub fn startDelegationTask(
         "\"{s}\" ext run {s} run --arg delegation={s} --arg depth={d}",
         .{ exe, self_ref, delegation, depth },
     );
-    return run(alloc, io, &.{ exe, "task", "run", "--session", parent, "--", cmd });
+    // `--runs-on session`: the supervisor and everything it drives belong on the
+    // machine holding the session, not the one holding the workspace — this
+    // command opens sub-sessions and deposits into a ledger, and both are here.
+    return run(alloc, io, &.{ exe, "task", "run", "--session", parent, "--runs-on", "session", "--", cmd });
 }

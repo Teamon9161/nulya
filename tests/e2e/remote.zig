@@ -961,6 +961,206 @@ test "a session whose header predates the exec-version column still steps" {
     try std.testing.expect(std.mem.indexOf(u8, results, "here") != null);
 }
 
+// ── members that land beside the session, not beside the workspace ──────────
+
+/// Prints the session FILE's path it was started with. Only a process on the
+/// machine holding the ledger ever sees that variable — the channel carries the
+/// session's identity and nothing else — so the line itself says which side ran.
+const session_probe_main_zig =
+    \\const std = @import("std");
+    \\
+    \\pub fn main(init: std.process.Init) !void {
+    \\    const alloc = init.gpa;
+    \\    const io = init.io;
+    \\
+    \\    var in_buf: [4096]u8 = undefined;
+    \\    var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
+    \\    const args_json = try reader.interface.allocRemaining(alloc, .limited(1 << 20));
+    \\    defer alloc.free(args_json);
+    \\
+    \\    const line = try std.fmt.allocPrint(alloc, "ran-with-session=[{s}]", .{init.environ_map.get("NULYA_SESSION") orelse ""});
+    \\    defer alloc.free(line);
+    \\    try std.Io.File.stdout().writeStreamingAll(io, line);
+    \\}
+    \\
+;
+
+/// A compiled package declaring it lands beside the SESSION, exposing one tool
+/// named `read` so the scripted `readfile` mode calls it.
+fn sessionSidePackage(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8) ![]u8 {
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+    const manifest_bytes = try std.fmt.allocPrint(alloc,
+        \\{{"schema":"nulya.extension/v2","id":"{s}",
+        \\ "runtime": {{"entry":"bin/{s}","runs_on":"session"}},
+        \\ "contributes": {{"tools":[{{"name":"read","surface":"manual","description":"probe","input":{{"type":"object","properties":{{}}}}}}]}}}}
+    , .{ id, id });
+    defer alloc.free(manifest_bytes);
+    const version = try support.installPrebuilt(alloc, io, ws, zig_exe, id, manifest_bytes, session_probe_main_zig);
+    errdefer alloc.free(version);
+    try support.activateInStore(alloc, io, ws, id, version);
+    return version;
+}
+
+test "a member that lands beside the session is called here, without ever being built or pushed for the far machine" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const spec = try execSpec(alloc, exe, "");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    const version = try sessionSidePackage(alloc, io, ws, "here.side");
+    defer alloc.free(version);
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs, "--with", "here.side:read" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // Nothing was pushed, so a call that crossed the channel could only come
+    // back as the "push it first" refusal.
+    const step = try runCliEnv(alloc, io, ws, &.{ exe, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "readfile");
+    defer alloc.free(step.stdout);
+    try std.testing.expectEqual(@as(u8, 0), step.code);
+    const results = toolResultsLine(step.stdout) orelse return error.NoToolResults;
+    try std.testing.expect(std.mem.indexOf(u8, results, "ext push") == null);
+
+    // …and it ran beside the ledger: it was handed the session FILE, which is a
+    // fact about this machine and never crosses.
+    const here = try std.fmt.allocPrint(alloc, "ran-with-session=[.nulya/sessions/{s}.jsonl]", .{id});
+    defer alloc.free(here);
+    try std.testing.expect(std.mem.indexOf(u8, results, here) != null);
+}
+
+/// One string field of a frozen header, as written — escapes and all, so two
+/// headers can be compared without unescaping either.
+fn headerField(header: []const u8, key: []const u8) ?[]const u8 {
+    var buf: [64]u8 = undefined;
+    const needle = std.fmt.bufPrint(&buf, "\"{s}\":\"", .{key}) catch return null;
+    const at = std.mem.indexOf(u8, header, needle) orelse return null;
+    const from = at + needle.len;
+    var end = from;
+    while (end < header.len and header[end] != '"') {
+        // A quote the value escaped is part of the value.
+        if (header[end] == '\\') end += 1;
+        end += 1;
+    }
+    return header[from..end];
+}
+
+test "a delegation from a remote session opens its child over the same workspace, and both ledgers stay here" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const spec = try execSpec(alloc, exe, "");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    const ref = try support.buildBundled(alloc, io, ws, exe, "agent");
+    defer alloc.free(ref);
+
+    // A package landing beside the session reads the definitions beside the
+    // session too — this directory, not the workspace the commands run in.
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{ .sub_path = ".nulya/agents/scout.md", .data =
+        \\---
+        \\description: a delegate opened from a remote session
+        \\max_steps: 1
+        \\---
+        \\You only read.
+        \\
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const delegated = try support.runCliEnvs(alloc, io, ws, &.{ exe, "ext", "run", ref, "agent", "{\"name\":\"scout\",\"task\":\"look\"}" }, &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    });
+    defer alloc.free(delegated.stdout);
+    try std.testing.expectEqual(@as(u8, 0), delegated.code);
+
+    // The child is a session of this machine, over the SAME far workspace: two
+    // conversations, one checkout, both ledgers beside each other here.
+    const at = std.mem.indexOf(u8, delegated.stdout, "session s-").? + "session ".len;
+    var end = at;
+    while (end < delegated.stdout.len and delegated.stdout[end] != ',' and delegated.stdout[end] != ' ') end += 1;
+    const child = delegated.stdout[at..end];
+
+    const parent_header = try support.readSessionFile(alloc, io, ws, parent);
+    defer alloc.free(parent_header);
+    const child_header = try support.readSessionFile(alloc, io, ws, child);
+    defer alloc.free(child_header);
+    // Compared against the PARENT header rather than against the arguments: both
+    // are JSON, so this cannot be fooled by how a path was escaped on the way in.
+    for ([_][]const u8{ "environment", "remote_workspace" }) |key| {
+        const mine = headerField(parent_header, key) orelse return error.NoSuchHeaderField;
+        const theirs = headerField(child_header, key) orelse return error.NoSuchHeaderField;
+        try std.testing.expect(mine.len != 0);
+        try std.testing.expectEqualStrings(mine, theirs);
+    }
+
+    // Its driving task belongs to the parent and was started on this side, so
+    // the parent can be asked about it here.
+    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
+    alloc.free(waited.stdout);
+}
+test "a member landing beside the session needs no build for a far machine no store could serve" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    // The same peer that stops creation for an ordinary compiled member.
+    const spec = try fakeSpec(alloc, "foreign");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    const version = try sessionSidePackage(alloc, io, ws, "here.side");
+    defer alloc.free(version);
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", "/srv/app", "--with", "here.side:read" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // The column that would have named a build over there stayed empty.
+    const header = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(header);
+    try std.testing.expect(std.mem.indexOf(u8, header, "\"exec_version\":\"\"") != null);
+}
+
 // ── background tasks on the far machine (Phase 4) ───────────────────────────
 //
 // The split under test: the command, its log and its supervisor are over there;
@@ -978,6 +1178,17 @@ fn relTaskPath(alloc: std.mem.Allocator, id: []const u8, slot: []const u8, name:
 fn exists(io: std.Io, dir: std.Io.Dir, path: []const u8) bool {
     dir.access(io, path, .{}) catch return false;
     return true;
+}
+
+/// The host half of a far task's claim: its directory AND the `machine` marker
+/// a real `startShellTask` leaves there before anything starts over there. A
+/// fixture standing in for a claimed far task has to leave both — the marker is
+/// what tells a reader which side to ask about it.
+fn claimFarTask(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, dir_rel: []const u8, spec: []const u8) !void {
+    try ws.createDirPath(io, dir_rel);
+    const marker = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_rel, environment.task_machine_file });
+    defer alloc.free(marker);
+    try ws.writeFile(io, .{ .sub_path = marker, .data = spec });
 }
 
 /// Which shell reads a command over there — asked of that machine, the way the
@@ -1076,6 +1287,63 @@ test "a remote session's background task runs over there and its report arrives 
     const again = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--json" });
     defer alloc.free(again.stdout);
     try std.testing.expect(!exists(io, ws, deposit));
+}
+
+test "one session may hold tasks on both machines, each read on the side that holds it" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    const spec = try execSpec(alloc, exe, "");
+    defer alloc.free(spec);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var far = std.testing.tmpDir(.{});
+    defer far.cleanup();
+    var far_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_abs = try absOf(io, far.dir, &far_buf);
+
+    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", spec, "--workspace", far_abs });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // t1 follows the session's environment, t2 asks to stay beside the ledger.
+    const there = try runCli(alloc, io, ws, &.{ exe, "task", "run", "--session", id, "--", "echo both-sides" });
+    defer alloc.free(there.stdout);
+    try std.testing.expectEqual(@as(u8, 0), there.code);
+    const here = try runCli(alloc, io, ws, &.{ exe, "task", "run", "--session", id, "--runs-on", "session", "--", "echo both-sides" });
+    defer alloc.free(here.stdout);
+    try std.testing.expectEqual(@as(u8, 0), here.code);
+
+    for ([_][]const u8{ "t1", "t2" }) |slot| {
+        const name = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ id, slot });
+        defer alloc.free(name);
+        const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // Each command's log sits on the machine that ran it, and only there.
+    const far_log = try relTaskPath(alloc, id, "t1", "output.log");
+    defer alloc.free(far_log);
+    const host_log = try relTaskPath(alloc, id, "t2", "output.log");
+    defer alloc.free(host_log);
+    try std.testing.expect(exists(io, far.dir, far_log));
+    try std.testing.expect(!exists(io, ws, far_log));
+    try std.testing.expect(exists(io, ws, host_log));
+    try std.testing.expect(!exists(io, far.dir, host_log));
+
+    // …and both are answered by the one listing, each asked of its own side.
+    const listed = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--json" });
+    defer alloc.free(listed.stdout);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, listed.stdout, "\"state\":\"done\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, listed.stdout, "\"machine\":\"remote:exec:"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, listed.stdout, "\"machine\":null"));
 }
 
 test "a step collects a far task's report even when no task verb ever asked" {
@@ -1232,7 +1500,7 @@ test "a report present while status still says running is not delivered — only
     // {background:true}` would have made before any command ran over there.
     const task_dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{id});
     defer alloc.free(task_dir);
-    try ws.createDirPath(io, task_dir);
+    try claimFarTask(alloc, io, ws, task_dir, spec);
 
     const listed = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--json" });
     defer alloc.free(listed.stdout);
@@ -1363,7 +1631,7 @@ test "a supervisor that dies over there reads here as lost, not running" {
     // does above) — only its CONTENT lives over there.
     const dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{id});
     defer alloc.free(dir);
-    try ws.createDirPath(io, dir);
+    try claimFarTask(alloc, io, ws, dir, spec);
     try far.dir.createDirPath(io, dir);
     const status_rel = try std.fmt.allocPrint(alloc, "{s}/status.json", .{dir});
     defer alloc.free(status_rel);
@@ -1412,7 +1680,7 @@ test "a real read fault on that machine's status file is a refusal, not an empty
     // fresh task, and the host read it as `starting` forever.
     const dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{id});
     defer alloc.free(dir);
-    try ws.createDirPath(io, dir);
+    try claimFarTask(alloc, io, ws, dir, spec);
     const status_rel = try std.fmt.allocPrint(alloc, "{s}/status.json", .{dir});
     defer alloc.free(status_rel);
     try far.dir.createDirPath(io, status_rel);
@@ -1460,7 +1728,7 @@ test "a real read fault on that machine's lease is a refusal, not a confident lo
     // happened is that machine could not answer the question at all.
     const dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{id});
     defer alloc.free(dir);
-    try ws.createDirPath(io, dir);
+    try claimFarTask(alloc, io, ws, dir, spec);
     try far.dir.createDirPath(io, dir);
     const status_rel = try std.fmt.allocPrint(alloc, "{s}/status.json", .{dir});
     defer alloc.free(status_rel);
@@ -1500,11 +1768,11 @@ test "a task whose machine will not answer reads as unreachable, not as lost or 
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
     defer alloc.free(id);
 
-    // The directory a claim leaves on this machine, and nothing else: the name
-    // is here, everything about the task is over there — and there is no there.
+    // What a claim leaves on this machine, and nothing else: the name is here,
+    // everything about the task is over there — and there is no there.
     const dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{id});
     defer alloc.free(dir);
-    try ws.createDirPath(io, dir);
+    try claimFarTask(alloc, io, ws, dir, nowhere);
 
     const listed = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--json" });
     defer alloc.free(listed.stdout);

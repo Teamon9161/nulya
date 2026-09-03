@@ -178,6 +178,11 @@ pub const Created = struct {
     permissions: Permissions = .readonly,
     profile: []const u8 = "",
     model: []const u8 = "",
+    /// The effort every step of this delegation sends, when a rung named one.
+    /// Read back on each round, unlike `profile` / `model`: effort is not part
+    /// of a session's identity, so it is not frozen in the child's header and
+    /// has to be said again every time.
+    effort: []const u8 = "",
     /// What an EXTERNAL runner was asked to run on — an opaque string in that
     /// harness's own vocabulary, never a nulya profile/model pair. Its own column
     /// rather than reusing `model`, which would read as a nulya model id.
@@ -243,6 +248,10 @@ pub fn appendCreated(
     if (c.model.len != 0) {
         try jw.objectField("model");
         try jw.write(c.model);
+    }
+    if (c.effort.len != 0) {
+        try jw.objectField("effort");
+        try jw.write(c.effort);
     }
     if (c.runner_model.len != 0) {
         try jw.objectField("runner_model");
@@ -365,6 +374,7 @@ pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const 
                     .permissions = Permissions.parse(stringOf(obj, "permissions") orelse "") orelse .readonly,
                     .profile = stringOf(obj, "profile") orelse "",
                     .model = stringOf(obj, "model") orelse "",
+                    .effort = stringOf(obj, "effort") orelse "",
                     .runner_model = stringOf(obj, "runner_model") orelse "",
                     .max_exchanges = try budgetOf(obj, "max_exchanges"),
                     .max_steps = try budgetOf(obj, "max_steps"),

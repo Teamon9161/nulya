@@ -45,6 +45,12 @@ pub const Def = struct {
     profile: []const u8 = "",
     /// `--model` within that profile; empty means the profile's default.
     model: []const u8 = "",
+    /// A RUNG rather than a model: `model: @explore` asks for whatever the
+    /// profile this delegation inherits calls `explore`. Resolved when the
+    /// delegation opens, against that profile's `roles` table; a profile that
+    /// staffs no such rung falls back to plain inheritance. Never both this and
+    /// `profile`/`model` — one `model:` field, one answer.
+    role: []const u8 = "",
     /// What an EXTERNAL runner should run on, in that harness's own vocabulary —
     /// `runner_model: gpt-5-codex`, say. Opaque here: a parser for it could only
     /// be a staler copy of somebody else's catalogue.
@@ -134,6 +140,22 @@ pub fn isMemberSpec(text: []const u8) bool {
 /// argument of the `agent` tool. The argument's whole purpose is to override the
 /// field for one delegation, so two parsers would be two grammars.
 pub const ModelRef = struct { profile: []const u8, model: []const u8 };
+
+/// The sigil that makes `model:` name a rung instead of a model. One character,
+/// and it cannot collide: a profile name is `[A-Za-z0-9_.-]+`.
+pub const role_sigil = '@';
+
+/// `@<rung>` — the third shape of the same field, and the only one whose answer
+/// depends on which profile the delegation ends up on.
+///
+/// Null is "not a rung at all"; an EMPTY name is "the sigil with nothing after
+/// it", which every caller reports rather than falling back to the pair grammar
+/// (where a bare `@` would read as a profile named `@`).
+pub fn parseRole(value: []const u8) ?[]const u8 {
+    const v = std.mem.trim(u8, value, " \t");
+    if (v.len == 0 or v[0] != role_sigil) return null;
+    return std.mem.trim(u8, v[1..], " \t");
+}
 
 pub fn parseModelRef(value: []const u8) ?ModelRef {
     const v = std.mem.trim(u8, value, " \t");
@@ -247,10 +269,14 @@ pub fn parse(
         } else if (std.mem.eql(u8, key, "runner")) {
             def.runner = runners.Runner.parse(unquote(value)) orelse return error.UnknownRunner;
         } else if (std.mem.eql(u8, key, "model")) {
-            if (parseModelRef(unquote(value))) |ref| {
+            if (parseRole(unquote(value))) |role| {
+                if (role.len == 0) {
+                    try warn(alloc, warnings, source, "model: @ needs a rung name after the @, ignored");
+                } else def.role = role;
+            } else if (parseModelRef(unquote(value))) |ref| {
                 def.profile = ref.profile;
                 def.model = ref.model;
-            } else try warn(alloc, warnings, source, "model must be <profile> or <profile>/<model-id>, ignored");
+            } else try warn(alloc, warnings, source, "model must be <profile>, <profile>/<model-id> or @<rung>, ignored");
         } else if (std.mem.eql(u8, key, "runner_model")) {
             def.runner_model = unquote(value);
         } else if (std.mem.eql(u8, key, "max_steps")) {
@@ -299,6 +325,10 @@ fn crossCheck(
         try warn(alloc, warnings, source, "model names a nulya profile, which this runner does not have; it was ignored (use `runner_model:`)");
         def.profile = "";
         def.model = "";
+    }
+    if (def.role.len != 0) {
+        try warn(alloc, warnings, source, "model names a rung of a nulya profile, which this runner does not have; it was ignored (use `runner_model:`)");
+        def.role = "";
     }
     // One sentence for all of them: three warnings about the same mistake would
     // bury the one thing the author has to change.
@@ -546,6 +576,70 @@ pub fn wornPersona(alloc: std.mem.Allocator, io: std.Io, session_id: []const u8)
 
 fn parseOne(alloc: std.mem.Allocator, text: []const u8, warnings: *std.ArrayList([]const u8)) !Def {
     return parse(alloc, text, "stem", .workspace, "x.md", warnings);
+}
+
+test "model: @rung names a rung instead of a pair, and the two shapes cannot both be set" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var warnings: std.ArrayList([]const u8) = .empty;
+
+    const rung = try parseOne(a,
+        \\---
+        \\name: explore
+        \\model: @explore
+        \\---
+        \\body
+        \\
+    , &warnings);
+    try std.testing.expectEqualStrings("explore", rung.role);
+    try std.testing.expectEqualStrings("", rung.profile);
+    try std.testing.expectEqualStrings("", rung.model);
+    try std.testing.expectEqual(@as(usize, 0), warnings.items.len);
+
+    const pair = try parseOne(a,
+        \\---
+        \\name: e
+        \\model: deepseek/deepseek-v4-pro
+        \\---
+        \\body
+        \\
+    , &warnings);
+    try std.testing.expectEqualStrings("", pair.role);
+    try std.testing.expectEqualStrings("deepseek", pair.profile);
+
+    // A sigil with nothing after it is not a rung, so it falls through to the
+    // pair grammar, which refuses it.
+    const empty = try parseOne(a,
+        \\---
+        \\name: e
+        \\model: @
+        \\---
+        \\body
+        \\
+    , &warnings);
+    try std.testing.expectEqualStrings("", empty.role);
+    try std.testing.expect(warnings.items.len != 0);
+}
+
+test "a rung on an external runner is dropped and named, like a profile is" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var warnings: std.ArrayList([]const u8) = .empty;
+
+    const def = try parseOne(arena.allocator(),
+        \\---
+        \\name: e
+        \\runner: codex
+        \\model: @explore
+        \\---
+        \\body
+        \\
+    , &warnings);
+    try std.testing.expectEqualStrings("", def.role);
+    try std.testing.expect(warnings.items.len != 0);
 }
 
 test "front matter reads into the arguments of one session new" {

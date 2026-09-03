@@ -60,6 +60,17 @@ fn holdCommand(alloc: std.mem.Allocator, d: environment.Dialect, hold_rel: []con
     };
 }
 
+/// The host half of a claim for a task whose command went to ANOTHER machine:
+/// its directory and the `machine` marker `startShellTask` writes there before
+/// starting anything. A fixture standing in for such a claim has to leave both —
+/// that marker is the only thing that tells a reader which side to ask.
+fn claimFarTask(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, dir_rel: []const u8, spec: []const u8) !void {
+    try ws.createDirPath(io, dir_rel);
+    const marker = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_rel, environment.task_machine_file });
+    defer alloc.free(marker);
+    try ws.writeFile(io, .{ .sub_path = marker, .data = spec });
+}
+
 /// Write the file `holdCommand` spins on, so the task starts already held.
 fn takeHold(io: std.Io, ws: std.Io.Dir, hold_rel: []const u8) !void {
     try ws.writeFile(io, .{ .sub_path = hold_rel, .data = "" });
@@ -758,11 +769,11 @@ test "background task: an unreadable owner header never turns kill into a local 
     defer alloc.free(id);
     const task_dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{id});
     defer alloc.free(task_dir);
-    try ws.createDirPath(io, task_dir);
+    try claimFarTask(alloc, io, ws, task_dir, "remote:exec:somewhere");
 
-    // The claim exists, but its owner's only location record does not. This may
-    // be a remote task; guessing local would create a kill marker no supervisor
-    // reads and then falsely print "kill requested".
+    // The task says its command went elsewhere, and its owner's only record of
+    // WHICH machine does not read. Guessing local would create a kill marker no
+    // supervisor reads and then falsely print "kill requested".
     const session_path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
     defer alloc.free(session_path);
     try ws.writeFile(io, .{ .sub_path = session_path, .data = "not a session header\n" });
@@ -1026,7 +1037,7 @@ test "background task: compact retargets an unreachable-machine task without cla
     // same shape a real `task run` leaves once its report has not come back.
     const task_dir = try std.fmt.allocPrint(alloc, ".nulya/scratch/{s}/tasks/t1", .{parent});
     defer alloc.free(task_dir);
-    try ws.createDirPath(io, task_dir);
+    try claimFarTask(alloc, io, ws, task_dir, env_spec);
     const task = try taskName(alloc, parent, "t1");
     defer alloc.free(task);
 

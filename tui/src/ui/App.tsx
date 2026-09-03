@@ -37,7 +37,7 @@ import { ExtView } from "./overlays/ExtView.tsx"
 import { HelpView } from "./overlays/HelpView.tsx"
 import { SettingsView } from "./overlays/SettingsView.tsx"
 import { UsageView } from "./overlays/UsageView.tsx"
-import { ModelView, modelParamsFor } from "./overlays/ModelView.tsx"
+import { ModelView, modelParamsFor, teamSummary } from "./overlays/ModelView.tsx"
 import { ProviderView } from "./overlays/ProviderView.tsx"
 import { TasksView } from "./overlays/TasksView.tsx"
 import { BodyWidthContext, ScreenContext, FrameContext, StyleContext, useScreen, useStyle, type Style } from "../render/theme.ts"
@@ -1992,6 +1992,17 @@ export function App(props: AppProps) {
   }
 
   /**
+   * The rest of the team the pick brings with it, as a section of a one-line
+   * notice — a profile's rungs are what its delegations run on, so changing the
+   * model changes them too, and that has to be visible where the change is
+   * announced. Empty when the profile staffs no rung, which is most of them.
+   */
+  const teamNote = (pick: ModelPick | undefined): string => {
+    const summary = teamSummary(props.profiles?.find((profile) => profile.name === pick?.profile))
+    return summary.length > 0 ? ` · ${summary}` : ""
+  }
+
+  /**
    * Whether that model is catalogued as accepting images (`[[models]]` with
    * `vision = true`) — the same question, against the same table, that the
    * kernel's gate asks when the turn is appended. An id the
@@ -2201,7 +2212,9 @@ export function App(props: AppProps) {
       closeOverlay()
       setGuide(null)
       void enterWorkspace(child.ws)
-      setNotice(`${child.id} · ${modelOf(pick)} · ${at} turns carried over · cold prompt cache, and the old reasoning stays behind`)
+      setNotice(
+        `${child.id} · ${modelOf(pick)}${teamNote(pick)} · ${at} turns carried over · cold prompt cache, and the old reasoning stays behind`,
+      )
     } catch (error) {
       // Verbatim, and with room to be read: the kernel's gates (credential,
       // vision when the carried turns hold images, a cut point past the tail)
@@ -2247,7 +2260,7 @@ export function App(props: AppProps) {
     setGuide(null)
     const what = bring ? ` · with ${formatWithRef(bring)}` : ""
     const who = chosen ? `${modelOf(chosen)}` : "the default model"
-    setNotice(`next session · ${who}${what} · starts when you send a message`)
+    setNotice(`next session · ${who}${teamNote(chosen)}${what} · starts when you send a message`)
     if (remember && chosen) rememberModel(chosen, props.statePath)
   }
 

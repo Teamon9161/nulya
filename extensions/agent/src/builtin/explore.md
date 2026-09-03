@@ -2,6 +2,7 @@
 name: explore
 description: Read-only reconnaissance that returns a report
 permissions: readonly
+model: @explore
 with: ["std:read,grep,glob"]
 ---
 # nulya exploration sub-agent

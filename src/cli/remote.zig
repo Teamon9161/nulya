@@ -222,7 +222,7 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     _ = args;
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
-    var cfg = try config.load(alloc, io, &host);
+    var cfg = try config.load(alloc, io, &host, common.stderr_diag);
     defer cfg.deinit();
 
     // No session ref: an agent runs commands, it does not own a ledger. Its

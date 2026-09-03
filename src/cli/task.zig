@@ -15,6 +15,7 @@ const journal = @import("../journals/journal.zig");
 const launch = @import("../launch.zig");
 const ledger = @import("../ledger.zig");
 const lease = @import("../lease.zig");
+const manifest = @import("../extension/manifest.zig");
 const remote = @import("../environment/remote/mod.zig");
 const Tree = @import("../environment/tree.zig").Tree;
 const task_remote = @import("task_remote.zig");
@@ -303,7 +304,7 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     } else {
         var cfg_host = try environment.hostEnvironMap(alloc);
         defer cfg_host.deinit();
-        var cfg = try config.load(alloc, io, &cfg_host);
+        var cfg = try config.load(alloc, io, &cfg_host, common.stderr_diag);
         defer cfg.deinit();
         // No session ref: a supervisor runs one command, it never starts tasks.
         var lenv = try launch.localEnvironment(alloc, io, &cfg, null, &.{}, common.stderr_diag);
@@ -815,10 +816,18 @@ pub fn heldTaskFor(alloc: std.mem.Allocator, io: std.Io, session_id: []const u8)
 
 fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const command = commandAfterDashDash(alloc, args) catch {
-        try printErr(io, "usage: nulya task run [--session <id>] [--cwd <dir>] [--timeout-ms N] -- <command>\n");
+        try printErr(io, "usage: nulya task run [--session <id>] [--cwd <dir>] [--timeout-ms N] [--runs-on workspace|session] -- <command>\n");
         return 1;
     };
     defer alloc.free(command);
+
+    // Where the command lands, in the SAME two words a manifest uses:
+    // `workspace` follows the session's own environment, `session` runs beside
+    // the session file whatever that environment is.
+    const runs_on = manifest.RunsOn.fromString(flagValue(args, "--runs-on") orelse "workspace") orelse {
+        try printErr(io, "--runs-on takes workspace or session\n");
+        return 1;
+    };
 
     const explicit = flagValue(args, "--session");
     const inherited = if (explicit == null) try envSessionId(alloc) else null;
@@ -857,36 +866,50 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
-    var cfg = try config.load(alloc, io, &host);
+    var cfg = try config.load(alloc, io, &host, common.stderr_diag);
     defer cfg.deinit();
 
     const tasks_dir = try launch.sessionTasksDir(alloc, session_id);
     defer alloc.free(tasks_dir);
-    // The SAME `startShellTask` and environment the `shell` tool reaches, so the
-    // two entry points cannot drift about which machine a command runs on.
-    var lenv = launch.sessionEnvironment(alloc, io, &cfg, .{
+    const sref: environment.SessionRef = .{
         .session_path = spath,
         .tasks_dir = tasks_dir,
         // No store roots: a task supervisor runs a COMMAND, never an extension.
-    }, hdr.value.environment, hdr.value.remote_workspace, &.{}, null, remote_agent.reach) catch |err| switch (err) {
-        error.UnsupportedEnvironmentBackend => {
-            try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
-            return 1;
-        },
-        error.RemoteChannelLost, error.RemoteChannelStalled, error.RemoteVersionMismatch => {
-            try printErrFmt(alloc, io, "session '{s}' runs its commands on '{s}', which did not answer; nothing was started here instead\n", .{ session_id, hdr.value.environment });
-            return 1;
-        },
-        error.InvalidExecTarget, error.InvalidRemoteSpec, error.RemoteSpecUnsupportedOnHost => {
-            // Same pointer a fresh `--env ssh:…` gets, for a retired spelling.
-            if (launch.legacyExecHint(environment.normalizeExecSpec(hdr.value.environment))) |hint| {
-                try printErrFmt(alloc, io, "session '{s}' runs its commands in '{s}', which this host cannot reach ({s})\n", .{ session_id, hdr.value.environment, hint });
+    };
+    // `session` never asks that machine anything, which is the point: the
+    // caller is already here. Otherwise the SAME `startShellTask` and
+    // environment the `shell` tool reaches, so the two entry points cannot
+    // drift about which machine a command runs on.
+    var lenv: launch.SessionEnvironment = blk: {
+        if (runs_on == .session) {
+            break :blk .{ .local = launch.localEnvironment(alloc, io, &cfg, sref, &.{}, common.stderr_diag) catch |err| switch (err) {
+                error.UnsupportedEnvironmentBackend => {
+                    try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
+                    return 1;
+                },
+                else => return err,
+            } };
+        }
+        break :blk launch.sessionEnvironment(alloc, io, &cfg, sref, hdr.value.environment, hdr.value.remote_workspace, &.{}, null, remote_agent.reach) catch |err| switch (err) {
+            error.UnsupportedEnvironmentBackend => {
+                try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
                 return 1;
-            }
-            try printErrFmt(alloc, io, "session '{s}' runs its commands in '{s}', which this host cannot reach\n", .{ session_id, hdr.value.environment });
-            return 1;
-        },
-        else => return err,
+            },
+            error.RemoteChannelLost, error.RemoteChannelStalled, error.RemoteVersionMismatch => {
+                try printErrFmt(alloc, io, "session '{s}' runs its commands on '{s}', which did not answer; nothing was started here instead\n", .{ session_id, hdr.value.environment });
+                return 1;
+            },
+            error.InvalidExecTarget, error.InvalidRemoteSpec, error.RemoteSpecUnsupportedOnHost => {
+                // Same pointer a fresh `--env ssh:…` gets, for a retired spelling.
+                if (launch.legacyExecHint(environment.normalizeExecSpec(hdr.value.environment))) |hint| {
+                    try printErrFmt(alloc, io, "session '{s}' runs its commands in '{s}', which this host cannot reach ({s})\n", .{ session_id, hdr.value.environment, hint });
+                    return 1;
+                }
+                try printErrFmt(alloc, io, "session '{s}' runs its commands in '{s}', which this host cannot reach\n", .{ session_id, hdr.value.environment });
+                return 1;
+            },
+            else => return err,
+        };
     };
     defer lenv.deinit();
 
@@ -952,7 +975,11 @@ pub const RowRef = struct {
 /// turns a null row into "no such task", and a `.lock` this machine cannot open
 /// is no evidence the task is gone, so it propagates as an error.
 fn readRow(arena: std.mem.Allocator, io: std.Io, far: *Far, ref: RowRef, deliver: bool) !?Row {
-    if (try far.isRemote(ref.session)) return task_remote.readRemoteRow(arena, io, far, ref, deliver);
+    // Per TASK, not per session: a session whose commands run elsewhere can
+    // still hold tasks started beside itself, and the two look alike here until
+    // one of them says so.
+    if (markerPresent(arena, io, ref.dir, environment.task_machine_file))
+        return task_remote.readRemoteRow(arena, io, far, ref, deliver);
     const parsed = readStatus(arena, io, ref.dir) catch return null;
     const status: ?Status = if (parsed) |p| p.value else null;
     return .{

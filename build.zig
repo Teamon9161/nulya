@@ -129,6 +129,18 @@ pub fn build(b: *std.Build) void {
     const agent_ext_tests = b.addTest(.{ .root_module = agent_ext_mod, .filters = test_filters });
     test_step.dependOn(&b.addRunArtifact(agent_ext_tests).step);
 
+    // …and the rung table it reads to answer "which model does `@explore` mean
+    // here" (`fleet.zig`): the resolution against one profile, and the several
+    // ways of not finding a rung that all mean plain inheritance. Its own root
+    // for `record.zig`'s reason — a test only runs where its file is analysed.
+    const agent_fleet_mod = b.createModule(.{
+        .root_source_file = b.path("extensions/agent/src/fleet.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const agent_fleet_tests = b.addTest(.{ .root_module = agent_fleet_mod, .filters = test_filters });
+    test_step.dependOn(&b.addRunArtifact(agent_fleet_tests).step);
+
     // …and that package's delegation journal (`record.zig`): the id shape, the
     // append-only rows the exchange budget is counted from, and the runner lease
     // the wake invariant is built on (contract D4). Its own root because nothing

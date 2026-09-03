@@ -283,7 +283,7 @@ pub fn createSession(
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
 
-    var cfg = try config.load(alloc, io, &host);
+    var cfg = try config.load(alloc, io, &host, common.stderr_diag);
     defer cfg.deinit();
 
     // `--parent <id>:<seq>` names the lineage this session continues. The
@@ -1023,7 +1023,7 @@ fn visionAccepted(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !bool
 
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
-    var cfg = try config.load(alloc, io, &host);
+    var cfg = try config.load(alloc, io, &host, common.stderr_diag);
     defer cfg.deinit();
 
     return visionClaimed(alloc, io, &cfg, header.value.model_identity.model, "session append");
@@ -1138,7 +1138,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     if (ssh_password != null and !remote.isSshSpec(hdr.value.environment))
         return stepFail(alloc, stream, "--ssh-password-stdin applies only to a remote:ssh: session", .{});
 
-    var cfg = try config.load(alloc, io, &host);
+    var cfg = try config.load(alloc, io, &host, common.stderr_diag);
     defer cfg.deinit();
 
     const tasks_dir = try launch.sessionTasksDir(alloc, id);
@@ -1220,6 +1220,19 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         else => return stepFail(alloc, stream, "session open failed: {s}", .{@errorName(err)}),
     };
     defer sess.deinit();
+
+    // After the composition, which is where the answer is, and before the first
+    // step, which is where a tool call could reach for it.
+    if (lenv == .remote) {
+        var host_side: std.ArrayList([]const u8) = .empty;
+        defer host_side.deinit(alloc);
+        for (sess.composition.extensions) |e| {
+            if (e.runs_on == .session) try host_side.append(alloc, e.id);
+        }
+        lenv.useHostSideExtensions(host_side.items) catch |err| {
+            return stepFail(alloc, stream, "session '{s}': cannot run its session-side extensions here: {s}", .{ id, @errorName(err) });
+        };
+    }
 
     sess.model_options = .{ .effort = effort_flag orelse cfg.defaultEffort(hdr.value.model, hdr.value.model_identity.model) };
 

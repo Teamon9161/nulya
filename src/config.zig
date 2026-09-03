@@ -6,6 +6,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const toml = @import("toml");
 const config_options = @import("config_options");
+const diag = @import("diag.zig");
 const environment = @import("environment.zig");
 const provider = @import("provider.zig");
 
@@ -41,6 +42,20 @@ pub const ShellDialect = enum {
     }
 };
 
+/// One named model choice on a profile. A delegating extension asks for a role
+/// by name and gets whatever THIS profile calls it, so changing the main model
+/// changes the whole line-up in one move. The names are an open vocabulary —
+/// the kernel knows none of them, and never reads this: like `ModelParams.label`
+/// the config carries it and someone above spends it.
+///
+/// `model` is a model id this same profile serves, or `<profile>/<model-id>` to
+/// cross to another profile.
+pub const Role = struct {
+    name: []const u8,
+    model: []const u8,
+    effort: ?[]const u8 = null,
+};
+
 /// A profile says HOW to reach a provider and WHICH model ids it serves; the
 /// ids' intrinsic properties live in the `[[models]]` catalog.
 pub const ProviderProfile = struct {
@@ -56,6 +71,8 @@ pub const ProviderProfile = struct {
     api_key: ?[]const u8 = null,
     /// Profile-wide effort override, preferred over the catalog's `default_effort`.
     effort: ?[]const u8 = null,
+    /// Named model choices, merged by `name` across trusted layers.
+    roles: []const Role = &.{},
 
     /// The model id a session gets when none is named. `""` means "let the
     /// provider default" (`launch.resolveDescriptor` fills it in).
@@ -199,6 +216,10 @@ const RawProviderProfile = struct {
     api_key_env: ?[]const u8 = null,
     api_key: ?[]const u8 = null,
     effort: ?[]const u8 = null,
+    /// Kept as the raw table and read a level down by `decodeRoles`: a role's
+    /// value is either a string or a table, and the mapper offers a struct-typed
+    /// field only tables, so no single Zig type can catch both shapes.
+    roles: ?toml.Table = null,
 };
 
 const RawModelParams = struct {
@@ -223,30 +244,50 @@ const RawExtensions = struct {
     with: ?[]const []const u8 = null,
 };
 
-pub fn load(alloc: std.mem.Allocator, io: std.Io, host_env: *const std.process.Environ.Map) !Config {
+/// `sink` is where a rejected file says which profile and which role broke it —
+/// an error name carries neither. `.{}` is silent, for a caller with nowhere to
+/// put it.
+pub fn load(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    host_env: *const std.process.Environ.Map,
+    sink: diag.Diag,
+) !Config {
     var cfg = Config.init(alloc);
     errdefer cfg.deinit();
+    const report: Report = .{ .io = io, .sink = sink };
 
-    try mergeToml(&cfg, default_toml, .trusted);
+    try mergeToml(&cfg, default_toml, .trusted, report);
 
     var paths = try ConfigPaths.init(alloc, host_env);
     defer paths.deinit(alloc);
 
     if (try readFileMaybe(alloc, io, paths.system)) |source| {
         defer alloc.free(source);
-        try mergeToml(&cfg, source, .trusted);
+        try mergeToml(&cfg, source, .trusted, report);
     }
     if (try readFileMaybe(alloc, io, paths.user)) |source| {
         defer alloc.free(source);
-        try mergeToml(&cfg, source, .trusted);
+        try mergeToml(&cfg, source, .trusted, report);
     }
     if (try readFileMaybe(alloc, io, project_config_path)) |source| {
         defer alloc.free(source);
-        try mergeToml(&cfg, source, .project);
+        try mergeToml(&cfg, source, .project, report);
     }
 
     return cfg;
 }
+
+/// Where a merge says what an error name cannot carry. Silent until a shell
+/// layer hands over a sink.
+const Report = struct {
+    io: std.Io,
+    sink: diag.Diag = .{},
+
+    fn line(self: Report, comptime fmt: []const u8, args: anytype) void {
+        self.sink.reportFmt(self.io, fmt, args);
+    }
+};
 
 test "user config lives at ~/.nulya/config.toml, NULYA_HOME relocates it" {
     const alloc = std.testing.allocator;
@@ -268,7 +309,7 @@ test "user config lives at ~/.nulya/config.toml, NULYA_HOME relocates it" {
 
 const LayerKind = enum { trusted, project };
 
-fn mergeToml(cfg: *Config, source: []const u8, kind: LayerKind) !void {
+fn mergeToml(cfg: *Config, source: []const u8, kind: LayerKind, report: Report) !void {
     var parser = toml.Parser(RawConfig).init(cfg.arena.child_allocator);
     defer parser.deinit();
 
@@ -276,17 +317,17 @@ fn mergeToml(cfg: *Config, source: []const u8, kind: LayerKind) !void {
     defer parsed.deinit();
 
     switch (kind) {
-        .trusted => try mergeTrusted(cfg, parsed.value),
+        .trusted => try mergeTrusted(cfg, parsed.value, report),
         .project => try mergeProject(cfg, parsed.value),
     }
 }
 
-fn mergeTrusted(cfg: *Config, raw: RawConfig) !void {
+fn mergeTrusted(cfg: *Config, raw: RawConfig, report: Report) !void {
     const arena = cfg.arenaAlloc();
 
     if (raw.provider) |p| {
         if (p.active_profile) |name| cfg.provider.active_profile = try arena.dupe(u8, name);
-        if (p.profiles) |profiles| for (profiles) |profile| try upsertProfile(cfg, profile);
+        if (p.profiles) |profiles| for (profiles) |profile| try upsertProfile(cfg, profile, report);
         if (p.retry) |retry| {
             if (retry.max_retries) |n| cfg.provider.retry.max_retries = n;
             if (retry.initial_backoff_ms) |ms| cfg.provider.retry.initial_backoff_ms = ms;
@@ -340,13 +381,13 @@ fn mergeProject(cfg: *Config, raw: RawConfig) !void {
     }
 }
 
-fn upsertProfile(cfg: *Config, raw: RawProviderProfile) !void {
+fn upsertProfile(cfg: *Config, raw: RawProviderProfile, report: Report) !void {
     const name = raw.name orelse return;
     const arena = cfg.arenaAlloc();
 
     for (cfg.provider.profiles, 0..) |*profile, i| {
         if (std.mem.eql(u8, profile.name, name)) {
-            try mergeProfileFields(arena, &cfg.provider.profiles[i], raw);
+            try mergeProfileFields(arena, &cfg.provider.profiles[i], raw, report);
             return;
         }
     }
@@ -354,11 +395,11 @@ fn upsertProfile(cfg: *Config, raw: RawProviderProfile) !void {
     const next = try arena.alloc(ProviderProfile, cfg.provider.profiles.len + 1);
     @memcpy(next[0..cfg.provider.profiles.len], cfg.provider.profiles);
     next[cfg.provider.profiles.len] = .{ .name = try arena.dupe(u8, name) };
-    try mergeProfileFields(arena, &next[cfg.provider.profiles.len], raw);
+    try mergeProfileFields(arena, &next[cfg.provider.profiles.len], raw, report);
     cfg.provider.profiles = next;
 }
 
-fn mergeProfileFields(arena: std.mem.Allocator, profile: *ProviderProfile, raw: RawProviderProfile) !void {
+fn mergeProfileFields(arena: std.mem.Allocator, profile: *ProviderProfile, raw: RawProviderProfile, report: Report) !void {
     if (raw.kind) |kind| profile.kind = kind;
     if (raw.model) |model| profile.model = try arena.dupe(u8, model);
     if (raw.models) |models| profile.models = try dupeStringList(arena, models);
@@ -366,6 +407,76 @@ fn mergeProfileFields(arena: std.mem.Allocator, profile: *ProviderProfile, raw: 
     if (raw.api_key_env) |api_key_env| profile.api_key_env = try arena.dupe(u8, api_key_env);
     if (raw.api_key) |api_key| profile.api_key = try arena.dupe(u8, api_key);
     if (raw.effort) |effort| profile.effort = try arena.dupe(u8, effort);
+    if (raw.roles) |roles| try mergeRoles(arena, profile, try decodeRoles(arena, roles, profile.name, report));
+}
+
+/// `[provider.profiles.roles]`, one level down by hand: a bare string is short
+/// for `{ model = <it> }`, a table carries `model` plus an optional `effort`.
+fn decodeRoles(
+    arena: std.mem.Allocator,
+    raw: toml.Table,
+    profile: []const u8,
+    report: Report,
+) ![]const Role {
+    const out = try arena.alloc(Role, raw.count());
+    var at: usize = 0;
+    var it = raw.iterator();
+    while (it.next()) |entry| : (at += 1) {
+        const name = try arena.dupe(u8, entry.key_ptr.*);
+        switch (entry.value_ptr.*) {
+            .string => |id| out[at] = .{ .name = name, .model = try arena.dupe(u8, id) },
+            .table => |table| {
+                const model = try roleString(arena, table.get("model"), profile, name, "model", report) orelse {
+                    report.line("config: profile '{s}': role '{s}' names no model\n", .{ profile, name });
+                    return error.InvalidRole;
+                };
+                out[at] = .{
+                    .name = name,
+                    .model = model,
+                    .effort = try roleString(arena, table.get("effort"), profile, name, "effort", report),
+                };
+            },
+            else => {
+                report.line("config: profile '{s}': role '{s}' must be a model id or a table\n", .{ profile, name });
+                return error.InvalidRole;
+            },
+        }
+    }
+    return out;
+}
+
+fn roleString(
+    arena: std.mem.Allocator,
+    value: ?toml.Value,
+    profile: []const u8,
+    role: []const u8,
+    key: []const u8,
+    report: Report,
+) !?[]const u8 {
+    const v = value orelse return null;
+    switch (v) {
+        .string => |s| return try arena.dupe(u8, s),
+        else => {
+            report.line("config: profile '{s}': role '{s}' has a non-string `{s}`\n", .{ profile, role, key });
+            return error.InvalidRole;
+        },
+    }
+}
+
+/// Overlay roles by `name`: the same discipline as `[[models]]` by `id`, so a
+/// layer retunes one slot without restating the line-up.
+fn mergeRoles(arena: std.mem.Allocator, profile: *ProviderProfile, incoming: []const Role) !void {
+    var out: std.ArrayList(Role) = .empty;
+    try out.appendSlice(arena, profile.roles);
+    for (incoming) |role| {
+        for (out.items) |*existing| {
+            if (std.mem.eql(u8, existing.name, role.name)) {
+                existing.* = role;
+                break;
+            }
+        } else try out.append(arena, role);
+    }
+    profile.roles = try out.toOwnedSlice(arena);
 }
 
 /// Merge a `[[models]]` entry by `id`: same id → fields overlay, new id → appended.
@@ -482,9 +593,14 @@ const TestLayer = struct {
 };
 
 fn loadFromLayers(alloc: std.mem.Allocator, layers: []const TestLayer) !Config {
+    return loadFromLayersReporting(alloc, layers, .{});
+}
+
+fn loadFromLayersReporting(alloc: std.mem.Allocator, layers: []const TestLayer, sink: diag.Diag) !Config {
     var cfg = Config.init(alloc);
     errdefer cfg.deinit();
-    for (layers) |layer| try mergeToml(&cfg, layer.source, if (layer.project) .project else .trusted);
+    const report: Report = .{ .io = std.testing.io, .sink = sink };
+    for (layers) |layer| try mergeToml(&cfg, layer.source, if (layer.project) .project else .trusted, report);
     return cfg;
 }
 
@@ -650,6 +766,113 @@ test "a config file naming the retired 'remote' backend fails to load, rather th
         .{ .source =
         \\[environment]
         \\backend = "remote"
+        },
+    }));
+}
+
+fn roleOf(profile: ProviderProfile, name: []const u8) ?Role {
+    for (profile.roles) |role| {
+        if (std.mem.eql(u8, role.name, name)) return role;
+    }
+    return null;
+}
+
+test "roles merge by role name and a restated role replaces the whole entry" {
+    var cfg = try loadFromLayers(std.testing.allocator, &.{
+        .{ .source = default_toml },
+        .{ .source =
+        \\[[provider.profiles]]
+        \\name = "openai"
+        \\[provider.profiles.roles]
+        \\review = "gpt-5.6-luna"
+        \\cheap = { model = "deepseek/deepseek-v4-flash", effort = "low" }
+        },
+    });
+    defer cfg.deinit();
+
+    const openai = cfg.provider.findProfile("openai").?;
+    // The layer named two roles; the ones it did not name survive untouched.
+    try std.testing.expect(roleOf(openai, "explore") != null);
+    // Restating a role replaces it, so the effort the default gave it is gone.
+    try std.testing.expectEqualStrings("gpt-5.6-luna", roleOf(openai, "review").?.model);
+    try std.testing.expect(roleOf(openai, "review").?.effort == null);
+    const cheap = roleOf(openai, "cheap").?;
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-flash", cheap.model);
+    try std.testing.expectEqualStrings("low", cheap.effort.?);
+    // Roles ride on the profile, so a profile nobody gave any has none.
+    try std.testing.expectEqual(@as(usize, 0), cfg.provider.findProfile("scripted").?.roles.len);
+}
+
+test "a bare role value is exactly a table naming only its model" {
+    var cfg = try loadFromLayers(std.testing.allocator, &.{.{ .source =
+        \\[[provider.profiles]]
+        \\name = "bare"
+        \\[provider.profiles.roles]
+        \\explore = "some-model"
+        \\
+        \\[[provider.profiles]]
+        \\name = "spelled"
+        \\[provider.profiles.roles]
+        \\explore = { model = "some-model" }
+    }});
+    defer cfg.deinit();
+
+    const bare = roleOf(cfg.provider.findProfile("bare").?, "explore").?;
+    const spelled = roleOf(cfg.provider.findProfile("spelled").?, "explore").?;
+    try std.testing.expectEqualStrings(bare.model, spelled.model);
+    try std.testing.expectEqual(bare.effort, spelled.effort);
+}
+
+test "project layer cannot define or retarget a role" {
+    var cfg = try loadFromLayers(std.testing.allocator, &.{
+        .{ .source = default_toml },
+        .{ .project = true, .source =
+        \\[[provider.profiles]]
+        \\name = "openai"
+        \\[provider.profiles.roles]
+        \\explore = "deepseek/deepseek-v4-flash"
+        \\
+        \\[[provider.profiles]]
+        \\name = "invented"
+        \\[provider.profiles.roles]
+        \\explore = "anything"
+        },
+    });
+    defer cfg.deinit();
+
+    const openai = cfg.provider.findProfile("openai").?;
+    try std.testing.expectEqualStrings("gpt-5.6-luna", roleOf(openai, "explore").?.model);
+    try std.testing.expect(cfg.provider.findProfile("invented") == null);
+}
+
+test "a role value of the wrong shape is refused, and the message names the role" {
+    const Sink = struct {
+        var seen: std.ArrayList(u8) = .empty;
+        fn write(_: ?*anyopaque, _: std.Io, line: []const u8) void {
+            seen.appendSlice(std.testing.allocator, line) catch {};
+        }
+    };
+    defer Sink.seen.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.InvalidRole, loadFromLayersReporting(std.testing.allocator, &.{
+        .{ .source = default_toml },
+        .{ .source =
+        \\[[provider.profiles]]
+        \\name = "openai"
+        \\[provider.profiles.roles]
+        \\review = 3
+        },
+    }, .{ .reportFn = Sink.write }));
+    try std.testing.expect(std.mem.indexOf(u8, Sink.seen.items, "review") != null);
+
+    // A table is the long form of a model choice, so it has to name one.
+    try std.testing.expectError(error.InvalidRole, loadFromLayers(std.testing.allocator, &.{
+        .{ .source = default_toml },
+        .{ .source =
+        \\[[provider.profiles]]
+        \\name = "openai"
+        \\[provider.profiles.roles]
+        \\review = { effort = "high" }
         },
     }));
 }

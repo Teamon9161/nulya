@@ -18,6 +18,7 @@
 //! | `<journal>.lock`                        | every journal append                                             | block      | *     |
 //! | `scratch/<id>/tasks/t<N>/.lock`         | one task's supervisor, for its whole life; probed by every reader | fail_fast  | *     |
 //! | `scratch/<id>/tasks/t<N>/{kill,notify,delivered}` | markers: stop it / where the report goes / it was delivered | —      | —     |
+//! | `scratch/<id>/tasks/t<N>/machine`       | marker: the command went to another machine, named inside     | —          | —     |
 //! | `.nulya/delegations/<d>/.runner.lock`   | `extensions/agent`: the runner of one delegation                 | fail_fast  | *     |
 //! | `.nulya/delegations/<d>/inbox/.writer.lock` | `extensions/agent`: a sender, across taking a number and publishing | block  | *     |
 //! | `.nulya/delegations/<d>/record.jsonl.lock`  | `extensions/agent`: an appender to the delegation record     | block      | *     |

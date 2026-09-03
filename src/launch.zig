@@ -327,6 +327,17 @@ pub const SessionEnvironment = union(enum) {
             .remote => |*r| try r.publishSession(session_id),
         }
     }
+
+    /// The members whose calls stay on this machine, per their frozen
+    /// manifests. Composition answers this, and composition is built after the
+    /// environment, so it is handed down here rather than at construction. A
+    /// local environment is already that machine and has nothing to route.
+    pub fn useHostSideExtensions(self: *SessionEnvironment, ids: []const []const u8) !void {
+        switch (self.*) {
+            .local => {},
+            .remote => |*r| try r.useHostSide(ids),
+        }
+    }
 };
 
 /// The shell layer's two answers about reaching another machine: where the
@@ -359,13 +370,15 @@ pub fn sessionEnvironment(
     const spec = environment.normalizeExecSpec(exec);
     if (remote.isSpec(spec)) {
         if (cfg.environment.backend != .local) return error.UnsupportedEnvironmentBackend;
-        // No store path: which version means which file is the far agent's
-        // answer, given against ITS own store.
+        // The store is THIS machine's: which version means which file over
+        // there is the far agent's answer, given against its own store. This
+        // one serves the members that never go there.
         return .{
             .remote = try remote.RemoteEnvironment.connect(alloc, io, .{
                 .spec = spec,
                 .workspace = workspace,
                 .version = version,
+                .extension_store = ext_store,
                 // A background task's name and delivery belong to the machine
                 // holding the ledger, whichever machine runs the command.
                 .session = session,

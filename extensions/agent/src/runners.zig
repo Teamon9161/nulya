@@ -146,6 +146,13 @@ pub const StartOptions = struct {
     /// runner with per-delegation state on disk has somewhere to put it. Empty
     /// only for the nulya arm.
     delegation: []const u8 = "",
+    /// Where the PARENT'S commands run, verbatim from its header, so the
+    /// delegated session's run in the same place: two sessions over one
+    /// workspace, both ledgers on this machine. Empty is this machine.
+    /// The nulya arm only — an external harness runs where it runs.
+    environment: []const u8 = "",
+    /// The parent's `remote_workspace`, meaningless without `environment`.
+    workspace: []const u8 = "",
 };
 
 /// What opening a conversation came back with.
@@ -286,6 +293,11 @@ pub fn start(r: Runner, alloc: std.mem.Allocator, io: std.Io, opts: StartOptions
             // empty for it. Inheriting it would give a sub-agent capabilities
             // its author never wrote down.
             try argv.appendSlice(alloc, &.{ opts.exe, "session", "new", "--bare", "--prompt", opts.prompt });
+            // Not inherited by `session new` itself (`--bare` or not): a child
+            // session is told where its commands run, or it opens on this
+            // machine while its parent works on another one.
+            if (opts.environment.len != 0) try argv.appendSlice(alloc, &.{ "--env", opts.environment });
+            if (opts.workspace.len != 0) try argv.appendSlice(alloc, &.{ "--workspace", opts.workspace });
             if (opts.profile.len != 0) try argv.appendSlice(alloc, &.{ "--profile", opts.profile });
             if (opts.model.len != 0) try argv.appendSlice(alloc, &.{ "--model", opts.model });
             for (opts.with) |member| try argv.appendSlice(alloc, &.{ "--with", member });

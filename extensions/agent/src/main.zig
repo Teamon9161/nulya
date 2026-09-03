@@ -22,6 +22,7 @@
 const std = @import("std");
 const rpc = @import("rpc.zig");
 const defs = @import("defs.zig");
+const fleet = @import("fleet.zig");
 const runner = @import("runner.zig");
 const runners = @import("runners.zig");
 const record = @import("record.zig");
@@ -234,8 +235,25 @@ fn list(ctx: *const Ctx) !rpc.Outcome {
     const alloc = ctx.alloc;
     var out: std.Io.Writer.Allocating = .init(alloc);
     var jw: std.json.Stringify = .{ .writer = &out.writer };
+    const found = try defs.discover(alloc, ctx.io, ctx.env);
+
+    // Where a rung would land if a delegation opened right now: this session's
+    // profile, else the one the config chain opens on. Asked ONCE for the whole
+    // list, and only when some definition names a rung — a picker's data is not
+    // worth a subprocess nobody asked a question with.
+    var payload: []const u8 = "";
+    var here: []const u8 = "";
+    for (found) |entry| {
+        if (entry.def.role.len == 0) continue;
+        const shown = proc.run(alloc, ctx.io, &.{ ctx.exe, "config", "show", "--json" }) catch break;
+        if (shown.code != 0) break;
+        payload = shown.stdout;
+        here = hereProfile(alloc, ctx, payload);
+        break;
+    }
+
     try jw.beginArray();
-    for (try defs.discover(alloc, ctx.io, ctx.env)) |entry| {
+    for (found) |entry| {
         try jw.beginObject();
         try jw.objectField("name");
         try jw.write(entry.def.name);
@@ -260,6 +278,15 @@ fn list(ctx: *const Ctx) !rpc.Outcome {
         try jw.write(entry.def.profile);
         try jw.objectField("model");
         try jw.write(entry.def.model);
+        try jw.objectField("role");
+        try jw.write(entry.def.role);
+        // Where that rung lands on the profile a delegation would inherit right
+        // now. Empty on a definition that names no rung — and on one whose rung
+        // this profile does not staff, which is the case somebody has to see: a
+        // `role` with no `role_model` runs on the model it inherits, and a
+        // misspelled rung looks exactly like that.
+        try jw.objectField("role_model");
+        try jw.write(if (entry.def.role.len == 0) "" else landing(alloc, payload, here, entry.def.role));
         try jw.objectField("runner_model");
         try jw.write(entry.def.runner_model);
         try jw.objectField("max_steps");
@@ -330,10 +357,13 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
 
     // Which session is this? Without it there is nobody to report BACK to —
     // the report is deposited as a `note` into a session's inbox.
-    const session_path = ctx.env.get("NULYA_SESSION") orelse
-        return rpc.refuse(alloc, "agent must be called from inside a session (NULYA_SESSION is not set)", .{});
-    const parent = std.fs.path.stem(session_path);
-    if (parent.len == 0) return rpc.refuse(alloc, "agent must be called from inside a session (NULYA_SESSION names no session file)", .{});
+    //
+    // The ID and not the file's path: everything below uses it as a name (the
+    // task's owner, the record's `parent`, the header to read), and the path is
+    // published only on the machine the file is on.
+    const parent = ctx.env.get("NULYA_SESSION_ID") orelse
+        return rpc.refuse(alloc, "agent must be called from inside a session (NULYA_SESSION_ID is not set)", .{});
+    if (parent.len == 0) return rpc.refuse(alloc, "agent must be called from inside a session (NULYA_SESSION_ID is empty)", .{});
 
     const depth = currentDepth(ctx.env);
     if (depth >= max_depth) {
@@ -434,26 +464,63 @@ fn newDelegation(
     var profile: []const u8 = "";
     var model: []const u8 = "";
     var runner_model: []const u8 = "";
+    var effort: []const u8 = "";
+    var where: Where = .{};
     var chosen = false;
     if (m.def.runner.usesNulyaModels()) {
-        const ref: ?defs.ModelRef = if (asked_model.len == 0) null else defs.parseModelRef(asked_model) orelse {
+        // `@rung` is the third shape of this argument, and the only one whose
+        // answer depends on the profile the levels below settle on — so it is
+        // recognised here and spent after them.
+        const asked_rung: []const u8 = if (asked_model.len == 0) "" else blk: {
+            const shaped = defs.parseRole(asked_model) orelse break :blk "";
+            if (shaped.len == 0) return rpc.refuse(alloc, "model '{s}' names no rung after the @.", .{asked_model});
+            break :blk shaped;
+        };
+        const ref: ?defs.ModelRef = if (asked_model.len == 0 or asked_rung.len != 0) null else defs.parseModelRef(asked_model) orelse {
             return rpc.refuse(
                 alloc,
-                "model must be <profile> or <profile>/<model-id> (the same form a definition's `model:` takes) — got '{s}'. `nulya config show` lists the profiles and the model ids each one serves.",
+                "model must be <profile>, <profile>/<model-id> or @<rung> (the same forms a definition's `model:` takes) — got '{s}'. `nulya config show` lists the profiles, the model ids each one serves and the rungs each one staffs.",
                 .{asked_model},
             );
         };
-        chosen = ref != null;
+        chosen = asked_model.len != 0;
+        // One read of a header that can be megabytes, two answers out of it:
+        // what to inherit running ON, and where to run.
+        const header = header_mod.object(alloc, ctx.io, parent);
         // A pair, never a mix (see above).
         const identity: Identity = if (ref) |r|
             .{ .profile = r.profile, .model = r.model }
         else if (m.def.profile.len != 0)
             .{ .profile = m.def.profile, .model = m.def.model }
         else
-            parentIdentity(alloc, ctx.io, parent);
+            parentIdentity(alloc, header);
         profile = identity.profile;
         model = identity.model;
+        // Never a decision, always inherited: a sub-agent works over the same
+        // checkout as the conversation that delegated to it.
+        where = parentWhere(alloc, header);
+
+        // A rung is asked of whatever profile the levels above just settled, so
+        // `model: @explore` on a definition that also names a profile means
+        // "that profile's explore". The call's rung beats the definition's, like
+        // every other level; a profile that staffs neither leaves this alone,
+        // which is plain inheritance.
+        const rung = if (asked_rung.len != 0) asked_rung else m.def.role;
+        if (rungOn(alloc, ctx, profile, rung)) |staffed| {
+            if (staffed.profile.len != 0) profile = staffed.profile;
+            model = staffed.model;
+            effort = staffed.effort;
+        }
     } else {
+        // A rung names a nulya profile's table, so passing it through would send
+        // the word `@explore` to somebody else's harness as a model name.
+        if (defs.parseRole(asked_model) != null) {
+            return rpc.refuse(
+                alloc,
+                "'{s}' names a rung of a nulya profile, and '{s}' runs on the {s} harness, which has no such table. Give a model name in that harness's own vocabulary, or drop `model` to run on what it is configured for.",
+                .{ asked_model, m.def.name, m.def.runner.label() },
+            );
+        }
         chosen = asked_model.len != 0;
         runner_model = if (asked_model.len != 0) asked_model else m.def.runner_model;
     }
@@ -488,6 +555,8 @@ fn newDelegation(
         .with = m.def.with,
         .with_self = if (m.def.agents.len != 0) self_ref else "",
         .delegation = d,
+        .environment = where.environment,
+        .workspace = where.workspace,
     });
     if (created.run.code != 0) {
         // Straight through, including the credential refusal: the kernel already
@@ -518,6 +587,7 @@ fn newDelegation(
         .permissions = permissions,
         .profile = profile,
         .model = model,
+        .effort = effort,
         .runner_model = runner_model,
         // Read from the definition HERE and never again — everything after this
         // reads the record.
@@ -808,18 +878,65 @@ fn currentDepth(env: *const std.process.Environ.Map) u32 {
 
 const Identity = struct { profile: []const u8 = "", model: []const u8 = "" };
 
+/// Where the parent's commands run: the `--env` spec verbatim, `""` being this
+/// machine, and the remote workspace that spec needs. A delegated session is
+/// opened with the same pair, so parent and child work over ONE workspace while
+/// both ledgers stay on the machine driving them.
+const Where = struct { environment: []const u8 = "", workspace: []const u8 = "" };
+
 /// What the parent session runs on, from its frozen header. Best effort: an
 /// unreadable header means "no inheritance", and the kernel's own default
 /// decides.
-fn parentIdentity(alloc: std.mem.Allocator, io: std.Io, parent: []const u8) Identity {
-    const obj = header_mod.object(alloc, io, parent) orelse return .{};
+fn parentIdentity(alloc: std.mem.Allocator, obj: ?std.json.ObjectMap) Identity {
+    const o = obj orelse return .{};
     var out: Identity = .{};
-    if (rpc.stringField(obj, "model")) |profile| out.profile = alloc.dupe(u8, profile) catch "";
-    if (obj.get("model_identity")) |ident| {
+    if (rpc.stringField(o, "model")) |profile| out.profile = alloc.dupe(u8, profile) catch "";
+    if (o.get("model_identity")) |ident| {
         if (ident == .object) {
             if (rpc.stringField(ident.object, "model")) |id| out.model = alloc.dupe(u8, id) catch "";
         }
     }
+    return out;
+}
+
+/// The profile a delegation opened from here would inherit: this session's, else
+/// the one the config chain opens on. Empty when neither can be read.
+fn hereProfile(alloc: std.mem.Allocator, ctx: *const Ctx, payload: []const u8) []const u8 {
+    if (ctx.env.get("NULYA_SESSION_ID")) |id| {
+        if (id.len != 0) {
+            const ident = parentIdentity(alloc, header_mod.object(alloc, ctx.io, id));
+            if (ident.profile.len != 0) return ident.profile;
+        }
+    }
+    return fleet.activeProfile(alloc, payload) orelse "";
+}
+
+/// One rung's landing point as one string: `<model-id>`, or `<profile>/<model-id>`
+/// when it crosses. Empty when that profile staffs no such rung.
+fn landing(alloc: std.mem.Allocator, payload: []const u8, profile: []const u8, rung: []const u8) []const u8 {
+    const staffed = fleet.find(alloc, payload, profile, rung) orelse return "";
+    if (staffed.profile.len == 0) return staffed.model;
+    return std.fmt.allocPrint(alloc, "{s}/{s}", .{ staffed.profile, staffed.model }) catch staffed.model;
+}
+
+/// Which model `rung` lands on for `profile`, asked of the kernel's own
+/// projection of the config chain. Null for every way of not having an answer —
+/// no rung asked for, no profile inherited, the command failing, that profile
+/// staffing no such rung — because the caller reads all of them as "inherit".
+fn rungOn(alloc: std.mem.Allocator, ctx: *const Ctx, profile: []const u8, rung: []const u8) ?fleet.Rung {
+    if (profile.len == 0 or rung.len == 0) return null;
+    const shown = proc.run(alloc, ctx.io, &.{ ctx.exe, "config", "show", "--json" }) catch return null;
+    if (shown.code != 0) return null;
+    return fleet.find(alloc, shown.stdout, profile, rung);
+}
+
+/// Same header, same best-effort reading: unreadable means "this machine", and
+/// `session new` refuses a spec it cannot reach anyway.
+fn parentWhere(alloc: std.mem.Allocator, obj: ?std.json.ObjectMap) Where {
+    const o = obj orelse return .{};
+    var out: Where = .{};
+    if (rpc.stringField(o, "environment")) |spec| out.environment = alloc.dupe(u8, spec) catch "";
+    if (rpc.stringField(o, "remote_workspace")) |dir| out.workspace = alloc.dupe(u8, dir) catch "";
     return out;
 }
 

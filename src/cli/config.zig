@@ -76,6 +76,9 @@ const ConfigView = struct {
         model: []const u8,
         models: []const []const u8,
         effort: ?[]const u8,
+        /// This profile's named model choices, sorted by role name: an array in
+        /// a settled order is a stable projection, an object's key order is not.
+        roles: []const config.Role = &.{},
         /// What THIS profile's own endpoint says about the ids in `models`,
         /// parallel to it (`catalog[i]` describes `models[i]`). Null — every
         /// profile but codex — means "look the id up in the top-level catalog":
@@ -87,7 +90,7 @@ const ConfigView = struct {
 fn configShow(alloc: std.mem.Allocator, io: std.Io, opts: ShowOptions) !u8 {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
-    var cfg = try config.load(alloc, io, &host);
+    var cfg = try config.load(alloc, io, &host, common.stderr_diag);
     defer cfg.deinit();
     var paths = try config.ConfigPaths.init(alloc, &host);
     defer paths.deinit(alloc);
@@ -135,6 +138,7 @@ fn configShow(alloc: std.mem.Allocator, io: std.Io, opts: ShowOptions) !u8 {
             .model = default_model,
             .models = models,
             .effort = p.effort,
+            .roles = try sortedRoles(a, p.roles),
             .catalog = catalog,
         };
     }
@@ -158,6 +162,16 @@ fn configShow(alloc: std.mem.Allocator, io: std.Io, opts: ShowOptions) !u8 {
     }
     try printRaw(io, out.written());
     return if (refreshed) 0 else 1;
+}
+
+fn sortedRoles(a: std.mem.Allocator, roles: []const config.Role) ![]const config.Role {
+    const out = try a.dupe(config.Role, roles);
+    std.mem.sort(config.Role, out, {}, struct {
+        fn less(_: void, x: config.Role, y: config.Role) bool {
+            return std.mem.order(u8, x.name, y.name) == .lt;
+        }
+    }.less);
+    return out;
 }
 
 /// The catalogue this profile's own endpoint publishes, when it publishes one
@@ -251,6 +265,11 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
         }
         if (p.base_url.len != 0) try w.print("\n      {s}", .{p.base_url});
         try w.writeByte('\n');
+        for (p.roles) |r| {
+            try w.print("      role {s: <16} {s}", .{ r.name, r.model });
+            if (r.effort) |e| try w.print(" effort={s}", .{e});
+            try w.writeByte('\n');
+        }
         if (p.catalog) |catalog| {
             try w.writeAll("      models from ~/.codex/models_cache.json:\n");
             for (catalog) |m| {
@@ -385,6 +404,51 @@ test "config show projects profiles with credential availability and the catalog
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "effort off|low|high|max (default auto)") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "max_tools            6") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "with                 guide, std:read,grep") != null);
+}
+
+test "config show projects a profile's roles as a sorted array, an empty one as []" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    const roles = try sortedRoles(arena.allocator(), &.{
+        .{ .name = "review", .model = "terra", .effort = "high" },
+        .{ .name = "cheap", .model = "deepseek/flash" },
+    });
+    const view: ConfigView = .{
+        .paths = .{ .system = "s", .user = "u", .project = config.project_config_path },
+        .active_profile = "openai",
+        .profiles = &.{
+            .{ .name = "openai", .kind = "openai", .base_url = "", .api_key_env = "K", .credential = true, .credential_source = "env", .model = "sol", .models = &.{"sol"}, .effort = null, .roles = roles },
+            .{ .name = "scripted", .kind = "scripted", .base_url = "", .api_key_env = "", .credential = true, .credential_source = "builtin", .model = "demo", .models = &.{"demo"}, .effort = null },
+        },
+        .models = &.{},
+        .registry = .{},
+        .extensions = .{ .with = &.{} },
+    };
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var jw: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    try jw.write(view);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, out.written(), .{});
+    defer parsed.deinit();
+    const ps = parsed.value.object.get("profiles").?.array.items;
+    const projected = ps[0].object.get("roles").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), projected.len);
+    try std.testing.expectEqualStrings("cheap", projected[0].object.get("name").?.string);
+    try std.testing.expectEqualStrings("review", projected[1].object.get("name").?.string);
+    try std.testing.expect(projected[0].object.get("effort").? == .null);
+    // A profile nobody gave roles projects an empty list, not a missing key.
+    try std.testing.expectEqual(@as(usize, 0), ps[1].object.get("roles").?.array.items.len);
+
+    var text: std.Io.Writer.Allocating = .init(alloc);
+    defer text.deinit();
+    try writeConfigText(&text.writer, view);
+    // The line-up is not knowledge reserved for whoever wrote the config file.
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "deepseek/flash") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "cheap") != null);
 }
 
 /// A models_cache.json the way the Codex CLI leaves one: the default model is

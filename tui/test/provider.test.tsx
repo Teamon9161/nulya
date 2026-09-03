@@ -157,6 +157,7 @@ test("the provider table is cut to its columns at 76: one row each, a gutter tha
         models: ["deepseek-v4-flash"],
         effort: null,
         catalog: null,
+        roles: [],
       },
     ],
   }

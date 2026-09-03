@@ -132,6 +132,7 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
 
     const delegated = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"find the parser\"}" }, &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     });
     defer alloc.free(delegated.stdout);
@@ -202,6 +203,7 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
     {
         const bad = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\",\"model\":\"/nope\"}" }, &.{
             .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "NULYA_SESSION_ID", .value = parent },
         });
         defer alloc.free(bad.stdout);
         try std.testing.expectEqual(@as(u8, 1), bad.code);
@@ -213,6 +215,7 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
         defer alloc.free(args);
         const late = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, &.{
             .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "NULYA_SESSION_ID", .value = parent },
         });
         defer alloc.free(late.stdout);
         try std.testing.expectEqual(@as(u8, 1), late.code);
@@ -231,6 +234,7 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
         defer alloc.free(args);
         const big = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, &.{
             .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "NULYA_SESSION_ID", .value = parent },
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
         });
         defer alloc.free(big.stdout);
@@ -366,6 +370,7 @@ test "bundled agent: the personas the package ships need no files — list layer
 
     const delegated = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"explore\",\"task\":\"find the parser\"}" }, &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     });
     defer alloc.free(delegated.stdout);
@@ -438,6 +443,7 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
     defer alloc.free(session_file);
     const in_parent: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     };
 
@@ -574,6 +580,7 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
         defer alloc.free(request);
         const taken = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", request }, &.{
             .{ .key = "NULYA_SESSION", .value = stranger_file },
+            .{ .key = "NULYA_SESSION_ID", .value = stranger },
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
         });
         defer alloc.free(taken.stdout);
@@ -695,6 +702,7 @@ test "bundled agent: the permission ladder is one word frozen into the delegatio
     defer alloc.free(session_file);
     const in_parent: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     };
 
@@ -766,6 +774,7 @@ test "bundled agent: the wake invariant — a turn sent while a runner holds the
     defer alloc.free(session_file);
     const in_parent: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     };
 
@@ -873,6 +882,7 @@ test "bundled agent: an interrupt stops the run in flight — the step is killed
     defer alloc.free(session_file);
     const looping: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "loop" },
     };
 
@@ -960,6 +970,7 @@ test "bundled agent: the record is what a delegation is driven by — its budget
     defer alloc.free(session_file);
     const in_parent: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     };
 
@@ -1100,6 +1111,7 @@ test "bundled agent: a sub-agent that spends every step on tools is asked to sto
     // to stop and report, which is the one thing that makes it answer.
     const in_parent: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "wrapup" },
     };
 
@@ -1174,6 +1186,7 @@ test "bundled agent: nothing runs in the round a sub-agent is given for its repo
     // allows. Seeing the call refused, it answers in text instead.
     const in_parent: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "wrapdefy" },
     };
     const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"stubborn\",\"task\":\"find something\"}" }, in_parent);
@@ -1297,6 +1310,7 @@ test "bundled agent: only a persona with an agents whitelist carries the tool, i
     defer alloc.free(session_file);
     const in_parent: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     };
 
@@ -1327,6 +1341,7 @@ test "bundled agent: only a persona with an agents whitelist carries the tool, i
 
     const in_boss: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = boss_file },
+        .{ .key = "NULYA_SESSION_ID", .value = std.fs.path.stem(boss_file) },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     };
 
@@ -1343,6 +1358,7 @@ test "bundled agent: only a persona with an agents whitelist carries the tool, i
     {
         const in_worker: []const EnvPair = &.{
             .{ .key = "NULYA_SESSION", .value = worker_file },
+            .{ .key = "NULYA_SESSION_ID", .value = std.fs.path.stem(worker_file) },
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
         };
         const denied = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"task\":\"x\"}" }, in_worker);
@@ -1358,6 +1374,7 @@ test "bundled agent: only a persona with an agents whitelist carries the tool, i
     {
         const deep: []const EnvPair = &.{
             .{ .key = "NULYA_SESSION", .value = boss_file },
+            .{ .key = "NULYA_SESSION_ID", .value = std.fs.path.stem(boss_file) },
             .{ .key = "NULYA_AGENT_DEPTH", .value = "3" },
         };
         const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"task\":\"x\"}" }, deep);
@@ -1393,6 +1410,135 @@ fn delegateTo(
     return std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{out.stdout[at..end]});
 }
 
+test "bundled agent: a rung is resolved against the profile the delegation inherits, an unstaffed one falls back to it, and `list` says where each lands" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    // The rung table is trusted-layer only, so it goes in the user config —
+    // which for an e2e run is the home inside the workspace.
+    try ws.createDirPath(io, support.home_subdir);
+    try ws.writeFile(io, .{ .sub_path = support.home_subdir ++ std.fs.path.sep_str ++ "config.toml", .data =
+        \\[[provider.profiles]]
+        \\name = "duo"
+        \\kind = "scripted"
+        \\model = "scripted-demo"
+        \\models = ["scripted-demo", "scripted-swift"]
+        \\[provider.profiles.roles]
+        \\explore = { model = "scripted-swift", effort = "high" }
+        \\
+    });
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{ .sub_path = ".nulya/agents/scout.md", .data =
+        \\---
+        \\description: rides the explore rung
+        \\model: @explore
+        \\max_steps: 1
+        \\---
+        \\You only read.
+        \\
+    });
+    try ws.writeFile(io, .{ .sub_path = ".nulya/agents/ghost.md", .data =
+        \\---
+        \\description: rides a rung nobody staffs
+        \\model: @nosuch
+        \\max_steps: 1
+        \\---
+        \\You only read.
+        \\
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "duo" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const in_parent: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    // The rung wins over what the parent runs on, and stays inside the profile
+    // the parent already froze: one move changed what this delegation runs on.
+    const scout_file = try delegateTo(alloc, io, ws, exe_abs, ref, in_parent, parent, "scout", "look");
+    defer alloc.free(scout_file);
+    {
+        const header = try support.readSessionFile(alloc, io, ws, std.fs.path.stem(scout_file));
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"model\":\"scripted-swift\"") != null);
+    }
+
+    // A rung this profile does not staff is not an error: the delegation runs
+    // on the model it would have inherited anyway.
+    const ghost_file = try delegateTo(alloc, io, ws, exe_abs, ref, in_parent, parent, "ghost", "look");
+    defer alloc.free(ghost_file);
+    {
+        const header = try support.readSessionFile(alloc, io, ws, std.fs.path.stem(ghost_file));
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"model\":\"scripted-demo\"") != null);
+    }
+
+    // The effort a rung names is frozen where every round reads it: a header
+    // cannot carry it, because effort is not part of an identity.
+    {
+        var dir = try ws.openDir(io, ".nulya/delegations", .{ .iterate = true });
+        defer dir.close(io);
+        var found_effort = false;
+        var it = dir.iterate();
+        while (try it.next(io)) |entry| {
+            const row_path = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/record.jsonl", .{entry.name});
+            defer alloc.free(row_path);
+            const rows = ws.readFileAlloc(io, row_path, alloc, .limited(1 << 20)) catch continue;
+            defer alloc.free(rows);
+            if (std.mem.indexOf(u8, rows, "\"agent\":\"scout\"") == null) continue;
+            found_effort = std.mem.indexOf(u8, rows, "\"effort\":\"high\"") != null;
+        }
+        try std.testing.expect(found_effort);
+    }
+
+    // And the catalogue says where each rung lands, so a misspelled one is
+    // visible rather than silently inherited.
+    {
+        const listed = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "list", "{}" }, in_parent);
+        defer alloc.free(listed.stdout);
+        try std.testing.expectEqual(@as(u8, 0), listed.code);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, listed.stdout, " \r\n"), .{});
+        defer parsed.deinit();
+        var saw_scout = false;
+        var saw_ghost = false;
+        for (parsed.value.array.items) |entry| {
+            const name = entry.object.get("name").?.string;
+            if (std.mem.eql(u8, name, "scout")) {
+                saw_scout = true;
+                try std.testing.expectEqualStrings("explore", entry.object.get("role").?.string);
+                try std.testing.expectEqualStrings("scripted-swift", entry.object.get("role_model").?.string);
+            }
+            if (std.mem.eql(u8, name, "ghost")) {
+                saw_ghost = true;
+                // Named, and landing nowhere: that pair is the whole signal.
+                try std.testing.expectEqualStrings("nosuch", entry.object.get("role").?.string);
+                try std.testing.expectEqualStrings("", entry.object.get("role_model").?.string);
+            }
+        }
+        try std.testing.expect(saw_scout and saw_ghost);
+    }
+}
 // ── the Codex runner ─────────────────────────────────────────────────────────
 //
 // A delegation whose definition says `runner: codex` is held by a Codex thread
@@ -1499,6 +1645,7 @@ test "bundled agent: a codex delegation is a thread, not a session — the recor
     defer alloc.free(session_file);
     const with_codex: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_CODEX_EXE", .value = codex_exe },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     };
@@ -1634,6 +1781,7 @@ test "bundled agent: a codex delegation that is running takes a message as turn/
     defer alloc.free(session_file);
     const held: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_CODEX_EXE", .value = codex_exe },
         .{ .key = "FAKE_CODEX_LOG", .value = "codex-log.txt" },
         .{ .key = "FAKE_CODEX_HOLD", .value = "hold" },
@@ -1770,6 +1918,7 @@ test "bundled agent: a message that asks to interrupt is never steered into the 
     defer alloc.free(session_file);
     const held: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_CODEX_EXE", .value = codex_exe },
         .{ .key = "FAKE_CODEX_LOG", .value = "codex-log.txt" },
         .{ .key = "FAKE_CODEX_HOLD", .value = "hold" },
@@ -1886,6 +2035,7 @@ test "bundled agent: the three rungs reach codex as its own three sandboxes, and
     // the two runs below, so the refusal can have no other cause.
     const wide: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_CODEX_EXE", .value = codex_exe },
         .{ .key = "FAKE_CODEX_SANDBOX", .value = "workspaceWrite" },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
@@ -1901,6 +2051,7 @@ test "bundled agent: the three rungs reach codex as its own three sandboxes, and
     // …and with a harness that confirms the ceiling, the same definition opens.
     const narrow: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_CODEX_EXE", .value = codex_exe },
         .{ .key = "FAKE_CODEX_LOG", .value = "codex-log.txt" },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
@@ -2000,6 +2151,7 @@ test "bundled agent: a claude delegation is a claude session — the record free
     defer alloc.free(session_file);
     const with_claude: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_CLAUDE_EXE", .value = claude_exe },
         .{ .key = "FAKE_CLAUDE_LOG", .value = "claude-log.txt" },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
@@ -2164,6 +2316,7 @@ test "bundled agent: a claude delegation that is running takes an interrupt as a
     defer alloc.free(session_file);
     const held: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_CLAUDE_EXE", .value = claude_exe },
         .{ .key = "FAKE_CLAUDE_LOG", .value = "claude-log.txt" },
         .{ .key = "FAKE_CLAUDE_HOLD", .value = "hold" },
@@ -2259,6 +2412,7 @@ test "bundled agent: the three rungs reach claude as its own three permission mo
     // D10's check can read, because unlike a sandbox nothing else comes back.
     const wide: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_CLAUDE_EXE", .value = claude_exe },
         .{ .key = "FAKE_CLAUDE_LOG", .value = "claude-log.txt" },
         .{ .key = "FAKE_CLAUDE_TOOLS", .value = "Read,Glob,Write" },
@@ -2300,6 +2454,7 @@ test "bundled agent: the three rungs reach claude as its own three permission mo
     // With a session that comes back inside the ceiling, the same definition runs.
     const narrow: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_CLAUDE_EXE", .value = claude_exe },
         .{ .key = "FAKE_CLAUDE_LOG", .value = "claude-log.txt" },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
@@ -2412,6 +2567,7 @@ test "bundled agent: a pi delegation is a pi session — one flag opens or resum
     defer alloc.free(session_file);
     const with_pi: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_PI_EXE", .value = pi_exe },
         .{ .key = "FAKE_PI_LOG", .value = "pi-log.txt" },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
@@ -2544,6 +2700,7 @@ test "bundled agent: a pi delegation that is running takes an interrupt as abort
     defer alloc.free(session_file);
     const held: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_PI_EXE", .value = pi_exe },
         .{ .key = "FAKE_PI_LOG", .value = "pi-log.txt" },
         .{ .key = "FAKE_PI_HOLD", .value = "hold" },
@@ -2631,6 +2788,7 @@ test "bundled agent: a read-only pi delegation asks for the allow-list and stops
     // say: a tool BEGINNING. `write` is not in the ceiling, so the run stops.
     const wide: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "NULYA_PI_EXE", .value = pi_exe },
         .{ .key = "FAKE_PI_LOG", .value = "pi-log.txt" },
         .{ .key = "FAKE_PI_TOOL", .value = "write" },
@@ -2671,6 +2829,7 @@ test "bundled agent: a read-only pi delegation asks for the allow-list and stops
     {
         const narrow: []const EnvPair = &.{
             .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "NULYA_SESSION_ID", .value = parent },
             .{ .key = "NULYA_PI_EXE", .value = pi_exe },
             .{ .key = "FAKE_PI_TOOL", .value = "read" },
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
@@ -2701,6 +2860,7 @@ test "bundled agent: a read-only pi delegation asks for the allow-list and stops
     {
         const bold: []const EnvPair = &.{
             .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "NULYA_SESSION_ID", .value = parent },
             .{ .key = "NULYA_PI_EXE", .value = pi_exe },
             .{ .key = "FAKE_PI_LOG", .value = "bold-log.txt" },
             .{ .key = "FAKE_PI_TOOL", .value = "write" },
@@ -2931,6 +3091,7 @@ test "bundled agent: a delegation can be held by a runner that is somebody else'
     defer alloc.free(session_file);
     const with_runner: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "ECHO_RUNNER_LOG", .value = "runner-log.txt" },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     };
@@ -3078,6 +3239,7 @@ test "bundled agent: the permission ladder crosses the contract as one word — 
     {
         const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, &.{
             .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "NULYA_SESSION_ID", .value = parent },
             .{ .key = "ECHO_RUNNER_REFUSE_READONLY", .value = "1" },
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
         });
@@ -3113,6 +3275,7 @@ test "bundled agent: the permission ladder crosses the contract as one word — 
     {
         const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, &.{
             .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "NULYA_SESSION_ID", .value = parent },
             .{ .key = "ECHO_RUNNER_LOG", .value = "runner-log.txt" },
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
         });
@@ -3166,6 +3329,7 @@ test "bundled agent: an interrupt crosses the contract — an outside runner tak
     defer alloc.free(session_file);
     const held: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SESSION_ID", .value = parent },
         .{ .key = "ECHO_RUNNER_LOG", .value = "runner-log.txt" },
         .{ .key = "ECHO_RUNNER_HOLD", .value = "hold" },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },

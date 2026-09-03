@@ -58,6 +58,27 @@ pub const PlatformValue = struct {
     }
 };
 
+/// Which machine a call to this package runs on, when the session's commands
+/// run on another one than the session itself:
+///   - `workspace` : beside the files the commands touch. THE DEFAULT, and the
+///                   only answer for a package that reads or writes them.
+///   - `session`   : beside the ledger, on the machine driving the session —
+///                   for a package whose work IS the session (it opens
+///                   sub-sessions, reads the session file, starts host tasks).
+///
+/// Orthogonal to `ImplementationKind`. It says nothing when both are the same
+/// machine, which is every ordinary session.
+pub const RunsOn = enum {
+    workspace,
+    session,
+
+    pub fn fromString(s: []const u8) ?RunsOn {
+        if (std.mem.eql(u8, s, "workspace")) return .workspace;
+        if (std.mem.eql(u8, s, "session")) return .session;
+        return null;
+    }
+};
+
 pub const Runtime = struct {
     /// A `bin/<name>` entry is a compiled Zig extension (built from
     /// `src/main.zig`); anything else is a script frozen as-is. The per-OS form
@@ -66,7 +87,18 @@ pub const Runtime = struct {
     /// The executable a script `entry` runs through, possibly per-OS. Absent
     /// means the entry is directly executable.
     interpreter: ?PlatformValue = null,
+    /// Kept as WRITTEN; read through `runsOn`, which defaults `workspace`.
+    runs_on: ?[]const u8 = null,
 };
+
+/// A package that runs nothing has no landing side to choose, so a manifest
+/// with no `runtime` block is `workspace` like every other silence.
+pub fn runsOn(m: Manifest) RunsOn {
+    const rt = m.runtime orelse return .workspace;
+    const written = rt.runs_on orelse return .workspace;
+    // `validate` refuses a word outside the two, so the unwrap is safe.
+    return RunsOn.fromString(written).?;
+}
 
 /// The `bin/` prefix is the sole distinguisher, checked on EVERY variant — one
 /// package is one kind, and `validate` refuses the mixture.
@@ -281,6 +313,11 @@ pub const Manifest = struct {
                     if (!std.mem.startsWith(u8, v.value, "src/")) return error.InvalidEntry;
                 }
             }
+            // Refused rather than defaulted: a typo meaning `session` would
+            // otherwise send the package to the machine it cannot work on.
+            if (rt.runs_on) |s| {
+                if (RunsOn.fromString(s) == null) return error.InvalidRunsOn;
+            }
             if (rt.interpreter) |ip| {
                 if (ip.variants.len == 0) return error.InvalidInterpreter;
                 const ip_per_os = ip.per_os;
@@ -375,6 +412,7 @@ pub const ValidateError = error{
     MissingRuntime,
     InvalidEntry,
     InvalidInterpreter,
+    InvalidRunsOn,
     NoContributions,
     InvalidToolName,
     ReservedToolName,
@@ -502,6 +540,7 @@ fn dupRuntime(a: std.mem.Allocator, obj: std.json.ObjectMap) ParseError!?Runtime
     return .{
         .entry = try dupPlatformValue(a, runtime_obj.get("entry") orelse return error.MissingField),
         .interpreter = interpreter,
+        .runs_on = try optionalString(a, runtime_obj, "runs_on"),
     };
 }
 
@@ -890,6 +929,50 @@ test "the per-OS entry form is scripts only, and its keys must be OS names" {
     ));
     try std.testing.expectError(error.WrongType, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":["src/run.sh"]},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    ));
+}
+
+test "a runtime lands beside the workspace or beside the session; silence means workspace and an unknown word is refused" {
+    const alloc = std.testing.allocator;
+
+    var beside_session = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a","runs_on":"session"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer beside_session.deinit();
+    try beside_session.validate();
+    try std.testing.expectEqual(RunsOn.session, runsOn(beside_session));
+
+    // A script says it the same way: the landing side is orthogonal to how the
+    // package is implemented.
+    var script = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","interpreter":"sh","runs_on":"session"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer script.deinit();
+    try script.validate();
+    try std.testing.expectEqual(RunsOn.session, runsOn(script));
+
+    // Every manifest written before the key reads as `workspace`.
+    var silent = try parse(alloc, valid_manifest);
+    defer silent.deinit();
+    try silent.validate();
+    try std.testing.expect(silent.runtime.?.runs_on == null);
+    try std.testing.expectEqual(RunsOn.workspace, runsOn(silent));
+
+    var no_runtime = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"skills":["skills/demo"]}}
+    );
+    defer no_runtime.deinit();
+    try no_runtime.validate();
+    try std.testing.expectEqual(RunsOn.workspace, runsOn(no_runtime));
+
+    var typo = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a","runs_on":"host"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer typo.deinit();
+    try std.testing.expectError(error.InvalidRunsOn, typo.validate());
+
+    try std.testing.expectError(error.WrongType, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a","runs_on":true},"contributes":{"tools":[{"name":"t","input":{}}]}}
     ));
 }
 

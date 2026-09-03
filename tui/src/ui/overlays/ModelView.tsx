@@ -173,6 +173,42 @@ function contextOf(params: ModelParams | null): string {
     : `${Math.round(window / 1000)}k ctx`
 }
 
+/**
+ * How this provider staffs its rungs, one `rung→model` each, with the effort in
+ * parentheses when the rung pins one. A bare model id is this provider's own;
+ * `<profile>/<id>` is somebody else's.
+ *
+ * Picking a model here picks the whole team with it, so the team cannot stay
+ * knowledge that only the person who wrote the config file has. Empty says
+ * nothing at all: most profiles staff no rung, and every delegation then runs
+ * on the model it inherits — which is not news.
+ */
+export function teamOf(profile: ProfileView | undefined): string[] {
+  return (profile?.roles ?? []).map((role) => `${role.name}→${role.model}${role.effort ? ` (${role.effort})` : ""}`)
+}
+
+/** The same team on ONE line: spelled out while it is short, counted once it is not. */
+export function teamSummary(profile: ProfileView | undefined, limit = 3): string {
+  const roles = teamOf(profile)
+  if (roles.length === 0) return ""
+  return roles.length > limit ? `${roles.length} roles` : roles.join(", ")
+}
+
+/**
+ * What the highlighted row's provider is, in full — its cell was cut to fit,
+ * and its team is nowhere else on the screen.
+ */
+export function providerDetail(profile: ProfileView): string {
+  const parts = [profile.name, `${profile.kind} wire`]
+  if (profile.base_url.length > 0) parts.push(profile.base_url)
+  if (profile.api_key_env.length > 0)
+    parts.push(`${profile.api_key_env} ${profile.credential_source === "env" ? "set" : "unset"}`)
+  if (profile.credential_source === "config") parts.push("key in the user config")
+  if (profile.kind === "codex") parts.push("~/.codex/auth.json")
+  parts.push(...teamOf(profile))
+  return parts.join(" · ")
+}
+
 /** The line for a row whose provider lost (or never had) its credential. */
 export function cannotRun(profile: ProfileView): string {
   const fix = keyable(profile) ? " · /provider to paste a key" : ""
@@ -253,17 +289,6 @@ export function ModelView(props: {
   /** The id beside the label, only when the label is not the id already. */
   const idOf = (row: PickerRow) => (labelOf(row) === row.model ? "" : row.model)
 
-  /** What the highlighted row's provider is, in full — its cell was cut to fit. */
-  const detailOf = (chosen: ProfileView) => {
-    const parts = [chosen.name, `${chosen.kind} wire`]
-    if (chosen.base_url.length > 0) parts.push(chosen.base_url)
-    if (chosen.api_key_env.length > 0)
-      parts.push(`${chosen.api_key_env} ${chosen.credential_source === "env" ? "set" : "unset"}`)
-    if (chosen.credential_source === "config") parts.push("key in the user config")
-    if (chosen.kind === "codex") parts.push("~/.codex/auth.json")
-    return parts.join(" · ")
-  }
-
   /**
    * The keys, in two parts: the two or three that are the point, and the rest
    * behind `?`. With no rows there is one thing to do and the
@@ -299,7 +324,7 @@ export function ModelView(props: {
   }
   const detailLines = () => {
     const chosen = row()
-    return chosen ? wrapWords(detailOf(chosen.profile), inner()) : []
+    return chosen ? wrapWords(providerDetail(chosen.profile), inner()) : []
   }
 
   /**
