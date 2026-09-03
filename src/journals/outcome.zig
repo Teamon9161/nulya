@@ -1,5 +1,5 @@
-//! Durable, append-only journal of session outcomes — the ground truth a slow
-//! loop evaluates skills, prompts and drivers against.
+//! Durable, append-only journal of session outcomes: the verdicts a slow loop
+//! evaluates skills, prompts and drivers against.
 //!
 //! One JSON object per line in `<workspace>/.nulya/session-outcomes.jsonl`:
 //!
@@ -7,27 +7,12 @@
 //!   {"v":1,"session":"s-…","verdict":"success","at":"…","source":"agent","by":"s-…"}
 //!   {"v":1,"session":"s-…","verdict":"failure","at":"…","seq":7}
 //!
-//! `note` is optional. A session may be judged more than once; every line is
-//! kept and readers take the LAST one for a session (`latestFor`). No line at
-//! all means UNKNOWN, never failure.
-//!
-//! Three optional columns say WHO judged and WHAT was judged, each written
-//! only when it is not the default — so a person's verdict on a whole session
-//! is byte-identical to the line this journal wrote before they existed:
-//!   * `source` — absent means a person (`human`). `agent` means the line was
-//!     written from inside a session's own shell (`nulya session outcome`
-//!     detects this through `NULYA_SESSION`): a session grading itself is a
-//!     CLAIM, not ground truth. An unrecognized value is an error, never
-//!     coerced to `human`.
-//!   * `by` — which session's shell wrote it (only with `source:"agent"`), so
-//!     `by == session` reads as "this session graded itself".
-//!   * `seq` — a judgment about ONE assistant turn instead of the whole
-//!     session. `latestFor` ignores these: the verdict that stands for a
-//!     session is the last WHOLE-SESSION line.
-//!
-//! File discipline (writer lease, torn-tail repair on write and skip on read,
-//! a missing file means "no verdicts yet") is shared with `tool_stats.zig`
-//! through `journal.zig`; the schema above is this module's alone.
+//! `note`, `source`, `by` and `seq` are optional and written only when not the
+//! default. Absent `source` means a person; `agent` means a session's own shell
+//! wrote it (a CLAIM, not ground truth) and `by` names that session; an
+//! unrecognized value is an error, never coerced. `seq` narrows a verdict to one
+//! assistant turn — `latestFor` ignores those, taking the last WHOLE-SESSION
+//! line. No line at all means UNKNOWN, never failure.
 
 const std = @import("std");
 const journal = @import("journal.zig");

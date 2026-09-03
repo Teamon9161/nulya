@@ -1,19 +1,18 @@
 //! The regex `grep` searches with: the vendored mvzr (byte-level backtracking,
-//! no lookaround/backreferences/Unicode classes/case-insensitive flag) behind
-//! a wrapper that adds a bigger program budget (`SizedRegex(256, 32)` — the
-//! default 64 ops/8 sets is too small for a model's `foo|bar|baz|...`) and
-//! case handling.
+//! no lookaround/backreferences/Unicode classes/case-insensitive flag) behind a
+//! wrapper that adds a bigger program budget (`SizedRegex(256, 32)` — the
+//! default 64 ops/8 sets is too small for a model's `foo|bar|baz|...`).
 //!
-//! The `(?…` family must be handled BEFORE mvzr sees it: mvzr misparses it
-//! into a pattern that compiles and silently matches the wrong text (`(?i)AAA`
-//! matched the literal `iAAA`). Non-capturing `(?:` is rewritten to a plain
-//! `(`; every other `(?…` is refused up front with a message naming the way out.
+//! The `(?…` family must be handled BEFORE mvzr sees it: mvzr misparses it into
+//! a pattern that compiles and silently matches the wrong text (`(?i)AAA`
+//! matched the literal `iAAA`). Non-capturing `(?:` is rewritten to a plain `(`;
+//! every other `(?…` is refused up front with a message naming the way out.
 //!
 //! Smart case: no uppercase literal in the pattern searches case-insensitively,
 //! any uppercase literal makes it exact, `case_insensitive=true` forces it.
 //! With no engine flag for this, insensitivity is done by lowering both sides;
-//! backslash escapes (`\d \D \w \W \s \S \b \B`) stay untouched — lowering
-//! `\D` would turn "not a digit" into "a digit".
+//! backslash escapes (`\d \D \w \W \s \S \b \B`) stay untouched — lowering `\D`
+//! would turn "not a digit" into "a digit".
 
 const std = @import("std");
 const mvzr = @import("vendor/mvzr.zig");

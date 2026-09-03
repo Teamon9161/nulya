@@ -1,21 +1,18 @@
 //! The second `Environment` implementation: the session's commands run on
-//! ANOTHER machine, through one long-lived channel to a `nulya remote serve`
-//! there — the workspace MOVES too, and the channel opens once per session
-//! process.
+//! ANOTHER machine through one long-lived channel to a `nulya remote serve`
+//! there — the workspace MOVES too, and the channel opens once per session.
 //!
 //! All four verbs cross it. `startShellTask` starts a `nulya task supervise` on
 //! THAT machine, so a background command outlives this channel; its report is
-//! carried back by whoever next asks (`cli/task.zig`), since the ledger is here.
-//! `runExtension` sends an IDENTITY — `(id, version, tool)` plus the arguments —
-//! because which file a version means, and whether it still matches its seal,
-//! only the machine holding the bytes can say. `putWorkspaceFile` lands spilled
-//! bytes in the far workspace at the very path the model is told to open.
-//!
-//! The far side is nulya itself in a shell role: the process-tree kill, the
-//! secret denylist, the wall-clock budget and the output capture over there are
-//! THE SAME CODE as here, and cancellation reaches it because the agent holds a
-//! real `Tree` around the command. Nothing on the channel carries a credential
-//! (`protocol.zig` rule 5) — the model connection stays on the host.
+//! carried back by whoever next asks, since the ledger is here. `runExtension`
+//! sends an IDENTITY — `(id, version, tool)` plus arguments — because which file
+//! a version means, and whether it still matches its seal, only the machine
+//! holding the bytes can say. `putWorkspaceFile` lands spilled bytes in the far
+//! workspace at the very path the model is told to open.
+//! The far side is nulya itself in a shell role: process-tree kill, secret
+//! denylist, budget and output capture there are THE SAME CODE as here, and
+//! cancellation reaches it through a real `Tree`. No credential ever crosses the
+//! channel — the model connection stays on the host.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -27,8 +24,8 @@ const environment_mod = environment;
 const protocol = @import("protocol.zig");
 const ssh_askpass = @import("ssh_askpass.zig");
 
-/// What marks a `--env` spec as naming this backend rather than the
-/// command-wrapping exec target. One prefix, checked in one place.
+/// What marks a `--env` spec as naming this backend rather than the local
+/// one. One prefix, checked in one place.
 pub const spec_prefix = "remote:";
 
 /// The vocabulary, in the one place a refusal can quote it.
@@ -88,7 +85,7 @@ pub fn isSshSpec(spec: []const u8) bool {
 }
 
 /// Pure syntax. Whether THIS host can reach it is `supportedOnHost` — the two
-/// have different fixes, exactly as they do for the exec target.
+/// have different fixes.
 pub fn parseSpec(spec: []const u8) Error!Launch {
     if (!isSpec(spec)) return error.InvalidRemoteSpec;
     const rest = spec[spec_prefix.len..];

@@ -1111,9 +1111,9 @@ test "canceling a running shell surfaces cancellation and kills the child" {
     const root_len = try tmp.dir.realPath(io, &root_real);
     const cwd = root_real[0..root_len];
 
-    // The DEFAULT dialect: cancellation terminates the command's whole process
-    // tree (`Tree`), so this no longer has to avoid Git Bash's launcher, whose
-    // real shell is a grandchild. That is the point of running it unpinned.
+    // The DEFAULT dialect, deliberately: cancellation terminates the command's
+    // whole process tree (`Tree`), so a launcher whose real shell is a
+    // grandchild (Git Bash) is killed with it.
     var lenv = try LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 

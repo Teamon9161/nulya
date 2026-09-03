@@ -474,8 +474,8 @@ test "a built binary is digested at any size, and streaming does not change the 
     defer tmp.cleanup();
 
     // Past the snapshot's per-source-file cap, and not a whole number of read
-    // chunks: the size a compiled extension actually reaches is what used to
-    // fail here, and the last partial chunk is what ends the read loop.
+    // chunks: a size a compiled extension actually reaches, where the last
+    // partial chunk is what ends the read loop.
     const size = max_snapshot_file_bytes + digest_read_chunk_bytes + 7;
     const bytes = try alloc.alloc(u8, size);
     defer alloc.free(bytes);

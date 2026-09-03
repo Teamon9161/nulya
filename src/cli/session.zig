@@ -526,11 +526,11 @@ pub fn createSession(
     // a tool, so nothing here can start a background task. `exec` was vetted
     // above.
     //
-    // A remote environment is deliberately not built here even when `exec`
-    // names one: building it means opening a connection, and `session new`
-    // runs nothing. Freezing the spec is the whole of its job; the first
-    // `step` is where that machine has to answer. This `LocalEnvironment` only
-    // resolves the extension store for the composition below.
+    // A remote environment is NOT built here even when `exec` names one:
+    // building it opens a connection, and `session new` runs nothing. Freezing
+    // the spec is the whole of its job, and the first `step` is where that
+    // machine has to answer. This `LocalEnvironment` only resolves the
+    // extension store for the composition below.
     const ext_store = try launch.storePath(alloc, &host);
     defer alloc.free(ext_store);
 

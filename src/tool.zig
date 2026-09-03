@@ -1,6 +1,4 @@
-//! The tool boundary — the single most load-bearing type in the kernel.
-//!
-//! A tool is a pure-ish function `f(args, ctx_header)`:
+//! The tool boundary. A tool is a pure-ish function `f(args, ctx_header)`:
 //!
 //!   - `args`      : model-distilled *semantic* input (JSON). The model curates
 //!                   this out of the conversation; the tool never sees the ledger.

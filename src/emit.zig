@@ -1,27 +1,17 @@
-//! The single output-discipline primitive.
-//!
-//! Every tool's output — shell, edit echo, and any future native tool — passes
-//! through `emit`. There is exactly ONE truncation/spill code path in the whole
-//! kernel, so the "dirty details" (line clipping, byte budget, head+tail
-//! retention, auto-spill) are concentrated in one testable function instead of
-//! being re-implemented per tool.
-//!
-//! Guarantees:
-//!   1. per-line clip     — no single line blows up a result
-//!   2. byte budget       — returned text is bounded by `max_bytes`
-//!   3. auto-spill        — the full raw output is ALWAYS written to the
-//!                          WORKSPACE when anything was truncated, and the
-//!                          model-visible text contains the spill path. Both
-//!                          halves matter: the path is workspace-relative and
-//!                          the bytes go through `FileSink`, so in a session
-//!                          whose workspace lives on another machine the file
-//!                          lands where the reader's hands are, not where the
-//!                          harness happens to run.
-//!   4. determinism       — spill filename derives from `seq`, never a runtime
-//!                          counter, so a replayed ledger reproduces byte-for-byte
-//!   5. valid UTF-8       — the returned text is valid UTF-8 whatever the tool
-//!                          wrote, because the ledger's strings have to be
-//!                          (`utf8Lossy`)
+//! The single output-discipline primitive: the kernel's one truncation/spill
+//! path, through which every tool's output passes. Guarantees:
+//!   1. per-line clip — no single line blows up a result
+//!   2. byte budget   — returned text is bounded by `max_bytes`
+//!   3. auto-spill    — whenever anything was truncated the full raw output is
+//!                      written to the WORKSPACE and the model-visible text
+//!                      carries the spill path. It is workspace-relative and
+//!                      the bytes go through `FileSink`, so a workspace on
+//!                      another machine gets the file where the reader's hands
+//!                      are, not where the harness runs
+//!   4. determinism   — the spill filename derives from `seq`, never a runtime
+//!                      counter, so a replayed ledger reproduces byte-for-byte
+//!   5. valid UTF-8   — returned text is valid UTF-8 whatever the tool wrote
+//!                      (`utf8Lossy`), because ledger strings have to be
 
 const std = @import("std");
 

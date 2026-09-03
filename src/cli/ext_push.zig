@@ -6,9 +6,8 @@
 //! version anyone can compose. Content addressing does the rest: pushing twice
 //! is a no-op.
 //!
-//! Only `remote:` specs. An exec target (`--env wsl`) runs commands elsewhere
-//! but keeps the workspace and the store HERE, so pushing to one would copy a
-//! version into the store it came out of.
+//! Only `remote:` specs: a local `--env` names this machine, so pushing to one
+//! would copy a version into the store it came out of.
 //!
 //! Nothing is activated on the far side, and nothing here decides when a
 //! version should travel.

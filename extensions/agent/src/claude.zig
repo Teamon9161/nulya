@@ -2,9 +2,7 @@
 //!
 //! `claude -p --input-format stream-json --output-format stream-json --verbose`
 //! is a bidirectional, newline-delimited JSON stream over the child's stdio,
-//! verified against Claude Code 2.1.246. The Agent SDK drives the same protocol
-//! and is not used: it would nail a TypeScript runtime into a compiled Zig
-//! package. IN, one object per line:
+//! verified against Claude Code 2.1.246. IN, one object per line:
 //! `{"type":"user","message":{"role":"user","content":…},"parent_tool_use_id":
 //! null}` is a turn (stdin stays open, so a session takes as many as it is
 //! given); `{"type":"control_request","request_id":…,"request":{"subtype":
@@ -20,8 +18,7 @@
 //! The session id is minted HERE — `--session-id <uuid>` opens, `--resume
 //! <uuid>` picks up in a later process — and which a round uses is decided by
 //! `<d>/claude.started`, so an attempt that died before opening anything retries
-//! as a creation. ONE TURN PER ROUND: no mid-turn steer, because Claude's own
-//! queue dies with the process where our inbox does not.
+//! as a creation. ONE TURN PER ROUND: Claude's own queue dies with the process.
 //!
 //! `readonly` is FAIL-CLOSED: ask for the narrow shape, then CHECK the
 //! `system/init` echo — a tool outside the read-only set, a wider permission

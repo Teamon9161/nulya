@@ -2,7 +2,7 @@
 //!
 //! A journal rather than a state file because TWO processes write it (the `agent`
 //! tool in the caller's step, the `run` tool in a background task): whole lines
-//! appended under a lock, `src/journals/journal.zig`'s discipline re-implemented
+//! appended under a lock, re-implementing `src/journals/journal.zig`'s discipline
 //! because an extension cannot import the kernel.
 //!
 //!   `<d>/record.jsonl`   this journal: one `created` row, then one `turn` row
@@ -20,11 +20,8 @@
 //!                        EXTERNAL runner extension can read it — written only by
 //!                        whoever holds the lease, and only for that round.
 //!
-//! The last two of those are a queue with a delivery contract rather than a
-//! record of what happened, so they live in `mailbox.zig`.
-//!
-//! Every entry point takes the workspace directory rather than assuming the
-//! process's own: callers pass `std.Io.Dir.cwd()`, tests a temporary one.
+//! The last two are a queue with a delivery contract rather than a record of
+//! what happened, so they live in `mailbox.zig`.
 
 const std = @import("std");
 

@@ -1,27 +1,21 @@
 //! `grep` — regex search over a directory tree or one file, ported from tcode
 //! search.rs (`GrepTool`): the numbers, the notes and the output shape are its.
 //!
-//! What a call does: resolve `path` (default cwd); compile the pattern under
-//! smart case (`regex.zig`); walk the base with `walk.zig` (gitignore, prune
-//! table, 10 s deadline) or read the one explicit file; skip files over the
-//! size cap, files with a NUL in their first 8 KB, and files the `glob` filter
-//! rejects; collect every file's matches into groups (a run of match and
-//! context lines with no gap between them); sort groups by file then line;
-//! apply the per-file cap (only when results span more than one file); page by
-//! MATCHES with `head_limit` / `offset`, cutting the groups that straddle a page
-//! edge so no context line dangles; render `file:` headings, `N: text` for
-//! matches, `N- text` for context, `--` between disjoint context blocks of one
-//! file; append the notes that explain what was left out.
+//! Order that matters: smart-case compile (`regex.zig`) → walk (`walk.zig`:
+//! gitignore, prune table, 10 s deadline) or the one explicit file → skip files
+//! over the size cap, with a NUL in their first 8 KB, or rejected by `glob` →
+//! group each file's matches with their context → sort by file then line →
+//! per-file cap (only when results span more than one file) → page by MATCHES
+//! with `head_limit`/`offset`, cutting groups that straddle a page edge so no
+//! context line dangles → render (`file:` heading, `N: text`, `N- text` context,
+//! `--` between disjoint blocks) → notes for what was left out. A total
+//! `max_output_bytes` budget cuts the page at match granularity, so the paging
+//! note's `offset=` is exact and the kernel's output guard never clips a listing
+//! and eats the notes.
 //!
-//! One thing tcode did not have: a total output budget of `max_output_bytes`.
-//! The page is cut at match granularity to fit under it, so the paging note's
-//! `offset=` is exact and the kernel's own output guard never has to clip a
-//! listing and eat the notes.
-//!
-//! Every answer that is not a host fault is TEXT: "no matches", "offset past
-//! the end" and a search path that does not exist are results a model can act
-//! on, not errors — the last of these names the nearest real ancestor instead
-//! of just failing. Only a pattern that will not compile refuses.
+//! Every answer that is not a host fault is TEXT: "no matches", "offset past the
+//! end" and a missing search path are results a model can act on, not errors —
+//! the last names the nearest real ancestor. Only an uncompilable pattern refuses.
 
 const std = @import("std");
 const rpc = @import("rpc.zig");

@@ -1,8 +1,7 @@
-//! The directory walk under `grep` and `glob`: one thread, gitignore-aware,
-//! a fixed prune table, a wall-clock deadline, and a callback per regular file.
-//! Ported from tcode search.rs; here it is a recursive `std.Io.Dir` iteration,
-//! entries in byte order — so a partial result under the deadline is
-//! deterministic — with `vendor/ignore.zig` for the gitignore rules.
+//! The directory walk under `grep` and `glob`: one thread, gitignore-aware, a
+//! fixed prune table, a wall-clock deadline, a callback per regular file. A
+//! recursive `std.Io.Dir` iteration in byte order — so a partial result under
+//! the deadline is deterministic — with `vendor/ignore.zig` for the rules.
 //!
 //! What is skipped, in the order it is decided for each entry: (1) the
 //! deadline — past it, the walk stops where it is and the report says so; (2)
@@ -12,12 +11,8 @@
 //! pointed inside one; (4) a symlink — a directory symlink is skipped and
 //! counted unless `follow_symlinks` (then entered once, guarded against
 //! cycles by the real paths already entered), a file symlink followed only
-//! under `follow_symlinks`. Dotfiles and dot-directories are searched
-//! (`.github/`, `.config/`): only the prune table and ignore files decide.
-//!
-//! The tail of the file holds what both search tools need to SHOW a walked
-//! path (`relDisplay` / `display`) and to hand any text to the model as
-//! valid UTF-8 (`lossyUtf8` / `sanitize`).
+//! under `follow_symlinks`. Dotfiles and dot-directories are searched: only
+//! the prune table and ignore files decide.
 
 const std = @import("std");
 const rpc = @import("rpc.zig");

@@ -12,10 +12,9 @@
 //!   `run {delegation, …}`   the background command itself (`runner.zig`).
 //!
 //! The model names a DELEGATION, never the session behind it; which harness holds
-//! it is the definition's `runner:`, frozen into the record when it opens.
-//!
-//! The persona reaches a session as `session new --prompt <file>` — bytes frozen
-//! into the header, nothing installed. Every child session is `--bare`, so a
+//! it is the definition's `runner:`, frozen into the record when it opens. The
+//! persona reaches a session as `session new --prompt <file>` — bytes frozen into
+//! the header, nothing installed. Every child session is `--bare`, so a
 //! definition's `with` is its whole composition and it behaves the same in every
 //! workspace. A delegated session carries this package only when its definition
 //! names somebody to pass work to (`agents:` non-empty).
@@ -330,7 +329,7 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     }
 
     // Which session is this? Without it there is nobody to report BACK to —
-    // `task_finished` is deposited into a session's inbox.
+    // the report is deposited as a `note` into a session's inbox.
     const session_path = ctx.env.get("NULYA_SESSION") orelse
         return rpc.refuse(alloc, "agent must be called from inside a session (NULYA_SESSION is not set)", .{});
     const parent = std.fs.path.stem(session_path);

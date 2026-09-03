@@ -1,30 +1,18 @@
-//! The shared file layer under Nulya's durable JSONL journals.
-//!
-//! Two journals live in the workspace's `.nulya/`: tool usage (`tool_stats.zig`)
-//! and session outcomes (`outcome.zig`). They record different facts and neither
-//! knows the other's schema — what they genuinely share is the FILE discipline:
+//! The shared file layer under Nulya's durable JSONL journals (tool usage in
+//! `tool_stats.zig`, session outcomes in `outcome.zig`). What they share is the
+//! FILE discipline below and the clock; each owns its own schema, encode/parse
+//! and error set.
 //!
 //!   * one complete JSON line per event, appended at the end, never rewritten;
-//!   * a journal is written by MANY processes (every `session step`, every
-//!     `ext run`, every `session outcome`), so an append holds a short exclusive
-//!     lease on the sidecar `<journal>.lock` while it measures, repairs and
-//!     writes — two appends can never land on the same offset. Readers take no
-//!     lock: they only ever see whole lines plus, at worst, one torn tail;
-//!   * an append interrupted by cancel or crash can leave a partial final line,
-//!     so the next append first drops that tail back to the last `\n` — a
-//!     truncated event can never be glued onto a later one into a permanently
-//!     malformed middle line — and a READ ignores that torn tail as well, so a
-//!     crash between two appends never blocks `session list` until someone
-//!     writes again. A malformed COMPLETE line is still the consumer's error:
-//!     the tail rule forgives an interrupted write, not a bad journal;
-//!   * a missing journal file reads as "no facts yet", while a missing workspace
-//!     (or any other host fault) propagates. What a missing *directory* means is
-//!     the journal's own call, not this layer's: for a workspace journal it is a
-//!     host fault, the workspace is supposed to be there.
-//!
-//! That I/O and the CLOCK are what is shared. There is deliberately no
-//! `Journal(T)`: each journal owns its own encode/parse, its own schema version,
-//! and its own error set.
+//!   * many processes append (every `session step`, `ext run`, `session
+//!     outcome`), so an append holds a short exclusive lease on the sidecar
+//!     `<journal>.lock` while it measures, repairs and writes — two appends can
+//!     never land on the same offset. Readers take no lock;
+//!   * an append cut short by cancel or crash leaves a partial final line: the
+//!     next append drops that tail back to the last `\n` before writing, and a
+//!     read skips it, so a torn write is never glued onto a later event. A
+//!     malformed COMPLETE line is still the consumer's error;
+//!   * a missing file reads as "no facts yet"; a missing workspace propagates.
 
 const std = @import("std");
 const lease = @import("../lease.zig");
@@ -171,10 +159,10 @@ test "a journal that sits directly in its directory creates no subdirectory" {
     const cwd = try tmpCwd(alloc, io, tmp);
     defer alloc.free(cwd);
 
-    // The user-level trust journal's shape: a bare file name, so the only
-    // directory involved is the one already passed in.
-    try appendLine(io, cwd, "trusted-stores.jsonl", "{\"v\":1}\n");
-    const bytes = (try readAll(alloc, io, cwd, "trusted-stores.jsonl")).?;
+    // A bare file name: the only directory involved is the one already
+    // passed in.
+    try appendLine(io, cwd, "bare-name.jsonl", "{\"v\":1}\n");
+    const bytes = (try readAll(alloc, io, cwd, "bare-name.jsonl")).?;
     defer alloc.free(bytes);
     try std.testing.expectEqualStrings("{\"v\":1}\n", bytes);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, journal_dir, .{}));

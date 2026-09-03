@@ -3,13 +3,8 @@
 //!
 //! Six tools in one binary — `read`, `write`, `append`, `edit`, `grep`,
 //! `glob` — dispatched here on `NULYA_TOOL`, ported from tcode's tool crate.
-//! Compiled Zig rather than a script: a regex engine, a gitignore-aware
-//! walker and the whitespace-normalising fallbacks `edit` needs are not
-//! something a shell script carries, and a manifest holds one `interpreter`,
-//! so a script version would need a `.sh` and a `.ps1` of the same six tools
-//! that could never share a content-addressed version. DEFAULT-OFF: this
-//! ships with the repo but a user who wants it must build, activate, and pin
-//! the tools they want.
+//! DEFAULT-OFF: this ships with the repo but a user who wants it must build,
+//! activate, and name the tools they want on a session's member list.
 //!
 //! A tool sees only its arguments, a sanitized environment and the working
 //! directory. The one thing these tools remember between calls — what the

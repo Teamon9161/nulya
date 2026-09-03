@@ -1,9 +1,9 @@
 //! The tool registry.
 //!
 //! In the immutable kernel there is exactly ONE builtin tool: shell.
-//! Everything else the AI grows as an extension: selected tools are exposed
-//! natively this session through `SessionComposition` pins, and every other
-//! extension capability is invoked through `nulya ext run`.
+//! Everything else the AI grows as an extension: a session member puts its
+//! selected tools on the model face, and every other extension capability is
+//! invoked through `nulya ext run`.
 //! A session receives a frozen `ToolSetSnapshot` through `SessionComposition`;
 //! execution never queries a live registry mid-step.
 
@@ -95,7 +95,7 @@ test "snapshot freezes builtin table for lookup" {
     try std.testing.expectEqual(@as(usize, 1), snap.tools.len);
     try std.testing.expect(snap.lookup("shell") != null);
     // `edit` is not a builtin: it is a tool of the bundled `std` extension and
-    // arrives, if at all, as a pinned extra.
+    // arrives, if at all, through a session's member list.
     try std.testing.expect(snap.lookup("edit") == null);
     try std.testing.expect(snap.lookup("nope") == null);
 }

@@ -1,10 +1,7 @@
-//! Durable, append-only journal of completed tool-call facts.
-//!
-//! Recorded as an observation after execution: the loop runs, the ledger
-//! records the batch, and `AgentSession` resolves each model-facing call name
-//! to its stable `ToolDefinition.id` and appends one `UseEvent` line. Ranking,
-//! recency, and promotion policy are derived later from `aggregate` or
-//! `readAll`, never stored here.
+//! Durable, append-only journal of completed tool-call facts, recorded after
+//! execution: the loop runs, the ledger records the batch, and `AgentSession`
+//! resolves each model-facing call name to its stable `ToolDefinition.id` and
+//! appends one `UseEvent`. Ranking and promotion policy are derived later.
 //!
 //! One JSON object per line in `<workspace>/.nulya/tool-usage.jsonl`:
 //!   {"v":1,"at":"2026-08-17T09:31:07Z","session":"s-1786-3f",
@@ -13,16 +10,9 @@
 //!
 //! `v` is the schema version; a bump fails old journals with a precise error
 //! instead of misreading them. `tool_id` is the durable identity, never the
-//! model-facing name, so history accumulates across implementation versions
-//! while `version` (below) records which one served a given call. Every
-//! column beyond `tool_id`/`ok` is optional both ways: absent on read means
-//! "not recorded" (never a zero), and a writer may genuinely have nothing to
-//! say for one.
-//!
-//! An append interrupted by cancel or crash can leave a partial final line;
-//! the next append drops that tail back to the last `\n` (shared discipline
-//! with the outcome journal, `journal.zig`) before writing, and a read skips
-//! it. A malformed COMPLETE line is an explicit error.
+//! model-facing name; `version` records which implementation served the call.
+//! Every column beyond `tool_id`/`ok` is optional both ways: absent on read means
+//! "not recorded", never a zero.
 
 const std = @import("std");
 const journal = @import("journal.zig");

@@ -1,20 +1,17 @@
 //! What the model has already seen of each file, so `read` can short-circuit a
 //! redundant read of unchanged content, `write` can demand a read before it
 //! overwrites, `append` can demand at least a glimpse, and both can spot
-//! external modification. Port of tcode's `tcode-core/src/freshness.rs`,
-//! semantics and tests included.
+//! external modification. Port of tcode's `freshness.rs`, tests included.
 //!
-//! Since a tool here is one process per call, the record is an append-only
-//! JSONL file in this session's scratch directory
+//! A tool here is one process per call, so the record is an append-only JSONL
+//! file in this session's scratch directory
 //! (`.nulya/scratch/<session>/std-freshness.jsonl`) — one line per `record_*`
 //! event, replayed on open. A fork or handoff gets a new session id and
 //! therefore a fresh file: the new context has read nothing yet. Outside a
 //! session there is no file and no gate. Paths are keyed absolute, compared
 //! byte for byte; the hash is only ever compared with hashes this file wrote.
-//!
-//! `edit` reports here too, as a read of the echoed snippet under the new
-//! hash, so a `write`/`append` after our own edit is not mistaken for an
-//! external change.
+//! `edit` reports here too, as a read of the echoed snippet under the new hash,
+//! so a `write`/`append` after our own edit is not mistaken for a change.
 
 const std = @import("std");
 

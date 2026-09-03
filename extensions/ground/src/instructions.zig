@@ -15,9 +15,7 @@ const git = @import("git.zig");
 ///
 /// "Readable" is doing real work in that sentence: a candidate that cannot be
 /// read, or is larger than `max_file_bytes`, is passed over for the next name
-/// rather than ending the search. The alternative — stat first, then decide
-/// whether an unreadable winner should silence the others — is machinery for a
-/// case nobody has: an `AGENTS.md` over a megabyte.
+/// rather than ending the search.
 const candidates = [_][]const u8{ ".nulya/AGENTS.md", "AGENTS.md", "CLAUDE.md" };
 
 /// Total bytes of instruction text this section may spend. It is the cached

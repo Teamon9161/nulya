@@ -1,8 +1,7 @@
 //! `run` — drive one delegation until nothing is left to answer, then report.
-//!
-//! This is the COMMAND of a background task, not part of the parent's step.
-//! When it exits, the supervisor deposits `task_finished` into the parent's
-//! inbox. Its stdout IS the report.
+//! This is the COMMAND of a background task, not part of the parent's step:
+//! when it exits the supervisor deposits a `note` into the parent's inbox, and
+//! its stdout IS the report.
 //!
 //! Holds `<d>/.runner.lock` (advisory) while looping. On the way out: check for
 //! pending messages, RELEASE, check AGAIN — a message landing between the first
@@ -12,12 +11,9 @@
 //! arranges for nobody to take it up.
 //!
 //! A `readonly` delegation is held to its word by answering `--gate`
-//! mechanically: `shell` refused, extension tools allowed only where the
-//! request line says `readonly: true`. `default` and `unsafe` run with no gate
-//! at all; what separates those two words today is only what the record froze.
-//!
-//! What answers a round is a `Backend` — nulya, codex, claude, pi, or an
-//! external `ext run`. None of them touch the lock protocol above.
+//! mechanically: `shell` refused, extension tools allowed only where the request
+//! line says `readonly: true`. `default` and `unsafe` run with no gate at all;
+//! what separates those two words today is only what the record froze.
 
 const std = @import("std");
 const rpc = @import("rpc.zig");

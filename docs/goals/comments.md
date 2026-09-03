@@ -45,7 +45,7 @@
 
 说"这个模块是什么、有哪些不变量"，不说"为什么这样设计"。
 
-例外写成**原则而不是文件白名单**：**一个模块的头如果就是被打印出去、由第三方照着实现的规格，它可以更长，但只写规格、不写规格的辩护。** 今天符合的有三个——`extension/protocol.zig`（`nulya ext api protocol`）、`environment/remote/protocol.zig`（`nulya src`，远端 agent 作者照它实现帧协议）、`extensions/agent/src/external.zig`（`agent_runner` 契约，第三方接一个新 harness 照它实现）。
+例外写成**原则而不是文件白名单**：**一个模块的头如果就是被打印出去、由读它的人照着实现的规格，它可以更长，但只写规格、不写规格的辩护。** 今天符合的有四个——`extension/protocol.zig`（`nulya ext api protocol`）、`environment/remote/protocol.zig`（`nulya src`，远端 agent 作者照它实现帧协议）、`extensions/agent/src/external.zig`（`agent_runner` 契约，第三方接一个新 harness 照它实现）、`src/lease.zig`（全系统的锁与顺序表，下一个加锁的人照它加一行）。
 
 ### 一条规则只说一次
 

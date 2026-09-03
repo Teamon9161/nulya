@@ -1182,8 +1182,7 @@ test "a tool's surface is auto, manual or internal; silence means auto and an un
     try std.testing.expect(m.tools[3].surface == null);
     try std.testing.expectEqual(Surface.auto, m.tools[3].surfaceOf());
 
-    // A word outside the three is a named refusal, not a default — including
-    // the three words this vocabulary used to be spelled with.
+    // A word outside the three is a named refusal, not a default.
     for ([_][]const u8{ "public", "pin", "with", "driver" }) |word| {
         const src = try std.fmt.allocPrint(alloc,
             \\{{"schema":"nulya.extension/v2","id":"a","runtime":{{"entry":"bin/a"}},"contributes":{{"tools":[{{"name":"t","input":{{}},"surface":"{s}"}}]}}}}
@@ -1503,10 +1502,10 @@ test "a `run` command must name a tool this same manifest declares; other verbs 
 test "policy is one optional bool, so nothing it can say has to be refused" {
     const alloc = std.testing.allocator;
 
-    // `allow` used to be a parse-time refusal — a package placing authority
-    // INTO an approval table. With one narrow-only field left,
-    // that rule is carried by the SHAPE: `allow` is simply an unknown key, and
-    // a policy that says nothing this build reads contributes nothing.
+    // A package cannot place authority INTO an approval table, and with one
+    // narrow-only field left that rule is carried by the SHAPE: `allow` is
+    // simply an unknown key, and a policy that says nothing this build reads
+    // contributes nothing.
     var allow = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"policy":{"allow":["shell"]}}}
     );
@@ -1626,8 +1625,7 @@ test "a command, a policy with content, or a ui block each alone counts as a con
 }
 
 test "commands, policy and ui default to absent, and a manifest predating them still validates" {
-    // `valid_manifest` (top of file) has none of these three — the fixture
-    // that already stood for "the format before this field existed".
+    // `valid_manifest` (top of file) has none of these three.
     var m = try parse(std.testing.allocator, valid_manifest);
     defer m.deinit();
     try m.validate();

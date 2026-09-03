@@ -1,22 +1,17 @@
 //! The kernel as a library: the root module of the public `nulya` package
-//! (`b.addModule("nulya", …)` in build.zig), the conventional `src/root.zig`
-//! a Zig dependency exposes. An application that wants the kernel in-process
-//! adds this repo to its `build.zig.zon` and `@import("nulya")`s what it needs.
+//! (`b.addModule("nulya", …)` in build.zig). An application that wants the
+//! kernel in-process adds this repo to its `build.zig.zon` and
+//! `@import("nulya")`s what it needs.
 //!
-//! Two consumers share this one surface on purpose. The e2e test binary is an
-//! out-of-tree module (Zig 0.16 forbids a single file living in two module
-//! graphs), so it reaches core code only through what is re-exported here —
-//! which means the e2e suite exercises exactly the surface a dependent gets.
-//! This file is NOT part of the shipped `nulya` binary; nothing in the binary's
-//! own module graph imports it.
+//! The e2e test binary is an out-of-tree module (Zig 0.16 forbids a single file
+//! living in two module graphs), so it reaches core code only through what is
+//! re-exported here — the e2e suite exercises exactly the surface a dependent
+//! gets. This file is NOT part of the shipped `nulya` binary; nothing in the
+//! binary's own module graph imports it.
 //!
-//! No stability promise yet: pre-release, the API moves when the kernel does.
-//! The stable integration surfaces remain the CLI (`nulya session *` for
-//! drivers) and the plain wire for extensions; this module is for embedding,
-//! not the only door in.
-//!
-//! Keep it a thin re-export surface: add a line when a consumer (a test, an
-//! embedder) genuinely needs a core module, never any logic.
+//! Pre-release: the API moves when the kernel does. Keep it a thin re-export
+//! surface — add a line when a consumer genuinely needs a core module, never
+//! any logic.
 
 pub const build_ext = @import("extension/build/build_ext.zig");
 pub const composition = @import("composition.zig");

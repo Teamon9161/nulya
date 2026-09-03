@@ -1,20 +1,19 @@
 //! `edit` — exact string replacement in a UTF-8 text file, with a recovery
 //! ladder for near misses and an echo of the edited region. Port of tcode
 //! `fs/edit.rs` (`{path, old_string, new_string, replace_all?, target_line?}`).
+//! No read-before-edit gate: the exact, unique match against the current bytes
+//! on disk IS the verification, and a failed match teaches (candidates with
+//! line numbers, similar lines, the count).
 //!
-//! No read-before-edit gate: the exact, unique match against the current
-//! bytes on disk IS the verification, and a failed match teaches (candidates
-//! with line numbers, similar lines, the count) so the next call can succeed.
+//! Recovery ladder, first hit wins: exact (with the file's own line endings, so
+//! an LF `old_string` matches a CRLF file) → typographic punctuation normalized
+//! → per-line whitespace normalized → all whitespace including newlines
+//! normalized (reflow). Every rung splices the file's REAL bytes back, and every
+//! rung refuses to choose between several matches.
 //!
-//! Recovery ladder, first hit wins: exact (with the file's own line endings,
-//! so an LF `old_string` matches a CRLF file) → typographic punctuation
-//! normalized → per-line whitespace normalized → all whitespace including
-//! newlines normalized (reflow). Every rung splices the file's REAL bytes
-//! back, and every rung refuses to choose between several matches.
-//!
-//! Freshness: the echoed snippet is recorded as a `read` of the new version,
-//! not as a write — a write would mark the whole file seen and let a later
-//! offset read return an "unchanged" stub for lines nobody has seen.
+//! Freshness: the echoed snippet is recorded as a `read` of the new version, not
+//! as a write — a write would mark the whole file seen and let a later offset
+//! read return an "unchanged" stub for lines nobody has seen.
 
 const std = @import("std");
 const builtin = @import("builtin");

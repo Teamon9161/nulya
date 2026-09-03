@@ -66,7 +66,7 @@ pub fn selfRef(alloc: std.mem.Allocator, io: std.Io) ![]const u8 {
 
 /// Start the background task that drives one delegation.
 ///
-/// It belongs to the PARENT, so its `task_finished` is deposited into the
+/// It belongs to the PARENT, so its report is deposited as a `note` into the
 /// parent's inbox when it ends. Each round gets a new `t<N>`: nothing is reused,
 /// nothing is resumed, and two reports are two events in the parent's ledger.
 ///

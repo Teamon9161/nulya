@@ -1,10 +1,9 @@
 //! Test-only fixtures: materialize seal-valid frozen extension versions on disk.
 //!
-//! Four modules used to hand-roll the same snapshot -> canonical -> versionId ->
-//! freeze -> seal dance to stand up a fake built version for their tests. This
-//! collapses that mechanism into one place so the fixtures can never drift from
-//! the real freeze/seal definitions in `integrity.zig`. Fixture *shape* (which
-//! manifest, which files) stays local to each test; only the plumbing lives here.
+//! One place for the snapshot -> canonical -> versionId -> freeze -> seal dance,
+//! so a fixture can never drift from the real definitions in `integrity.zig`.
+//! Fixture *shape* (which manifest, which files) stays local to each test; only
+//! the plumbing lives here.
 
 const std = @import("std");
 const integrity = @import("integrity.zig");

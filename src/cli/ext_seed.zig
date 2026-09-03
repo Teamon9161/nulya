@@ -1,8 +1,8 @@
-//! `nulya ext seed`: the extension drafts this binary ships, written into a
-//! store root and kept in step with the binary afterwards.
+//! `nulya ext seed`: the extension drafts this binary ships, written into the
+//! workspace and kept in step with the binary afterwards.
 //!
 //! Seeding writes SOURCE only: `ext sync` builds what lands here like any other
-//! draft, and every later gate (trust, activation, pins) is unchanged.
+//! draft, and activation is unchanged.
 //!
 //! A seeded draft carries a `.seed` record — the digest of the tree this binary
 //! wrote — which answers "whose bytes are these". Either it still describes

@@ -1490,7 +1490,7 @@ test "a selected extension tool is provider-visible and freezes to the compositi
     try std.testing.expectEqualStrings("web.search", comp.extension_tool_bindings[0].ext_id);
     try std.testing.expectEqualStrings(v1, comp.extension_tool_bindings[0].version);
 
-    // Activate v2 mid-session: the pinned tool stays on v1 (no `current`
+    // Activate v2 mid-session: the frozen tool stays on v1 (no `current`
     // re-read, no second activeVersion lookup).
     try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
     try std.testing.expectEqualStrings(v1, comp.extension_tool_bindings[0].version);

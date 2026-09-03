@@ -1,27 +1,18 @@
 //! Codex backend: the Responses endpoint the Codex CLI uses
 //! (`chatgpt.com/backend-api/codex/responses`), authenticated with the OAuth
-//! tokens `codex login` leaves in `~/.codex/auth.json`. No API key is involved —
-//! usage bills against the ChatGPT subscription. Named for the backend, not the
-//! protocol: a plain Chat Completions endpoint is `providers/openai.zig`.
-//!
-//! Three wire differences from Chat Completions matter here:
+//! tokens `codex login` leaves in `~/.codex/auth.json` — no API key, usage bills
+//! against the ChatGPT subscription. Plain Chat Completions is
+//! `providers/openai.zig`. Three wire constraints:
 //!  - History is a flat list of typed *items* (message / function_call /
 //!    function_call_output), not role messages.
 //!  - The prompt cache is keyed by the `session_id` header (the backend writes
-//!    it over the body's `prompt_cache_key`). Nulya has a real durable session
-//!    id, so the key is derived from it and the cache survives across separate
-//!    `nulya session step` processes — not just within one.
-//!  - The endpoint 400s on `max_output_tokens` at any value, so a caller that
-//!    needs a short answer has to ask for it in the prompt.
-//!
-//! Reasoning IS replayed. With `store: false` the model's chain-of-thought comes
-//! back as a `reasoning` item whose `encrypted_content` (requested via
-//! `include`) only this model can read; each such item is emitted whole as a
+//!    it over the body's `prompt_cache_key`), derived here from the durable
+//!    session id, so the cache survives across separate `session step` processes.
+//!  - The endpoint 400s on `max_output_tokens` at any value.
+//! Reasoning IS replayed: with `store: false` each `reasoning` item's
+//! `encrypted_content` (requested via `include`) is emitted whole as a
 //! `reasoning_item`, kept on the ledger's `assistant` event, and sent back
-//! verbatim ahead of the function_call it preceded. Without them the model
-//! re-derives its plan at every tool step; with them its reasoning is
-//! continuous across the whole tool loop, the way the Codex CLI itself
-//! replays it.
+//! verbatim ahead of the function_call it preceded.
 
 const std = @import("std");
 const config = @import("../config.zig");

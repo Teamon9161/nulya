@@ -366,13 +366,13 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
 
 > **晋升 = 下一场的一行成员，对话中途只追加 note。**
 
-**`NULYA_SESSION` 是路径，`NULYA_SESSION_ID` 是身份，`session step` 两个都发布。** 它们从前是一个变量，而"这一场叫什么"与"这一场的文件在哪"是两件事——工作区可以住在别的机器上（§8.2），那里有前者而根本没有后者。要**文件**的读者（上面这条投 note）读 `NULYA_SESSION`；只要**名字**的读者（`session outcome` 的 `by:`、usage journal 的 `session` 列、`nulya task …` 的缺省场次，都经 `cli/common.zig` 的 `envSessionId` 一处读；`extensions/std` 的 freshness 键）读 `NULYA_SESSION_ID`，而后者是唯一一个过通道的（§8.2）。
+**`NULYA_SESSION` 是路径，`NULYA_SESSION_ID` 是身份，`session step` 两个都发布。** "这一场叫什么"与"这一场的文件在哪"是两件事——工作区可以住在别的机器上（§8.2），那里有前者而根本没有后者。要**文件**的读者（上面这条投 note）读 `NULYA_SESSION`；只要**名字**的读者（`session outcome` 的 `by:`、usage journal 的 `session` 列、`nulya task …` 的缺省场次，都经 `cli/common.zig` 的 `envSessionId` 一处读；`extensions/std` 的 freshness 键）读 `NULYA_SESSION_ID`，而后者是唯一一个过通道的（§8.2）。
 
 （纯内存 session 没有 inbox 可排；投递/排干只对 durable session 生效。）
 
-### 5.4 为什么不做动态 promotion / eviction
+### 5.4 没有动态 promotion / eviction
 
-每次中途 activate / evict 都改 `tools[]` = 全量 cache miss，与头号诉求正面冲突。§5.1–5.3 让能力照常增长而零缓存代价：中途只 append note，工具面的改变一律等下一场——那时改的是成员表里的一行，而下一场本来就是新前缀。
+中途改 `tools[]` 是全量 cache miss，所以工具面的改变一律等下一场：中途只 append note（§5.3），下一场改的是成员表里的一行，而那本来就是新前缀。
 
 ### 5.5 Usage journal（evidence）
 
@@ -393,11 +393,11 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
 - **`duration_ms`** 是 `ok` 说不出的成本维度，只由 loop 在 executor 两端用**单调时钟**量（不进 ledger：耗时是 journal 的事实，不是对话的事实），所以 `ext run` 那条路没有这一列。
 - **`version`** 是这次调用由哪个冻结实现服务的。它是**双身份的另一半**（PLAN §3.5）：`tool_id` 不带版本，所以一个 tool 的历史是**一段**历史；`version` 在旁边，所以同一段历史也能**按实现**读。null 两种含义都诚实：早于此列 = unknown（不是"没有版本"）；builtin = 它就是内核。两个写点各自拿着答案：session 从**本场冻结的成员列表**（`composition.extensions` 的 `FrozenExtension{id, version}`）反查——版本是冻结成员关系的属性，唯一真相就在那里，不复制进 binding；`ext run` 用它自己刚解析出的那个版本。反查不到 = 写 null，不是错误。
 
-**写它的理由是 evidence 补不了课**：journal 只能 append，今天不记就永远 unknown。所以这一列**只写不读**——内核里没有读者，`aggregate` 一字未动，per-version 投影等第一个真实 consumer。
+journal 只能 append，今天不记就永远 unknown，所以这一列**只写不读**——内核里没有读者，`aggregate` 一字未动，per-version 投影等第一个真实 consumer。
 
 **这条 journal 不是 ledger 的第二份真相，是 ledger 说不出的那部分。** 一场 session 调了几次工具、几次失败，ledger 的 `tool_results[].ok` 本来就答得出——`session list --json` 的 `tools{calls, failures}`（§14）就是直接数那个字段，不查这条 journal。留着 `ok` 没删的原因是**跨 session 的成功率**：TUI 的 `/usage`（`journals/tool_stats.aggregate`）要按 `tool_id` 聚合整台机器的历史，那个问题不属于任何一个 ledger 文件，只有这条 journal 能连续答。`duration_ms` 与 `ext run` 场外调用的身份同理——两者 ledger 天生不知道。
 
-**四列都可选、`v` 仍是 1**：加宽之前的每一行原样读回，缺的列是 null = "没记录"，绝不是 0。**为什么不升 v2**：这条 journal 的纪律一直是"加可选列、reader 忽略未知列"（`at` / `session` / `duration_ms` 三个先例），升 v2 只会让所有老读者对新行报错。reader 对未知 `v` 精确报错（`UnsupportedStatsVersion`），坏行 / 残尾容忍。
+**四列都可选、`v` 仍是 1**：加宽之前的每一行原样读回，缺的列是 null = "没记录"，绝不是 0。这条 journal 的纪律是"加可选列、reader 忽略未知列"（`at` / `session` / `duration_ms` 三个先例），所以加列不升 `v`。reader 对未知 `v` 精确报错（`UnsupportedStatsVersion`），坏行 / 残尾容忍。
 
 > **内核只存 facts；晋升是内核之外做的决定**——一个人，或 evolution session（PLAN §3.7），读完 journal 往成员表里写一行，下一场生效。它有真实成本（一个 `max_tools` 槽 + 每场的前缀 token），所以该有人为它负责，而不是由一个公式代劳。
 
@@ -508,7 +508,7 @@ workspace 只放 **draft** 与一个**可选的 `current` 指针**：`.nulya/ext
 - **每个 `<id>/` 的变更都在 `<store>/<id>/.lock` 下进行**（`Store.lease`：build 写 `versions/<v>`、activate 改任一层的 `current`、deactivate 删它；阻塞式排他 advisory 锁）——store 被这台机器上的每个 workspace 共写。读端不拿锁：`current` 是原子 rename，版本目录靠 seal 校验。
 - **header 不记位置**（`active` 仍是 `{id, version}`）：所以老布局写下的 session，只要版本进了 store 就照常 resume。
 - 不存在的 store 是**缺席**不是错误（没有 home 的机器就没有 store）；写端需要时才创建。
-- **checkout 里没有可执行的字节**：workspace 能带的只有源码，所以从前那道 workspace-store trust gate 连同 `trusted-stores` journal 一起删掉了。
+- **checkout 里没有可执行的字节**：workspace 能带的只有源码，所以没有任何门要把守（§9）。
 
 **`nulya ext migrate [--dry-run]`**（`cli/ext.zig`）是一次性的搬家：把老布局的
 `.nulya/extensions/<id>/versions/*` 与 `<NULYA_HOME | ~/.nulya>/extensions/<id>/versions/*` 搬进 store，
@@ -596,7 +596,7 @@ manifest 讲给三种听众，字段按哪个听众读它分成三层，每层�
 
 `contributes.policy?`（可选，`{readonly: ?bool}`）= 这个包要求审批 policy 在**它是本场冻结 composition 的成员期间**收窄的东西。同为声明：kernel 解析、冻进版本、不强制；TUI 把它判在三张审批表**之前**，与 agent 天花板同一处（§7.8）。`policy` 整体可以不写（`null`），写了但内容为空的 `{}` 是**不同的值**，这个区别在解析出的数据里读得出来，但对 `NoContributions` 而言两者算同一件事。
 
-**一个字段，而它只能收窄——这两件事是同一件事。** 从前是三个（`readonly` / `deny` / `ask`）外加一条 parse 规则"没有 `allow`"（否则就是 authority 经成员关系隐式增长，physics #6）。删掉两张表之后**形状自己守它**：一个可选 bool 说不出任何拓宽的话，`allow` 与任何别的键一样只是未知键。
+**一个字段，而它只能收窄——这两件事是同一件事。** 一个可选 bool 说不出任何拓宽的话，所以 authority 不会经成员关系隐式增长（physics #6）**由形状本身守住**，不需要一条 parse 规则；`allow` 与任何别的键一样只是未知键。
 
 #### 前端声明
 
@@ -608,9 +608,9 @@ manifest 讲给三种听众，字段按哪个听众读它分成三层，每层�
 
 `contributes.ui?`（可选，`{"<host>": {entry: str, api: u32}}`）是这个包**自己的前端模块**声明，**按宿主键**：`"tui"` 是本仓库那个前端的键，一个包可以同时给几个。宿主名是**开放词表**（`[a-z0-9-]+`，否则 `InvalidUiHost`）——内核的 schema 不该点名一个具体前端；一个前端读自己那一条，没有就是"这个包对我没有插件"。kernel 只验证形状：`entry` 与 `system_prompts` 同一条路径安全检查（`InvalidUiEntry`），且 `ext build` 收集快照时要求这个文件**真的存在**（`validateUi` / `UiEntryFileMissing`）——**每一条都查**，因为一个版本要服务所有宿主，build 是唯一能发现"某个宿主的模块没写"的时刻；`api` 必须 ≥ 1，否则 `InvalidUiApi`。**kernel 从不加载或运行这些文件。**
 
-#### 曾经有、为什么退场
+#### 退役的键：今天写它会怎样
 
-manifest 上有过五样东西，现在一样都不剩，读的人也不再被告知它们存在过。
+这些键 manifest 上一个都不剩。写了不会被当成声明，读的人也不会被告知它们存在过。
 
 | 退场的 | 曾经是什么 | 今天写它会怎样 |
 |---|---|---|
@@ -624,7 +624,7 @@ manifest 上有过五样东西，现在一样都不剩，读的人也不再被�
 | `commands[].action` 的字符串形 | `"run propose"`，按空格切 | `WrongType` |
 | `contributes.ui` 的平铺形 | `{entry, api}`，没有宿主键 | `WrongType`（读成"一个叫 `entry` 的宿主"） |
 
-**不留兼容垫片**：那套东西的成本是每一个读 manifest 的人要同时装下两种形状，而收益的对象不存在（仓库外还没有人写过 extension，仓库内的八个自带包与两个模板每次都被一起改）。`ext build` 因此对写了退役键的 draft **什么都不说**。
+**没有兼容垫片**：`ext build` 对写了退役键的 draft **什么都不说**。
 
 **没有任何 manifest 字段能决定 reach**：`nulya ext activate` 只是"原子改 `current`"（physics #5），一场都不组合；谁进哪一场由成员表说了算（§5.1）。
 
@@ -669,7 +669,7 @@ exit    0 = 成功；非 0 = 一次**失败的调用**，文本是 `exit <code>`
 - **`timeout_ms` 只是模型工具面上一次 call 的上限，不是这个 tool 本身的属性**：一次调用的 wall-clock 上限来自 `tool.Timeouts.extension_ms`（30s，与 shell 同一张表），**除非该 tool 的冻结 manifest 自己声明了 `timeout_ms`**（上限 `extension_max_ms` = 600s）：到点 kill，并把已捕获的 stderr 一起折成一次**失败的调用**。这条只管 **模型工具面的路径**（`ext_tools.Binding`）。**`nulya ext run` 缺省不套任何超时**——那是一个人或一段脚本在自己的时钟上跑同一个 tool；要上限就 `--timeout-ms N`，给了才夹到同一个 `extension_max_ms`。
 - 不做 daemon / persistent worker / streaming / host callback。spawn 一个原生 binary ≈ 毫秒，对比模型 round-trip 可忽略；最高频的 `shell` 是 in-core 根本不 spawn。真正的成本是某些 extension 每次调用的重初始化（浏览器 / DB 连接）——**先测量再持久化**（PLAN §3.3）。
 
-**曾经还有一种 wire，叫 `jsonrpc`**（`{"jsonrpc":"2.0","id":…,"method":"tool/call","params":{…}}` 进、一条 `result` / `error` 信封出，由 `runtime.wire` 缺省选中），2026-08-23 连同 `runtime.wire` 这个字段一起删掉。它比今天这一种多的三样东西到最后一个读者都没有：`id`（oneshot 进程一次只有一个请求）、`error.code`（到模型那里只是一个没人分支的数字）、`error.data.retryable`（内核从不读）；而它**少**的东西没有（stdout 可以是文本也可以是 JSON）。将来 persistent runtime / streaming 若需要分帧，帧该按它自己的用途设计（PLAN §3.3）。老 manifest 写了这个键的照建照跑，当未知键忽略。
+**只有这一种 wire。** 将来若需要分帧，帧该按它自己的用途设计。
 
 ### 7.4 生命周期：不可变版本 + 原子切换（`store.zig` / `integrity.zig` / `build/build_ext.zig`）
 
@@ -844,7 +844,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 **② git 答不上来永远不是错误，而"挂住"也算答不上来。** 一律少说一句而不是失败退出，而三种答案**三句话，谁都不冒充谁**：git 没装 · git 没报出 working tree（`Repo.unknown`——通常是"不在仓库里"，但超时、unsafe repository、读不懂的输出也从这条路进来）· 在仓库里。同一条纪律在字段一级也成立：**"没答"绝不塌成空字符串**——`branch --show-current` 在 detached head 上、`status --porcelain` 在干净工作树上什么都不打，空答案本身就是答案（`Answer` 是 `union(enum){ok, missing, failed}`，`failed` 不带原因码：四种失败在每个调用点说的话完全一样）。`locate` 一次 `rev-parse --show-cdup --show-prefix` 打两行（仓库根上是两个空行所以不许 trim），`Repo` 是 union——「半个答案」这个状态不存在。**每条命令 4 s 封顶**（`git.zig` 的 `bounded`）：`ls-files --others` 与 `status --porcelain` 都遍历工作树，而那个遍历不总是有限的（Windows 上 git 把目录 junction 当普通目录往下走，一个 junction 环就是无穷下降），而这段代码跑在用户发第一条消息之前。不需要进程组 / job object（git 的 stdout 是管道时不开 pager，没有孙进程攥着写端），但输出必须**边跑边排干**（大仓库 `ls-files` 是几 MB，先等后读会在管道满时死锁）。
 
-**③ 只覆盖 repo root → cwd（含），cwd 以下一律不碰。** 更深的层要到 tool 真的握着一个路径时才知道要不要读，于是机械投递只剩 `extensions/std` 一个落点；那条路真写过一版又撤了——它把候选名单 / 预算 / fence / 信任框定逐字抄成两份，而 root→cwd 那条分界**没有任何执行者**（不装 `ground` 根层就静悄悄消失），且它拓宽了 `std` 的 tool 契约。所以更深的层由 `extensions/coding` 一句工作纪律交给模型自己读（候选顺序 `.nulya/AGENTS.md > AGENTS.md > CLAUDE.md` 写在那句话里——文件名与优先级是这个约定本身），零包间耦合。层级由 `git rev-parse --show-cdup` / `--show-prefix` 给出，不需要 realpath。
+**③ 只覆盖 repo root → cwd（含），cwd 以下一律不碰。** 更深的层要到 tool 真的握着一个路径时才知道要不要读，机械投递答不了；它由 `extensions/coding` 一句工作纪律交给模型自己读（候选顺序 `.nulya/AGENTS.md > AGENTS.md > CLAUDE.md` 写在那句话里——文件名与优先级是这个约定本身），零包间耦合。层级由 `git rev-parse --show-cdup` / `--show-prefix` 给出，不需要 realpath。
 
 **UTF-8 与预算的终验**：非 git 回退路径遇到不是合法 UTF-8 的目录条目直接跳过（`layout.zig` 的 `skip`——POSIX 文件名是字节不是文本）；非法 UTF-8 的 instruction 候选文件**跳过**（一个坏文件该少一段，不该少一场 session）；`render` 返回前对整份文档 `utf8ValidateSlice` 兜底，并按**文档级 byte budget** `max_document_bytes = 1 MiB` 裁剪（`clipToBudget` 复用 UTF-8 安全裁剪；marker 先量、正文预算收成 `budget -| marker.len`，所以返回值恒 ≤ budget）。理由都是同一条：**外部事实不许让 `render` 造出一个 kernel 随后拒绝的 prompt**——漏了这一道，`render` 会报成功、把失败甩给 `session new --prompt`。（单段上限不够：`%<(240,trunc)` 截的是**显示列**不是字节，zero-width combining mark 占列不占宽度，实测一个由约 110 万个 U+0301 堆出的 subject 让同一句格式串打出 2.2 MB。）
 
@@ -1007,7 +1007,7 @@ runner 因此是带锁循环而不是"drive 一轮就退"，报告取本 task �
 
 regex 引擎是 vendored 的 mvzr（字节级、无 lookaround / backreference，smart-case 由 wrapper 补，并装了一个空 `std_options.logFn`——plain wire 上 stderr 就是失败消息，包必须独占它）；gitignore / glob 匹配移植自 zeegrep 的两个 core 模块；walker 单线程 + 10 s deadline，**不依赖 rg**。契约与进度在 `docs/goals/std.md`。
 
-**`edit` 是这个包里的第六个 tool**（它曾经是内核的第二个 builtin，见 §6）。 `{path, old_string, new_string, replace_all?, target_line?}`：**精确串匹配**，唯一匹配才动手，歧义就报次数并给最多 5 个带行号的候选窗口，匹配不上就给相似行提示（没读过该文件再附一句 note），让模型一轮纠正；**匹配本身就是校验**，不设 read-before-edit 门。**不做 fuzzy patch**（§17）——所谓 recovery ladder（标点归一 → 逐行空白归一 → 跨行 reflow 归一）每一级都只在**唯一**命中时才动手、且回填文件的真实字节，多于一个候选一律报歧义，所以它是"把模型的排版漂移对回原文"而不是"猜一个位置打补丁"。CRLF 文件收 LF `old_string`；`target_line` 与 `replace_all` 互斥。原子写并保留可执行位。成功后 stdout 是给模型读的小结果（以替换点为锚的带行号片段）；给 TUI 的事实 diff 从实际 `ReplacementPlan`、旧文件字节与新文件字节写进 `NULYA_PRESENTATION_FILE` 指向的 sidecar（`{kind:"diff", path, patch}`，patch 是完整文件行上的 unified hunk），kernel 原样存 `tool_results[].presentation`，不让前端解析 edit 参数或猜 diff。回显的片段按新 hash 登记成一次 **read**（不是 write——write 会把整文件标成已看过，让之后的窗口读错误地回 unchanged），所以 read → edit → write 同一文件不再被拦一次要求重读。
+**`edit` 是这个包里的第六个 tool。** `{path, old_string, new_string, replace_all?, target_line?}`：**精确串匹配**，唯一匹配才动手，歧义就报次数并给最多 5 个带行号的候选窗口，匹配不上就给相似行提示（没读过该文件再附一句 note），让模型一轮纠正；**匹配本身就是校验**，不设 read-before-edit 门。**不做 fuzzy patch**（§17）——所谓 recovery ladder（标点归一 → 逐行空白归一 → 跨行 reflow 归一）每一级都只在**唯一**命中时才动手、且回填文件的真实字节，多于一个候选一律报歧义，所以它是"把模型的排版漂移对回原文"而不是"猜一个位置打补丁"。CRLF 文件收 LF `old_string`；`target_line` 与 `replace_all` 互斥。原子写并保留可执行位。成功后 stdout 是给模型读的小结果（以替换点为锚的带行号片段）；给 TUI 的事实 diff 从实际 `ReplacementPlan`、旧文件字节与新文件字节写进 `NULYA_PRESENTATION_FILE` 指向的 sidecar（`{kind:"diff", path, patch}`，patch 是完整文件行上的 unified hunk），kernel 原样存 `tool_results[].presentation`，不让前端解析 edit 参数或猜 diff。回显的片段按新 hash 登记成一次 **read**（不是 write——write 会把整文件标成已看过，让之后的窗口读错误地回 unchanged），所以 read → edit → write 同一文件不再被拦一次要求重读。
 
 #### `plan` / `ask`：声明层与代码层的两个真实 consumer
 
@@ -1041,7 +1041,7 @@ Environment { runShell(cmd, dialect) / runExtension(id, version, tool, request_j
 
 **`runExtension` 收的是身份，不是路径**（§7.5）：`(id, version, tool)` + 参数 JSON。把 `(id, version)` 变成一个可以 spawn 的文件是**执行这一侧**的事（按自己的 OS 选 entry 变体、按自己的 `.sealed` 复验、拼自己的 store 路径），住在 `extension/exec.zig`，由 local backend 与 `nulya remote serve` 共用。
 
-**这里曾经还有一个 `WorkspaceFs`**（`readFileAlloc` / `atomicWriteFile` 的 vtable，只为 builtin `edit` 存在）。`edit` 搬进 `extensions/std` 之后它一个读者都没有了——extension 子进程本来就自己开文件（authority 上与 shell 同级，§9）。`ToolContext` 现在是 `{environment, cwd}`。真要 sandbox / remote backend 时，能拦住文件访问的是那一层本身。
+**`ToolContext` 是 `{environment, cwd}`，没有文件 vtable**：extension 子进程自己开文件（authority 上与 shell 同级，§9）。真要 sandbox 时，能拦住文件访问的是那一层本身。
 
 只有 `local` backend。`sandbox` 在 config 里能解析，但建 environment 时（`launch.localEnvironment`，唯一一处）直接报 `UnsupportedEnvironmentBackend`——不会悄悄按 local 跑一个要求隔离的 config（PLAN §3.8）。**`remote` 这个词已从 `EnvironmentBackend` 删除**：它从未实现，且与 §8.2 的 `--env remote:…`（哪台机器跑，不是关得多紧）撞了名；老配置写 `backend = "remote"` 现在是响亮的解析失败（`error.InvalidValueType`），不会被静默读成 `local`。ACP 不是 Environment（那是 editor→agent 的通信协议，方向相反，归前端层）。
 
@@ -1108,7 +1108,7 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Site.resolv
 
 **远端 agent 永不需要模型或 tool credential**（§9 的直接推论）：模型连接留在 host，对面只执行。协议里**没有能装 credential 的字段**，host 从不转发自己的 env map，而传输子进程拿到的是 `environment.sanitizedChildEnv`（`isSecretKey` 剥过、加了 `NULYA_EXE` 的那一份——**同一个函数，两台机器各跑一次**）。SSH transport 自己的认证是 host 侧 transient 输入（见上），不进入帧协议。
 
-**`NULYA_SESSION` 不下传**（那是 host 上一个文件的路径，发过去就是一句假话）；**下传的是 `NULYA_SESSION_ID`**。这两个变量从前是一个：远端化只是把它掰开，于是**只要 id 的读者**（`extensions/std` 的 freshness 门、`session outcome` 的 `by:`、usage journal 的 `session` 列、`nulya task` 动词的缺省场次）在对面照常工作，而**真要一个文件的**那些（`ext activate` 投能力宣告 note）仍然只在 host 上拿得到路径。
+**`NULYA_SESSION` 不下传**（那是 host 上一个文件的路径，发过去就是一句假话）；**下传的是 `NULYA_SESSION_ID`**，于是**只要 id 的读者**（`extensions/std` 的 freshness 门、`session outcome` 的 `by:`、usage journal 的 `session` 列、`nulya task` 动词的缺省场次）在对面照常工作，而**真要一个文件的**那些（`ext activate` 投能力宣告 note）仍然只在 host 上拿得到路径。
 
 **`.nulya/` 的归属按"谁读它"切**：session 文件、两条 journal、extension store 的宿主面全部留 host；工作树在对面。**`emit` 的 spill 跟着工作区走**——它经 `putWorkspaceFile`（§8）落在对面，路径就是 footer 里那个 workspace 相对的字符串，所以模型下一条命令就能打开它；而 `tool-presentation/` 下那个文件的读者是**前端**（TUI 在 host 上读它），所以它**不走**这个动词、照旧由 `loop.zig` 用本机 io 写在 host。同一个 step 里两个文件去两台机器，是因为它们各自的读者在那两台机器上。
 
@@ -1732,7 +1732,7 @@ GapDetector · WorkflowMiner · ToolSynthesisManager · AutoRefactor · RewardMo
 | 动态 promotion / eviction 改 `tools[]` | 每次都是全量 cache miss | §5.4 |
 | `.so/.dll` 动态链接 extension | ABI / 版本 / crash 带死 host / allocator 所有权 | §7.1 |
 | WASM in-process | 与原生 + 内嵌工具链冲突，削弱语言无关性 | §7.1 |
-| 第二种 wire（jsonrpc 信封） | 多出的 `id` / `error.code` / `retryable` 一个读者都没有 | §7.3 |
+| 第二种 wire（jsonrpc 信封） | 多出的 `id` / `error.code` / `retryable` 一个读者都没有 | §7.2.1 |
 | 启动 binary 询问其 tools（`describe()`） | source / manifest / runtime 三份状态漂移 | §7.2.1 |
 | manifest 的 `permissions` 声明 | 零读者的声明会被读成保证；沙箱该定自己的形状 | §7.2.1 |
 | `activation` + fresh 路 discovery | reach 是人的决定不是作者的 | §7.2.1 |

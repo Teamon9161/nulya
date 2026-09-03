@@ -12,22 +12,14 @@
 //!                           `agent_end` is NOT — it fires once per low-level run
 //!                           and can be followed by more.
 //!
-//! `pi --session-id <id>` opens that session or creates it, so unlike the Claude
-//! arm no fact on disk decides between two flags. ONE TURN PER ROUND: `steer` and
-//! `follow_up` are unused, since both hand the message to a queue inside a
-//! process that could die with it where our inbox is a file.
+//! `pi --session-id <id>` opens that session or creates it, so no fact on disk
+//! decides between two flags. ONE TURN PER ROUND: `steer` and `follow_up` hand
+//! the message to a queue inside a process that could die with it.
 //!
 //! `readonly` is FAIL-CLOSED with NO ECHO to check: nothing in the protocol
-//! reports what the session ended up with (`get_state` answers with the model,
-//! the queue modes and the session file, and no tool list). So the mechanism is
-//! the `--tools` allowlist and the check is the EVENT STREAM —
-//! `tool_execution_start` names every tool as it begins, and one outside the
-//! read-only set aborts the run. That catches a breach at the first tool rather
-//! than before the first word, which is the strongest this protocol offers.
-//!
-//! There is no `unsafe` to reach for: pi has no bypass mode, so an `unsafe`
-//! delegation runs exactly as a `default` one does. The record still freezes the
-//! word that was ASKED for.
+//! reports what the session ended up with. So the mechanism is the `--tools`
+//! allowlist and the check is the EVENT STREAM — `tool_execution_start` names
+//! every tool as it begins, and one outside the read-only set aborts the run.
 
 const std = @import("std");
 const proc = @import("proc.zig");

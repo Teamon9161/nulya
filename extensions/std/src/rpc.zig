@@ -11,9 +11,8 @@
 //! those bytes to the model unchanged); `failed` → stderr, then exit 1 (the
 //! host folds it into a failed tool result, shown as `exit 1` followed by
 //! that message — the message IS the teaching text: what went wrong and how
-//! to succeed next call). One shape for every failure, deliberately: a
-//! missing argument, an unknown tool name and a file that is not there all
-//! reach the model as one sentence.
+//! to succeed next call). A missing argument, an unknown tool name and a file
+//! that is not there all reach the model in that one shape.
 
 const std = @import("std");
 

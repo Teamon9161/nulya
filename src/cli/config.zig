@@ -51,14 +51,9 @@ const ConfigView = struct {
     /// `config.Registry`, so the two names printed are the two keys to write
     /// back.
     registry: config.Registry,
-    /// The other standing axis: which packages are a member of every session
-    /// opened here. Projected for the same reason as the pins: a reader who
-    /// cannot see it here goes and reads the config files, one of which may
-    /// hold an inline `api_key`.
-    ///
-    /// `extensions.paths` is deliberately not projected: it names directories
-    /// this machine will run code from, and `nulya ext list` already shows a
-    /// store root as such.
+    /// Which packages are a member of every session opened here. Projected so a
+    /// reader does not have to open the config files themselves, one of which
+    /// may hold an inline `api_key`.
     extensions: ExtensionsView,
 
     const ExtensionsView = struct {

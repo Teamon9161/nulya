@@ -876,7 +876,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     defer alloc.free(stable_id);
     // This command reaches the model through `shell`, whose env names the live
     // session, so a tool invoked through the CLI lands in the journal
-    // attributed to the same session a natively pinned one would be.
+    // attributed to the same session a composed one would be.
     const in_session = try envSessionId(alloc);
     defer if (in_session) |s| alloc.free(s);
     try tool_stats.append(alloc, io, cwd_path, .{

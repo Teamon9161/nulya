@@ -852,9 +852,9 @@ test "a capped section is cut between characters, never inside one" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // The boundary case that used to render a brief `session append` refuses:
-    // the cap falls one byte into a multi-byte character, so a plain byte slice
-    // ends on half of it.
+    // The boundary case: the cap falls one byte into a multi-byte character,
+    // so a plain byte slice ends on half of it and `session append` refuses the
+    // brief.
     var straddling: std.ArrayList(u8) = .empty;
     try straddling.appendNTimes(arena, 'a', max_section_bytes - 1);
     try straddling.appendSlice(arena, "字"); // three bytes, across the cap

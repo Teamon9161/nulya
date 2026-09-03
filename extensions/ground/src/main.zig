@@ -12,11 +12,9 @@
 //! ```
 //!
 //! These facts (today's date, this branch, this directory) have a lifetime of
-//! exactly one session, unlike a contributed system prompt (same bytes frozen
-//! into every session an extension version serves) — hence `--prompt`, not
-//! `contributes.system_prompts`. The package itself contributes nothing (no
-//! `apply`, no prompt, no model-facing tool): installing it changes no
-//! session by itself, only what a driver can choose to render and attach.
+//! exactly one session, unlike a contributed system prompt — the same bytes
+//! frozen into every session an extension version serves. The package itself
+//! contributes nothing: installing it changes no session by itself.
 
 const std = @import("std");
 const facts = @import("facts.zig");
