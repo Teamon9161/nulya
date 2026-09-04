@@ -755,31 +755,20 @@ export async function activeVersionOf(ws: Workspace, id: string): Promise<string
 }
 
 /**
- * The slash commands of every ACTIVATED, TRUSTED package — the data source
- * `/ext` itself reads (`listExtensions` → `ext list`), so this spawns no
- * process of its own beyond that one call.
+ * The slash commands of every ACTIVATED package — the data source `/ext`
+ * itself reads (`ext list`), so this spawns no process of its own beyond that
+ * one call and the manifest reads behind it.
  *
- * "Activated" here is deliberately not "a member of the CURRENT session's
+ * "Activated" is deliberately not "a member of the CURRENT session's
  * composition": a `with` command's whole point is to bring a package INTO a
  * session that does not have it yet, and that has to be typable before there
- * is anything to be a member of (a draft tab). So
- * the filter is exactly `ext list`'s own notion of "holding a current version,
- * not shadowed" — the same one `/with`'s picker uses.
+ * is anything to be a member of (a draft tab). So the filter is exactly `ext
+ * list`'s own notion of "holds a current version" — the same one `/with`'s
+ * picker uses.
  *
- * Trust is the one thing `ext list` does not say: a workspace store that
- * arrived with a checkout and has never been looked at still lists
- * its `current` versions, but naming one of its commands would run headlong
- * into the kernel's own refusal at the first `session new` or `ext run`. So
- * this reads the same trust journal the start-up question does
- * (`storeTrusted`) and drops that root's entries rather than offering a
- * command that cannot work. Every other root (the user's own, or an
- * `extensions.paths` addition) needs no such gate: nothing arrives there
- * without a person putting it there themselves.
- *
- * Returned in `ext list`'s own order — root by root, in kernel search order —
- * which is what lets a caller resolve a same-name collision between two
- * DIFFERENT packages by "first one in this list wins" (D8) without this
- * function itself having an opinion about names.
+ * Returned in `ext list`'s order, which is by id, so a caller settling a
+ * same-name collision between two DIFFERENT packages by "first one wins" gets
+ * a stable answer without this function having an opinion about names.
  */
 export async function packageCommands(
   ws: Workspace,

@@ -563,7 +563,7 @@ export function ModelView(props: {
     const on = anchor()
     if (!here || !loaded || on.length === 0) return
     if (!validRungName(rung)) {
-      return props.onNotice(`a rung is named with letters, digits, - or _ (not '${rung}')`)
+      return props.onNotice(`a rung is named like a sub-agent is (not '${rung}')`)
     }
     const slot = effortOf(here)
     const lands = rungValue(on, here)

@@ -777,6 +777,27 @@ fn roleOf(profile: ProviderProfile, name: []const u8) ?Role {
     return null;
 }
 
+test "a rung name with a dot survives as one role when the key is quoted" {
+    // A persona whose name carries a dot rides a rung of that name, so the
+    // config a front end writes for it has to reach `roleOf` whole rather than
+    // becoming a table called `review` holding `fast`.
+    var cfg = try loadFromLayers(std.testing.allocator, &.{
+        .{ .source = default_toml },
+        .{ .source =
+        \\[[provider.profiles]]
+        \\name = "openai"
+        \\[provider.profiles.roles]
+        \\"review.fast" = { model = "gpt-5.6-luna", effort = "low" }
+        },
+    });
+    defer cfg.deinit();
+
+    const openai = cfg.provider.findProfile("openai").?;
+    const rung = roleOf(openai, "review.fast").?;
+    try std.testing.expectEqualStrings("gpt-5.6-luna", rung.model);
+    try std.testing.expectEqualStrings("low", rung.effort.?);
+}
+
 test "roles merge by role name and a restated role replaces the whole entry" {
     var cfg = try loadFromLayers(std.testing.allocator, &.{
         .{ .source = default_toml },

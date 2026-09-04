@@ -69,7 +69,9 @@ help` in PowerShell. Below, `nulya` means whichever of the two applies.
   ```
 
   A bare value is one of this profile's own model ids; one with a `/` reads
-  `<profile>/<model-id>` and crosses to another profile. The names mean nothing
+  `<profile>/<model-id>` and crosses to another profile. The rung NAME is a TOML
+  key, so quote it when it carries a dot (`"review.fast" = "..."`) — a persona
+  name may, and a persona that names no model rides a rung of its own name. The names mean nothing
   to the kernel — an agent definition asks for `@explore` and gets whatever the
   profile it runs on calls that, so changing the model a conversation runs on
   changes what its delegations run on, in one move. A profile that staffs no

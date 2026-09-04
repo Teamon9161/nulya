@@ -416,22 +416,57 @@ test("credentials: a rung is its own marked block, so re-pointing one leaves the
     const both = writeRung(path, "openai", "review", "gpt-5.6-terra", "high")
     // An absent effort and a chosen one are different instructions, so the key
     // is written only when there is one.
-    expect(both).toContain(`explore = { model = "gpt-5.6-luna" }`)
-    expect(both).toContain(`review = { model = "gpt-5.6-terra", effort = "high" }`)
+    expect(both).toContain(`"explore" = { model = "gpt-5.6-luna" }`)
+    expect(both).toContain(`"review" = { model = "gpt-5.6-terra", effort = "high" }`)
 
     // Re-pointing one rung replaces that block and nothing else — not the other
     // rung, and not what the person wrote.
     const moved = writeRung(path, "openai", "explore", "gpt-5.6-sol", "low")
     expect(moved).not.toContain("gpt-5.6-luna")
-    expect(moved).toContain(`explore = { model = "gpt-5.6-sol", effort = "low" }`)
-    expect(moved).toContain(`review = { model = "gpt-5.6-terra", effort = "high" }`)
+    expect(moved).toContain(`"explore" = { model = "gpt-5.6-sol", effort = "low" }`)
+    expect(moved).toContain(`"review" = { model = "gpt-5.6-terra", effort = "high" }`)
     expect(moved).toContain("# mine")
 
-    // A dot would make it a DOTTED key — a table called `a` holding `b`, which
-    // is not a rung at all.
-    expect(() => writeRung(path, "openai", "a.b", "m")).toThrow()
+    // A persona name may carry a dot, and a persona that names no model rides a
+    // rung called after itself — so the picker can offer `review.fast`, and the
+    // quoted key is what keeps it ONE rung instead of a table holding `fast`.
+    const dotted = writeRung(path, "openai", "review.fast", "gpt-5.6-terra")
+    expect(dotted).toContain(`"review.fast" = { model = "gpt-5.6-terra" }`)
+
     expect(() => writeRung(path, "openai", "explore", "   ")).toThrow()
+    expect(() => writeRung(path, "openai", ".hidden", "m")).toThrow()
     expect(() => writeRung(path, "bad name", "explore", "m")).toThrow()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("credentials: a block owns itself to its end line, so what a person wrote under it survives", () => {
+  const dir = mkdtempSync(join(tmpdir(), "nulya-home-"))
+  const path = join(dir, "config.toml")
+  try {
+    const { writeRung } = require("../src/nulya/credentials.ts")
+    writeRung(path, "openai", "explore", "gpt-5.6-luna")
+    // The file is the person's: they may close the gap the block was written
+    // with. What follows is still theirs.
+    const packed = require("node:fs").readFileSync(path, "utf8").replace(/\n\n+/g, "\n") + `[[models]]\nid = "mine"\n`
+    require("node:fs").writeFileSync(path, packed)
+
+    const again = writeRung(path, "openai", "explore", "gpt-5.6-sol")
+    expect(again).toContain(`"explore" = { model = "gpt-5.6-sol" }`)
+    expect(again).not.toContain("gpt-5.6-luna")
+    expect(again).toContain(`[[models]]\nid = "mine"`)
+
+    // A block written before the end line existed is bounded the same way, by
+    // the first line that could not have come from here.
+    const legacy =
+      `# nulya: rung "explore" on profile "openai" (written by the TUI; edit or delete freely)\n` +
+      `[[provider.profiles]]\nname = "openai"\n[provider.profiles.roles]\nexplore = { model = "old" }\n` +
+      `[[models]]\nid = "mine"\n`
+    require("node:fs").writeFileSync(path, legacy)
+    const migrated = writeRung(path, "openai", "explore", "gpt-5.6-sol")
+    expect(migrated).not.toContain(`model = "old"`)
+    expect(migrated).toContain(`[[models]]\nid = "mine"`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

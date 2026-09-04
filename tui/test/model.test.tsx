@@ -517,7 +517,7 @@ test("s asks who, not what to call it: the personas are the list, and picking on
     expect(written).toContain(`name = "openai"`)
     // Written on the profile in force, naming the other provider — the main
     // model on one endpoint, this rung on another.
-    expect(written).toContain(`explore = { model = "deepseek/deepseek-v4-flash" }`)
+    expect(written).toContain(`"explore" = { model = "deepseek/deepseek-v4-flash" }`)
     expect(notices[0]).toContain("deepseek/deepseek-v4-flash")
     // And the question is down, with the models back.
     await until(() => setup.captureCharFrame().includes("GPT-5.6 Sol"), 10_000)

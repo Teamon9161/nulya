@@ -12,6 +12,7 @@
  *     [[provider.profiles]]
  *     name = "deepseek"
  *     api_key = "…"
+ *     # nulya: end
  *
  * That is legal because the kernel merges same-name profiles within a layer in
  * order (`config.zig` `upsertProfile`): the block overlays only the fields it
@@ -40,12 +41,14 @@ export function validProfileName(name: string): boolean {
 }
 
 /**
- * A rung is written as a TOML bare key, where a dot would make it a DOTTED one
- * — `a.b = {…}` is a table named `a` holding `b`, not a rung called `a.b`. So
- * this is the profile charset minus the dot.
+ * The same grammar a persona name has (`defs.isPlainName`), because a persona
+ * that names no model rides a rung called after itself — so anything the
+ * picker can offer has to be something this file can write. A dot is legal
+ * there, which is why the key is always QUOTED below: bare, `a.b = {…}` would
+ * be a table named `a` holding `b`, not a rung called `a.b`.
  */
 export function validRungName(name: string): boolean {
-  return /^[A-Za-z0-9_-]+$/.test(name)
+  return name.length <= 64 && /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(name)
 }
 
 function rungMarker(profile: string, rung: string): string {
@@ -54,18 +57,22 @@ function rungMarker(profile: string, rung: string): string {
 
 export function rungBlock(profile: string, rung: string, model: string, effort?: string): string {
   const dial = effort && effort.length > 0 ? `, effort = ${tomlString(effort)}` : ""
-  return [
+  return close([
     rungMarker(profile, rung),
     "[[provider.profiles]]",
     `name = ${tomlString(profile)}`,
     "[provider.profiles.roles]",
-    `${rung} = { model = ${tomlString(model)}${dial} }`,
-    "",
-  ].join("\n")
+    `${tomlString(rung)} = { model = ${tomlString(model)}${dial} }`,
+  ])
 }
 
 export function keyBlock(profile: string, key: string): string {
-  return `${keyMarker(profile)}\n[[provider.profiles]]\nname = ${tomlString(profile)}\napi_key = ${tomlString(key)}\n`
+  return close([
+    keyMarker(profile),
+    "[[provider.profiles]]",
+    `name = ${tomlString(profile)}`,
+    `api_key = ${tomlString(key)}`,
+  ])
 }
 
 /** What `/model`'s add-provider form collected. `key` empty = rely on `api_key_env`. */
@@ -92,16 +99,48 @@ export function profileBlock(draft: ProfileDraft): string {
   }
   if (draft.api_key_env && draft.api_key_env.length > 0) lines.push(`api_key_env = ${tomlString(draft.api_key_env)}`)
   if (draft.key && draft.key.length > 0) lines.push(`api_key = ${tomlString(draft.key)}`)
-  return `${lines.join("\n")}\n`
+  return close(lines)
+}
+
+/** The line that closes a block written here: the block's own end, stated. */
+const end_marker = "# nulya: end"
+
+/** A block is its lines, its closing line, and a trailing newline. */
+function close(lines: readonly string[]): string {
+  return `${[...lines, end_marker].join("\n")}\n`
+}
+
+/**
+ * How much of `rest` — which begins at a marker line — was written here.
+ *
+ * A block carries its own `# nulya: end`, so the answer is exact: the file is
+ * the person's to edit, and nothing they wrote underneath — with or without a
+ * blank line between — can be taken for ours. A block with no end line was
+ * written by an older build; it is bounded instead by the first line this file
+ * would never emit (blank, a comment, or a table header that is not one of the
+ * two below), and the rewrite gives it an end line.
+ */
+function ownedLength(rest: string): number {
+  const lines = rest.split("\n")
+  let used = Math.min(lines[0]!.length + 1, rest.length)
+  for (const line of lines.slice(1)) {
+    if (line.trim() === end_marker) return Math.min(used + line.length + 1, rest.length)
+    if (!ourLine(line)) return used
+    used = Math.min(used + line.length + 1, rest.length)
+  }
+  return rest.length
+}
+
+function ourLine(line: string): boolean {
+  const t = line.trim()
+  if (t.length === 0 || t.startsWith("#")) return false
+  if (t.startsWith("[")) return t === "[[provider.profiles]]" || t === "[provider.profiles.roles]"
+  return true
 }
 
 /**
  * Put `block` in `text` under `marker`: replacing what is already there, else
  * appended after a blank line.
- *
- * "What is already there" is the marker line through to the blank line that
- * ends it (or the end of the file) — not a fixed line count, because a profile
- * block grows and shrinks with the model list it carries.
  */
 export function placeBlock(text: string, marker: string, block: string): string {
   const at = text.indexOf(marker)
@@ -112,11 +151,7 @@ export function placeBlock(text: string, marker: string, block: string): string 
     return head + block
   }
   const rest = text.slice(at)
-  // The first blank line after the marker; everything from it on is somebody
-  // else's and stays exactly as it was.
-  const end = rest.search(/\n[ \t]*\n/)
-  const tail = end < 0 ? "" : rest.slice(end + 1)
-  return text.slice(0, at) + block + tail
+  return text.slice(0, at) + block + rest.slice(ownedLength(rest))
 }
 
 function write(path: string, text: string): string {
@@ -142,14 +177,15 @@ function read(path: string): string {
  *     [[provider.profiles]]
  *     name = "openai"
  *     [provider.profiles.roles]
- *     explore = { model = "gpt-5.6-luna", effort = "low" }
+ *     "explore" = { model = "gpt-5.6-luna", effort = "low" }
+ *     # nulya: end
  *
  * `effort` is written only when the dial was on a rung of its own, because an
  * absent effort and a chosen one are different instructions to the kernel.
  */
 export function writeRung(path: string, profile: string, rung: string, model: string, effort?: string): string {
   if (!validProfileName(profile)) throw new Error(`profile name '${profile}' cannot be written to config`)
-  if (!validRungName(rung)) throw new Error(`a rung is named with letters, digits, - or _ (got '${rung}')`)
+  if (!validRungName(rung)) throw new Error(`a rung is named like a sub-agent is (got '${rung}')`)
   if (model.trim().length === 0) throw new Error("a rung names a model")
   return write(path, placeBlock(read(path), rungMarker(profile, rung), rungBlock(profile, rung, model.trim(), effort)))
 }

@@ -18,8 +18,10 @@ import {
   renderAgent,
   planProjectAgents,
   readonlyCeiling,
+  rungChoices,
   usableAgents,
 } from "../src/agents.ts"
+import { validRungName } from "../src/nulya/credentials.ts"
 import { samePath } from "../src/extensions.ts"
 import { loadTuiState, rememberAgentsAnswer } from "../src/state/tui_state.ts"
 import { tempWorkspace, type TempWorkspace } from "./support.ts"
@@ -99,6 +101,26 @@ test("list is the one reading: three layers in search order, with what an earlie
   }
   // A file that is not a definition is simply not one.
   expect(all.some((entry) => entry.name === "broken")).toBe(false)
+}, 300_000)
+
+/**
+ * A persona name may carry a dot, and a persona that names no model of its own
+ * rides a rung called after itself — so the rung the picker offers can carry
+ * one too, and every rung it offers has to be one the config writer can write.
+ * Both rules live elsewhere (the package derives the rung, `credentials.ts`
+ * writes it); what is asserted here is that they still meet.
+ */
+test("a dotted persona rides a dotted rung, and a rung the picker offers is one the config can hold", async () => {
+  const dotted = tempWorkspace()
+  try {
+    writeDef(agentsDirOf(dotted, "workspace"), "review.fast", "---\ndescription: a quick reviewer\n---\nreview quickly\n")
+    const offered = rungChoices(await listAgents(dotted, await buildAgentPackage(ws)))
+    const mine = offered.find((choice) => choice.name === "review.fast")!
+    expect(mine.riders).toEqual(["review.fast"])
+    for (const choice of offered) expect(validRungName(choice.name)).toBe(true)
+  } finally {
+    dotted.cleanup()
+  }
 }, 300_000)
 
 /**
