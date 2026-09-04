@@ -182,10 +182,14 @@ pub const Ledger = struct {
         const owned_origins = try owner.alloc([]const u8, origins.len);
         for (origins, owned_origins) |origin, *slot| slot.* = try owner.dupe(u8, origin);
         try self.origins.ensureUnusedCapacity(self.alloc, @intCast(owned_origins.len));
+        // Every fallible allocation happens before the two parallel arrays are
+        // touched: they must grow together or not at all.
+        try self.events.ensureUnusedCapacity(self.alloc, 1);
+        try self.line_origins.ensureUnusedCapacity(self.alloc, 1);
 
         const owned = try cloneEvent(owner, e);
-        try self.events.append(self.alloc, owned);
-        try self.line_origins.append(self.alloc, owned_origins);
+        self.events.appendAssumeCapacity(owned);
+        self.line_origins.appendAssumeCapacity(owned_origins);
         if (self.durable) |*d| {
             const seq: u64 = self.events.items.len;
             d.persist(self.alloc, e, seq, origins) catch |err| {
@@ -1418,6 +1422,30 @@ test "ledger only grows and preserves order" {
     try std.testing.expectEqual(@as(usize, 2), l.len());
     try std.testing.expectEqualStrings("a", l.view()[0].user_text.text);
     try std.testing.expectEqualStrings("b", l.view()[1].user_text.text);
+}
+
+test "a failed append leaves no half-added turn: events and line_origins stay parallel" {
+    // Every allocation index that can fail during one append, so no future
+    // reordering can slip a commit before a fallible allocation again.
+    var fail_index: usize = 0;
+    while (fail_index < 32) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const alloc = failing.allocator();
+
+        var l = Ledger.init(alloc);
+        defer l.deinit();
+        l.appendWithOrigin(.{ .user_text = .{ .text = "a" } }, "d-1") catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(l.events.items.len, l.line_origins.items.len);
+            try std.testing.expect(!l.containsOrigin("d-1"));
+            continue;
+        };
+        // Past the last fallible allocation: the append committed whole.
+        try std.testing.expectEqual(@as(usize, 1), l.len());
+        try std.testing.expectEqual(@as(usize, 1), l.line_origins.items.len);
+        try std.testing.expectEqualStrings("d-1", l.originsAt(1)[0]);
+        break;
+    }
 }
 
 fn expectEventsEqual(a: []const Event, b: []const Event) !void {

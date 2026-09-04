@@ -380,9 +380,6 @@ export interface RegistryView {
  * layers — the projection does not say which config file contributed an entry,
  * so a panel that needs to know reads the user file itself (`face.ts`), which is
  * the one file it may write.
- *
- * `paths` is deliberately not in the projection: it names directories code may
- * come from, which `ext list` already answers by showing each root.
  */
 export interface ExtensionsView {
   with: string[]
