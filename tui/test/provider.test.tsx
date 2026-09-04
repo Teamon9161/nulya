@@ -457,16 +457,24 @@ test("credentials: a block owns itself to its end line, so what a person wrote u
     expect(again).not.toContain("gpt-5.6-luna")
     expect(again).toContain(`[[models]]\nid = "mine"`)
 
-    // A block written before the end line existed is bounded the same way, by
-    // the first line that could not have come from here.
+    // A block an older build wrote has no end line, and which of the lines under
+    // it were ours is not knowable — so nothing is deleted. The new block is
+    // appended and overrides it (roles merge by name, last one wins), and from
+    // then on there is a marked block to replace exactly.
     const legacy =
       `# nulya: rung "explore" on profile "openai" (written by the TUI; edit or delete freely)\n` +
       `[[provider.profiles]]\nname = "openai"\n[provider.profiles.roles]\nexplore = { model = "old" }\n` +
-      `[[models]]\nid = "mine"\n`
+      `effort = "high"\n[[models]]\nid = "mine"\n`
     require("node:fs").writeFileSync(path, legacy)
     const migrated = writeRung(path, "openai", "explore", "gpt-5.6-sol")
-    expect(migrated).not.toContain(`model = "old"`)
-    expect(migrated).toContain(`[[models]]\nid = "mine"`)
+    expect(migrated.startsWith(legacy)).toBe(true)
+    expect(migrated).toContain(`"explore" = { model = "gpt-5.6-sol" }`)
+
+    // And the second write replaces that one rather than piling up a third.
+    const settled = writeRung(path, "openai", "explore", "gpt-5.6-terra")
+    expect(settled.startsWith(legacy)).toBe(true)
+    expect(settled).not.toContain("gpt-5.6-sol")
+    expect((settled.match(/# nulya: end/g) ?? []).length).toBe(1)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

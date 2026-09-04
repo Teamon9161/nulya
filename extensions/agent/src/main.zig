@@ -476,7 +476,7 @@ fn newDelegation(
         // recognised here and spent after them.
         const asked_rung: []const u8 = if (asked_model.len == 0) "" else blk: {
             const shaped = defs.parseRole(asked_model) orelse break :blk "";
-            if (shaped.len == 0) return rpc.refuse(alloc, "model '{s}' names no rung after the @.", .{asked_model});
+            if (shaped.len == 0) return rpc.refuse(alloc, "model '{s}' names no rung after the @ — a rung is named the way a sub-agent is (letters, digits, `-`, `_`, and `.` after the first character).", .{asked_model});
             break :blk shaped;
         };
         const ref: ?defs.ModelRef = if (asked_model.len == 0 or asked_rung.len != 0) null else defs.parseModelRef(asked_model) orelse {

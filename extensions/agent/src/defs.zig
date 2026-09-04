@@ -163,13 +163,18 @@ pub const role_sigil = '@';
 /// `@<rung>` — the third shape of the same field, and the only one whose answer
 /// depends on which profile the delegation ends up on.
 ///
-/// Null is "not a rung at all"; an EMPTY name is "the sigil with nothing after
-/// it", which every caller reports rather than falling back to the pair grammar
+/// Null is "not a rung at all"; an EMPTY name is "the sigil names no rung",
+/// which every caller reports rather than falling back to the pair grammar
 /// (where a bare `@` would read as a profile named `@`).
+///
+/// A rung is named the way a definition is, because a definition that names no
+/// model rides a rung of its own name — one grammar, so every rung this package
+/// reports is one a front end can also write into a config file as a key.
 pub fn parseRole(value: []const u8) ?[]const u8 {
     const v = std.mem.trim(u8, value, " \t");
     if (v.len == 0 or v[0] != role_sigil) return null;
-    return std.mem.trim(u8, v[1..], " \t");
+    const name = std.mem.trim(u8, v[1..], " \t");
+    return if (isPlainName(name)) name else "";
 }
 
 pub fn parseModelRef(value: []const u8) ?ModelRef {
@@ -286,7 +291,7 @@ pub fn parse(
         } else if (std.mem.eql(u8, key, "model")) {
             if (parseRole(unquote(value))) |role| {
                 if (role.len == 0) {
-                    try warn(alloc, warnings, source, "model: @ needs a rung name after the @, ignored");
+                    try warn(alloc, warnings, source, "model: @ needs a rung name after it, named like a sub-agent is, ignored");
                 } else def.role = role;
             } else if (parseModelRef(unquote(value))) |ref| {
                 def.profile = ref.profile;
@@ -636,6 +641,30 @@ test "model: @rung names a rung instead of a pair, and the two shapes cannot bot
     , &warnings);
     try std.testing.expectEqualStrings("", empty.role);
     try std.testing.expect(warnings.items.len != 0);
+
+    // Neither is a name a rung cannot have. The rung this package reports is
+    // the one a front end offers and then writes into a config file, so a rung
+    // it accepts here but nothing can hold would be offered and then refused.
+    const dotted = try parseOne(a,
+        \\---
+        \\name: e
+        \\model: @review.fast
+        \\---
+        \\body
+        \\
+    , &warnings);
+    try std.testing.expectEqualStrings("review.fast", dotted.role);
+
+    for ([_][]const u8{ "@review fast", "@foo:bar", "@.hidden" }) |bad| {
+        warnings.clearRetainingCapacity();
+        const text = try std.fmt.allocPrint(a, "---\nname: e\nmodel: {s}\n---\nbody\n", .{bad});
+        const def = try parseOne(a, text, &warnings);
+        try std.testing.expectEqualStrings("", def.role);
+        // And it is not read as a profile either: the sigil already said which
+        // grammar this is.
+        try std.testing.expectEqualStrings("", def.profile);
+        try std.testing.expect(warnings.items.len != 0);
+    }
 }
 
 test "a rung on an external runner is dropped and named, like a profile is" {
