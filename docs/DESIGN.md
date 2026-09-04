@@ -284,7 +284,7 @@ observer（§14）的姊妹——同一个形状，相反的权力：observer �
 
 ### 输出纪律（`emit.zig`，细节见 [base-tools.md](base-tools.md)）
 
-每个 tool 结果过 head/tail 字节预算（UTF-8 边界截断），超限落盘留指针。
+每个 tool 结果过 head/tail 字节预算（UTF-8 边界截断），超限落盘留指针。**指针带落盘文件的字节数**（`[full output: <path> — N bytes]`，step 预算那条同理）：读到的人只知道"被切了"而不知道被切掉多少，就无从判断值不值得去读那个文件。
 
 **返回的文本一定是合法 UTF-8**（`emit.utf8Lossy`：非法字节换 U+FFFD、加一行说明、按 truncation 落盘留下原始字节）——ledger 的字符串必须是合法 UTF-8，否则 `std.json.Stringify` 会把它写成数字数组。note 的正文同一条纪律；`presentation` 则是**拒绝**而不是修复。
 

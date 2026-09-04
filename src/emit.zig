@@ -49,6 +49,10 @@ pub const Emitted = struct {
     text: []const u8,
     /// Owned path to the full raw output, if it was spilled.
     spill_path: ?[]const u8,
+    /// How many bytes are AT `spill_path`; 0 when nothing was spilled. Stated in
+    /// the footer so a reader knows the size of what it is not being shown, and
+    /// carried so the step limiter can repeat it when it replaces this text.
+    full_bytes: usize = 0,
 
     pub fn deinit(self: Emitted, alloc: std.mem.Allocator) void {
         alloc.free(self.text);
@@ -92,7 +96,7 @@ pub fn emit(
     errdefer final_text.deinit(alloc);
 
     if (spill_path) |path| {
-        const footer = try std.fmt.allocPrint(alloc, "\n[full output: {s}]", .{path});
+        const footer = try std.fmt.allocPrint(alloc, "\n[full output: {s} — {d} bytes]", .{ path, raw.len });
         defer alloc.free(footer);
         const body_budget = budget.max_bytes -| footer.len;
 
@@ -114,6 +118,7 @@ pub fn emit(
     return .{
         .text = try final_text.toOwnedSlice(alloc),
         .spill_path = spill_path,
+        .full_bytes = if (spill_path == null) 0 else raw.len,
     };
 }
 
@@ -256,6 +261,10 @@ pub const StepOutputLimiter = struct {
     /// no longer fits keeps, whichever is smaller, its own text verbatim or a head
     /// prefix ending in a COMPLETE pointer to the bytes on disk. The footer is the
     /// per-result floor and is not charged.
+    ///
+    /// `spilled_bytes` is `Emitted.full_bytes` — how big the file `spill_path`
+    /// already names is. It cannot be read off `output` because that file holds
+    /// the tool's RAW bytes, of which `output` is the cleaned, clipped view.
     pub fn apply(
         self: *StepOutputLimiter,
         alloc: std.mem.Allocator,
@@ -263,6 +272,7 @@ pub const StepOutputLimiter = struct {
         call_index: usize,
         output: *[]const u8,
         spill_path: *?[]const u8,
+        spilled_bytes: usize,
     ) !void {
         const remaining = self.budget.max_bytes -| self.used;
         if (output.*.len <= remaining) {
@@ -275,7 +285,12 @@ pub const StepOutputLimiter = struct {
         var path_owned = spill_path.* == null;
         const path = spill_path.* orelse try stepSpillPath(alloc, self.scratch_dir, tool_name, self.event_seq, call_index);
         errdefer if (path_owned) alloc.free(path);
-        const footer = try std.fmt.allocPrint(alloc, "\n[tool result clipped by step output budget; full output: {s}]", .{path});
+        const full_bytes = if (path_owned) output.*.len else spilled_bytes;
+        const footer = try std.fmt.allocPrint(
+            alloc,
+            "\n[tool result clipped by step output budget; full output: {s} — {d} bytes]",
+            .{ path, full_bytes },
+        );
         defer alloc.free(footer);
 
         // A replacement must never cost more than what it replaces: a result
@@ -421,6 +436,12 @@ test "emit clips an over-long line with a self-describing marker and footer" {
     try std.testing.expect(std.mem.indexOf(u8, out.text, "[full output: ") != null);
     // The footer's path and the sink's destination are ONE string.
     try std.testing.expectEqualStrings(out.spill_path.?, rec.path.?);
+    // …and the size it states is the size of what actually landed there, so a
+    // reader can tell how much it is not being shown.
+    try std.testing.expectEqual(rec.data.?.len, out.full_bytes);
+    const stated = try std.fmt.allocPrint(alloc, "{d} bytes]", .{rec.data.?.len});
+    defer alloc.free(stated);
+    try std.testing.expect(std.mem.endsWith(u8, out.text, stated));
 }
 
 test "emit keeps hard byte budget on whole-output truncation" {
@@ -492,7 +513,7 @@ test "step output limiter clips an oversized aggregate result and spills it" {
     }
 
     var limiter = StepOutputLimiter.init(rec.sink(), ".", 7, .{ .max_bytes = 160 });
-    try limiter.apply(alloc, "shell", 2, &output, &spill_path);
+    try limiter.apply(alloc, "shell", 2, &output, &spill_path, 0);
 
     try std.testing.expect(std.mem.startsWith(u8, output, "x" ** 160));
     try std.testing.expect(!std.mem.startsWith(u8, output, "x" ** 161));
@@ -513,7 +534,7 @@ test "step budget exhaustion never blanks a later result: the pointer floor surv
     var first: []const u8 = try alloc.dupe(u8, "aaaaaaaa"); // exactly the budget
     defer alloc.free(first);
     var first_spill: ?[]const u8 = null;
-    try limiter.apply(alloc, "shell", 0, &first, &first_spill);
+    try limiter.apply(alloc, "shell", 0, &first, &first_spill, 0);
     try std.testing.expectEqualStrings("aaaaaaaa", first);
     try std.testing.expect(first_spill == null);
 
@@ -524,7 +545,7 @@ test "step budget exhaustion never blanks a later result: the pointer floor surv
         alloc.free(second);
         if (second_spill) |p| alloc.free(p);
     }
-    try limiter.apply(alloc, "shell", 1, &second, &second_spill);
+    try limiter.apply(alloc, "shell", 1, &second, &second_spill, 0);
 
     try std.testing.expect(second.len != 0);
     try std.testing.expect(std.mem.indexOf(u8, second, "clipped by step output budget; full output: ") != null);
@@ -542,12 +563,12 @@ test "a short result over the spent budget stays verbatim instead of becoming a 
     var first: []const u8 = try alloc.dupe(u8, "aaaaaaaa");
     defer alloc.free(first);
     var first_spill: ?[]const u8 = null;
-    try limiter.apply(alloc, "shell", 0, &first, &first_spill);
+    try limiter.apply(alloc, "shell", 0, &first, &first_spill, 0);
 
     var second: []const u8 = try alloc.dupe(u8, "ok [exit 0]");
     defer alloc.free(second);
     var second_spill: ?[]const u8 = null;
-    try limiter.apply(alloc, "shell", 1, &second, &second_spill);
+    try limiter.apply(alloc, "shell", 1, &second, &second_spill, 0);
 
     try std.testing.expectEqualStrings("ok [exit 0]", second);
     try std.testing.expect(second_spill == null);

@@ -364,7 +364,7 @@ pub fn runStepWithPrompt(
         // escaping cancel here would strand the assistant tail without its
         // matching batch. The executor already finished, so allocate the marker
         // FIRST (an OOM then leaves the valid result intact) and replace after.
-        step_output.apply(alloc, call.tool, i, &results[i].output, &results[i].spill_path) catch |err| switch (err) {
+        step_output.apply(alloc, call.tool, i, &results[i].output, &results[i].spill_path, executed.full_bytes) catch |err| switch (err) {
             error.Canceled => {
                 const marker = try alloc.dupe(u8, tool_result_recording_canceled_output);
                 alloc.free(results[i].output);
@@ -460,6 +460,10 @@ fn unknownToolMessage(alloc: std.mem.Allocator, tool_snapshot: registry.ToolSetS
 const Executed = struct {
     entry: ledger.ToolResultEntry,
     duration_ms: u64,
+    /// How big `entry.spill_path`'s file is; 0 when nothing spilled. Lives here
+    /// rather than on the ledger entry because it is not a fact about the turn —
+    /// only the step limiter needs it, to say the size in the footer it writes.
+    full_bytes: usize = 0,
 };
 
 fn execOne(
@@ -518,6 +522,7 @@ fn execOne(
             .presentation = presentation,
         },
         .duration_ms = duration_ms,
+        .full_bytes = emitted.full_bytes,
     };
 }
 

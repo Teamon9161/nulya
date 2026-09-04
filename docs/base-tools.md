@@ -55,13 +55,13 @@ fn emit(raw: []const u8, tool: []const u8, spill_key: SpillKey, ctx: *Ctx) Emitt
 
 1. **逐行裁剪**：任何单行超过 `max_line_bytes` → 在 UTF-8 boundary 前截断 + `…[+N bytes]` 自描述标记。这里明确是 byte 上限，不承诺按 codepoint 计数。
 2. **整体预算是硬不变量**：整段超过 `max_bytes` → 按 byte budget 保留头/尾（默认 25% / 75%），在预算附近找 newline / UTF-8 boundary，中间挖掉并插入自描述标记。`len(result) <= max_bytes` 必须能写成测试 invariant。`head_lines` / `tail_lines` 最多是 soft hint，不能让结果突破 byte ceiling，也不能产生重叠/underflow。
-3. **自动落盘（不是 opt-in 模式）**：一旦发生任何 truncation（单行裁剪或整体裁剪），**总是**把完整原文写到 `scratch/tool-output/...`，并在返回给模型的正文末尾统一追加 footer：`[full output: <path>]`。
+3. **自动落盘（不是 opt-in 模式）**：一旦发生任何 truncation（单行裁剪或整体裁剪），**总是**把完整原文写到 `scratch/tool-output/...`，并在返回给模型的正文末尾统一追加 footer：`[full output: <path> — N bytes]`（N = 落盘文件的字节数）。
    → 这**取代 tcode 的 `full`/`final` 双模式**：只有一种行为，模型永不丢数据、永不需要提前预测输出多大，也不依赖额外 metadata 才知道完整内容在哪里。
 4. **确定性且不碰撞**：落盘文件名不要用运行时自增计数器，也不要用 `base_seq * 64 + i` 这类隐藏上限。用 content hash（如 BLAKE3(raw)）或 `<ledger-id>/<event-seq>-<call-index>` 派生，保证 replay/fork/subagent 下路径稳定且不碰撞。
 5. **返回的文本一定是合法 UTF-8**（`emit.utf8Lossy`）：工具的字节就是世界的字节——控制台代码页不是 UTF-8、`grep` 撞上二进制文件、日志尾从字符中间开始读。非法字节逐个换成 U+FFFD，正文前面加一行说明换了几个，并且**当作一次 truncation** 触发落盘（原始字节因此仍在一条路径之外）。这不是排版洁癖：`std.json.Stringify` 会把不合法的 `[]const u8` 写成**数字数组**而不是字符串，一个杂字节就让 session 文件与由它拼出的 provider 请求体换了形状（BUGS.md #22）。
 6. **给模型看的相对路径一律用 `/` 拼**（`emit.joinRel`；spill footer、后台任务的 log 路径与目录、`.nulya/scratch/<id>` 前缀都经它）：Windows 的文件 API 本来就认 `/`，而一条反斜杠路径被模型贴进 bash 命令的那一刻就坏了（`\t` 是 tab）；harness 其它地方的相对路径（`.nulya/sessions/…`、`.nulya/handoffs/…`）本来就是 `/`，同一个地方不该在一份转录里有两种写法。绝对的宿主路径（store 根、config 文件）照 OS 的写法——那是给人看、也本来就带盘符的。
 
-**批量输出再过一层 StepOutputBudget**：同一 assistant turn 可能返回 N 个 tool call。每个工具 `<= 128KB` 仍可能让一整轮膨胀到 MB 级，所以 batched `tool_results` 合成前还要有 `max_step_bytes`。顺序预算，但**有保底**：预算约束正文、不约束可见性——装不下的结果落盘后保留 prefix + 一条完整的 `[… full output: <path>]` footer（footer 不计入预算；比 footer 还短的结果直接保留原文、不落盘），所以最后一个 call 的报错和第一个一样可见，执行顺序不决定谁进 context。可见总量 ≤ `max_step_bytes` + 每 call 一条 footer。
+**批量输出再过一层 StepOutputBudget**：同一 assistant turn 可能返回 N 个 tool call。每个工具 `<= 128KB` 仍可能让一整轮膨胀到 MB 级，所以 batched `tool_results` 合成前还要有 `max_step_bytes`。顺序预算，但**有保底**：预算约束正文、不约束可见性——装不下的结果落盘后保留 prefix + 一条完整的 `[… full output: <path> — N bytes]` footer（footer 不计入预算；比 footer 还短的结果直接保留原文、不落盘），所以最后一个 call 的报错和第一个一样可见，执行顺序不决定谁进 context。可见总量 ≤ `max_step_bytes` + 每 call 一条 footer。
 
 **收益**：`shell`、`edit` 回显、以及未来任何 native 工具，截断/落盘/裁剪逻辑**只有一份**，在一个文件里，可单测，AI 一眼看懂。不再有 per-command 的 `shell_filter/` 子系统。
 
