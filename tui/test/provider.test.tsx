@@ -515,6 +515,30 @@ test("credentials: an added profile is one marked block, replaced whole (not by 
     expect(again).not.toContain("anthropic")
     expect(again).not.toContain("sk-or")
     expect((again.match(/\[\[provider\.profiles\]\]/g) ?? []).length).toBe(2)
+    // The form asked for a key and got none, so the block SAYS none: an empty
+    // inline key is no key to the kernel, and silence here would leave a key
+    // this form was just told about beating the environment.
+    expect(again).toContain(`api_key = ""`)
+
+    // Which is what makes the answer the same whether or not there is an older,
+    // unmarked block of ours in the file: nothing is deleted, and the appended
+    // block still says this profile has no inline key.
+    const stale =
+      `# nulya: profile "legacy" (added in /model; edit or delete freely)\n` +
+      `[[provider.profiles]]\nname = "legacy"\nkind = "openai"\nbase_url = "https://x/v1"\n` +
+      `model = "m"\nmodels = ["m"]\napi_key = "old-key"\napi_key_env = "LEGACY_KEY"\n`
+    require("node:fs").writeFileSync(path, stale)
+    const appended = writeProfile(path, {
+      name: "legacy",
+      kind: "openai",
+      base_url: "https://y/v1",
+      models: ["m"],
+    })
+    expect(appended.startsWith(stale)).toBe(true)
+    expect(appended.slice(stale.length)).toContain(`api_key = ""`)
+    // And nothing is said about the env var, which this form never asked about
+    // — the person keeps the wiring they wrote, which is how they switch to it.
+    expect(appended.slice(stale.length)).not.toContain("api_key_env")
 
     expect(() => writeProfile(path, { name: "bad name", kind: "openai", base_url: "https://x", models: ["m"] })).toThrow()
     expect(() => writeProfile(path, { name: "ok", kind: "openai", base_url: "", models: ["m"] })).toThrow()

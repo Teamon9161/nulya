@@ -98,7 +98,15 @@ export function profileBlock(draft: ProfileDraft): string {
     lines.push(`models = [${draft.models.map(tomlString).join(", ")}]`)
   }
   if (draft.api_key_env && draft.api_key_env.length > 0) lines.push(`api_key_env = ${tomlString(draft.api_key_env)}`)
-  if (draft.key && draft.key.length > 0) lines.push(`api_key = ${tomlString(draft.key)}`)
+  // The form's last step asks for a key and takes "none" for an answer, so an
+  // absent one is an ANSWER and gets written: an empty value, which the kernel
+  // reads as no inline key at all. Saying nothing would instead inherit
+  // whatever else in this layer names this profile — an older block of ours
+  // that the migration leaves in place, or a `[[provider.profiles]]` the person
+  // wrote themselves — and a profile somebody just said has no key would go on
+  // running on one, because an inline key beats the environment. `api_key_env`
+  // has no such line: nothing asks for it, so there is no answer to record.
+  lines.push(`api_key = ${tomlString(draft.key ?? "")}`)
   return close(lines)
 }
 
