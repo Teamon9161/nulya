@@ -5,14 +5,17 @@
 
 const std = @import("std");
 const tool = @import("tool.zig");
+const environment = @import("environment.zig");
 const shell = @import("tools/shell.zig");
 
-const builtins = [_]tool.Tool{
-    shell.def,
-};
+/// The builtin table for one shell dialect. `shell` is the only entry, and the
+/// dialect reaches it because its description names the interpreter it runs.
+fn builtinsFor(dialect: environment.Dialect) [1]tool.Tool {
+    return .{shell.defFor(dialect)};
+}
 
 /// Permanent model-facing tool slots, reserved before any extension tool.
-pub const builtin_count: usize = builtins.len;
+pub const builtin_count: usize = 1;
 
 /// A snapshot rejects two ways of colliding: logical-identity clashes, not
 /// resource faults, so they stay their own error set.
@@ -46,8 +49,8 @@ pub const ToolSetSnapshot = struct {
     }
 };
 
-pub fn snapshot(alloc: std.mem.Allocator) !ToolSetSnapshot {
-    return snapshotWith(alloc, &.{});
+pub fn snapshot(alloc: std.mem.Allocator, dialect: environment.Dialect) !ToolSetSnapshot {
+    return snapshotWith(alloc, dialect, &.{});
 }
 
 /// Freeze the builtin table plus `extras` into one model-facing tool set. The
@@ -55,7 +58,8 @@ pub fn snapshot(alloc: std.mem.Allocator) !ToolSetSnapshot {
 /// invariants: unique stable id, unique model-facing name. The builtin keeps its
 /// leading slot; extras follow sorted by stable id, so the frozen set is
 /// deterministic regardless of caller order.
-pub fn snapshotWith(alloc: std.mem.Allocator, extras: []const tool.Tool) !ToolSetSnapshot {
+pub fn snapshotWith(alloc: std.mem.Allocator, dialect: environment.Dialect, extras: []const tool.Tool) !ToolSetSnapshot {
+    const builtins = builtinsFor(dialect);
     const tools = try alloc.alloc(tool.Tool, builtins.len + extras.len);
     errdefer alloc.free(tools);
 
@@ -78,7 +82,7 @@ fn lessThanById(_: void, a: tool.Tool, b: tool.Tool) bool {
 }
 
 test "snapshot freezes builtin table for lookup" {
-    const snap = try snapshot(std.testing.allocator);
+    const snap = try snapshot(std.testing.allocator, .bash);
     defer snap.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), snap.tools.len);
     try std.testing.expect(snap.lookup("shell") != null);
@@ -88,7 +92,7 @@ test "snapshot freezes builtin table for lookup" {
 }
 
 test "snapshot exposes unique model-facing names" {
-    const snap = try snapshot(std.testing.allocator);
+    const snap = try snapshot(std.testing.allocator, .bash);
     defer snap.deinit(std.testing.allocator);
 
     for (snap.tools, 0..) |a, i| {
@@ -100,7 +104,7 @@ test "snapshot exposes unique model-facing names" {
 }
 
 test "snapshot exports provider-facing tool definitions without handlers" {
-    const snap = try snapshot(std.testing.allocator);
+    const snap = try snapshot(std.testing.allocator, .bash);
     defer snap.deinit(std.testing.allocator);
 
     const defs = try snap.definitions(std.testing.allocator);
@@ -122,7 +126,7 @@ test "snapshotWith keeps builtins first and sorts extras by stable id" {
         stubTool("ext:z.pkg/zeta", "zeta"),
         stubTool("ext:a.pkg/alpha", "alpha"),
     };
-    const snap = try snapshotWith(std.testing.allocator, &extras);
+    const snap = try snapshotWith(std.testing.allocator, .bash, &extras);
     defer snap.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 3), snap.tools.len);
@@ -137,7 +141,7 @@ test "snapshotWith rejects a duplicate stable id" {
         stubTool("ext:dup/one", "one"),
         stubTool("ext:dup/one", "two"),
     };
-    try std.testing.expectError(error.DuplicateToolId, snapshotWith(std.testing.allocator, &extras));
+    try std.testing.expectError(error.DuplicateToolId, snapshotWith(std.testing.allocator, .bash, &extras));
 }
 
 test "snapshotWith rejects a model-facing name that collides across extensions" {
@@ -145,10 +149,10 @@ test "snapshotWith rejects a model-facing name that collides across extensions" 
         stubTool("ext:a.pkg/search", "search"),
         stubTool("ext:b.pkg/search", "search"),
     };
-    try std.testing.expectError(error.DuplicateToolName, snapshotWith(std.testing.allocator, &extras));
+    try std.testing.expectError(error.DuplicateToolName, snapshotWith(std.testing.allocator, .bash, &extras));
 }
 
 test "snapshotWith rejects an extra that shadows a builtin name" {
     const extras = [_]tool.Tool{stubTool("ext:evil/shell", "shell")};
-    try std.testing.expectError(error.DuplicateToolName, snapshotWith(std.testing.allocator, &extras));
+    try std.testing.expectError(error.DuplicateToolName, snapshotWith(std.testing.allocator, .bash, &extras));
 }

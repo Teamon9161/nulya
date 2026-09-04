@@ -186,7 +186,7 @@ header 冻的东西：
 - **`native_tools`** = 被选为 native 的 tool 稳定 id。
 - **`prompts`** = `session new --prompt <file>` 冻进来的 per-session system prompt **字节**（`{source, text}`）——不经 store，所以 resume 不与 `ext prune` 耦合。`source` 是**内核从不解释**的标签。
 - **`model_identity`**：`provider` / 具体 `model` / `base_url` / `api_key_env`。旁边的 `model` 字段只是 profile 名。
-- **`nulya{version, kernel_hash}`**：build 版本串 + kernel system prompt 与 builtin 定义的 hash。**纯 provenance**，不参与任何判定：resume 对不上就在 stderr 警告一行照跑，空 stamp = 老 session = 不警告。
+- **`nulya{version, kernel_hash}`**：build 版本串 + kernel system prompt 与 builtin 定义的 hash（`shell` 的 description 含 dialect，所以换了 shell 的 resume 也在里面）。**纯 provenance**，不参与任何判定：resume 对不上就在 stderr 警告一行照跑，空 stamp = 老 session = 不警告。
 - **`environment`** = exec target spec（§8.1；`""` = 本机）。**不投影给模型**：一份转录只在产生它的那台机器上才有意义。`session step` 没有对应 flag，目标不可达就像 `MissingCredential` 一样响亮失败。
 
 任何进程 `openDurable` 回来时都从 header 重建 composition（`composition.initFrozen`）：**不重扫 `current`、不重排 usage journal**，所以每个 `session step` 进程都看到**同一个** composition（§5.1 / §7.5）。
@@ -409,7 +409,7 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
 
 ### 6.1 shell
 
-schema 恒定 `{ command, cwd?, timeout_ms?, background? }`。命令用哪种语言写由 Environment 的 dialect 决定，**跑在哪台机器上**由 exec target 决定（§8.1）。所有 `nulya …` CLI 都经它调用 → 模型工具面极小。读文件也交给 shell（`cat` / `rg` / `sed`）。
+schema 恒定 `{ command, cwd?, timeout_ms?, background? }`。命令用哪种语言写由 Environment 的 dialect 决定，**跑在哪台机器上**由 exec target 决定（§8.1）。**description 把 argv 说出来**（`bash -lc <command>` / `powershell -NoProfile -NonInteractive -Command <command>`），**只说是哪个 shell，不解释那个 shell 怎么用**——后者模型已经会，而 description 每次请求都重发一遍。唯一推不出来的事实是「是哪个」：Windows 上装了 bash 就选 bash，而猜错的后果不是被拒绝而是被悄悄改写（bash 在 PowerShell 看到之前就展开了管道里的 `$_`）。所以 Windows build 的 bash 那句多半行 `— a POSIX shell, not PowerShell.`，POSIX 平台上那是废话、不发。description 进 `kernel_hash`（§3.4），换了 shell 的 resume 会自己报出来。所有 `nulya …` CLI 都经它调用 → 模型工具面极小。读文件也交给 shell（`cat` / `rg` / `sed`）。
 
 **超时是内核常量，不是 config**（`tool.Timeouts`）：默认 120s、上限 600s，模型给的 `timeout_ms` 夹进 `[1, 600000]`（非正整数当场教学式拒绝）。到点 kill，并把**被杀前已捕获的输出**连同 `[timed out after <n> ms; process killed, output above is partial]` 一起返回（`ok=false`）。实现上 `child.wait` 仍是唯一的取消点，只是和一个 sleep 任务放进 `std.Io.Select` 赛跑；io 给不出两个并发单元就裸跑。
 
@@ -1282,7 +1282,7 @@ nulya                                            ← 无参数：同 `nulya help
 
 `events` 打印时**唯一的例外**是带 `images` 的 `user_text` 行：每张图的 base64 换成 `[image <media_type>, N base64 bytes]` 再重编码，其它列一字不动，解析不了的行照旧原样打印（原始字节仍在文件里）。而 **`session step` 的 ledger 行不省略**——那是 driver 面，要与文件同形。
 
-`session step` 读完 header 就核一次 `nulya.kernel_hash`（§3.4）：与本二进制不符就往 **stderr** 打一行 `warning: session <id> was created by nulya <ver> whose kernel prompt/builtins differ from this binary's; its frozen system prompt has changed`，然后照跑。空 stamp 的老 session 不警告。
+`session step` 解析出这一场的 Environment 之后核一次 `nulya.kernel_hash`（§3.4；在 Environment 之后，因为 dialect 也在 hash 里）：与本二进制不符就往 **stderr** 打一行 `warning: session <id> was created by nulya <ver> with a kernel prompt, builtin set or shell dialect that differs from this run's; what the model is told at the top of this session has changed`，然后照跑。空 stamp 的老 session 不警告。
 
 **`session new` 的模型与继承**：`--profile P` 是 config 里的 profile 名（默认 `active_profile`），`--model ID` 是该 profile 服务的一个 model id（默认 `ProviderProfile.defaultModel()`；接受任意 id，选择器只列目录里的），不存在的 profile 直接拒绝（exit 1，提示 `nulya config show`）。`--parent` 的模型分两级继承：`--profile` 换的是"怎么连"，替掉父的 profile；`--model` 只在一个 profile 内换 id，所以**父的 profile 仍然生效**；两个都不给则**原样继承父 header 冻的那个身份**，此时不重解 credential、也不打降级警告。composition 一律现解；`environment` / `remote_workspace` 反过来继承（§8.1）。`--carry`（要 `--parent`）另外把父场 1..seq 复制进来，`reasoning` 置空、不带 `origin`（§11）。`session step --effort E` 是**每次 step 的 generation option**（不是身份）：不给则用 `Config.defaultEffort(header.model, header.model_identity.model)`。
 

@@ -18,17 +18,39 @@ const environment = @import("../environment.zig");
 /// Well above the emit budget, so `emit` decides truncation, not the runner.
 const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 
-pub const def: tool.Tool = .{
-    .definition = .{
-        .id = "builtin.shell",
-        .name = "shell",
-        .description = "Run a command in the configured shell. With background:true it starts detached and returns at once; you are told when it finishes.",
-        .input_schema =
-        \\{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout_ms":{"type":"integer"},"background":{"type":"boolean"}},"required":["command"]}
-        ,
-    },
-    .executor = tool.functionExecutor(run),
-};
+const background_sentence = "With background:true it starts detached and returns at once; you are told when it finishes.";
+
+/// The argv each dialect runs, named and nothing more — how the named shell
+/// behaves is not this tool's to explain, and every word here is re-sent on
+/// every request. The one non-derivable fact is WHICH shell: on Windows bash
+/// wins whenever one is installed, and a wrong guess there is not refused but
+/// silently rewritten (bash expands `$_` in a PowerShell pipeline).
+const not_powershell = if (builtin.os.tag == .windows) " — a POSIX shell, not PowerShell." else ".";
+
+fn descriptionFor(dialect: environment.Dialect) []const u8 {
+    return switch (dialect) {
+        .bash => "Run a command as `bash -lc <command>`" ++ not_powershell ++ " " ++ background_sentence,
+        .powershell => "Run a command as `powershell -NoProfile -NonInteractive -Command <command>`. " ++ background_sentence,
+    };
+}
+
+/// The builtin as this session's shell dialect makes it. A function rather than
+/// a constant because the description names the interpreter, which is resolved
+/// per environment; the description is part of `composition.kernelHash`, so a
+/// session resumed under a different shell says so instead of drifting quietly.
+pub fn defFor(dialect: environment.Dialect) tool.Tool {
+    return .{
+        .definition = .{
+            .id = "builtin.shell",
+            .name = "shell",
+            .description = descriptionFor(dialect),
+            .input_schema =
+            \\{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout_ms":{"type":"integer"},"background":{"type":"boolean"}},"required":["command"]}
+            ,
+        },
+        .executor = tool.functionExecutor(run),
+    };
+}
 
 /// What a background call is told when there is no session to report back to:
 /// how to get one, and what to do right now.
@@ -334,4 +356,34 @@ test "shell tool reports cancellation as an error, not a failure result" {
 
     // `run` must let error.Canceled through, not make it a failed shell result.
     try std.testing.expectError(error.Canceled, fut.cancel(io));
+}
+
+test "each dialect's description names the argv that dialect actually runs" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // The description is the model's ONLY statement of which interpreter it is
+    // writing for, so it has to be checked against `shellArgv` rather than
+    // maintained beside it: a flag added there and forgotten here sends the
+    // model syntax the real shell mangles instead of refusing.
+    for ([_]environment.Dialect{ .bash, .powershell }) |dialect| {
+        var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = dialect });
+        defer lenv.deinit();
+
+        var buf: [5][]const u8 = undefined;
+        const cmdline = try lenv.shellArgv(alloc, "echo hi", &buf);
+        defer cmdline.deinit(alloc);
+
+        const described = descriptionFor(dialect);
+        // Every argv word but the command itself — the interpreter and each of
+        // its flags — has to appear in what the model is told.
+        for (cmdline.argv[0 .. cmdline.argv.len - 1], 0..) |word, i| {
+            // argv[0] may be an absolute path on a host where the interpreter
+            // is not on PATH; the model is told the NAME either way.
+            const named = if (i == 0) std.fs.path.stem(word) else word;
+            try std.testing.expect(std.mem.indexOf(u8, described, named) != null);
+        }
+    }
 }

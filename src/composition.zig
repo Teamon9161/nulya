@@ -44,9 +44,13 @@ const kernel_system_prompt =
 /// A digest over everything the KERNEL ITSELF puts into a session's frozen
 /// model-visible state: the kernel system prompt, then each builtin's id, name,
 /// description and input schema in registry order. Stamped into the header at
-/// creation so a resume can SEE that these compile-time constants moved.
-pub fn kernelHash(alloc: std.mem.Allocator) ![]u8 {
-    const snap = try registry.snapshot(alloc);
+/// creation so a resume can SEE that these constants moved.
+///
+/// `dialect` is in the digest because `shell`'s description names the
+/// interpreter: a session resumed where the shell resolves differently than it
+/// did at creation is exactly the drift this stamp exists to notice.
+pub fn kernelHash(alloc: std.mem.Allocator, dialect: environment.Dialect) ![]u8 {
+    const snap = try registry.snapshot(alloc, dialect);
     defer snap.deinit(alloc);
     const defs = try snap.definitions(alloc);
     defer alloc.free(defs);
@@ -200,11 +204,16 @@ pub const SessionComposition = struct {
     skills: skill.SkillSetSnapshot,
     system_prompts: prompt.SystemPromptSnapshot,
 
+    /// `dialect` is the shell the session's commands will actually run in — not
+    /// a preference but the resolved answer, taken from the very Environment
+    /// that will run them, so the `shell` description and the interpreter behind
+    /// it can never disagree.
     pub fn init(
         alloc: std.mem.Allocator,
         io: std.Io,
         cwd: []const u8,
         ext_store: []const u8,
+        dialect: environment.Dialect,
         opts: Options,
     ) !SessionComposition {
         try validateBudget(opts);
@@ -214,7 +223,7 @@ pub const SessionComposition = struct {
         var site = try site_mod.Site.open(alloc, io, cwd, ext_store, opts.diag);
         defer site.deinit();
 
-        return build(alloc, io, &site, .{ .fresh = opts });
+        return build(alloc, io, &site, dialect, .{ .fresh = opts });
     }
 
     /// Rebuild the composition frozen into a session header: exactly the
@@ -226,13 +235,14 @@ pub const SessionComposition = struct {
         io: std.Io,
         cwd: []const u8,
         ext_store: []const u8,
+        dialect: environment.Dialect,
         frozen: ledger.FrozenComposition,
         diag: site_mod.Diag,
     ) !SessionComposition {
         var site = try site_mod.Site.open(alloc, io, cwd, ext_store, diag);
         defer site.deinit();
 
-        return build(alloc, io, &site, .{ .frozen = frozen });
+        return build(alloc, io, &site, dialect, .{ .frozen = frozen });
     }
 
     /// Release everything this composition owns. One arena release covers it
@@ -250,14 +260,14 @@ pub const SessionComposition = struct {
 ///
 /// `gpa` backs phase one's `Site.Resolved` values, released explicitly whatever
 /// happens. Nothing in the finished composition points at them.
-fn build(gpa: std.mem.Allocator, io: std.Io, site: *const site_mod.Site, request: Request) !SessionComposition {
+fn build(gpa: std.mem.Allocator, io: std.Io, site: *const site_mod.Site, dialect: environment.Dialect, request: Request) !SessionComposition {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
 
     const resolved = try resolve(gpa, arena.allocator(), site, request);
     defer freeResolved(gpa, resolved.extensions);
 
-    var comp = try assemble(arena.allocator(), io, site, resolved);
+    var comp = try assemble(arena.allocator(), io, site, dialect, resolved);
     comp.arena = arena; // moved in last: nothing holds an allocator into the local
     return comp;
 }
@@ -408,6 +418,7 @@ fn assemble(
     a: std.mem.Allocator,
     io: std.Io,
     site: *const site_mod.Site,
+    dialect: environment.Dialect,
     resolved: Resolved,
 ) !SessionComposition {
     // One frozen slice, so the addresses are stable enough for `asTool` to hand
@@ -425,7 +436,7 @@ fn assemble(
         .extensions = try copyFrozenExtensions(a, resolved.extensions, resolved.exec_versions),
         .extension_tool_bindings = bindings,
         .prompts = resolved.prompts,
-        .tools = try snapshotFromBindings(a, bindings),
+        .tools = try snapshotFromBindings(a, dialect, bindings),
         .skills = skills,
         .system_prompts = try buildSystemPrompts(a, io, site, resolved.extensions, resolved.prompts, skills),
     };
@@ -441,11 +452,11 @@ fn validateBudget(opts: Options) CompositionError!void {
 /// Freeze the builtin table plus the bindings' tools. The extras array is
 /// transient — `snapshotWith` copies it — but each `Tool.executor.ptr` keeps
 /// pointing at the arena-owned, address-stable `bindings`.
-fn snapshotFromBindings(a: std.mem.Allocator, bindings: []ext_tools.Binding) !registry.ToolSetSnapshot {
+fn snapshotFromBindings(a: std.mem.Allocator, dialect: environment.Dialect, bindings: []ext_tools.Binding) !registry.ToolSetSnapshot {
     const extras = try a.alloc(tool.Tool, bindings.len);
     defer a.free(extras);
     for (bindings, extras) |*b, *slot| slot.* = b.asTool();
-    return registry.snapshotWith(a, extras);
+    return registry.snapshotWith(a, dialect, extras);
 }
 
 /// The extension-tool bindings for a FRESH session: for each member, its
@@ -780,13 +791,19 @@ test "the kernel prompt names the harness binary, the help verb and the source v
 test "kernelHash is stable across calls and moves when any kernel constant does" {
     const alloc = std.testing.allocator;
 
-    const a = try kernelHash(alloc);
+    const a = try kernelHash(alloc, .bash);
     defer alloc.free(a);
-    const b = try kernelHash(alloc);
+    const b = try kernelHash(alloc, .bash);
     defer alloc.free(b);
     // Deterministic: two runs of the same binary must agree.
     try std.testing.expectEqualStrings(a, b);
     try std.testing.expectEqual(@as(usize, 64), a.len);
+
+    // The shell the session will actually run in is part of the stamp, so a
+    // resume under a different one is drift the warning can see.
+    const other_shell = try kernelHash(alloc, .powershell);
+    defer alloc.free(other_shell);
+    try std.testing.expect(!std.mem.eql(u8, a, other_shell));
 
     // …and sensitive: a changed prompt or builtin definition is the drift.
     const defs = [_]tool.ToolDefinition{
@@ -847,7 +864,7 @@ test "a member named without a version freezes whatever current pointed at when 
 
     const with_finance: []const WithRef = &.{.{ .id = "finance" }};
     try testkit.activate(alloc, io, tmp.dir, "finance", v1);
-    var first = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_finance });
+    var first = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = with_finance });
     defer first.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), first.extensions.len);
     try std.testing.expectEqualStrings(v1, first.extensions[0].version);
@@ -860,7 +877,7 @@ test "a member named without a version freezes whatever current pointed at when 
     try std.testing.expectEqualStrings(v1, first.extensions[0].version);
     try std.testing.expectEqualStrings("v1 skill", first.skills.skills[0].description);
 
-    var second = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_finance });
+    var second = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = with_finance });
     defer second.deinit(alloc);
     try std.testing.expectEqualStrings(v2, second.extensions[0].version);
     try std.testing.expectEqualStrings("v2 skill", second.skills.skills[0].description);
@@ -883,7 +900,7 @@ test "pinned skill load survives current changes and absent draft source" {
     defer alloc.free(v2);
     try testkit.activate(alloc, io, tmp.dir, "finance", v1);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "finance" }} });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "finance" }} });
     defer comp.deinit(alloc);
     const ref = try alloc.dupe(u8, comp.skills.skills[0].ref);
     defer alloc.free(ref);
@@ -911,7 +928,7 @@ test "skill frontmatter name must match the skill directory" {
     defer alloc.free(version);
     try testkit.activate(alloc, io, tmp.dir, "finance", version);
 
-    try std.testing.expectError(error.SkillNameDoesNotMatchDirectory, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "finance" }} }));
+    try std.testing.expectError(error.SkillNameDoesNotMatchDirectory, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "finance" }} }));
 }
 
 test "duplicate skill names in one extension are rejected" {
@@ -932,7 +949,7 @@ test "duplicate skill names in one extension are rejected" {
     defer alloc.free(version);
     try testkit.activate(alloc, io, tmp.dir, "finance", version);
 
-    try std.testing.expectError(error.DuplicateSkillName, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "finance" }} }));
+    try std.testing.expectError(error.DuplicateSkillName, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "finance" }} }));
 }
 
 test "activating a package composes nothing: a member is one somebody NAMED, and activate only says which version that is" {
@@ -960,7 +977,7 @@ test "activating a package composes nothing: a member is one somebody NAMED, and
 
     // No discovery pass: the store's content cannot reach a session on its own.
     {
-        var plain = try SessionComposition.init(alloc, io, cwd, one_store, .{});
+        var plain = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{});
         defer plain.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 0), plain.extensions.len);
         try std.testing.expectEqual(@as(usize, 0), plain.skills.skills.len);
@@ -968,7 +985,7 @@ test "activating a package composes nothing: a member is one somebody NAMED, and
     }
 
     {
-        var worn = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode" }} });
+        var worn = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "mode" }} });
         defer worn.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), worn.extensions.len);
         try std.testing.expectEqualStrings("mode", worn.extensions[0].id);
@@ -978,7 +995,7 @@ test "activating a package composes nothing: a member is one somebody NAMED, and
     }
 
     {
-        var both = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{ .{ .id = "policy" }, .{ .id = "mode" } } });
+        var both = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{ .{ .id = "policy" }, .{ .id = "mode" } } });
         defer both.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 2), both.extensions.len);
         try std.testing.expectEqualStrings("MODE", both.system_prompts.blocks[1].bytes);
@@ -987,10 +1004,10 @@ test "activating a package composes nothing: a member is one somebody NAMED, and
 
     // Deactivating takes the BARE name away: `--with <id>` reads `current`.
     try testkit.deactivate(alloc, io, tmp.dir, "mode");
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode" }} }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "mode" }} }));
     // …while the exact version still composes: naming a build needs no pointer.
     {
-        var exact = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode", .version = mode_v }} });
+        var exact = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "mode", .version = mode_v }} });
         defer exact.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 2), exact.system_prompts.blocks.len);
     }
@@ -1014,12 +1031,12 @@ test "--with brings a built-but-inactive version into one session, overrides an 
 
     // Nothing activated: a plain session sees only the kernel prompt.
     {
-        var plain = try SessionComposition.init(alloc, io, cwd, one_store, .{});
+        var plain = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{});
         defer plain.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), plain.system_prompts.blocks.len);
     }
     {
-        var with = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode", .version = v2 }} });
+        var with = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "mode", .version = v2 }} });
         defer with.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 2), with.system_prompts.blocks.len);
         try std.testing.expectEqualStrings("V2", with.system_prompts.blocks[1].bytes);
@@ -1029,13 +1046,13 @@ test "--with brings a built-but-inactive version into one session, overrides an 
 
     try testkit.activate(alloc, io, tmp.dir, "mode", v1);
     {
-        var current = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode" }} });
+        var current = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "mode" }} });
         defer current.deinit(alloc);
         try std.testing.expectEqualStrings("V1", current.system_prompts.blocks[1].bytes);
     }
     // Naming a version OVERRIDES the active one: replaced, never composed twice.
     {
-        var override = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{
+        var override = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{
             .{ .id = "mode", .version = v2 },
             .{ .id = "mode", .version = v1 },
             .{ .id = "mode", .version = v2 },
@@ -1046,9 +1063,9 @@ test "--with brings a built-but-inactive version into one session, overrides an 
         try std.testing.expectEqualStrings("V2", override.system_prompts.blocks[1].bytes); // the last --with wins
     }
 
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "absent" }} }));
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "mode", .version = "v-000000000000000000000000" }} }));
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, "nulya-absent-root", .{ .with = &.{.{ .id = "mode" }} }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "absent" }} }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "mode", .version = "v-000000000000000000000000" }} }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, "nulya-absent-root", .bash, .{ .with = &.{.{ .id = "mode" }} }));
 }
 
 test "--with of a resolvable extension followed by one that fails to resolve reports WithVersionNotFound regardless of order (regression: used to panic on an invalid free)" {
@@ -1068,13 +1085,13 @@ test "--with of a resolvable extension followed by one that fails to resolve rep
     // The first resolvable `--with` grows the list past its empty base, so the
     // backing allocation is bigger than `list.items`; a second `--with` that
     // fails must free the GROWN allocation, not the shorter slice.
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{
         .{ .id = "good", .version = v_good },
         .{ .id = "bad", .version = "v-000000000000000000000000" },
     } }));
 
     // The reverse order never grows the list before failing.
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{
         .{ .id = "bad", .version = "v-000000000000000000000000" },
         .{ .id = "good", .version = v_good },
     } }));
@@ -1105,7 +1122,7 @@ test "system prompt ordering is deterministic by pinned extension id and manifes
     try testkit.activate(alloc, io, tmp.dir, "a", va);
 
     // Named in the OPPOSITE order: the sort is by member id.
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{ .{ .id = "b" }, .{ .id = "a" } } });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{ .{ .id = "b" }, .{ .id = "a" } } });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 4), comp.system_prompts.blocks.len);
     try std.testing.expectEqualStrings("kernel", comp.system_prompts.blocks[0].source);
@@ -1144,7 +1161,7 @@ test "prompt position partitions the extension band into early, normal and late,
 
     const expected = [_][]const u8{ "Z1", "A1", "Z2", "A2" };
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{ .{ .id = "a" }, .{ .id = "z" } } });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{ .{ .id = "a" }, .{ .id = "z" } } });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1 + expected.len), comp.system_prompts.blocks.len);
     try std.testing.expectEqualStrings("kernel", comp.system_prompts.blocks[0].source);
@@ -1157,7 +1174,7 @@ test "prompt position partitions the extension band into early, normal and late,
         .{ .id = "a", .version = va },
         .{ .id = "z", .version = vz },
     } };
-    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen, .{});
+    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, .bash, frozen, .{});
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(comp.system_prompts.blocks.len, resumed.system_prompts.blocks.len);
     for (comp.system_prompts.blocks, resumed.system_prompts.blocks) |a_block, b_block| {
@@ -1184,7 +1201,7 @@ test "inline prompts land after every member's block and before the skills catal
     defer alloc.free(v);
     try testkit.activate(alloc, io, tmp.dir, "b", v);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "b" }}, .prompts = &.{
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "b" }}, .prompts = &.{
         .{ .source = "agent-explore", .text = "FIRST" },
         .{ .source = "brief", .text = "SECOND" },
     } });
@@ -1217,7 +1234,7 @@ test "a header's inline prompts rebuild the identical blocks with no store to co
         .{ .source = "agent-explore", .text = "You are a scout.\n" },
     } };
 
-    var comp = try SessionComposition.initFrozen(alloc, io, cwd, "nulya-absent-root", frozen, .{});
+    var comp = try SessionComposition.initFrozen(alloc, io, cwd, "nulya-absent-root", .bash, frozen, .{});
     defer comp.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 2), comp.system_prompts.blocks.len);
@@ -1388,7 +1405,7 @@ test "a selected extension tool is provider-visible and freezes to the compositi
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
     const with_search: []const WithRef = &.{.{ .id = "web.search", .tools = .{ .named = &.{"web_search"} } }};
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_search });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = with_search });
     defer comp.deinit(alloc);
 
     const t = comp.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
@@ -1403,7 +1420,7 @@ test "a selected extension tool is provider-visible and freezes to the compositi
     try std.testing.expectEqualStrings(v1, comp.extension_tool_bindings[0].version);
 
     // A fresh session opened after the switch sees v2.
-    var comp2 = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_search });
+    var comp2 = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = with_search });
     defer comp2.deinit(alloc);
     try std.testing.expectEqualStrings(v2, comp2.extension_tool_bindings[0].version);
 }
@@ -1428,7 +1445,7 @@ test "initFrozen rebuilds a composition from a header and ignores later activati
         .native_tools = &.{"ext:web.search/web_search"},
     };
 
-    var comp = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen, .{});
+    var comp = try SessionComposition.initFrozen(alloc, io, cwd, one_store, .bash, frozen, .{});
     defer comp.deinit(alloc);
     const t = comp.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
@@ -1436,7 +1453,7 @@ test "initFrozen rebuilds a composition from a header and ignores later activati
     try std.testing.expectEqualStrings(v1, comp.extension_tool_bindings[0].version);
 
     try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
-    var comp2 = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen, .{});
+    var comp2 = try SessionComposition.initFrozen(alloc, io, cwd, one_store, .bash, frozen, .{});
     defer comp2.deinit(alloc);
     try std.testing.expectEqualStrings(v1, comp2.extension_tool_bindings[0].version);
 }
@@ -1449,7 +1466,7 @@ test "initFrozen with no active extensions yields the builtin only" {
     const cwd = try tmpPath(alloc, io, tmp.dir);
     defer alloc.free(cwd);
 
-    var comp = try SessionComposition.initFrozen(alloc, io, cwd, one_store, .{}, .{});
+    var comp = try SessionComposition.initFrozen(alloc, io, cwd, one_store, .bash, .{}, .{});
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
     try std.testing.expectEqual(registry.builtin_count, comp.tools.tools.len);
@@ -1470,7 +1487,7 @@ test "executor calls reach the composition-time frozen version" {
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
     const with_search: []const WithRef = &.{.{ .id = "web.search", .tools = .{ .named = &.{"web_search"} } }};
-    var session_a = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_search });
+    var session_a = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = with_search });
     defer session_a.deinit(alloc);
     const tool_a = session_a.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     var env_a = FakeEnv{ .io = io };
@@ -1493,7 +1510,7 @@ test "executor calls reach the composition-time frozen version" {
     }
 
     // ...while a fresh session's executor reaches v2.
-    var session_b = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with_search });
+    var session_b = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = with_search });
     defer session_b.deinit(alloc);
     const tool_b = session_b.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     var env_b = FakeEnv{ .io = io };
@@ -1522,7 +1539,7 @@ test "a member named without a version whose current is corrupted fails the sess
 
     // A healthy store composes normally.
     {
-        var ok = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = named });
+        var ok = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = named });
         defer ok.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), ok.extensions.len);
     }
@@ -1532,11 +1549,11 @@ test "a member named without a version whose current is corrupted fails the sess
     defer alloc.free(seal_sub);
     try tmp.dir.writeFile(io, .{ .sub_path = seal_sub, .data = "{}" });
 
-    try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = named }));
+    try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = named }));
 
     // Not naming it at all composes fine.
     {
-        var unnamed = try SessionComposition.init(alloc, io, cwd, one_store, .{});
+        var unnamed = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{});
         defer unnamed.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 0), unnamed.extensions.len);
     }
@@ -1545,7 +1562,7 @@ test "a member named without a version whose current is corrupted fails the sess
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
     try store.Store.init(io, root).deactivate(alloc, "web.search");
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = named }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = named }));
 }
 
 test "a broken version under the workspace pointer fails the session rather than falling back to the user one" {
@@ -1576,11 +1593,11 @@ test "a broken version under the workspace pointer fails the session rather than
     const seal_sub = try std.fs.path.join(alloc, &.{ "web.search", "versions", ws_v, integrity.seal_file });
     defer alloc.free(seal_sub);
     try store_dir.writeFile(io, .{ .sub_path = seal_sub, .data = "{}" });
-    try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, "store", .{ .with = named }));
+    try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, "store", .bash, .{ .with = named }));
 
     // Drop the workspace pointer and the user layer's version takes effect.
     try site.deactivate(alloc, .workspace, "web.search");
-    var comp = try SessionComposition.init(alloc, io, cwd, "store", .{ .with = named });
+    var comp = try SessionComposition.init(alloc, io, cwd, "store", .bash, .{ .with = named });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), comp.extensions.len);
     try std.testing.expectEqualStrings(user_v, comp.extensions[0].version);
@@ -1630,7 +1647,7 @@ test "a member landing beside the session keeps its exec_version empty and never
     try testkit.activate(alloc, io, tmp.dir, "agent", beside_session);
 
     var probe: NeverProbe = .{};
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "agent" }},
         .exec_target = probe.handle(),
     });
@@ -1658,7 +1675,7 @@ test "a member's manual tool is not natively visible without a selection" {
 
     // No selection: a member whose `surface: manual` tool is reachable only
     // through the CLI.
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "web.search" }} });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "web.search" }} });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
     try std.testing.expect(comp.tools.lookup("web_search") == null);
@@ -1684,7 +1701,7 @@ test "a bare member exposes surface-auto tools but not manual or internal ones" 
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "assistant", v1);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = &.{.{ .id = "assistant" }} });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = &.{.{ .id = "assistant" }} });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
     try std.testing.expect(comp.tools.lookup("ask") != null);
@@ -1711,7 +1728,7 @@ test "a member's auto tools join the face beside the ones its selection names" {
     try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
 
     // A selection ADDS to the package's own default; it does not replace it.
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "pkg", .tools = .{ .named = &.{"call"} } }},
     });
     defer comp.deinit(alloc);
@@ -1720,7 +1737,7 @@ test "a member's auto tools join the face beside the ones its selection names" {
     try std.testing.expect(comp.tools.lookup("extra") != null);
 
     // `:none` takes nothing onto the face, the `auto` default included.
-    var quiet = try SessionComposition.init(alloc, io, cwd, one_store, .{
+    var quiet = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "pkg", .tools = .none }},
     });
     defer quiet.deinit(alloc);
@@ -1745,15 +1762,15 @@ test "a selection reaches no internal tool and no tool the manifest never declar
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
 
-    try std.testing.expectError(error.WithToolNotDeclared, SessionComposition.init(alloc, io, cwd, one_store, .{
+    try std.testing.expectError(error.WithToolNotDeclared, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "pkg", .tools = .{ .named = &.{"internal_tool"} } }},
     }));
-    try std.testing.expectError(error.WithToolNotDeclared, SessionComposition.init(alloc, io, cwd, one_store, .{
+    try std.testing.expectError(error.WithToolNotDeclared, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "pkg", .tools = .{ .named = &.{"nope"} } }},
     }));
 
     // Naming an already-surfaced tool is not an error, and is not a duplicate.
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "pkg", .tools = .{ .named = &.{"auto_tool"} } }},
     });
     defer comp.deinit(alloc);
@@ -1781,7 +1798,7 @@ test "frozen resume accepts header native tools regardless of current surface" {
         .active = &.{.{ .id = "pkg", .version = v1 }},
         .native_tools = &.{"ext:pkg/call"},
     };
-    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen, .{});
+    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, .bash, frozen, .{});
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), resumed.extension_tool_bindings.len);
     try std.testing.expect(resumed.tools.lookup("call") != null);
@@ -1805,7 +1822,7 @@ test "surface-auto tools count against the tool budget" {
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
 
-    try std.testing.expectError(error.ToolBudgetExceeded, SessionComposition.init(alloc, io, cwd, one_store, .{
+    try std.testing.expectError(error.ToolBudgetExceeded, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "pkg" }},
         .max_tools = registry.builtin_count + 1,
     }));
@@ -1832,7 +1849,7 @@ test "frozen resume uses header native tools only, not fresh surface expansion" 
         .active = &.{.{ .id = "pkg", .version = v1 }},
         .native_tools = &.{},
     };
-    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, frozen, .{});
+    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_store, .bash, frozen, .{});
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), resumed.extension_tool_bindings.len);
     try std.testing.expect(resumed.tools.lookup("call") == null);
@@ -1857,7 +1874,7 @@ test "two selected tools sharing a model-facing name are rejected" {
         .{ .id = "a.pkg", .tools = .{ .named = &.{"search"} } },
         .{ .id = "b.pkg", .tools = .{ .named = &.{"search"} } },
     };
-    try std.testing.expectError(error.DuplicateToolName, SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with }));
+    try std.testing.expectError(error.DuplicateToolName, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = with }));
 }
 
 test "a selection naming the same tool twice still puts it on the face once" {
@@ -1872,7 +1889,7 @@ test "a selection naming the same tool twice still puts it on the face once" {
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "web.search", .tools = .{ .named = &.{ "web_search", "web_search" } } }},
     });
     defer comp.deinit(alloc);
@@ -1892,11 +1909,11 @@ test "a member with no built version, and a selection with no slot left, are bot
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
     // A member nothing holds: named, so it fails the session.
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .{
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "absent" }},
     }));
     // A selected tool never silently loses to the budget.
-    try std.testing.expectError(error.ToolBudgetExceeded, SessionComposition.init(alloc, io, cwd, one_store, .{
+    try std.testing.expectError(error.ToolBudgetExceeded, SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "web.search", .tools = .{ .named = &.{"web_search"} } }},
         .max_tools = registry.builtin_count,
     }));
@@ -1916,7 +1933,7 @@ test "a member named at a version stays on it whatever current says" {
     defer alloc.free(v2);
     try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "web.search", .version = v1, .tools = .{ .named = &.{"web_search"} } }},
     });
     defer comp.deinit(alloc);
@@ -1934,12 +1951,12 @@ test "a member with no store at all is a hard error, not a silent empty set" {
     defer alloc.free(cwd);
 
     // No extensions root exists at all.
-    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, "nulya-absent-root", .{
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, "nulya-absent-root", .bash, .{
         .with = &.{.{ .id = "web.search" }},
     }));
 
     // With no members, an absent store yields a clean builtin-only composition.
-    var comp = try SessionComposition.init(alloc, io, cwd, "nulya-absent-root", .{});
+    var comp = try SessionComposition.init(alloc, io, cwd, "nulya-absent-root", .bash, .{});
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
     try std.testing.expect(comp.tools.lookup("shell") != null);
@@ -1965,7 +1982,7 @@ test "members decide the face, not the final tool order" {
         .{ .id = "b.pkg", .tools = .{ .named = &.{"beta"} } },
         .{ .id = "a.pkg", .tools = .{ .named = &.{"alpha"} } },
     };
-    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .{ .with = with, .max_tools = 4 });
+    var comp = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{ .with = with, .max_tools = 4 });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), comp.extension_tool_bindings.len);
     try std.testing.expectEqual(@as(usize, 3), comp.tools.tools.len);
@@ -1989,7 +2006,7 @@ test "the tool set freezes at session creation; a changed selection only reaches
     try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
     try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
 
-    var first = try SessionComposition.init(alloc, io, cwd, one_store, .{
+    var first = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "a.pkg", .tools = .{ .named = &.{"alpha"} } }},
         .max_tools = 3,
     });
@@ -1998,7 +2015,7 @@ test "the tool set freezes at session creation; a changed selection only reaches
     try std.testing.expect(first.tools.lookup("beta") == null);
 
     // Composition moves at a session boundary: the first one is untouched.
-    var second = try SessionComposition.init(alloc, io, cwd, one_store, .{
+    var second = try SessionComposition.init(alloc, io, cwd, one_store, .bash, .{
         .with = &.{.{ .id = "b.pkg", .tools = .{ .named = &.{"beta"} } }},
         .max_tools = 3,
     });

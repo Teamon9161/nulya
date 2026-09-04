@@ -90,6 +90,7 @@ fn emit(raw: []const u8, tool: []const u8, spill_key: SpillKey, ctx: *Ctx) Emitt
 
 ### shell
 - 单工具，`{ command, cwd?, timeout_ms?, background? }`。**去掉 `output_mode`**——溢出由 §2 `emit` 自动落盘，模型不用选。
+- **description 说出这一场解析到的 argv**（`bash -lc <command>` / `powershell -NoProfile -NonInteractive -Command <command>`），**到此为止**：那个 shell 怎么用不归它说，模型已经会，而这几个字每次请求都重发一遍。要买的只有「是哪个」这一个事实——dialect 不是平台的函数（Windows 上装了 bash 就选 bash），而猜错的代价不是被拒绝而是被悄悄改写：`Where-Object { $_.Name … }` 交给 `bash -lc`，`$_` 在 PowerShell 看到它之前就被展开了。所以 Windows build 的 bash 那句多一句 `— a POSIX shell, not PowerShell.`，POSIX 平台上那是废话、不发。description 进 `kernel_hash`（DESIGN §3.4），换了 shell 的 resume 会自己报出来。
 - exit code 追加；stderr 以 `--- stderr ---` 分隔追加。
 - `timeout_ms` **已实现**：缺省 §3 的 120s、夹进 `[1, 600000]`，非正整数当场教学式拒绝（不替它换个数）。到点杀掉**整棵进程树**（POSIX process group / Windows job object，取消走同一条路径；OS 拒绝 job 时降级为只杀直接子进程，DESIGN §6.1），输出里 `[exit …]` 之前多一行 `[timed out after <n> ms; process killed, output above is partial]`，`ok=false`。
 - **正常返回不杀树**：`some-server >/dev/null 2>&1 &` 这样的后台进程活得过这次调用（两个平台一致）。但它**必须重定向 stdio**——否则它继承着管道写端，而 §2 的 drain 要读到 EOF，这次调用就会一直等到它退出。

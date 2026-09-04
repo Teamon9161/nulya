@@ -119,7 +119,7 @@ pub const AgentSession = struct {
 
     pub fn init(alloc: std.mem.Allocator, opts: Options) !AgentSession {
         const tool_ctx = opts.step_ctx.tool_context;
-        const comp = try composition.SessionComposition.init(alloc, tool_ctx.environment.io, tool_ctx.cwd, opts.extension_store, opts.registry);
+        const comp = try composition.SessionComposition.init(alloc, tool_ctx.environment.io, tool_ctx.cwd, opts.extension_store, tool_ctx.environment.dialect(), opts.registry);
         errdefer comp.deinit(alloc);
 
         return .{
@@ -136,7 +136,7 @@ pub const AgentSession = struct {
     pub fn createDurable(alloc: std.mem.Allocator, opts: Options, d: CreateDurableOptions) !AgentSession {
         const tool_ctx = opts.step_ctx.tool_context;
         const io = tool_ctx.environment.io;
-        var comp = try composition.SessionComposition.init(alloc, io, tool_ctx.cwd, opts.extension_store, opts.registry);
+        var comp = try composition.SessionComposition.init(alloc, io, tool_ctx.cwd, opts.extension_store, tool_ctx.environment.dialect(), opts.registry);
         errdefer comp.deinit(alloc);
 
         // Frozen into the header, so any process reopening rebuilds it.
@@ -155,7 +155,7 @@ pub const AgentSession = struct {
 
         // Provenance: the kernel prompt and builtin definitions are the part of
         // the model-visible state the header could not otherwise name.
-        const kernel_hash = try composition.kernelHash(alloc);
+        const kernel_hash = try composition.kernelHash(alloc, tool_ctx.environment.dialect());
         defer alloc.free(kernel_hash);
 
         var l = try ledger.createDurable(alloc, io, d.workspace, d.session_path, .{
@@ -194,7 +194,7 @@ pub const AgentSession = struct {
         var l = try ledger.openDurable(alloc, io, d.workspace, d.session_path);
         errdefer l.deinit();
         const hdr = l.header().?;
-        var comp = try composition.SessionComposition.initFrozen(alloc, io, tool_ctx.cwd, opts.extension_store, hdr.composition, opts.registry.diag);
+        var comp = try composition.SessionComposition.initFrozen(alloc, io, tool_ctx.cwd, opts.extension_store, tool_ctx.environment.dialect(), hdr.composition, opts.registry.diag);
         errdefer comp.deinit(alloc);
 
         const owned_path = try alloc.dupe(u8, d.session_path);

@@ -1060,17 +1060,19 @@ fn stepFail(
     return 1;
 }
 
-/// Say once, on resume, that this binary's kernel prompt / builtins are not the
-/// ones frozen into the session. Not a gate; stderr keeps `--stream` pure.
-fn warnKernelDrift(alloc: std.mem.Allocator, io: std.Io, id: []const u8, stamp: ledger.Stamp) !void {
+/// Say once, on resume, that the kernel's own model-visible constants are not
+/// the ones frozen into the session: a different binary's prompt or builtin
+/// definitions, or the same binary resolving a different shell for `shell` to
+/// run in. Not a gate; stderr keeps `--stream` pure.
+fn warnKernelDrift(alloc: std.mem.Allocator, io: std.Io, id: []const u8, stamp: ledger.Stamp, dialect: environment.Dialect) !void {
     if (stamp.kernel_hash.len == 0) return;
-    const mine = try composition.kernelHash(alloc);
+    const mine = try composition.kernelHash(alloc, dialect);
     defer alloc.free(mine);
     if (std.mem.eql(u8, mine, stamp.kernel_hash)) return;
     const by = if (stamp.version.len != 0) stamp.version else "unknown";
     const msg = try std.fmt.allocPrint(
         alloc,
-        "warning: session {s} was created by nulya {s} whose kernel prompt/builtins differ from this binary's; its frozen system prompt has changed\n",
+        "warning: session {s} was created by nulya {s} with a kernel prompt, builtin set or shell dialect that differs from this run's; what the model is told at the top of this session has changed\n",
         .{ id, by },
     );
     defer alloc.free(msg);
@@ -1134,7 +1136,6 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         return stepFail(alloc, stream, "no such session '{s}': {s}", .{ id, @errorName(err) });
     };
     defer hdr.deinit();
-    try warnKernelDrift(alloc, io, id, hdr.value.nulya);
     if (ssh_password != null and !remote.isSshSpec(hdr.value.environment))
         return stepFail(alloc, stream, "--ssh-password-stdin applies only to a remote:ssh: session", .{});
 
@@ -1173,6 +1174,9 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // Let this session's children name it: the FILE path, so `ext activate` can
     // deposit a note into its inbox, and the ID, true on whichever machine.
     try lenv.publishSession(spath, id);
+    // After the environment, because the shell dialect it resolved is part of
+    // what the stamp covers — `shell`'s description names the interpreter.
+    try warnKernelDrift(alloc, io, id, hdr.value.nulya, lenv.handle().dialect());
     // A background task on another machine cannot deposit its own report — the
     // session file is here. So before stepping, ask that machine and turn a
     // finished report into the note the inbox understands.
