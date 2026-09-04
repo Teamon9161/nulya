@@ -146,7 +146,7 @@ import {
   seedBundled,
   sessionMember,
   summarize,
-  type SessionMember,
+  type MemberOutcome,
 } from "../extensions.ts"
 import { builtin_names } from "../commands.ts"
 import {
@@ -796,12 +796,21 @@ export function App(props: AppProps) {
    * only the id would compose the second workspace's session out of the first
    * one's build.
    */
-  const memberBuilds = new Map<string, Promise<SessionMember | null>>()
-  const sessionMemberOnce = (where: Workspace, id: string): Promise<SessionMember | null> => {
+  const memberBuilds = new Map<string, Promise<MemberOutcome>>()
+  const sessionMemberOnce = (where: Workspace, id: string): Promise<MemberOutcome> => {
     const key = `${where.dir}::${id}`
     let started = memberBuilds.get(key)
     if (!started) {
-      started = sessionMember(where, id).catch(() => null)
+      // The REASON is cached beside the outcome, not thrown away. A package
+      // that will not resolve here has one — an un-migrated store entry, a
+      // build that failed, no `current` at all — and each names its own repair.
+      // Reducing all of them to `null` made every one of them read as "not
+      // composed in", which is the one sentence that fits none of them and
+      // sends somebody to `/ext`, a screen with nothing to say about any.
+      started = sessionMember(where, id).then(
+        (member) => ({ member }),
+        (error) => ({ failed: error instanceof Error ? error.message : String(error) }),
+      )
       memberBuilds.set(key, started)
     }
     return started
@@ -815,10 +824,7 @@ export function App(props: AppProps) {
    * has to be about the directory the caller asked about, not about whichever
    * tab happens to be in front by the time it answers.
    */
-  const agentPackage = async (where: Workspace): Promise<WithRef | null> => {
-    const member = await sessionMemberOnce(where, agent_id)
-    return member ? { id: member.id, version: member.version } : null
-  }
+  const agentPackage = async (where: Workspace): Promise<MemberOutcome> => sessionMemberOnce(where, agent_id)
   const [composedWithTools, setComposedWithTools] = createSignal<string[]>([])
   /**
    * The `surface:"auto"` tools those composed packages will put on the face,
@@ -2370,12 +2376,15 @@ export function App(props: AppProps) {
     const profile = envProfile(where)
     const withRefs: string[] = []
     const missing: string[] = []
+    const why: string[] = []
     for (const spec of profile.with) {
-      const member = await sessionMemberOnce(target, spec)
-      if (!member) {
+      const outcome = await sessionMemberOnce(target, spec)
+      if (!("member" in outcome)) {
         missing.push(parseWithRef(spec)?.id ?? spec)
+        why.push(outcome.failed)
         continue
       }
+      const member = outcome.member
       // The version and the selection ride on ONE member entry: that is the
       // only shape the kernel takes, so nothing here has to keep two lists in
       // step.
@@ -2404,27 +2413,32 @@ export function App(props: AppProps) {
     // there is nothing here for it to be right about.
     const grounded = !isHomeWorkspaceDir(target.dir)
     for (const id of grounded ? profile.session_prompts : []) {
-      const member = await sessionMemberOnce(target, id)
-      if (!member) {
+      const outcome = await sessionMemberOnce(target, id)
+      if (!("member" in outcome)) {
         missing.push(id)
+        why.push(outcome.failed)
         continue
       }
+      const member = outcome.member
       try {
         prompts.push(await renderSessionPrompt(target, { id: member.id, version: member.version }))
       } catch (error) {
         // Kept apart from `missing`, because they are different failures with
-        // different fixes: a package that would not resolve is answered by
-        // `/ext`, while one whose `render` failed has its own reason, and
-        // pointing at `/ext` for that one sends somebody to a screen that has
-        // nothing to say about it.
+        // different fixes: one package never resolved, so the session is short
+        // a member; the other resolved and then its `render` failed, so the
+        // session has the member and not its opening text.
         broke.push(error instanceof Error ? error.message : String(error))
       }
     }
     // Both kinds, when both happened. An `else if` here would have undone the
     // split above: one unresolvable package would swallow a second package's
     // real diagnostic, which is the thing keeping them apart was for.
+    //
+    // The verdict leads and the reasons follow it, in that order: the verdict
+    // is the short half and survives a narrow status line, while `why` is what
+    // used to be dropped on the floor in favour of a pointer at `/ext`.
     const notices = missing.length > 0
-      ? [`${missing.join(" & ")} not composed in · /ext for what it said`, ...broke]
+      ? [`${missing.join(" & ")} not composed in`, ...why, ...broke]
       : broke
     if (notices.length > 0) setNotice(notices.join(" · "))
     // `--workspace` only ever makes sense beside a `remote:` target (DESIGN
@@ -2988,9 +3002,9 @@ export function App(props: AppProps) {
     where: Workspace,
   ): Promise<{ defs: readonly AgentEntry[]; warnings: readonly string[] }> => {
     const pkg = await agentPackage(where)
-    if (!pkg) return { defs: [], warnings: [] }
+    if (!("member" in pkg)) return { defs: [], warnings: [] }
     try {
-      const found = await listAgents(where, pkg)
+      const found = await listAgents(where, { id: pkg.member.id, version: pkg.member.version })
       return { defs: usableAgents(found), warnings: found.flatMap((entry) => entry.warnings) }
     } catch {
       // No listing is "none known"; the sentence a caller needs comes from
@@ -3063,11 +3077,12 @@ export function App(props: AppProps) {
     }
     const inherited = draft.pick()
     setNotice(`agent ${entry.name} · rendering its prompt…`)
-    const pkg = await agentPackage(where)
-    if (!pkg) {
-      setNotice("the agent package could not be built here · /ext for what it said")
+    const resolved_pkg = await agentPackage(where)
+    if (!("member" in resolved_pkg)) {
+      setNotice(`the agent package is not usable here · ${resolved_pkg.failed}`)
       return null
     }
+    const pkg: WithRef = { id: resolved_pkg.member.id, version: resolved_pkg.member.version }
     let m: RenderedAgent
     try {
       // The package renders the definition and checks that the members it

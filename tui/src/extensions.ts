@@ -692,6 +692,17 @@ export interface SessionMember {
 }
 
 /**
+ * `sessionMember`'s answer once a caller has stopped it from throwing: the
+ * member, or the sentence saying why there is none.
+ *
+ * A union rather than `SessionMember | null` because the two failures a caller
+ * can act on — "no version to compose" and "the build failed, here is what the
+ * compiler said" — are the same `null`, and the caller that has to put one on
+ * screen cannot invent it back.
+ */
+export type MemberOutcome = { member: SessionMember } | { failed: string }
+
+/**
  * Resolve one `session_with` id to the version a `session new` should name, and
  * the tools that version's own manifest offers a selection.
  *

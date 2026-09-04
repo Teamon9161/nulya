@@ -666,6 +666,11 @@ test("`no project` lands in the home workspace, and asks no renderer for a proje
   try {
     // An ordinary workspace does ask, and says what it could not find.
     await until(() => project.captureCharFrame().includes("not composed in"), 30_000)
+    // …and says it in the PACKAGE's own words, not just the verdict: the
+    // resolver's sentence is the only thing that distinguishes "there is no
+    // such version" from "its build failed", and it used to be caught and
+    // dropped at the call site in favour of a pointer at `/ext`.
+    expect(project.captureCharFrame()).toContain("no active version")
   } finally {
     project.renderer.destroy()
   }

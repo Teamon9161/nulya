@@ -735,3 +735,11 @@ T0–T115 全部落地，逐条经过与验收标准在归档的实施日志里�
 **④ 远端场里模型看得见 `std`，一调就说「这台机器上没有这个版本的拷贝」。** `[env.remote]` 的缺省早就是 `bare = true` + 空 `with`，但 `state/tabs.ts` 的 `materialize` / `carryFork` 自己又读了一遍 `tui-state.json` 的 `session_with`（`/ext` 上勾的那些）并无条件并进去——profile 说了不带，另一处把它带上了。**现在 `bare` 连这张单子一起丢下**：它和 config 的 `[extensions] with` 是同一种东西，一张某个人在某台机器上写下的常驻单子，而那台机器有它自己的 store。draft 屏的 `tools 1+N` 与真正 `session new` 读同一份 profile，所以远端 draft 现在写 `tools 1+0`，而不是列出六个一调就失败的工具。要让它们过去仍然是两步、都得说出口：`/ext` 的 `r` push，再在 `[env.remote] with` 里点名。
 
 测试各钉机制不钉措辞：`workingstatus.test.ts` 三条（reach 说哪台机器与内核最后那句话、它压过 step 与 store pass 但让位于「等你回答」、ssh 的警告不上这条行而认证拒绝上）· `tuistate.test.ts` 两条（启动丢掉 remote 与它的 workspace、留下 `remote_cwd`；本地选择与别的字段不动）· `tabs.test.ts` 一条（拿一个谁都解析不出来的成员 id 当探针：非 bare 的 `session new` 被拒、bare 的开得起来——把 `bare ? [] :` 去掉就变红）。`bun run typecheck` 通过。
+
+### T117 · 一个包解析不出来时，把它自己那句话说出来（2026-09-04）
+
+`App.tsx` 里 `sessionMemberOnce` 的 `sessionMember(where, id).catch(() => null)` 把**所有**解析失败压成一个 `null`，于是三种完全不同的处境——store 里那份没迁移、`ext build` 当场失败、根本没有 `current`——在屏幕上是同一句 `<id> not composed in · /ext for what it said`，而 `/ext` 对前两种无话可说。更糟的是它与显示不一致：draft 屏那个「哪些成员在这一场里」（`refreshComposedMembership`）读的是 `ext list` + config 的 `with`，**有意不 resolve**（resolve 可能触发一次工具链编译）。所以一个没迁移的 `ground` 会**显示为已组合，同时一声不响地不渲染开场文本**——报告里那句「我明明启用了 ground」就是这个。
+
+**现在 `sessionMemberOnce` 缓存的是 `MemberOutcome = { member } | { failed }`**（类型在 `extensions.ts`，紧挨着 `SessionMember`）：原因与结论一起缓存，不再在调用点被丢掉。notice 的**结论仍然领头**（`<id> & <id> not composed in`，短、活得过一条窄状态行），后面跟每个包自己那句话——`ground · no active version in any store · nulya ext build <path> --user …` 这种已经把修法带在身上，比指向一块屏幕强。`render` 失败仍是**另一堆**（`broke`）：那个包解析成功了，缺的是它的开场文本，不是它本身。同一个吞法在 agent 那条路上也有一份（`the agent package could not be built here · /ext for what it said`），一并换成包自己的话。
+
+`agentPackage` 因此回 `MemberOutcome` 而不是 `WithRef | null`；两个调用点各自决定怎么对待失败——`agentsIn` 照旧静默（「一个都不知道」是它的正常答案），`startAgent` 把那句话放上屏。`workspace.test.tsx` 里那条已经拿一个不存在的 renderer 钉住结论的测试，多一条断言：屏幕上还要有那个包**自己那句话**（`no active version`）——把 `then` 的第二个分支换回 `catch(() => null)` 就变红。`bun test` 791 pass / 1 fail（`sshpassword.test.tsx` 那条在干净工作树上同样红：fixture 的 `fake-nulya` 在 Windows 上没有可执行后缀）· `bunx tsc --noEmit` 通过。
