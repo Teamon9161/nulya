@@ -1,0 +1,48 @@
+{
+  "schema": "nulya.extension/v2",
+  "id": "mcp",
+  "runtime": { "entry": "bin/mcp" },
+  "contributes": {
+    "skills": [{ "path": "skills/mcp", "surface": "reference" }],
+    "commands": [
+      { "name": "mcp", "description": "The MCP servers this machine holds, and whether each one is configured.", "action": { "run": "mcp_list" } }
+    ],
+    "tools": [
+      {
+        "name": "mcp_add",
+        "surface": "internal",
+        "description": "Turn one MCP server into one extension package. Starts the server once, reads its tools/list, writes each tool's own JSON Schema into a draft under .nulya/extensions/mcp.<name>/, and builds it into an immutable version. It does not activate anything and puts nothing on a model's tool face: every generated tool is `manual` and not recommended, so a person still names the ones they want. Run it again after the server changes and you get a new version, side by side with the old one. stdio transport only.",
+        "input": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "A short name for this server: it becomes the package id (mcp.<name>), the prefix on every generated tool name, and the stem of the file that carries its secrets. Letters, digits, '-' and '_'."
+            },
+            "command": {
+              "type": "string",
+              "description": "The command that starts the server on stdio, e.g. 'npx' or an absolute path."
+            },
+            "args": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "The command's arguments, one per element."
+            },
+            "env": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "The NAMES of the environment variables the server needs (a token, a host). Only the names are frozen into the package; the values are read at call time from .nulya/mcp/<name>.json or <NULYA_HOME or ~/.nulya>/mcp/<name>.json."
+            }
+          },
+          "required": ["name", "command"]
+        }
+      },
+      {
+        "name": "mcp_list",
+        "surface": "internal",
+        "description": "The MCP server packages this machine holds: their versions, the command behind each one, the tools it exposes, and whether the variables it needs have values yet.",
+        "input": { "type": "object", "properties": {} }
+      }
+    ]
+  }
+}

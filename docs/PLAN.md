@@ -75,7 +75,7 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 - `sandbox` backend（Linux landlock+seccomp / macOS sandbox-exec / Windows AppContainer 或容器）；一个包声明自己足迹的字段随它一起定形状。
 
 ### M8 · Ecosystem adapters（§3.11）
-- MCP client 作为 extension（tools 同构进 ToolSetSnapshot）。ACP ✅ 与 TUI ✅ 已落地。作为输入 / 输出适配器，不是主架构。
+**✅ 三项全部落地**：MCP（`extensions/mcp`）· ACP（`tui/src/acp`）· TUI。三者都是输入 / 输出适配器，不是主架构，且**内核为它们零改动**。
 
 **`M1 → M2` 是分水岭**：做到 M2，"subagent = 自调用"（§3.2）、agents-and-review §6 的 re-spawn 通信、§3.6 的 driver、§3.7 的 evolution session 全部有了 substrate，之后都是脚本。
 
@@ -332,7 +332,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 - 前端（CLI 交互 / TUI / app / ACP）都是 core 之上的薄客户端：tail ledger 文件 + append user 事件。**前端是长期进程，re-spawn 的只是 worker，UI 状态不丢。**
 - **ACP ✅ 已落地**（`tui/src/acp/`，v1，内核零改动）：[goals/acp.md](goals/acp.md)。
 - **TUI 已有设计契约与里程碑：[tui.md](tui.md)**（Bun + OpenTUI，仓库顶层 `tui/`；内核改动两处：`session step` 的行协议纯观测、`session step --gate` 每个 call 问一次，§3.8.1）。
-- MCP client：一个 extension，把 MCP tools 适配成 `tool.Tool` 进 ToolSetSnapshot（同构）。
+- **MCP ✅ 已落地**（`extensions/mcp`，内核零改动）：[goals/mcp.md](goals/mcp.md)。
 - 唯一需要常驻进程的是"子 agent 与真人持续流式对话跨多轮"——persistent mode，纯后期加法。
 
 ### 3.12 Policy hooks / reviewer `[占位]`

@@ -35,6 +35,13 @@
 //!
 //!     #!/bin/sh
 //!     printf 'hello %s\n' "${NULYA_ARG_name:-world}"
+//!
+//! ONE CONSTRAINT ON WHAT YOU SPAWN. The caller learns this call is over when
+//! your stdout closes, and a child you start inherits that write end (Windows
+//! has no handle allowlist here). So a tool that starts a helper process must
+//! kill it before exiting, or the caller waits out its whole timeout on an EOF
+//! that never arrives. Tear down your readers AFTER the kill, never before:
+//! their parked reads end only once the process holding the write end is gone.
 
 const std = @import("std");
 

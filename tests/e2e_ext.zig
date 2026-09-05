@@ -24,9 +24,10 @@
 //!   e2e/manufacture.zig  the flagship self-manufacture + pin proof
 //!   e2e/source.zig       `nulya src` / `ext api`
 //!   e2e/ext_cli.zig      activation's shape default, `ext run` timeout, `ext inspect`
+//!   e2e/mcp.zig          `extensions/mcp`: one MCP server, generated into one package
 //!
-//! The other groups are `e2e-core`, `e2e-agent` and `e2e-std`; `zig build
-//! e2e` is all four, run in parallel.
+//! The other groups are `e2e-core`, `e2e-agent`, `e2e-std` and `e2e-remote`;
+//! `zig build e2e` is all five.
 
 comptime {
     _ = @import("e2e/support.zig");
@@ -35,4 +36,5 @@ comptime {
     _ = @import("e2e/manufacture.zig");
     _ = @import("e2e/source.zig");
     _ = @import("e2e/ext_cli.zig");
+    _ = @import("e2e/mcp.zig");
 }

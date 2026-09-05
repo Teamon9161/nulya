@@ -201,6 +201,20 @@ pub fn build(b: *std.Build) void {
     const ground_ext_tests = b.addTest(.{ .root_module = ground_ext_mod, .filters = test_filters });
     test_step.dependOn(&b.addRunArtifact(ground_ext_tests).step);
 
+    // …and the `mcp` package's generator (`gen.zig`): the tool names it puts on
+    // a session's face, the manifest it writes around a server's own schema, and
+    // (through `server.zig`, which it imports) the frozen shape a generated
+    // package is read back from. Rooted at the generator rather than the entry
+    // point: in test mode nothing reaches `main`, so a root with no tests of its
+    // own collects none from what it imports.
+    const mcp_ext_mod = b.createModule(.{
+        .root_source_file = b.path("extensions/mcp/src/gen.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const mcp_ext_tests = b.addTest(.{ .root_module = mcp_ext_mod, .filters = test_filters });
+    test_step.dependOn(&b.addRunArtifact(mcp_ext_tests).step);
+
     // The kernel as a library (`src/root.zig`): registered as the PUBLIC
     // `nulya` module, so a dependent's build.zig can say
     // `b.dependency("nulya", …).module("nulya")` and embed the kernel

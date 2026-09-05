@@ -151,6 +151,46 @@ stderr 一句话说清**哪个文件、缺哪个变量、去哪读**（自己的
 `extensions/guide/skills/guide/SKILL.md`（**只加 F 那一小节机制，不提 mcp**）·
 `docs/PLAN.md` §3.11 删掉 MCP 那一行、M8 相应收窄。
 
-## 4. 落地记录
+## 4. 落地记录（2026-09-05）
 
-（待填）
+`extensions/mcp/`（六个 zig 文件 ~1360 行 + 一个 `reference` skill）+ `tests/e2e/mcp.zig`。
+**`src/` 一个字节未动**——本轮的中心主张成立。`build.zig` 多 14 行（照 `ground_ext_mod` 的写法给这个包
+挂单测，rooted 在 `gen.zig` 而不是 `main.zig`：test 模式下没有东西到达 `main`，一个自己没有 test 的根
+收不到它 import 的那些）。
+
+**形状比契约写的更省一层**：一个二进制两个身份，靠自己旁边有没有冻着 `server.json` 分辨（生成器 / 就是
+那个 server 的包）。生成出来的包带着同一份源码，所以没有第二份实现要同步。细节进了 DESIGN §7.8。
+
+验收五条全过：`zig build test` 629/633（4 skip）· `zig build e2e` 184/191（7 skip），两条都 exit 0。
+
+**实测的三个数**（契约 §1 H 说先测量）：一次调用端到端 **~204 ms**（`ext run` 启动 + seal + spawn +
+PowerShell 假 server 冷启 + 握手 + `tools/call` + 拆除），连着五次 1.02 s——真 node server 会被它自己的
+启动主导。`mcp_add` 一个新工具面 **~8.9 s**（几乎全是 `zig build-exe`），不变的重复生成 **0.31 s**。
+**没有加任何持久化**。
+
+### 契约错了一处，判断留了四处
+
+1. **§1 A 的复用主张是错的。**「`ext build` 复用匹配路径命中同一份字节，所以不为每个 server 编一次」
+   不成立：seal 的复用键是 `package_digest + target + compiler`，而每个 server 的 `extension.json` 都不同，
+   所以**每个不同的工具面各编一次 ~9 s**；只有不变的重复生成才命中复用。后果要写下来：**`mcp_add` 需要
+   工具链**。没有工具链时 draft 照写，消息里原样引内核自己的 `ZigVersionUnreadable` 那句话。
+2. **§1 D 的两层，两个判断**（这是我当初最不确定的一节，结论是它站得住：值不碰 store、不放宽 denylist、
+   这个包做的事不比一条 `shell` 命令更多）：① 层是**近的整份赢**而不是逐键合并——照抄 `agent` 的
+   `.nulya/agents/` 先例，代价是 workspace 那份要写全，换来的是「哪一份在生效」只有一个答案；
+   ② 一个读得出但不是 `{"env":{…}}` 的文件是**错误**，不是穿透到下一层——穿透会让 server 拿着另一层的
+   凭据跑，而写文件的人以为自己改的那份在生效。
+3. **拒绝里的 skill ref 是一个模式加一条命令**，不是一个具体的冻结 ref。具体 ref 得住进 `server.json`，
+   而那在快照里——于是 `mcp` 每前进一个版本，所有生成包的身份都跟着动，哪怕 runtime 一个字节没变。
+   §1 E 那句「自己的 skill ref」按版本无关的那种读法实现。
+4. **`url?` 声明了但当场拒绝**（"stdio only"）。`mcp_add` 是 `internal`，schema 不花模型注意力，
+   而悄悄不声明只会让人试一次失败之后才读成「还不支持」。
+5. **§2 第 2 条的「失败并点名」到内核为止**：`session new` 打的是 `session new failed: DuplicateToolName`
+   ——错误点名了，撞名的那个工具没有。要它说出是哪个工具得改 `src/`，本轮不改。
+
+### 一个值得记下来的坑（Windows）
+
+扩展 spawn 出来的子进程会继承**扩展自己的 stdout 写端**（Zig 0.16 的 spawn 没有 handle allowlist），
+所以一个起了长命助手进程的包**必须在自己退出前杀掉它**，否则调用方在一个永远不会到来的 EOF 上等到超时。
+而且 MultiReader 要在 kill **之后**拆，绝不能在之前——它那些停着的读只有在持有写端的进程消失之后才结束。
+两条都写在 `client.stop` 里。这与 supervisor 那边的 `closeInheritedStrayPipes`（DESIGN §8）是同一类事实的
+两个面。

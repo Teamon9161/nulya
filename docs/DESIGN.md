@@ -743,6 +743,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 | `coding` | data | system prompt（`position: normal`） | 用户 `--user` 装一次。kernel prompt 只说 harness 的事实，这个包说**怎么工作**：信任与授权、探索纪律、批量、输出量、沟通、代码质量、验证、git。它**不点名任何别的包的 tool**（点名的只有 `shell`） |
 | `ground` | compiled | `render` 一个 tool（`internal`） | driver 在 `session new` **之前** `ext run ground@<v> render`，把它答出的路径喂给 `--prompt`（TUI 的 `[extensions] session_prompts`，缺省 `["ground"]`） |
 | `std` | compiled | `read` / `write` / `append` / `edit` / `grep` / `glob`（`read` / `grep` / `glob` 声明 `readonly`；六个都**显式** `manual`——这是一张由人拼出来的工具面） | `ext build extensions/std` → `activate --user` → user config `[extensions] with = ["std:read,write,append,edit,grep,glob"]`（1 + 6 = 7 ≤ `max_tools` 20） |
+| `mcp` | compiled | `mcp_add` / `mcp_list`（都 `internal`）+ 一个 `reference` skill + `commands[/mcp]` | **永不当成员**，经 `nulya ext run mcp …` 调用。当成员的是它生成出来的 `mcp.<name>`，那些包只贡献 `manual` 且 `recommended: false` 的 tool |
 | `plan` | compiled | system prompt + `policy{readonly}` + `propose` / `todo`（都 `readonly` + `auto`，`todo` 另带 `ui: {render: checklist, panel: true}`）/ `approve`（`internal`）+ `contributes.ui.tui` | mode：manifest `commands` 声明的 `/plan` 或 `--with plan` |
 | `ask` | compiled | `ask` tool（`readonly` + `auto`）+ `commands[/ask]` + `contributes.ui.tui` | 能力不是模式，所以它想常驻：user config `[extensions] with = ["ask"]` |
 
@@ -757,6 +758,33 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 - **只覆盖 repo root → cwd（含）**，更深的层由 `extensions/coding` 一句工作纪律交给模型自己读，零包间耦合。
 
 **UTF-8 与预算的终验**：非法 UTF-8 的条目与候选文件跳过；`render` 返回前对整份文档 `utf8ValidateSlice` 兜底并按 `max_document_bytes = 1 MiB` 裁剪。**外部事实不许让 `render` 造出一个 kernel 随后拒绝的 prompt。**
+
+#### `mcp`：一个 server 的工具面，在 build 时冻成一个包
+
+按字面读「运行时连上 server 问它有什么工具」会同时撞两条：§7.2.1 的**manifest 是 schema 唯一真相**
+与 physics #2（composition 在 init 冻结）。这个包的形状让那两条替它干活：**生成器在 build 时**连一次
+server、跑 `tools/list`、把每个工具的 JSON Schema **原样**写进 `contributes.tools[]`，然后走 `ext build`
+封版——于是 **version = hash(工具面快照 + 这份 runtime)**。server 改了工具就重新生成一个新版本，
+`activate` 是唯一的开关，回滚就是 activate 旧版本。**内核零改动**：现成的 oneshot wire（§7.3）够了。
+
+**一个二进制两个身份**，靠自己旁边有没有冻着一份 `server.json` 分辨：没有 → 它是生成器；有 → 它**就是**
+那个 server 的包，`NULYA_TOOL` 点名它生成的某个工具。生成出来的包带着同一份源码（`embed.zig` 把自己
+`@embedFile` 进去），所以答一次调用的 runtime 就是造它的那个 runtime，没有第二份实现要同步。
+**每个不同的工具面仍然各编一次**（seal 的复用键是 `package_digest + target + compiler`，而每个 server
+的 `extension.json` 都不同）——所以 `mcp_add` 需要工具链；重复生成同一个不变的 server 才命中复用。
+
+**名字与预算**：工具名一律 `<server>_<tool>`（`registry.snapshotWith` 对 `DuplicateToolName` 是硬失败，
+两个 server 撞名时 `session new` 当场拒绝）；每个生成的工具都 `surface: "manual"` + `recommended: false`，
+所以装一个五十工具的 server 与模型面多五十个名字**不是同一件事**——后者永远是人写的那一行。
+
+**secret 走包自己的两层目录**（`.nulya/mcp/<name>.json` → `<NULYA_HOME|~/.nulya>/mcp/<name>.json`，
+近的赢、**整份赢**，与 `extensions/agent` 的 `.nulya/agents/` 同一个先例，内核对这两个目录一无所知）。
+分工是硬的：**形状**（命令、参数、要读哪几个变量的**名字**、哪个曝露名对应 server 的哪个工具）进包快照、
+进 version hash；**值**永不进——版本目录内容寻址且世界可读，而 §9 的 `isSecretKey` 本来就把 secret 形状的
+变量从扩展的 env 里抹掉了。这条路没有放宽那个 denylist，也没有给内核 config 加第二个键。
+
+**装了但还没配**是一次干净的失败调用（非零退出 + stderr 一句话点名两个文件路径与自己的 skill），
+不是一个 manifest 字段——「我还没被配置」是运行时事实，内核判不了真假。
 
 #### `agent`：委派，靠已有的后台任务回路
 

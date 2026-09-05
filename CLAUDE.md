@@ -39,7 +39,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 **工具面**：唯一 builtin 是 `shell`（前台带超时、`background:true` 起活得过 step 进程的任务）。其余能力都是 extension——内容寻址的不可变版本 + `current` 指针，`activate` 移指针，并在 manifest 声明了安装时默认值（`apply` / `tools[].recommended`，内核零读者）时替人把那一行成员写进 user config，所以"装了就生效"不必再配一次，而生效的理由仍只有成员表一处。版本字节一台机器只有一处（`<NULYA_HOME | ~/.nulya>/store`），workspace 里只有 draft 与一个可选的 `current`（压过 store 那份）。上模型面只有一条路：成为这一场的成员，并由那一行的工具选择决定带哪些 tool（`auto` 随成员上，`manual` 要点名，`internal` 永不上）。
 
-**自带扩展**（顶层 `extensions/`，十个，随二进制分发，`ext seed` 落盘）：`std`（六个文件 tool）· `agent`（委派；五种 runner：nulya / codex / claude / pi / `ext:<id>` 外置；定义里的 `model:` 可以写 `@<档位>`——问的是"这一场所在的 profile 管这一档叫什么"，所以换主模型就换掉整支队伍，没写这一档的 profile 上退化成继承）· `compact`（fork 压缩）· `handoff` · `plan` · `ask` · `ground`（开场把「这一场在哪」写成 per-session prompt）· `coding`（工作纪律）· `evolution` · `guide`（自描述 skill）。
+**自带扩展**（顶层 `extensions/`，十一个，随二进制分发，`ext seed` 落盘）：`std`（六个文件 tool）· `agent`（委派；五种 runner：nulya / codex / claude / pi / `ext:<id>` 外置；定义里的 `model:` 可以写 `@<档位>`——问的是"这一场所在的 profile 管这一档叫什么"，所以换主模型就换掉整支队伍，没写这一档的 profile 上退化成继承）· `compact`（fork 压缩）· `handoff` · `plan` · `ask` · `ground`（开场把「这一场在哪」写成 per-session prompt）· `coding`（工作纪律）· `evolution` · `guide`（自描述 skill）· `mcp`（一个 MCP server 生成成一个包：工具面在 build 时连一次 server 冻死，于是 version = hash(工具面快照)；两个 tool 都 `internal`，包自己永不当成员；secret 走包自己的两层目录，不进内容寻址的字节）。
 
 **Provider**：`openai` / `anthropic`（两个 cache_control breakpoint）/ `codex`（ChatGPT 订阅 OAuth）/ `scripted`（离线替身，九档）。三个真实 provider 的 prompt cache 命中由 `zig build integration` 实测。
 
