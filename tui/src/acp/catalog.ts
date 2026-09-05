@@ -9,26 +9,35 @@
 import type { Workspace } from "../nulya/bin.ts"
 import { readContributions, readHeader } from "../nulya/files.ts"
 
+/** The manifest word for "draw my calls as a checklist" (`ToolSpec.ui.render`). */
+const checklist = "checklist"
+
 export interface Catalog {
   /**
-   * Whether the `todo` this session's model can call is `extensions/plan`'s.
-   * A checklist becomes an ACP `plan`, and a tool of that name from any other
-   * package is not one.
+   * The tools whose package asked for them to be drawn as a checklist. An ACP
+   * `plan` IS a checklist, so a call to one of these becomes a plan update.
+   *
+   * Asked of the manifest, never of the name: which package this session wears
+   * and what it calls its tools are its own business, and a front end that
+   * matched `plan`'s `todo` by spelling would both miss the next package to
+   * offer a checklist and mistake any other `todo` for one.
    */
-  planTodo: boolean
+  checklistTools: Set<string>
 }
 
-const empty_catalog: Catalog = { planTodo: false }
+const empty_catalog: Catalog = { checklistTools: new Set() }
 
 export async function readCatalog(ws: Workspace, id: string): Promise<Catalog> {
   const header = await readHeader(ws, id)
   if (!header) return empty_catalog
-  let planTodo = false
+  const checklistTools = new Set<string>()
   for (const member of header.composition.active) {
     const contributes = await readContributions(ws, member.id, member.version)
-    if (member.id === "plan" && contributes.tools.includes("todo")) planTodo = true
+    for (const [tool, render] of Object.entries(contributes.toolRender)) {
+      if (render === checklist) checklistTools.add(tool)
+    }
   }
-  return { planTodo }
+  return { checklistTools }
 }
 
 /**

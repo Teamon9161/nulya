@@ -162,8 +162,12 @@ export interface TurnOptions {
    * is not ours to swallow.
    */
   echoed: ReadonlySet<string>
-  /** Whether the `todo` on this session's tool face is `extensions/plan`'s. */
-  planTodo: boolean
+  /**
+   * The tools whose package asked for a checklist rendering (`catalog.ts`). An
+   * ACP `plan` is a checklist, so calls to these become plan updates — asked of
+   * the manifest, never of the tool's name.
+   */
+  checklistTools: ReadonlySet<string>
 }
 
 /** One prompt turn's worth of translation state. */
@@ -216,13 +220,13 @@ export class TurnTranslator {
   /**
    * The arguments are complete once the model's reply is done, so this is where
    * a call gets its real title and `rawInput` — and where a checklist becomes a
-   * plan, since `plan`'s `todo` IS its arguments.
+   * plan, since such a tool's arguments ARE the checklist.
    */
   private closeInputs(): SessionUpdate[] {
     const updates: SessionUpdate[] = []
     for (const call of this.open.values()) {
       updates.push(inputUpdate(call.id, call.tool, call.args))
-      if (this.options.planTodo && call.tool === "todo") {
+      if (this.options.checklistTools.has(call.tool)) {
         const plan = planOf(call.args)
         if (plan) updates.push(plan)
       }
@@ -267,7 +271,10 @@ function callsOf(event: LedgerEvent): ToolCall[] {
  * it is opaque provider state kept for the model, and nobody read it the first
  * time either.
  */
-export function replayUpdates(events: readonly LedgerEvent[], options: { planTodo: boolean }): SessionUpdate[] {
+export function replayUpdates(
+  events: readonly LedgerEvent[],
+  options: { checklistTools: ReadonlySet<string> },
+): SessionUpdate[] {
   const updates: SessionUpdate[] = []
   for (const event of events) {
     switch (event.kind) {
@@ -281,7 +288,7 @@ export function replayUpdates(events: readonly LedgerEvent[], options: { planTod
         for (const call of callsOf(event)) {
           updates.push(toolCallStart(call.id, call.tool))
           updates.push(inputUpdate(call.id, call.tool, call.args))
-          if (options.planTodo && call.tool === "todo") {
+          if (options.checklistTools.has(call.tool)) {
             const plan = planOf(call.args)
             if (plan) updates.push(plan)
           }

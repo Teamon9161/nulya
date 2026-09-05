@@ -82,7 +82,7 @@ interface AcpSession {
   id: string
   ws: Workspace
   policy: SessionPolicy
-  planTodo: boolean
+  checklistTools: ReadonlySet<string>
   /**
    * Updates that belong to the session rather than to a turn — the command list
    * and any refusal from `session/new`. Held until there is somewhere to stream
@@ -185,12 +185,17 @@ export function createAcpAgent(options: AcpAgentOptions = {}): AgentApp {
     return session
   }
 
-  function track(id: string, ws: Workspace, planTodo: boolean, opening: SessionUpdate[]): AcpSession {
+  function track(
+    id: string,
+    ws: Workspace,
+    checklistTools: ReadonlySet<string>,
+    opening: SessionUpdate[],
+  ): AcpSession {
     const session: AcpSession = {
       id,
       ws,
       policy: { mode: startMode, rules: rulesFor(ws.dir), always: new Set(), never: new Set() },
-      planTodo,
+      checklistTools,
       opening,
       echoed: new Set(),
       turn: false,
@@ -228,7 +233,7 @@ export function createAcpAgent(options: AcpAgentOptions = {}): AgentApp {
     session.echoed.add(delivery)
     await send(cx, session.id, [{ sessionUpdate: "user_message_chunk", content: { type: "text", text } }])
 
-    const translator = new TurnTranslator({ echoed: session.echoed, planTodo: session.planTodo })
+    const translator = new TurnTranslator({ echoed: session.echoed, checklistTools: session.checklistTools })
     const step = sessionStep(session.ws, session.id, {
       effort: options.effort,
       env: options.env,
@@ -320,7 +325,7 @@ export function createAcpAgent(options: AcpAgentOptions = {}): AgentApp {
       if (unmatched.length > 0) {
         opening.push({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: mcpNotice(unmatched) } })
       }
-      track(id, ws, catalog.planTodo, opening)
+      track(id, ws, catalog.checklistTools, opening)
       return { sessionId: id, modes: modeState(startMode) }
     })
     .onRequest(methods.agent.session.load, async (ctx) => {
@@ -328,13 +333,13 @@ export function createAcpAgent(options: AcpAgentOptions = {}): AgentApp {
       const id = ctx.params.sessionId
       if (!sessionExists(ws, id)) throw RequestError.resourceNotFound(id)
       const catalog = await readCatalog(ws, id)
-      const session = sessions.get(id) ?? track(id, ws, catalog.planTodo, [])
+      const session = sessions.get(id) ?? track(id, ws, catalog.checklistTools, [])
       const events = await sessionEvents(ws, id)
       // A load HAS a window to stream in, so whatever was waiting for a first
       // prompt is said here instead.
       await send(ctx.client, id, session.opening)
       session.opening = []
-      await send(ctx.client, id, replayUpdates(events, { planTodo: catalog.planTodo }))
+      await send(ctx.client, id, replayUpdates(events, { checklistTools: catalog.checklistTools }))
       return { modes: modeState(session.policy.mode) }
     })
     .onRequest(methods.agent.session.setMode, (ctx) => {

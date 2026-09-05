@@ -23,6 +23,8 @@ import {
   type SessionUpdate,
 } from "@agentclientprotocol/sdk"
 import { createAcpAgent, type AcpAgentOptions } from "../src/acp/agent.ts"
+import { TurnTranslator } from "../src/acp/updates.ts"
+import type { StreamLine } from "../src/nulya/cli.ts"
 import { acpRules } from "../src/acp/settings.ts"
 import { default_rules } from "../src/approvals.ts"
 import { sessionEvents, sessionList } from "../src/nulya/cli.ts"
@@ -295,4 +297,30 @@ test("acp.toml layers user then workspace, and a nearer table replaces rather th
   const survived = acpRules(env, (line) => said.push(line))(ws.dir)
   expect(survived.allow).toEqual(["shell:git", "shell:ls"])
   expect(said.length).toBe(1)
+})
+
+test("a checklist tool becomes an ACP plan because its package asked for one, not because of its name", () => {
+  const line = (index: number, tool: string) =>
+    ({ stream: "model", event: "tool_use_start", index, id: `c${index}`, name: tool }) as const
+  const args = (index: number, fragment: string) =>
+    ({ stream: "model", event: "tool_use_input_delta", index, fragment }) as const
+  const checklist = JSON.stringify({ items: [{ text: "read the ledger", state: "doing" }] })
+
+  const translate = (tool: string, checklistTools: ReadonlySet<string>) => {
+    const t = new TurnTranslator({ echoed: new Set(), checklistTools })
+    const out: SessionUpdate[] = []
+    const stream: StreamLine[] = [line(0, tool), args(0, checklist), { stream: "model", event: "done", stop: "tool_use" }]
+    for (const l of stream) out.push(...t.line({ kind: "stream", line: l }))
+    return out
+  }
+
+  // The package said `ui.render: "checklist"`, whatever it calls the tool.
+  const declared = translate("roadmap", new Set(["roadmap"]))
+  const plan = declared.find((u) => u.sessionUpdate === "plan")
+  expect(plan).toBeDefined()
+  expect(plan).toMatchObject({ entries: [{ content: "read the ledger", status: "in_progress" }] })
+
+  // A tool named `todo` that nobody declared as a checklist is not one: the old
+  // name match would have called this a plan.
+  expect(translate("todo", new Set()).some((u) => u.sessionUpdate === "plan")).toBe(false)
 })

@@ -190,7 +190,24 @@ ACP 的 `session/new` **必带** `mcpServers`（client 每场告诉 agent 连哪
    spawn 一个进程，启动行就是那个选择自然待的地方，第二处说法就是第二个答案。schema 只有一份：
    `approvals.applyApprovals` 一个 parser 服务两个文件。
 
+### 一处按名字猜，已改（2026-09-05）
+
+「这一场的 `todo` 是不是 `extensions/plan` 的」原本写成 `member.id === "plan" && tools.includes("todo")`
+——**前端按名字猜一个包**，正是 DESIGN §17 记着已经判过一次的那种错（`surface` 落地时 TUI 侧四张
+硬编码名单随之消失）。而字段早就在了：`ToolSpec.ui.render`（开放词表，`plan` 的 `todo` 声明的就是
+`"checklist"`），`Contributions.toolRender` 也已经把它按 tool 名读出来了。
+
+现在问的是 manifest：**任何声明了 `ui.render: "checklist"` 的工具**，它的调用就翻成 ACP 的 `plan`，
+与哪个包、叫什么名字无关。于是下一个提供清单的包自动就有，而任何一个碰巧叫 `todo` 的工具不再被
+误当成计划。这条路以前**没有测试**（原报告自己列在「没测到的」里），所以补了一条：声明过的
+`roadmap` 出 plan，没声明的 `todo` 不出——旧写法在第二半上会红。
+
+**没跟着改的一处**：`updates.ts` 的 `tool_kinds`（工具名 → ACP 的图标 kind）仍是一张按名字的表。
+它与上面那条不同类：失败形态只是图标画错，而 manifest today 没有一个字段说得出「这是搜索还是编辑」
+（`readonly` 是审批用的声明，`grep` 只读但不是 `read` 那一类）。模块头已经诚实地写着 `shell` 是唯一
+确定的名字、其余是自带包的叫法、认不出就是 `other`。等真有一个字段说这件事再改，不为一个图标发明一个。
+
 ### 没测到的
 
-`plan` → ACP plan 的翻译，与 `note` 的映射。两者都要先 build `plan` 包（要 zig 工具链 + 每个 workspace
-一次慢编译）；`consumers.test.tsx` 是「要不要为此加一道门」的先例。
+`note` 的映射（要先 build 一个真包）。plan 那条翻译**已经补上了**（见上一节），走的是 `TurnTranslator`
+的公开面，不需要工具链。
