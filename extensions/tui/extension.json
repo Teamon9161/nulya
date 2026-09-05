@@ -1,0 +1,7 @@
+{
+  "schema": "nulya.extension/v2",
+  "id": "tui",
+  "contributes": {
+    "skills": [{ "path": "skills/configuring-a-front-end", "surface": "reference" }]
+  }
+}

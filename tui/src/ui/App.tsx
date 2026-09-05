@@ -165,6 +165,7 @@ import { createPluginHost, pluginKeyOf } from "../plugins/host.ts"
 import { PluginContext } from "../plugins/context.ts"
 import { extNoteMeta, extNoteText, ext_note_source } from "../extnote.ts"
 import { renderSessionPrompt } from "../sessionprompt.ts"
+import { selfSettingsHelpCommand } from "../settingshelp.ts"
 import { formatWithRef, parseWithRef, splitToolId, type WithRef } from "../with.ts"
 import { builtin_tools, orphanTools, resolvableSelections, toolId } from "../face.ts"
 import {
@@ -2421,7 +2422,12 @@ export function App(props: AppProps) {
       }
       const member = outcome.member
       try {
-        prompts.push(await renderSessionPrompt(target, { id: member.id, version: member.version }))
+        prompts.push(
+          await renderSessionPrompt(target, { id: member.id, version: member.version }, {
+            driver: "nulya-tui",
+            driver_help: selfSettingsHelpCommand(),
+          }),
+        )
       } catch (error) {
         // Kept apart from `missing`, because they are different failures with
         // different fixes: one package never resolved, so the session is short

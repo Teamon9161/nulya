@@ -234,7 +234,7 @@ Store and scope:
   what it just built (and at ids that have none) — it never moves a `current`
   that names something else, so going back to an older version survives. `--dry-run` says what it
   would do and writes nothing. Add `--seed` to bring in this binary's own
-  bundled drafts (`extensions/{agent,ask,coding,compact,evolution,ground,guide,handoff,mcp,plan,std}`
+  bundled drafts (`extensions/{agent,ask,coding,compact,evolution,ground,guide,handoff,mcp,plan,std,tui}`
   and any later ones) first — `nulya ext sync --seed --user` on a machine that
   has never seen this checkout writes and builds all of them in one call.
 - A build writes nothing when the store already holds that exact version, which
@@ -438,6 +438,16 @@ Store and scope:
   one step at a time, watch for a handover brief, fork through the bundled
   `compact` tool and carry on in the child, keeping control lines on stdout and
   the stream on stderr.
+- A driver's OWN settings are not a config layer here — `nulya config show`
+  will never mention them, and this page will never list them. A driver that
+  wants to be configurable from inside a session does two things: it names a
+  command that prints what its settings file takes, and it ships a data package
+  whose skill is `surface: "reference"` and routes to that command. So the way
+  to configure whatever is driving this session is `nulya skill list`, then
+  `skill load` the entry for it — never a copy of its keys written down
+  somewhere else. A driver may also report itself to a session-prompt renderer
+  (`ground` takes a `driver` and a `driver_help` argument), which puts that
+  command in the opening context and saves the lookup.
 - Where the bundled `agent` package is in play, a sub-agent is a markdown file:
   `.nulya/agents/<name>.md` (or the same under this machine's nulya home). Its
   front matter is a set of `session new` arguments — `permissions`, `with`,

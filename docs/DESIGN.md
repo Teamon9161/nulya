@@ -741,21 +741,23 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 | `evolution` | data | system prompt + skill + `commands`（`evolve` → `{with: true}`） | mode：`--with evolution` 或写进 config `[extensions] with` |
 | `guide` | data | skill | 用户 `--user` 装一次，写进 user config，每场 `<available_skills>` 多一行 |
 | `coding` | data | system prompt（`position: normal`） | 用户 `--user` 装一次。kernel prompt 只说 harness 的事实，这个包说**怎么工作**：信任与授权、探索纪律、批量、输出量、沟通、代码质量、验证、git。它**不点名任何别的包的 tool**（点名的只有 `shell`） |
-| `ground` | compiled | `render` 一个 tool（`internal`） | driver 在 `session new` **之前** `ext run ground@<v> render`，把它答出的路径喂给 `--prompt`（TUI 的 `[extensions] session_prompts`，缺省 `["ground"]`） |
+| `ground` | compiled | `render` 一个 tool（`internal`，两个**可选**参数 `driver` / `driver_help`） | driver 在 `session new` **之前** `ext run ground@<v> render`，把它答出的路径喂给 `--prompt`（TUI 的 `[extensions] session_prompts`，缺省 `["ground"]`） |
 | `std` | compiled | `read` / `write` / `append` / `edit` / `grep` / `glob`（`read` / `grep` / `glob` 声明 `readonly`；六个都**显式** `manual`——这是一张由人拼出来的工具面） | `ext build extensions/std` → `activate --user` → user config `[extensions] with = ["std:read,write,append,edit,grep,glob"]`（1 + 6 = 7 ≤ `max_tools` 20） |
 | `mcp` | compiled | `mcp_add` / `mcp_list`（都 `internal`）+ 一个 `reference` skill + `commands[/mcp]` | **永不当成员**，经 `nulya ext run mcp …` 调用。当成员的是它生成出来的 `mcp.<name>`，那些包只贡献 `manual` 且 `recommended: false` 的 tool |
 | `plan` | compiled | system prompt + `policy{readonly}` + `propose` / `todo`（都 `readonly` + `auto`，`todo` 另带 `ui: {render: checklist, panel: true}`）/ `approve`（`internal`）+ `contributes.ui.tui` | mode：manifest `commands` 声明的 `/plan` 或 `--with plan` |
 | `ask` | compiled | `ask` tool（`readonly` + `auto`）+ `commands[/ask]` + `contributes.ui.tui` | 能力不是模式，所以它想常驻：user config `[extensions] with = ["ask"]` |
+| `tui` | data | 一个 `reference` skill，**只路由** | **不当成员、也不必当**：`reference` 的 skill 不看成员表（§7.7），所以装上就在 `skill list` 里。它替 driver 补上 §7.2.1 那条不变量——driver 没有 manifest，贡献不了 skill，于是它带一个只路由的 data 包，指向 `nulya-tui --settings-help` / `nulya-acp --settings-help`。**包里没有那张键表**，所以版本不会脱节 |
 
 #### `ground`：一场 session 开场就知道自己在哪
 
-一个 tool 渲染四段——**事实归 `ground`，纪律归 `coding`**，两个独立的包：项目布局（两层、80 条封顶；在 git 仓库里清单来自 `git ls-files --cached --others --exclude-standard`，**gitignore 是 git 的算法，这个包不持有第二份答案**）· 项目自己的 instruction 文件（每层第一个读得出、非空的 `.nulya/AGENTS.md` → `AGENTS.md` → `CLAUDE.md`，16 KB 预算）· 环境（cwd / 平台 / `shell` 实际跑的那条命令行 / 日期）· git（branch / 最后一个 commit / 工作树）。答案只有 `prompt` 一个字段，**每次调用写进自己的目录** `.nulya/scratch/ground/<n>/ground.md`（`O_EXCL` 抢名）。**它对任何 session 的 composition 是零贡献**——进 session 的是它写出来的那个文件（§5.6 那把尺子的另一侧）。
+一个 tool 渲染四段——**事实归 `ground`，纪律归 `coding`**，两个独立的包：项目布局（两层、80 条封顶；在 git 仓库里清单来自 `git ls-files --cached --others --exclude-standard`，**gitignore 是 git 的算法，这个包不持有第二份答案**）· 项目自己的 instruction 文件（每层第一个读得出、非空的 `.nulya/AGENTS.md` → `AGENTS.md` → `CLAUDE.md`，16 KB 预算）· 环境（cwd / 平台 / `shell` 实际跑的那条命令行 / 日期 / 报了的话还有谁在驱动）· git（branch / 最后一个 commit / 工作树）。答案只有 `prompt` 一个字段，**每次调用写进自己的目录** `.nulya/scratch/ground/<n>/ground.md`（`O_EXCL` 抢名）。**它对任何 session 的 composition 是零贡献**——进 session 的是它写出来的那个文件（§5.6 那把尺子的另一侧）。
 
-三条纪律：
+四条纪律：
 
 - **instruction 正文一律进 fence，fence 比进了 prompt 的那段正文里最长的一串反引号还长**；fence 量的是**裁剪之后**的正文（量整个文件就等于让没进 prompt 的字节决定 prompt 的大小）。正文的 `trim` 只判空、只裁尾。
 - **git 答不上来永远不是错误，"挂住"也算答不上来**：三种答案三句话，谁都不冒充谁（git 没装 · 没报出 working tree（`Repo.unknown`）· 在仓库里），字段一级同理——**"没答"绝不塌成空字符串**（`Answer` 是 `union(enum){ok, missing, failed}`）。**每条命令 4 s 封顶**（工作树遍历不总是有限的，而这段代码跑在用户发第一条消息之前），输出必须**边跑边排干**（先等后读会在管道满时死锁）。
 - **只覆盖 repo root → cwd（含）**，更深的层由 `extensions/coding` 一句工作纪律交给模型自己读，零包间耦合。
+- **谁在驱动这一场，只有 driver 自己知道**，所以那两个参数是**可选**的，报了才写（`driver:` / `driver settings:` 两行）。没报就一个字都不写——**绝不从环境里猜**：这份文档全部价值就是里面每一句都是量出来的，一句关于调用者的猜测会让读它的人不知道该信哪几行。这是 §7.2.1 那条不变量在 driver 这一侧的**捷径**（三跳压成一跳），不是它的答案：TUI 没在驱动的那些场里，答得出的只有 `extensions/tui` 那个包（§7.8 表里那一行）。
 
 **UTF-8 与预算的终验**：非法 UTF-8 的条目与候选文件跳过；`render` 返回前对整份文档 `utf8ValidateSlice` 兜底并按 `max_document_bytes = 1 MiB` 裁剪。**外部事实不许让 `render` 造出一个 kernel 随后拒绝的 prompt。**
 

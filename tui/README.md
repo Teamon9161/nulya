@@ -310,56 +310,31 @@ reads the live keymap, so it shows your bindings, not these defaults.
 
 ## Settings
 
-`tui.toml`, user layer first then project layer — see `../docs/tui.md` §7.
-`/settings` shows the values in force and which file each came from; the TUI
-never writes them.
-
-- `%APPDATA%\nulya\tui.toml` (Windows) or `~/.config/nulya/tui.toml`
-- `<workspace>\.nulya\tui.toml`
-
-```toml
-[transcript]
-diff           = "expanded"    # expanded | collapsed
-tool_output    = "collapsed"   # collapsed | expanded
-thinking       = "collapsed"   # collapsed | hidden | expanded
-composition    = "collapsed"   # collapsed | expanded — the session card at the top
-max_width      = 100
-history_window = 400           # cards mounted at once, newest first; 0 = all
-ascii          = false         # plain glyphs for fonts without the box drawing set
-
-[ui]
-theme  = "nulya-dark"          # nulya-dark | nulya-light   (NO_COLOR wins over both)
-motion = true                  # spinner and streaming cursor
-
-[driver]
-mode = "ask"                   # ask | auto — where a run starts (see /mode above)
-
-[approvals]                    # standing answers to the gate; see /mode above
-allow = []
-ask   = []
-deny  = []
-manifest_readonly = true
-
-[extensions]
-sync_on_start = true           # build the drafts in the store roots on the way in
-auto_activate = true           # let that pass point `current` at what it built
-session_with = ["handoff", "agent"] # every session carries these packages; surface:"with" tools join the face
-plugins       = true           # load the front-end module of a trusted, active package
-                               # (`contributes.ui`); false leaves only the declared
-                               # commands / policy / render hints. See plugin-api.d.ts
-
-[keys]                         # action = binding; names are the rows of /help
-cancel  = "escape"
-fold    = "ctrl+o"
-foldAll = "ctrl+shift+o"
-help    = "f1"
-ext     = "f2"
-sessions = "f3"
-nextTab = "f4"
-closeTab = "ctrl+w"
-redraw  = "ctrl+l"
-quit    = "ctrl+c"
 ```
+nulya-tui --settings-help
+```
+
+Every key, the values it takes, and its default — printed from the same table
+the parser and `/settings` read, so it cannot go stale the way a copy in this
+file did. `nulya-acp --settings-help` does the same for the ACP adapter's
+`acp.toml`.
+
+The file is `tui.toml`, in two layers, nearer wins, neither required:
+
+- `$NULYA_HOME/tui.toml`, else `~/.nulya/tui.toml` (Windows:
+  `%USERPROFILE%\.nulya\tui.toml`) — beside the kernel's own `config.toml`
+- `<workspace>/.nulya/tui.toml`
+
+`/settings` shows what is in force and which file it came from, and writes the
+user layer for you: `Enter` flips a two-value key, opens a list for a longer
+vocabulary, or types a number in place. It edits the one line and leaves the
+rest of the file — comments and order included — exactly as it was.
+
+`[keys]` is the one thing `/settings` will not write, because action names are
+an open set rather than a vocabulary: `/help` lists them, and a binding looks
+like `cancel = "escape"`.
+
+The design contract behind all of it is [`../docs/tui.md`](../docs/tui.md) §7.
 
 ## Test
 

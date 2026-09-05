@@ -10,7 +10,16 @@
         "description": "Render this workspace's starting facts — project layout, the project's own instruction files, environment and git state — into a file, and answer where it is. Call it before `session new` and pass the path to `--prompt`; nothing here opens or steps a session.",
         "input": {
           "type": "object",
-          "properties": {}
+          "properties": {
+            "driver": {
+              "type": "string",
+              "description": "The program that is about to open this session, as a person would name it on a command line. Whoever calls `render` is that program, so it is the only thing that knows. Left out = ground writes nothing about it; it never guesses."
+            },
+            "driver_help": {
+              "type": "string",
+              "description": "A command line that prints what that program's own settings file takes. A driver is not an extension and contributes no skill, so this is how a session learns that the thing driving it is configurable at all."
+            }
+          }
         }
       }
     ]

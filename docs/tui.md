@@ -108,12 +108,13 @@ tui/
 ├── package.json  tsconfig.json  bun.lock  README.md
 ├── src/
 │   ├── acp/                  # ★ 第二个 entry：ACP v1 的 agent 那一侧（goals/acp.md）
-│   │   ├── main.ts           #   argv（--profile/--model/--effort/--mode）+ stdio 接线；不读 tui.toml（§7）
+│   │   ├── main.ts           #   argv（--profile/--model/--effort/--mode/--settings-help/--help）+ stdio 接线；不读 tui.toml（§7）
 │   │   ├── agent.ts          #   initialize / authenticate / session {new,load,set_mode,prompt,cancel}；acp 的 sessionId 就是内核的 session id
 │   │   ├── updates.ts        #   纯翻译：行协议与 ledger 事件 → session/update；id 全是内核的（call_id / seq）
 │   │   ├── permission.ts     #   gate ↔ session/request_permission；判断用 approvals.ts，always/never 两个集合只活在这一侧
 │   │   └── catalog.ts        #   冻结 manifest → available_commands_update
-│   ├── main.tsx              # 参数解析（--session <id> | --new [--profile p] [--model id] [--effort e] | --workspace dir）→ launch.planLaunch → createCliRenderer → <App/>
+│   ├── main.tsx              # 参数解析（--session <id> | --new [--profile p] [--model id] [--effort e] | --workspace dir）→ launch.planLaunch → createCliRenderer → <App/>；--settings-help / --help 不开屏就答
+│   ├── settingshelp.ts       # 两个 entry 的 --settings-help 正文：排版 setting_fields，键表只有一处（§7）
 │   ├── launch.ts             # 启动选择：命令行 > tui-state 上次选择 > 内核 active_profile，每层过 config show 的 credential；都不行 → 离线场 + 开屏选择器（D10）
 │   ├── nulya/                # ★ 唯一知道内核形状的目录
 │   │   ├── bin.ts            #   binary 发现：NULYA_BIN → <repo>/zig-out/bin/nulya[.exe] → PATH；版本探测（`nulya --version` 若有）
@@ -644,6 +645,8 @@ cancel = "escape"
 
 `sync_on_start` / `auto_activate` 都只作用于**这一趟 sync**：`auto_activate` 永远不会盖掉指着别处的 `current`（那是 DESIGN §7.2 的规则，前端无从违反），所以一次 rollback 活得过下一次启动。**没有第二道 policy 挡在它前面**（T60 把那个守卫整个删了）：进得到自动激活的只有三条路——装这个二进制、自己往 store 写源码、亲口回答 checkout 的那句问（它本来就提供 `s` = 只 build 不激活）——每一条都已经过了一个人，守卫是在这些之后**再**替人否决一次。`activateUnattended` 只剩一条 **fail-closed**：读不出这个版本的冻结 manifest 就不动指针——那不是 policy，是「别对读不出来的数据动手」。换掉守卫的是**可见**：开屏那行汇总点名这一趟装了什么并指 `/ext`，`standing` 那一格与 Enter 是收回的地方。**一个包这一趟拿到它的第一个 `current` 时**（而不是每次指针前进时），按它自己声明的 `surface` 选上它的 `manual` tool——版本前进时那张成员表已经是人的了，一个会自己撤销的开关不是开关；`max_tools` 不够就一个都不写，让 `/ext` 去挑。checkout 那句「要不要 build 它的 draft」**不受这两个键管**：别人写的源码在本机编译并被指上，只有按键能推动。
 
+**这张表本身也是一条命令**：`nulya-tui --settings-help` 打印上面每一个键、它收什么、缺省是什么，源就是 `/settings` 那张表（`state/settings.ts` 的 `setting_fields`，`settingshelp.ts` 只是把它排版），所以它与解析器不可能对不上。`nulya-acp --settings-help` 打的是它自己读的那一节（`[approvals]`，同一张表按前缀过滤——两个文件本来就一个 parser）。两个都还有 `--help` 说自己的命令行。**为什么是命令而不是一页文档**：driver 不是 extension，没有 manifest、贡献不了 skill，一份写下来的键表就是同一件事的第二个作者，而腐掉的那半永远是抄本。真正被枚举到的是 `extensions/tui` 那个 data 包（DESIGN §7.8）——它**只贡献一个 `reference` skill，只路由**到上面两条命令与那两层路径，一个键都不复制，所以不管这块屏幕在不在驱动这一场，`nulya skill list` 都找得到它。另外，TUI 每次问 `session_prompts` 的 renderer 时会把**自己是谁**报进去（`ground` 的两个可选参数 `driver` / `driver_help`，值就是 `selfSettingsHelpCommand()` 算出的那条能直接跑的命令行），于是开场文本里直接有那一行——那是把三跳压成一跳的**捷径**，不是那条链本身。
+
 **`nulya-acp` 读的是 `acp.toml`，这个文件一节都不读**，也不读不写 `tui-state.json`。它是**并列的 driver** 而不是这块屏幕的第二张脸：一个人在自己终端里和在编辑器插件里能容忍的东西本来就不是一回事，而上面这张表里的 theme / keys / transcript 对它一个字都不意味着。`acp.toml` 只有 `[approvals]` 一节，两层（user 层 + 每场 session 自己那个 workspace 的 `.nulya/`），近的**整份替换**那一个字段——与这里的纪律逐条相同，schema 也只有一份（`approvals.applyApprovals` 一个 parser 服务两个文件）。权限档不在文件里：`nulya-acp --mode ask|unsafe`，因为编辑器本来就按 workspace spawn 一个进程，启动行就是那个选择自然待的地方。
 
 `/settings` 显示当前生效值与来源文件，**说得出这个文件收哪些字段**（T94）——上面这一整张表的每个键都在屏幕上，每行带着它接受的词表或形状，以及——当它不是缺省时——缺省是什么；能在界面里选、记在 `tui-state.json` 里的那些（模型 / 权限档 / 目录 / shell 跑在哪 / 成员与它们的工具）排在最前面，每行就是一个入口（T92）——**并且改得动**（T100）：`j/k` 落光标、`Enter` 在两值的键上直接换成另一个、三值以上开一个列表、数字与列表在行内输入（列表用逗号分隔，与值那一列的写法同一种）。写的是 **user 层**那一个文件，手法是**最小编辑**：找到那个键所在的行就地替换（连行尾注释一起留着）、没有就在它那张表的末尾加一行、连表都没有才在文件末尾开一节并写一句 `# nulya:` 说明是谁加的；**绝不重排、绝不删注释、绝不 serialize 整个文件**（`state/settingsfile.ts`，`nulya/credentials.ts` 的同一条纪律）。**这不构成第二个作者**：作者只有人一个，屏幕是那支笔，文件仍是同一份文档。`keys.*` 与 `env.<kind>.*` 两类行不写（前者名字是开集，后者一行代表三张表），`Enter` 只说去哪儿改；**项目层已经设过的键在行首标出来并拒绝写**——近的那层胜，写在 user 层什么都不会发生。写完当场重读文件链、界面即刻生效（`render/theme.ts` 的 `liveStyle`），只在启动时读一次的那几个键（`extensions.*`、`driver.mode`）由行自己说出这一点。
@@ -753,3 +756,18 @@ T0–T115 全部落地，逐条经过与验收标准在归档的实施日志里�
 **现在 `sessionMemberOnce` 缓存的是 `MemberOutcome = { member } | { failed }`**（类型在 `extensions.ts`，紧挨着 `SessionMember`）：原因与结论一起缓存，不再在调用点被丢掉。notice 的**结论仍然领头**（`<id> & <id> not composed in`，短、活得过一条窄状态行），后面跟每个包自己那句话——`ground · no active version in any store · nulya ext build <path> --user …` 这种已经把修法带在身上，比指向一块屏幕强。`render` 失败仍是**另一堆**（`broke`）：那个包解析成功了，缺的是它的开场文本，不是它本身。同一个吞法在 agent 那条路上也有一份（`the agent package could not be built here · /ext for what it said`），一并换成包自己的话。
 
 `agentPackage` 因此回 `MemberOutcome` 而不是 `WithRef | null`；两个调用点各自决定怎么对待失败——`agentsIn` 照旧静默（「一个都不知道」是它的正常答案），`startAgent` 把那句话放上屏。`workspace.test.tsx` 里那条已经拿一个不存在的 renderer 钉住结论的测试，多一条断言：屏幕上还要有那个包**自己那句话**（`no active version`）——把 `then` 的第二个分支换回 `catch(() => null)` 就变红。`bun test` 791 pass / 1 fail（`sshpassword.test.tsx` 那条在干净工作树上同样红：fixture 的 `fake-nulya` 在 Windows 上没有可执行后缀）· `bunx tsc --noEmit` 通过。
+
+### T118 · driver 的设置也有地方查：一条打印自己的命令，一个只路由的包（2026-09-05）
+
+CLAUDE.md 那条不变量（每个可配置面都要能从 `nulya help` 出发、有限跳内、不读本仓库源码地到达一份与代码同源的说明）在 `tui.toml` 这一处一直是破的：driver 不是 extension，没有 manifest、贡献不了 skill，于是**要配这块屏幕只能读这个仓库的源码**。`acp.toml` 落地时又开了第二个同形的口子。
+
+补法两半，都不是"再写一页文档"。**第一半是一条命令**：`nulya-tui --settings-help` / `nulya-acp --settings-help`，正文由 `settingshelp.ts` 从 `state/settings.ts` 的 `setting_fields` 排版出来——那是 `/settings` 已经在用的那张表，第三列还是 `acceptsOf`，所以屏幕上能选的词与打印出来的词是同一份。ACP 那份是同一张表按 `approvals.` 前缀**过滤**，不是第二张单子（两个文件本来就走 `applyApprovals` 一个 parser）。`[env.<kind>]` 那三行有点特殊：它们只说得出"哪几个 kind 覆盖了"，真正生效的值是**按 kind 的**，一个格子装不下——所以尾部那两行是问 `resolveEnvProfile(kind, …, {})` 得来的，也就是屏幕真正组合 session 时走的那个函数。顺手给两个 entry 都加了 `--help`：一个人敲 `nulya-tui --help` 却弹出全屏 TUI，本身就是条死路。
+
+**第二半是一个包**：`extensions/tui`，data kind，只贡献一个 `reference` skill（`configuring-a-front-end`）。它**一个键都不抄**，只说两个文件在哪两层、哪条命令打得出它们收什么、以及哪些问题其实是内核的（`config.toml` / 包自己的 skill）而不是 driver 的。`reference` 不看成员表，所以**不管这块屏幕在不在驱动这一场**，`nulya skill list` 都枚举得到——ground 补不了这一半。它也不需要 `apply`，因为它永远不必当成员。
+
+**锦上添花的那一跳**：TUI 问 renderer 要开场文本时把自己报进去（`ground` 的 `driver` / `driver_help` 两个**可选**参数，走已有的 `NULYA_ARG_*`，内核零改动），开场文本的环境段就多两行。值是 `selfSettingsHelpCommand()`：编译过的 entry 就是 `process.execPath` 自己，从源码跑时 `execPath` 是 bun、脚本要再报一遍——两者由 runner 的**名字**分辨，因为文件系统分辨不了（编译二进制报的那个虚拟 main 路径 `existsSync` 也答 true）。**没人报就一个字不写**，守 ground 自己那条"答不上来永远不是错误、但绝不猜"。
+
+改到的：`tui/src/settingshelp.ts`（新）· `main.tsx` / `acp/main.ts` 各一个 `answeredOnStdout` · `sessionprompt.ts` 多一个 `Caller` 参数（**报给每一个 renderer，不点名任何包**）· `App.tsx` 调用点 · `extensions/tui/`（新）· `extensions/ground` 的 manifest 与 `facts.zig` · `src/bundled.zig`（自带包清单补齐成十二个，并新增一条：**manifest 里写的每个 skill 路径都必须真的在包里**——路径写错了，要到有人 `skill load` 那一页时才发现，而那正是这条不变量被兑现的一刻）· `guide` 一条机制（不提 TUI 两个字）。
+
+`bun test settingshelp/extensions/envprofile/acp/driver` 68 pass · `workspace/consumers/plugins` 61 pass · `bunx tsc --noEmit` 通过 · `zig build test` 630/634（4 skip）· `zig build e2e` 184/191（7 skip）。ground 那条 e2e 多两段断言：没人报 → 文档里没有 `driver:`；报了 → 两行都在。
+

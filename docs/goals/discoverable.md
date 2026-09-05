@@ -171,9 +171,39 @@ TUI 没在驱动的那些场里，只有 E2 答得出。
 是 `reference`——有人把它改回 `auto` 就红）· e2e 两处（`ext_cli` 的封闭词表多一个 `InvalidSkillSurface` 案例；
 `extension.zig` 一条走完 build → 成员 composition 的 catalog → `skill list` → `skill load`）。
 
-### 还没做的（本轮**故意**留下）
+## 5. 落地记录（2026-09-05，E2 / F —— driver 那半）
 
-- **E2 · `tui.toml` 那条断链**（`nulya-tui --settings-help` + `extensions/tui` 的 thin `reference` skill）。
-  排在 ACP adapter 之后：两者都动 `tui/`，并发改是白痛苦。**A 那条不变量在这一处仍然是破的**，
-  E2 落地之前不要说它成立。
-- **F · ground 报出「谁在驱动」**。它是 E2 的锦上添花（三跳压成一跳），不能替代 E2，所以跟着 E2 一起做。
+- **E2 · 那条命令** ✅ `nulya-tui --settings-help` / `nulya-acp --settings-help`，正文在
+  `tui/src/settingshelp.ts`，源是 `state/settings.ts` 的 `setting_fields`（`/settings` 已经在用的那张表），
+  第三列走 `acceptsOf`——**屏幕上能选的词与打印出来的词是同一份**。ACP 那份是同一张表按 `approvals.`
+  前缀**过滤**而不是第二张单子（两个文件本来就一个 parser）。两个 entry 各加一个 `--help`。
+- **契约没写、但落地时必须补的一处**：`acp.toml`。它在本契约之后才存在，是同一形状的第二个断口——
+  A 那条不变量说的是「新增一个可配置面时同时说出它那条链」，所以它跟 `tui.toml` 一起补，
+  而不是留成下一轮的欠账。
+- **偏离契约一处（往前多做了一点）**：`[env.<kind>]` 那三行只说得出「哪几个 kind 覆盖了」，
+  真正生效的值是**按 kind 的**，一个格子装不下。尾部那两行问的是
+  `resolveEnvProfile(kind, …, {})`——屏幕真正组合 session 时走的那个函数，所以仍然同源。
+- **E2 · 那个包** ✅ `extensions/tui`，data kind，只贡献一个 `reference` skill
+  （`configuring-a-front-end`）。**一个键都不抄**：只说两个文件在哪两层、哪条命令打得出它们收什么、
+  以及哪些问题其实是内核的（`config.toml` / 包自己的 skill）而不是 driver 的。`reference` 不看成员表，
+  所以不管 TUI 在不在驱动这一场都枚举得到；它也**不需要 `apply`**——永远不必当成员。
+- **F · ground 报驱动** ✅ `render` 两个**可选**参数 `driver` / `driver_help`，走已有的 `NULYA_ARG_*`，
+  **内核零改动**。TUI 报给**每一个** renderer（`sessionprompt.ts` 的 `Caller`），不点名任何包。
+  值是 `selfSettingsHelpCommand()`：编译过的 entry 就是 `process.execPath`，从源码跑时 `execPath` 是 bun、
+  脚本要再报一遍——两者由 runner 的**名字**分辨，因为文件系统分辨不了（编译二进制报的虚拟 main 路径
+  `existsSync` 也答 true）。**没人报就一个字不写。**
+- **guide** ✅ 一条机制，不提 TUI 两个字：driver 的设置不是 config 层，它自己带一条打印命令 +
+  一个 `surface: "reference"` 的 data 包；顺带提一句 `ground` 那两个参数是捷径。
+
+验收：`zig build test` 630/634（4 skip）· `zig build e2e` 184/191（7 skip）· `bunx tsc --noEmit` 通过 ·
+`bun test` 目标文件 68 + 61 pass。新增钉子：`tui/test/settingshelp.test.ts` 两条（每个键都印得出、
+词表走 `acceptsOf`、ACP 那份不含它不读的表——把 `fields` 换成手写清单就红，验过）· `bundled.zig` 一条
+（**manifest 里写的每个 skill 路径都必须真的在包里**——路径写错要到有人 `skill load` 那一页时才发现，
+而那正是这条不变量被兑现的一刻；把 `tui` 的路径改错验过会红）· ground 的 e2e 多两段（没人报 →
+文档里没有 `driver:`；报了 → 两行都在）。
+
+**A 那条不变量今天没有已知破口。**
+
+### 还剩什么
+
+没有本契约范围内的。下一次新增可配置面时，按 A 那条 review 尺子说出它的链。

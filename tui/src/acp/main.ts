@@ -2,6 +2,7 @@
  * Entry point: speak ACP over stdio.
  *
  *   nulya-acp [--profile <p>] [--model <id>] [--effort <e>] [--mode ask|unsafe]
+ *   nulya-acp --settings-help   what `acp.toml` takes
  *
  * The standing approval tables come from `acp.toml` (see `settings.ts`),
  * user layer then the workspace each session names.
@@ -20,6 +21,7 @@ import { ndJsonStream } from "@agentclientprotocol/sdk"
 import { normalizeMode, type PermissionMode } from "../approvals.ts"
 import { createAcpAgent } from "./agent.ts"
 import { acpRules } from "./settings.ts"
+import { acpSettingsHelp } from "../settingshelp.ts"
 
 interface Args {
   profile?: string
@@ -71,6 +73,28 @@ function stdoutStream(): WritableStream<Uint8Array> {
       sink.end()
     },
   })
+}
+
+/**
+ * What this program answers without speaking the protocol.
+ */
+function answeredOnStdout(argv: readonly string[]): string | null {
+  if (argv.includes("--settings-help")) return acpSettingsHelp()
+  if (argv.includes("--help") || argv.includes("-h")) {
+    return [
+      "nulya-acp [--profile <p>] [--model <id>] [--effort <e>] [--mode ask|unsafe]",
+      "nulya-acp --settings-help          what `acp.toml` takes",
+      "",
+      "Speaks the Agent Client Protocol over stdio; an editor spawns it.",
+    ].join("\n") + "\n"
+  }
+  return null
+}
+
+const answered = answeredOnStdout(Bun.argv.slice(2))
+if (answered !== null) {
+  process.stdout.write(answered)
+  process.exit(0)
 }
 
 let args: Args

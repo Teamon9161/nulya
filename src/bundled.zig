@@ -40,7 +40,7 @@ pub fn has(id: []const u8) bool {
     return false;
 }
 
-test "every bundled manifest validates, and agent ships its authoring manual as a reference skill" {
+test "every bundled manifest parses, names only skills it ships, and keeps agent's manual off the catalogue" {
     const alloc = std.testing.allocator;
     var checked: usize = 0;
     for (files) |f| {
@@ -55,6 +55,24 @@ test "every bundled manifest validates, and agent ships its authoring manual as 
             std.debug.print("bundled {s} does not validate: {t}\n", .{ f.path, err });
             return err;
         };
+
+        // A skill it names must be a directory it ships. A path with a typo in
+        // it is invisible until someone runs `skill load` on the one page that
+        // says how to configure that package — which is the moment the whole
+        // "there is always somewhere to look" claim is being cashed in.
+        for (m.skills) |spec| {
+            const dir = f.path[0 .. f.path.len - "extension.json".len];
+            const md = try std.fmt.allocPrint(alloc, "{s}{s}/SKILL.md", .{ dir, spec.path });
+            defer alloc.free(md);
+            var shipped = false;
+            for (files) |g| {
+                if (std.mem.eql(u8, g.path, md)) shipped = true;
+            }
+            if (!shipped) {
+                std.debug.print("bundled {s} names a skill nothing ships: {s}\n", .{ f.path, md });
+                return error.MissingBundledSkill;
+            }
+        }
 
         // `agent`'s tool must be on the model's face, so the package is a
         // member of every session that delegates. Its authoring manual rides
@@ -76,7 +94,7 @@ test "bundled drafts include every one the repo ships, each with a manifest at i
     const alloc = std.testing.allocator;
     const list = try ids(alloc);
     defer alloc.free(list);
-    for ([_][]const u8{ "agent", "ask", "compact", "evolution", "guide", "handoff", "plan", "std" }) |want| {
+    for ([_][]const u8{ "agent", "ask", "coding", "compact", "evolution", "ground", "guide", "handoff", "mcp", "plan", "std", "tui" }) |want| {
         try std.testing.expect(has(want));
         var manifest_path_buf: [64]u8 = undefined;
         const manifest_path = try std.fmt.bufPrint(&manifest_path_buf, "{s}/extension.json", .{want});

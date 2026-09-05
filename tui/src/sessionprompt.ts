@@ -11,6 +11,13 @@
  *
  *   nulya ext run <id>@<v> render     →  {"prompt": "<workspace-relative path>"}
  *
+ * The arguments are one thing, and it is not about any package: WHO is opening
+ * this session. A driver has no manifest and contributes no skill, so a session
+ * cannot otherwise learn that the program running it is configurable at all —
+ * and the only thing that knows is the caller. A renderer that does not declare
+ * these ignores them; this front end reports them to every renderer rather than
+ * to one it knows by name.
+ *
  * `[extensions] session_prompts` in `tui.toml` lists which packages this front
  * end asks, the way `session_with` lists which it composes. The bundled
  * `ground` is the first entry and, today, the only one — but it is an entry,
@@ -23,6 +30,14 @@
 import type { Workspace } from "./nulya/bin.ts"
 import { extRun } from "./nulya/cli.ts"
 import { formatWithRef, type WithRef } from "./with.ts"
+
+/** What a renderer is told about the program that is about to open this session. */
+export interface Caller {
+  /** As a person would name it on a command line. */
+  driver: string
+  /** A command line that prints what that program's own settings file takes. */
+  driver_help: string
+}
 
 /**
  * Ask one renderer for this session's opening text; answer the workspace-
@@ -37,8 +52,8 @@ import { formatWithRef, type WithRef } from "./with.ts"
  * decision, or a renderer that is failing for its own reasons is reported as a
  * package that could not be found.
  */
-export async function renderSessionPrompt(ws: Workspace, pkg: WithRef): Promise<string> {
-  const call = await extRun(ws, formatWithRef(pkg), "render", {})
+export async function renderSessionPrompt(ws: Workspace, pkg: WithRef, caller: Caller): Promise<string> {
+  const call = await extRun(ws, formatWithRef(pkg), "render", caller)
   if (call.code !== 0) throw new Error(`${pkg.id}: ${said(call.stdout, call.stderr)}`)
   let value: unknown
   try {

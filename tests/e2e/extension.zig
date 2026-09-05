@@ -1824,6 +1824,29 @@ test "bundled ground: render answers a context file carrying this directory's ow
     for ([_][]const u8{ "# Project instructions", "# Environment", "# Git" }) |needle| {
         try std.testing.expect(std.mem.indexOf(u8, context, needle) != null);
     }
+    // Nobody said who was driving, so nothing is written about it. `ground`
+    // never guesses a caller: everything in this document was measured, and a
+    // claim about the program that spawned it would be the one exception.
+    try std.testing.expect(std.mem.indexOf(u8, context, "driver:") == null);
+
+    // A driver IS the caller, so it is the one thing that can report itself —
+    // it has no manifest and contributes no skill, so without this a session
+    // cannot learn that the program running it is configurable at all.
+    const reported = try runCliEnvs(alloc, io, ws, &.{
+        exe_abs,                                      "ext",   "run",                   ref,
+        "render",                                     "--arg", "driver=some-front-end", "--arg",
+        "driver_help=some-front-end --settings-help",
+    }, no_git);
+    defer alloc.free(reported.stdout);
+    try std.testing.expectEqual(@as(u8, 0), reported.code);
+
+    const said = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, reported.stdout, " \r\n"), .{});
+    defer said.deinit();
+    const second = try ws.readFileAlloc(io, said.value.object.get("prompt").?.string, alloc, .unlimited);
+    defer alloc.free(second);
+    for ([_][]const u8{ "driver: some-front-end", "driver settings: some-front-end --settings-help" }) |needle| {
+        try std.testing.expect(std.mem.indexOf(u8, second, needle) != null);
+    }
 
     // …and the answer is a path `session new` takes, landing in the frozen
     // header as an inline prompt whose `source` is the file's stem — which

@@ -44,6 +44,28 @@ pub fn renderEnvironment(
     try w.print("shell: {s}\n", .{shell});
 
     try w.print("date: {s}\n", .{try today(alloc, io)});
+
+    try renderDriver(w, env);
+}
+
+/// Who opened this session, and how to ask that program what it takes.
+///
+/// A driver is not an extension: it has no manifest and contributes no skill,
+/// so nothing inside a session can find out that the thing driving it is
+/// configurable at all — unless the driver says so itself. It is the one that
+/// called `render`, so it is the one that knows; both halves arrive as
+/// ordinary arguments (`NULYA_ARG_driver` / `NULYA_ARG_driver_help`).
+///
+/// Nobody reported it = nothing is written. Guessing from the environment
+/// would put a claim about the caller into a document whose whole value is
+/// that everything in it was measured.
+fn renderDriver(w: *std.Io.Writer, env: *const std.process.Environ.Map) !void {
+    const name = env.get("NULYA_ARG_driver") orelse return;
+    if (name.len == 0) return;
+    try w.print("driver: {s}\n", .{name});
+    const help = env.get("NULYA_ARG_driver_help") orelse return;
+    if (help.len == 0) return;
+    try w.print("driver settings: {s}\n", .{help});
 }
 
 pub fn renderGit(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, repo: git.Repo) !void {

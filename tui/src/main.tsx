@@ -3,6 +3,7 @@
  * then hand the whole screen to <App/>.
  *
  *   nulya-tui [--session <id>] [--new] [--profile <p>] [--model <id>] [--effort <e>] [--workspace <dir>]
+ *   nulya-tui --settings-help   what `tui.toml` takes
  *
  * With no arguments NOTHING is created: the screen opens on a
  * draft, and `session new` runs at the first message. Composition freezes when a
@@ -20,6 +21,7 @@ import { configShow } from "./nulya/cli.ts"
 import { sessionExists } from "./nulya/files.ts"
 import { selectedToolIds } from "./with.ts"
 import { loadSettings } from "./state/settings.ts"
+import { tuiSettingsHelp } from "./settingshelp.ts"
 import { forgetRemoteEnv, loadTuiState, rememberAgentsAnswer, rememberStoreAsked } from "./state/tui_state.ts"
 import { planLaunch } from "./launch.ts"
 import {
@@ -83,8 +85,37 @@ function parseArgs(argv: string[]): Args {
   return args
 }
 
+/**
+ * The two things this program answers without opening a screen.
+ *
+ * `--settings-help` is the far end of a chain that starts at `nulya help`: a
+ * driver contributes no skill, so the bundled `tui` package's own manual routes
+ * here rather than restating what `tui.toml` takes.
+ */
+function answeredOnStdout(argv: readonly string[], cwd: string): string | null {
+  if (argv.includes("--settings-help")) return tuiSettingsHelp(cwd)
+  if (argv.includes("--help") || argv.includes("-h")) {
+    return [
+      "nulya-tui [--session <id>] [--new] [--profile <p>] [--model <id>] [--effort <e>]",
+      "          [--max-steps <n>] [--workspace <dir>]",
+      "nulya-tui --settings-help          what `tui.toml` takes",
+      "",
+      "With no arguments nothing is created: the screen opens on a draft and the",
+      "session starts at the first message.",
+    ].join("\n") + "\n"
+  }
+  return null
+}
+
 async function main() {
-  const args = parseArgs(process.argv.slice(2))
+  const argv = process.argv.slice(2)
+  const answer = answeredOnStdout(argv, process.cwd())
+  if (answer !== null) {
+    process.stdout.write(answer)
+    return
+  }
+
+  const args = parseArgs(argv)
   const ws = openWorkspace(args.workspace ?? process.cwd())
 
   const id = args.session
