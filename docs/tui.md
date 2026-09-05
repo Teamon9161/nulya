@@ -101,10 +101,18 @@
 
 ## 3. 目录与模块（`tui/`）
 
+**两个 entry**，都是进程边界外的 driver 客户端而不是第二个 harness：`src/main.tsx`（这块屏幕）与 `src/acp/main.ts`（`nulya-acp`，说 ACP 的那个）。`build.ts` 一次编出两个二进制。
+
 ```
 tui/
 ├── package.json  tsconfig.json  bun.lock  README.md
 ├── src/
+│   ├── acp/                  # ★ 第二个 entry：ACP v1 的 agent 那一侧（goals/acp.md）
+│   │   ├── main.ts           #   argv（--profile/--model/--effort/--mode）+ stdio 接线；不读 tui.toml（§7）
+│   │   ├── agent.ts          #   initialize / authenticate / session {new,load,set_mode,prompt,cancel}；acp 的 sessionId 就是内核的 session id
+│   │   ├── updates.ts        #   纯翻译：行协议与 ledger 事件 → session/update；id 全是内核的（call_id / seq）
+│   │   ├── permission.ts     #   gate ↔ session/request_permission；判断用 approvals.ts，always/never 两个集合只活在这一侧
+│   │   └── catalog.ts        #   冻结 manifest → available_commands_update
 │   ├── main.tsx              # 参数解析（--session <id> | --new [--profile p] [--model id] [--effort e] | --workspace dir）→ launch.planLaunch → createCliRenderer → <App/>
 │   ├── launch.ts             # 启动选择：命令行 > tui-state 上次选择 > 内核 active_profile，每层过 config show 的 credential；都不行 → 离线场 + 开屏选择器（D10）
 │   ├── nulya/                # ★ 唯一知道内核形状的目录
@@ -635,6 +643,8 @@ cancel = "escape"
 ```
 
 `sync_on_start` / `auto_activate` 都只作用于**这一趟 sync**：`auto_activate` 永远不会盖掉指着别处的 `current`（那是 DESIGN §7.2 的规则，前端无从违反），所以一次 rollback 活得过下一次启动。**没有第二道 policy 挡在它前面**（T60 把那个守卫整个删了）：进得到自动激活的只有三条路——装这个二进制、自己往 store 写源码、亲口回答 checkout 的那句问（它本来就提供 `s` = 只 build 不激活）——每一条都已经过了一个人，守卫是在这些之后**再**替人否决一次。`activateUnattended` 只剩一条 **fail-closed**：读不出这个版本的冻结 manifest 就不动指针——那不是 policy，是「别对读不出来的数据动手」。换掉守卫的是**可见**：开屏那行汇总点名这一趟装了什么并指 `/ext`，`standing` 那一格与 Enter 是收回的地方。**一个包这一趟拿到它的第一个 `current` 时**（而不是每次指针前进时），按它自己声明的 `surface` 选上它的 `manual` tool——版本前进时那张成员表已经是人的了，一个会自己撤销的开关不是开关；`max_tools` 不够就一个都不写，让 `/ext` 去挑。checkout 那句「要不要 build 它的 draft」**不受这两个键管**：别人写的源码在本机编译并被指上，只有按键能推动。
+
+**`nulya-acp` 一节都不读。** 它的权限档来自 `--mode`（缺省 `ask`），三张审批表是 `approvals.default_rules`——读 `[approvals]` 要 import `state/settings.ts`，而那半是 solid 的。规则是 `createAcpAgent` 的一个参数，接一个读文件的人进来是入口处一行；**要先决定它读哪个文件**（`tui.toml` 是这块屏幕的设定，而在编辑器里跑的那个 agent 未必该继承它）。它也不读也不写 `tui-state.json`。
 
 `/settings` 显示当前生效值与来源文件，**说得出这个文件收哪些字段**（T94）——上面这一整张表的每个键都在屏幕上，每行带着它接受的词表或形状，以及——当它不是缺省时——缺省是什么；能在界面里选、记在 `tui-state.json` 里的那些（模型 / 权限档 / 目录 / shell 跑在哪 / 成员与它们的工具）排在最前面，每行就是一个入口（T92）——**并且改得动**（T100）：`j/k` 落光标、`Enter` 在两值的键上直接换成另一个、三值以上开一个列表、数字与列表在行内输入（列表用逗号分隔，与值那一列的写法同一种）。写的是 **user 层**那一个文件，手法是**最小编辑**：找到那个键所在的行就地替换（连行尾注释一起留着）、没有就在它那张表的末尾加一行、连表都没有才在文件末尾开一节并写一句 `# nulya:` 说明是谁加的；**绝不重排、绝不删注释、绝不 serialize 整个文件**（`state/settingsfile.ts`，`nulya/credentials.ts` 的同一条纪律）。**这不构成第二个作者**：作者只有人一个，屏幕是那支笔，文件仍是同一份文档。`keys.*` 与 `env.<kind>.*` 两类行不写（前者名字是开集，后者一行代表三张表），`Enter` 只说去哪儿改；**项目层已经设过的键在行首标出来并拒绝写**——近的那层胜，写在 user 层什么都不会发生。写完当场重读文件链、界面即刻生效（`render/theme.ts` 的 `liveStyle`），只在启动时读一次的那几个键（`extensions.*`、`driver.mode`）由行自己说出这一点。
 

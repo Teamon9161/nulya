@@ -6,11 +6,13 @@
   "private": true,
   "scripts": {
     "start": "bun run src/main.tsx",
+    "acp": "bun run src/acp/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "compile": "bun run build.ts"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
     "@opentui/core": "0.5.9",
     "@opentui/keymap": "0.5.9",
     "@opentui/solid": "0.5.9",

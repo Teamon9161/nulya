@@ -140,6 +140,47 @@ ACP 的 `session/new` **必带** `mcpServers`（client 每场告诉 agent 连哪
 
 **不改**：`src/**` 一个文件都不动。本轮若发现必须改内核，那是设计错了——回来重读本文 §1。
 
-## 4. 落地记录
+## 4. 落地记录（2026-09-05）
 
-（待填）
+落在 `tui/src/acp/` 五个文件（~910 行）+ `tui/test/acp.test.ts`（271 行）。**`src/` / `extensions/` /
+`tests/` / `drivers/` 一个字节未动**，`tui/src/nulya/*` 与 `approvals.ts` 也一行没改——现成的绑定全够。
+`build.ts` 两个 entry，一次编出 `nulya-tui` 与 `nulya-acp`。SDK 是 `@agentclientprotocol/sdk@1.4.0`
+（它的 `PROTOCOL_VERSION` 是 1）。
+
+- `main.ts` argv + stdio · `agent.ts` 那几个方法 · `updates.ts` 纯翻译 · `permission.ts` gate 那一侧 ·
+  `catalog.ts` 冻结 manifest → `available_commands_update`。
+- **ACP 的 `sessionId` 就是内核的 session id**——这正是 §E 说的「`session/load` 几乎白送」兑现的地方。
+- 验收 1–5 全绿（`bun test test/acp.test.ts` → 5 pass / 0 fail）。四条把 agent app 在同进程里接上 **SDK
+  自己的 client**（所以断言的是「一个 client 看到的协议」，不是 adapter 自言自语），`session/load` 那条
+  真的 spawn 一个进程走真 stdio——「换个进程接得上」本来就是那条的全部主张。五条都驱动**真** `nulya`
+  二进制，跑 scripted provider。第 3 条除了 `stopReason === cancelled` 还回头读 `session events` 核对
+  每条 assistant-with-calls 后面都跟着 call id 同序的 `tool_results`——physics #7 没有被 adapter 破坏。
+- `bunx tsc --noEmit` 干净。验收第 6 条（真实 Zed 手测）**还没做**。
+
+### 契约没说、落地时定了的（七处）
+
+| 处 | 怎么定的 |
+|---|---|
+| `note` 事件（§C 表里没有它） | 投成 `user_message_chunk`，与 PromptIR 一致（note 是一个只带文本的 turn）。不这么做，后台任务报告会从 client 眼前消失 |
+| `session/load` 的返回 | 这个 SDK 的 `LoadSessionResponse` 是全可选对象，答 `{modes}` 而不是 §E 字面的 `null`——否则 load 出来的一场没有 new 出来的那份 mode 状态 |
+| credential 缺失 | `internalError` 带内核那句原话，**不是** `authRequired`：`authMethods: []` 时给 client 一个它挑不出东西的鉴权流程是死路 |
+| `retry` 行 | ACP 没有这个变体，也没有收回已发 chunk 的办法。作废的 delta 留在 client 屏幕上，retry 本身走 stderr。**adapter 侧修不了** |
+| usage | SDK 的 `usage_update` 与 `PromptResponse.usage` 都标 UNSTABLE，所以按 §C「不编一个 update 出来」，每轮一行走 stderr |
+| `presentation` 的 diff | ACP 的 `Diff` 要 `path` + 完整 `newText`，而我们带的是 unified patch，不重读文件就无损转不了。`std.edit` 的输出因此按文本进 |
+| §F 的 mcp notice 时机 | 推迟到第一次 `session/prompt` 或 `session/load`：`session/new` 还没返回，client 不知道 session id，往一个它不认识的 id 上发通知没有意义。对得上的 `mcp.<name>` 走 `--with` 进成员，**绝不往活着的一场上挂工具** |
+
+### 两处要人拍板的缺口
+
+1. **广告了做不到的命令。** §C 让 `available_commands_update` 来自冻结的 `contributes.commands`，
+   而**今天自带的三个命令（`/ask` `/evolve` `/plan`）动作全是 `{with}`**——那要求换 composition，
+   而 composition 在 `session new` 就冻了（physics #2/#4）。所以 adapter 列得出它们、执行不了它们；
+   ACP v1 里命令又是当**普通 prompt 文本**发回来的，adapter 连「这是一条命令」都分辨不出。
+   三个候选：只列 `{run}`/`{skill}`（今天等于列空）· 照列不误，靠文本落到模型面前降级 ·
+   让 `nulya-acp --with <id>` 在启动时就戴上，广告只当发现。**这是永久后果不是待修 bug**：
+   在 ACP 里 session 由 client 创建，agent 没有开新场的手。
+2. **人的 `[approvals]` 到不了编辑器这条路**（见 tui.md §7 那段）：要先决定 `nulya-acp` 读哪个文件。
+
+### 没测到的
+
+`plan` → ACP plan 的翻译，与 `note` 的映射。两者都要先 build `plan` 包（要 zig 工具链 + 每个 workspace
+一次慢编译）；`consumers.test.tsx` 是「要不要为此加一道门」的先例。
