@@ -59,6 +59,13 @@ pub const Def = struct {
     /// The other is dropped with a warning once the front matter has been read
     /// WHOLE (`crossCheck`) — a definition may write its fields in any order.
     runner_model: []const u8 = "",
+    /// Did the front matter WRITE a non-empty `model:`, whatever came of it?
+    /// A field that was written and could not be read leaves `profile` / `model`
+    /// / `role` exactly as empty as a field nobody wrote, and the two must not
+    /// mean the same thing: the implicit `@<name>` rung belongs only to the
+    /// definition that said nothing, so a typo inherits rather than quietly
+    /// riding a rung its author never asked for.
+    model_written: bool = false,
     /// `<id>[@<version>][:<tool>,…]` members for `--with`, on top of the
     /// session's usual composition.
     with: []const []const u8 = &.{},
@@ -155,6 +162,7 @@ pub fn rungOf(def: Def) []const u8 {
     if (!def.runner.usesNulyaModels()) return "";
     if (def.role.len != 0) return def.role;
     if (def.profile.len != 0 or def.model.len != 0) return "";
+    if (def.model_written) return "";
     return def.name;
 }
 
@@ -289,6 +297,7 @@ pub fn parse(
         } else if (std.mem.eql(u8, key, "runner")) {
             def.runner = runners.Runner.parse(unquote(value)) orelse return error.UnknownRunner;
         } else if (std.mem.eql(u8, key, "model")) {
+            def.model_written = std.mem.trim(u8, unquote(value), " \t").len != 0;
             if (parseRole(unquote(value))) |role| {
                 if (role.len == 0) {
                     try warn(alloc, warnings, source, "model: @ needs a rung name after it, named like a sub-agent is, ignored");
@@ -664,6 +673,30 @@ test "model: @rung names a rung instead of a pair, and the two shapes cannot bot
         // grammar this is.
         try std.testing.expectEqualStrings("", def.profile);
         try std.testing.expect(warnings.items.len != 0);
+    }
+}
+
+test "a definition that said nothing rides its own rung; one whose model: could not be read inherits" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var warnings: std.ArrayList([]const u8) = .empty;
+
+    const silent = try parseOne(a, "---\nname: scout\n---\nbody\n", &warnings);
+    try std.testing.expectEqualStrings("scout", rungOf(silent));
+    try std.testing.expectEqual(@as(usize, 0), warnings.items.len);
+
+    // Written and unreadable is not the same as never written: the field is
+    // dropped with a warning, and what follows is plain inheritance — never the
+    // implicit rung, which would send this persona somewhere its author never
+    // named and which `list` and every real delegation would then agree on.
+    for ([_][]const u8{ "@review fast", "deepseek/", "@" }) |bad| {
+        warnings.clearRetainingCapacity();
+        const text = try std.fmt.allocPrint(a, "---\nname: scout\nmodel: {s}\n---\nbody\n", .{bad});
+        const def = try parseOne(a, text, &warnings);
+        try std.testing.expect(warnings.items.len != 0);
+        try std.testing.expectEqualStrings("", rungOf(def));
     }
 }
 

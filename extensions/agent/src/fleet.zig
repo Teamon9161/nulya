@@ -52,7 +52,7 @@ pub fn find(
             if (role != .object) continue;
             if (!eqlField(role.object, "name", rung)) continue;
             const model = stringOf(role.object, "model") orelse return null;
-            return split(model, stringOf(role.object, "effort") orelse "");
+            return split(entry.object, model, stringOf(role.object, "effort") orelse "");
         }
         // The profile was found and does not staff this rung: no other profile
         // can answer for it.
@@ -64,13 +64,35 @@ pub fn find(
 /// `<model-id>` on the profile asked about, or `<profile>/<model-id>` somewhere
 /// else. A pair, never a mix: crossing to another profile takes its model id
 /// with it.
-fn split(model: []const u8, effort: []const u8) ?Rung {
-    const at = std.mem.indexOfScalar(u8, model, '/') orelse
-        return if (model.len == 0) null else .{ .model = model, .effort = effort };
+///
+/// A model id may CONTAIN `/` — an OpenAI-compatible endpoint serves
+/// `anthropic/claude-…` — so the profile's own catalogue is asked first: a value
+/// it already lists is that model, whole. Only when it does not does the FIRST
+/// `/` separate, and everything after it is the id, so a model crossed to keeps
+/// whatever slashes it has of its own.
+fn split(profile: std.json.ObjectMap, model: []const u8, effort: []const u8) ?Rung {
+    if (model.len == 0) return null;
+    if (serves(profile, model)) return .{ .model = model, .effort = effort };
+    const at = std.mem.indexOfScalar(u8, model, '/') orelse return .{ .model = model, .effort = effort };
     const other = model[0..at];
     const id = model[at + 1 ..];
     if (other.len == 0 or id.len == 0) return null;
     return .{ .profile = other, .model = id, .effort = effort };
+}
+
+/// Does this profile itself serve `id`? Its default `model` and the `models`
+/// list it publishes are the same list the kernel resolves a `--model` against
+/// (a profile whose ids come from an endpoint catalogue has them here too).
+fn serves(profile: std.json.ObjectMap, id: []const u8) bool {
+    if (eqlField(profile, "model", id)) return true;
+    const models = switch (profile.get("models") orelse return false) {
+        .array => |a| a,
+        else => return false,
+    };
+    for (models.items) |m| {
+        if (m == .string and std.mem.eql(u8, m.string, id)) return true;
+    }
+    return false;
 }
 
 /// The profile the config chain opens on — what a delegation inherits when
@@ -95,9 +117,13 @@ fn eqlField(obj: std.json.ObjectMap, key: []const u8, want: []const u8) bool {
 
 const test_payload =
     \\{"profiles":[
-    \\  {"name":"openai","roles":[{"name":"explore","model":"gpt-5.6-luna","effort":null},
-    \\                            {"name":"review","model":"gpt-5.6-terra","effort":"high"},
-    \\                            {"name":"cheap","model":"deepseek/deepseek-v4-flash","effort":null}]},
+    \\  {"name":"openai","models":["gpt-5.6-luna","gpt-5.6-terra"],
+    \\   "roles":[{"name":"explore","model":"gpt-5.6-luna","effort":null},
+    \\            {"name":"review","model":"gpt-5.6-terra","effort":"high"},
+    \\            {"name":"cheap","model":"deepseek/deepseek-v4-flash","effort":null}]},
+    \\  {"name":"openrouter","model":"tencent/hy3:free","models":["tencent/hy3:free","anthropic/claude-sonnet-4"],
+    \\   "roles":[{"name":"explore","model":"anthropic/claude-sonnet-4","effort":null},
+    \\            {"name":"far","model":"deepseek/openai/gpt-oss-120b","effort":null}]},
     \\  {"name":"anthropic","roles":[]}
     \\]}
 ;
@@ -125,6 +151,26 @@ test "a rung value with a slash crosses to another profile, taking its model id"
     const crossed = find(arena.allocator(), test_payload, "openai", "cheap").?;
     try std.testing.expectEqualStrings("deepseek", crossed.profile);
     try std.testing.expectEqualStrings("deepseek-v4-flash", crossed.model);
+}
+
+test "a model id that contains a slash stays whole on the profile that serves it" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // An OpenAI-compatible endpoint serves ids like `anthropic/claude-sonnet-4`.
+    // The slash is part of the NAME here, and reading it as a profile would send
+    // the delegation to a profile that may not even exist.
+    const own = find(a, test_payload, "openrouter", "explore").?;
+    try std.testing.expectEqualStrings("", own.profile);
+    try std.testing.expectEqualStrings("anthropic/claude-sonnet-4", own.model);
+
+    // A value this profile does not serve crosses, and only the FIRST segment is
+    // the profile: the model keeps the slashes that are its own.
+    const crossed = find(a, test_payload, "openrouter", "far").?;
+    try std.testing.expectEqualStrings("deepseek", crossed.profile);
+    try std.testing.expectEqualStrings("openai/gpt-oss-120b", crossed.model);
 }
 
 test "the active profile is read from the same payload, and a bad one is null" {

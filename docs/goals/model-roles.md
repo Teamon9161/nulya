@@ -106,3 +106,19 @@ cheap   = "deepseek/deepseek-v4-flash"
 - agent：四级解析顺序；未定义的档位退化成继承（**不是**报错）；`<profile>/<model>` 形式确实换 profile；外置 runner 上的档位被警告并丢弃；**没写 `model:` 的定义按自己的名字被 staff 到**（且 `list` 的 `rung` 列报得出来）。
 - effort：档位带 effort 时子 session 的 step 真的带上了 `--effort`。
 - 不断言具体文案、不逐一枚举档位组合。
+
+## 5. 落地后的两处修正（外部 review，2026-09-05）
+
+两条都不是新功能，是把 §3 / §3b 已定的语义做对；内核 physics 一条未动，`extensions/agent` 之外没有代码改动。
+
+### 5.1 一个 model id 里的 `/` 不再被当成 profile 分隔符 ✅
+
+`fleet.split` 原来只认"有 `/` 就是 `<profile>/<model>`"。而 OpenAI 兼容端点（OpenRouter 是现成例子，`default.toml` 里就有一个 `tencent/hy3:free`）serve 的 model id **本身带 `/`**：一条写在 `openrouter` 名下的 `explore = "anthropic/claude-sonnet-4"` 会被读成"去 `anthropic` 这个 profile 找 `claude-sonnet-4`"，而那个 profile 多半根本不存在——委派于是静默落在别处。TUI 那一侧没有错：同 profile 写裸 id、跨 profile 才写 `<profile>/<model>`，歧义在读的一侧。
+
+修法不引入转义也不加新语法：**先问这一档所在的 profile 自己 serve 不 serve 这个 id**（`config show --json` 的每个 profile 都带 `model` 与 `models[]`，codex 那种从 catalog 来的 id 也已经在 `models[]` 里）。serve 就是整串一个 model；不 serve 才按**第一个** `/` 切，后面的整段都是 id——所以 `deepseek/openai/gpt-oss-120b` 仍然是"去 deepseek 找 `openai/gpt-oss-120b`"。钉子：`fleet.zig` 一条单测同时守这两个方向。
+
+### 5.2 读不出来的 `model:` 不再冒充"没写过" ✅
+
+§3b 的隐式档位（没写 `model:` 的定义骑自己名字那一档）与 parser 的 warn-and-skip 组合出一个状态丢失：`model: @review fast` 这种非法值会 warning 然后把字段丢掉，于是 `role` / `profile` / `model` 三个都空——**和从没写过 `model:` 在数据结构里完全一样**，`rungOf` 于是把它当默认情况，`scout` 悄悄变成骑 `@scout`。影响的不只是 `list` 与选择器：真正委派时落点也走同一个函数。
+
+修法是 §3b 缺的那一位状态：`Def.model_written`（front matter 里出现过非空 `model:` 就为真，无论解析成不成功），`rungOf` 只在它为假时给隐式档位。语义因此写全了——**没写 = 骑自己那一档；写对 = 按它执行；写错 = warning + 普通继承，但绝不假装没写过**。这比"坏一个字段就丢整个 persona"更符合这个 parser 既有的策略。钉子：`defs.zig` 一条单测，三种坏写法都必须落在"继承"。
