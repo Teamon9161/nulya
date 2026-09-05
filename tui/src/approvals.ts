@@ -120,6 +120,24 @@ export const default_rules: ApprovalRules = {
   readonly_commands: [],
 }
 
+/**
+ * Read an `[approvals]` table onto `into`. One parser, because the schema is one
+ * schema however many files carry it — `tui.toml` for the screen, `acp.toml` for
+ * the editor-facing agent.
+ *
+ * Every field REPLACES rather than merges: a nearer layer that wanted to narrow
+ * a further one's `allow` could not do it if the two were unioned, and narrowing
+ * is the direction that must always be available.
+ */
+export function applyApprovals(table: Record<string, unknown> | undefined, into: ApprovalRules): void {
+  if (!table) return
+  for (const name of ["allow", "ask", "deny", "readonly_commands"] as const) {
+    const list = table[name]
+    if (Array.isArray(list)) into[name] = list.filter((e): e is string => typeof e === "string")
+  }
+  if (typeof table["manifest_readonly"] === "boolean") into.manifest_readonly = table["manifest_readonly"]
+}
+
 export interface ApprovalContext {
   mode: PermissionMode
   rules: ApprovalRules

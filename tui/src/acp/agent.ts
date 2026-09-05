@@ -20,7 +20,6 @@ import {
   methods,
   type AgentApp,
   type AgentContext,
-  type AvailableCommand,
   type ContentBlock,
   type SessionModeState,
   type SessionUpdate,
@@ -67,10 +66,12 @@ export interface AcpAgentOptions {
   /** The mode a new session starts in. */
   mode?: PermissionMode
   /**
-   * The standing approval tables. Policy is the driver's, which is why it
-   * arrives as a parameter and not as a file this module knows how to find.
+   * The standing approval tables — one table for every session, or a reader
+   * keyed by the workspace a session names (`acp/settings.ts` is the one that
+   * reads `acp.toml`). Policy is the driver's, which is why it arrives as a
+   * parameter and not as a file this module knows how to find.
    */
-  rules?: ApprovalRules
+  rules?: ApprovalRules | ((workspaceDir: string) => ApprovalRules)
   /** Extra environment for the `nulya` children (`NULYA_SCRIPTED_MODE` in tests). */
   env?: Record<string, string>
   /** Where diagnostics go. Never stdout: that carries JSON-RPC and nothing else. */
@@ -173,7 +174,8 @@ function refuse(error: unknown): RequestError {
 
 export function createAcpAgent(options: AcpAgentOptions = {}): AgentApp {
   const sessions = new Map<string, AcpSession>()
-  const rules = options.rules ?? default_rules
+  const held = options.rules ?? default_rules
+  const rulesFor = typeof held === "function" ? held : () => held
   const startMode = options.mode ?? "ask"
   const log = options.log ?? ((line: string) => process.stderr.write(`${line}\n`))
 
@@ -187,7 +189,7 @@ export function createAcpAgent(options: AcpAgentOptions = {}): AgentApp {
     const session: AcpSession = {
       id,
       ws,
-      policy: { mode: startMode, rules, always: new Set(), never: new Set() },
+      policy: { mode: startMode, rules: rulesFor(ws.dir), always: new Set(), never: new Set() },
       planTodo,
       opening,
       echoed: new Set(),
@@ -201,10 +203,6 @@ export function createAcpAgent(options: AcpAgentOptions = {}): AgentApp {
     for (const update of updates) {
       await cx.notify(methods.client.session.update, { sessionId, update })
     }
-  }
-
-  function commandsUpdate(commands: AvailableCommand[]): SessionUpdate[] {
-    return commands.length > 0 ? [{ sessionUpdate: "available_commands_update", availableCommands: commands }] : []
   }
 
   /**
@@ -318,7 +316,7 @@ export function createAcpAgent(options: AcpAgentOptions = {}): AgentApp {
         throw refuse(error)
       }
       const catalog = await readCatalog(ws, id)
-      const opening = commandsUpdate(catalog.commands)
+      const opening: SessionUpdate[] = []
       if (unmatched.length > 0) {
         opening.push({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: mcpNotice(unmatched) } })
       }
@@ -330,7 +328,7 @@ export function createAcpAgent(options: AcpAgentOptions = {}): AgentApp {
       const id = ctx.params.sessionId
       if (!sessionExists(ws, id)) throw RequestError.resourceNotFound(id)
       const catalog = await readCatalog(ws, id)
-      const session = sessions.get(id) ?? track(id, ws, catalog.planTodo, commandsUpdate(catalog.commands))
+      const session = sessions.get(id) ?? track(id, ws, catalog.planTodo, [])
       const events = await sessionEvents(ws, id)
       // A load HAS a window to stream in, so whatever was waiting for a first
       // prompt is said here instead.

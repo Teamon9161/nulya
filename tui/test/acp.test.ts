@@ -10,6 +10,7 @@
  * up" is the whole claim being made.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import {
   PROTOCOL_VERSION,
@@ -22,6 +23,7 @@ import {
   type SessionUpdate,
 } from "@agentclientprotocol/sdk"
 import { createAcpAgent, type AcpAgentOptions } from "../src/acp/agent.ts"
+import { acpRules } from "../src/acp/settings.ts"
 import { default_rules } from "../src/approvals.ts"
 import { sessionEvents, sessionList } from "../src/nulya/cli.ts"
 import {
@@ -269,3 +271,28 @@ test("an MCP server this machine has no package for is refused out loud", async 
     expect(row.composition.active).toEqual([])
   })
 }, 120_000)
+
+test("acp.toml layers user then workspace, and a nearer table replaces rather than merges", () => {
+  const home = join(ws.dir, "home")
+  mkdirSync(join(ws.dir, ".nulya"), { recursive: true })
+  writeFileSync(join(home, "acp.toml"), '[approvals]\nallow = ["shell:git", "shell:ls"]\nmanifest_readonly = false\n')
+  const env = { ...process.env, NULYA_HOME: home }
+
+  const userOnly = acpRules(env)(join(ws.dir, "elsewhere"))
+  expect(userOnly.allow).toEqual(["shell:git", "shell:ls"])
+  expect(userOnly.manifest_readonly).toBe(false)
+
+  // Replaced, not unioned — narrowing a further layer must always be available.
+  writeFileSync(join(ws.dir, ".nulya", "acp.toml"), '[approvals]\nallow = ["shell:git"]\n')
+  const narrowed = acpRules(env)(ws.dir)
+  expect(narrowed.allow).toEqual(["shell:git"])
+  // A field the nearer layer never mentions keeps what the further one said.
+  expect(narrowed.manifest_readonly).toBe(false)
+
+  // A file that will not parse is "nothing said", never a refusal to start.
+  writeFileSync(join(ws.dir, ".nulya", "acp.toml"), "[approvals\nallow = [")
+  const said: string[] = []
+  const survived = acpRules(env, (line) => said.push(line))(ws.dir)
+  expect(survived.allow).toEqual(["shell:git", "shell:ls"])
+  expect(said.length).toBe(1)
+})

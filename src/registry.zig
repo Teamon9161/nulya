@@ -7,6 +7,7 @@ const std = @import("std");
 const tool = @import("tool.zig");
 const environment = @import("environment.zig");
 const shell = @import("tools/shell.zig");
+const Diag = @import("diag.zig").Diag;
 
 /// The builtin table for one shell dialect. `shell` is the only entry, and the
 /// dialect reaches it because its description names the interpreter it runs.
@@ -49,8 +50,22 @@ pub const ToolSetSnapshot = struct {
     }
 };
 
+/// The builtin table alone. It takes no `Diag` because there is nothing here to
+/// collide with: the builtins are a compile-time list of one.
 pub fn snapshot(alloc: std.mem.Allocator, dialect: environment.Dialect) !ToolSetSnapshot {
-    return snapshotWith(alloc, dialect, &.{});
+    return .{ .tools = try freeze(alloc, dialect, &.{}) };
+}
+
+/// Builtins first, extras after, sorted by stable id — the frozen order, made
+/// before anything is checked so both callers see the same set.
+fn freeze(alloc: std.mem.Allocator, dialect: environment.Dialect, extras: []const tool.Tool) ![]tool.Tool {
+    const builtins = builtinsFor(dialect);
+    const tools = try alloc.alloc(tool.Tool, builtins.len + extras.len);
+    errdefer alloc.free(tools);
+    @memcpy(tools[0..builtins.len], &builtins);
+    @memcpy(tools[builtins.len..], extras);
+    std.mem.sort(tool.Tool, tools[builtins.len..], {}, lessThanById);
+    return tools;
 }
 
 /// Freeze the builtin table plus `extras` into one model-facing tool set. The
@@ -58,19 +73,35 @@ pub fn snapshot(alloc: std.mem.Allocator, dialect: environment.Dialect) !ToolSet
 /// invariants: unique stable id, unique model-facing name. The builtin keeps its
 /// leading slot; extras follow sorted by stable id, so the frozen set is
 /// deterministic regardless of caller order.
-pub fn snapshotWith(alloc: std.mem.Allocator, dialect: environment.Dialect, extras: []const tool.Tool) !ToolSetSnapshot {
-    const builtins = builtinsFor(dialect);
-    const tools = try alloc.alloc(tool.Tool, builtins.len + extras.len);
+///
+/// A collision names BOTH sides on `diag` before the error leaves: the error is
+/// `DuplicateToolName`, and which two tools claimed the name is the part a
+/// person needs and an error cannot carry. Two generated packages wrapping the
+/// same upstream are the ordinary way to arrive here.
+pub fn snapshotWith(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    dialect: environment.Dialect,
+    extras: []const tool.Tool,
+    diag: Diag,
+) !ToolSetSnapshot {
+    const tools = try freeze(alloc, dialect, extras);
     errdefer alloc.free(tools);
-
-    @memcpy(tools[0..builtins.len], &builtins);
-    @memcpy(tools[builtins.len..], extras);
-    std.mem.sort(tool.Tool, tools[builtins.len..], {}, lessThanById);
 
     for (tools, 0..) |a, i| {
         for (tools[i + 1 ..]) |b| {
-            if (std.mem.eql(u8, a.definition.id, b.definition.id)) return error.DuplicateToolId;
-            if (std.mem.eql(u8, a.definition.name, b.definition.name)) return error.DuplicateToolName;
+            if (std.mem.eql(u8, a.definition.id, b.definition.id)) {
+                diag.reportFmt(io, "two of this session's tools have the same id '{s}'", .{a.definition.id});
+                return error.DuplicateToolId;
+            }
+            if (std.mem.eql(u8, a.definition.name, b.definition.name)) {
+                diag.reportFmt(
+                    io,
+                    "two members put a tool named '{s}' on this session's face: {s} and {s} — drop one of them from that member's tool selection",
+                    .{ a.definition.name, a.definition.id, b.definition.id },
+                );
+                return error.DuplicateToolName;
+            }
         }
     }
 
@@ -126,7 +157,7 @@ test "snapshotWith keeps builtins first and sorts extras by stable id" {
         stubTool("ext:z.pkg/zeta", "zeta"),
         stubTool("ext:a.pkg/alpha", "alpha"),
     };
-    const snap = try snapshotWith(std.testing.allocator, .bash, &extras);
+    const snap = try snapshotWith(std.testing.allocator, std.testing.io, .bash, &extras, .{});
     defer snap.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 3), snap.tools.len);
@@ -141,7 +172,7 @@ test "snapshotWith rejects a duplicate stable id" {
         stubTool("ext:dup/one", "one"),
         stubTool("ext:dup/one", "two"),
     };
-    try std.testing.expectError(error.DuplicateToolId, snapshotWith(std.testing.allocator, .bash, &extras));
+    try std.testing.expectError(error.DuplicateToolId, snapshotWith(std.testing.allocator, std.testing.io, .bash, &extras, .{}));
 }
 
 test "snapshotWith rejects a model-facing name that collides across extensions" {
@@ -149,10 +180,36 @@ test "snapshotWith rejects a model-facing name that collides across extensions" 
         stubTool("ext:a.pkg/search", "search"),
         stubTool("ext:b.pkg/search", "search"),
     };
-    try std.testing.expectError(error.DuplicateToolName, snapshotWith(std.testing.allocator, .bash, &extras));
+    try std.testing.expectError(error.DuplicateToolName, snapshotWith(std.testing.allocator, std.testing.io, .bash, &extras, .{}));
+}
+
+test "a name collision names both sides on the diag, because the error cannot" {
+    const Sink = struct {
+        var seen: std.ArrayList(u8) = .empty;
+        fn write(_: ?*anyopaque, _: std.Io, line: []const u8) void {
+            seen.appendSlice(std.testing.allocator, line) catch {};
+        }
+    };
+    defer Sink.seen.deinit(std.testing.allocator);
+
+    const extras = [_]tool.Tool{
+        stubTool("ext:mcp.a/search", "search"),
+        stubTool("ext:mcp.b/search", "search"),
+    };
+    try std.testing.expectError(error.DuplicateToolName, snapshotWith(
+        std.testing.allocator,
+        std.testing.io,
+        .bash,
+        &extras,
+        .{ .reportFn = Sink.write },
+    ));
+    // Both ids, so the person knows which two members to look at; the shared
+    // name alone would leave them reading manifests to find out.
+    try std.testing.expect(std.mem.indexOf(u8, Sink.seen.items, "ext:mcp.a/search") != null);
+    try std.testing.expect(std.mem.indexOf(u8, Sink.seen.items, "ext:mcp.b/search") != null);
 }
 
 test "snapshotWith rejects an extra that shadows a builtin name" {
     const extras = [_]tool.Tool{stubTool("ext:evil/shell", "shell")};
-    try std.testing.expectError(error.DuplicateToolName, snapshotWith(std.testing.allocator, .bash, &extras));
+    try std.testing.expectError(error.DuplicateToolName, snapshotWith(std.testing.allocator, std.testing.io, .bash, &extras, .{}));
 }

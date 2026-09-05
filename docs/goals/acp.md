@@ -169,16 +169,26 @@ ACP 的 `session/new` **必带** `mcpServers`（client 每场告诉 agent 连哪
 | `presentation` 的 diff | ACP 的 `Diff` 要 `path` + 完整 `newText`，而我们带的是 unified patch，不重读文件就无损转不了。`std.edit` 的输出因此按文本进 |
 | §F 的 mcp notice 时机 | 推迟到第一次 `session/prompt` 或 `session/load`：`session/new` 还没返回，client 不知道 session id，往一个它不认识的 id 上发通知没有意义。对得上的 `mcp.<name>` 走 `--with` 进成员，**绝不往活着的一场上挂工具** |
 
-### 两处要人拍板的缺口
+### 两处缺口，已定（2026-09-05）
 
-1. **广告了做不到的命令。** §C 让 `available_commands_update` 来自冻结的 `contributes.commands`，
+1. **广告了做不到的命令** → **定了：这一轮不发 `available_commands_update`。**
+   §C 让它来自冻结的 `contributes.commands`，
    而**今天自带的三个命令（`/ask` `/evolve` `/plan`）动作全是 `{with}`**——那要求换 composition，
    而 composition 在 `session new` 就冻了（physics #2/#4）。所以 adapter 列得出它们、执行不了它们；
    ACP v1 里命令又是当**普通 prompt 文本**发回来的，adapter 连「这是一条命令」都分辨不出。
-   三个候选：只列 `{run}`/`{skill}`（今天等于列空）· 照列不误，靠文本落到模型面前降级 ·
-   让 `nulya-acp --with <id>` 在启动时就戴上，广告只当发现。**这是永久后果不是待修 bug**：
-   在 ACP 里 session 由 client 创建，agent 没有开新场的手。
-2. **人的 `[approvals]` 到不了编辑器这条路**（见 tui.md §7 那段）：要先决定 `nulya-acp` 读哪个文件。
+   **拍板：`/plan` 在 ACP 里就是不起作用，而菜单里不再留着它假装。** 只列 `{run}`/`{skill}` 是要长成的
+   形状，但今天没有任何成员包声明过一个，而在那两个动词能执行之前把通知打开，等于替第一个声明它们的包
+   重建同一个谎。**两半一起落，或者都不落。** `{with}` 要的更多：`session/set_mode` 用一次
+   `session new --parent <id>:<seq> --carry --with <pkg>` fork 来答——那正是「换 composition、留住对话」
+   的原语，代价是这个 adapter 现在倚着的那条身份（ACP session id **就是** nulya session id）。
+   **注意这不是一锤子**：`available_commands_update` 是个通知，一场里任何时候都能再推，推几次都行，
+   所以将来打开它不必付这一轮省下的任何东西。理由写在 `catalog.ts` 的模块头里，那是读它的人会打开的地方。
+2. **人的 `[approvals]` 到不了编辑器这条路** → **定了：`acp.toml`**（user 层 + 每场 workspace 层，近的
+   整份替换那一个字段）。它是**并列的 driver**，不是这块屏幕的第二张脸：一个人在自己终端里和在编辑器
+   插件里能容忍的东西本来就不是一回事，而 `tui.toml` 里还塞满了 theme / keys / transcript 这些对它
+   一个字都不意味着的键。`[approvals]` 是唯一一节——权限档仍走 `--mode`，编辑器本来就按 workspace
+   spawn 一个进程，启动行就是那个选择自然待的地方，第二处说法就是第二个答案。schema 只有一份：
+   `approvals.applyApprovals` 一个 parser 服务两个文件。
 
 ### 没测到的
 

@@ -8,7 +8,7 @@
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { default_rules, modes, normalizeMode, type ApprovalRules, type PermissionMode } from "../approvals.ts"
+import { applyApprovals, default_rules, modes, normalizeMode, type ApprovalRules, type PermissionMode } from "../approvals.ts"
 import type { EnvProfileOverride, EnvProfiles } from "./envprofile.ts"
 import { code_theme_names, type CodeThemeName } from "../render/syntax.ts"
 import type { TomlValue } from "./settingsfile.ts"
@@ -311,24 +311,7 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
     const mode = normalizeMode(driver["mode"])
     if (mode) into.driver.mode = mode
   }
-  const approvals = record["approvals"] as Record<string, unknown> | undefined
-  if (approvals) {
-    for (const table of ["allow", "ask", "deny"] as const) {
-      const list = approvals[table]
-      // Replaced, not merged: a project layer that wanted to narrow a user
-      // layer's `allow` could not do it if the two were unioned, and narrowing
-      // is the direction that must always be available.
-      if (Array.isArray(list)) into.approvals[table] = list.filter((e): e is string => typeof e === "string")
-    }
-    if (typeof approvals["manifest_readonly"] === "boolean") {
-      into.approvals.manifest_readonly = approvals["manifest_readonly"]
-    }
-    // Same discipline as the three tables: replaced, so a nearer layer can take
-    // an entry back off the list.
-    if (Array.isArray(approvals["readonly_commands"])) {
-      into.approvals.readonly_commands = approvals["readonly_commands"].filter((e): e is string => typeof e === "string")
-    }
-  }
+  applyApprovals(record["approvals"] as Record<string, unknown> | undefined, into.approvals)
   const keys = record["keys"] as Record<string, unknown> | undefined
   if (keys) {
     for (const [name, binding] of Object.entries(keys)) {

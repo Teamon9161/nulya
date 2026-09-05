@@ -6,13 +6,10 @@
  * that changes the next session and not this one. Nothing here runs a package —
  * the manifest is the schema's single truth.
  */
-import type { AvailableCommand } from "@agentclientprotocol/sdk"
 import type { Workspace } from "../nulya/bin.ts"
 import { readContributions, readHeader } from "../nulya/files.ts"
 
 export interface Catalog {
-  /** `contributes.commands`, pooled over the members, in header order. */
-  commands: AvailableCommand[]
   /**
    * Whether the `todo` this session's model can call is `extensions/plan`'s.
    * A checklist becomes an ACP `plan`, and a tool of that name from any other
@@ -21,19 +18,39 @@ export interface Catalog {
   planTodo: boolean
 }
 
-const empty_catalog: Catalog = { commands: [], planTodo: false }
+const empty_catalog: Catalog = { planTodo: false }
 
 export async function readCatalog(ws: Workspace, id: string): Promise<Catalog> {
   const header = await readHeader(ws, id)
   if (!header) return empty_catalog
-  const commands: AvailableCommand[] = []
   let planTodo = false
   for (const member of header.composition.active) {
     const contributes = await readContributions(ws, member.id, member.version)
-    for (const command of contributes.commands) {
-      commands.push({ name: command.name, description: command.description })
-    }
     if (member.id === "plan" && contributes.tools.includes("todo")) planTodo = true
   }
-  return { commands, planTodo }
+  return { planTodo }
 }
+
+/**
+ * NO `available_commands_update` IS SENT, and `contributes.commands` is read
+ * here for nothing else.
+ *
+ * A command arrives as ordinary prompt text — ACP has no invocation method, the
+ * agent is expected to recognize the `/name` prefix — so advertising one is a
+ * promise this adapter would have to keep by hand. Every command a bundled
+ * package declares today acts `{"with": …}`: wear this package. Wearing is
+ * membership, membership freezes at `session new`, and no driver can add one to
+ * a live session. So the menu would offer a mode and deliver a text prefix.
+ *
+ * Advertising only the actions that CAN be kept (`{"run"}`, `{"skill"}`) is the
+ * shape to grow into, but nothing in a member package declares one yet, and
+ * turning the notification back on before those two verbs execute would rebuild
+ * the same lie for the first package that does. Both halves land together, or
+ * neither. `{"with"}` needs more than that: `session/set_mode` answered by a
+ * `session new --parent <id>:<seq> --carry --with <pkg>` fork — the primitive
+ * for "change the composition, keep the conversation" — which costs the identity
+ * this adapter currently leans on, where an ACP session id IS a nulya one.
+ *
+ * The notification may be sent at any point in a session and as often as it
+ * likes, so bringing it back later costs nothing that was spent here.
+ */

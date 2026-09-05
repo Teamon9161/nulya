@@ -372,4 +372,8 @@ test "mcp: two servers whose tools land on one name fail the session rather than
     const said = try support.runCliStderr(alloc, io, ws, &argv, &.{});
     defer alloc.free(said);
     try std.testing.expect(std.mem.indexOf(u8, said, "DuplicateToolName") != null);
+    // And WHICH two, which the error name alone cannot carry: without the ids a
+    // person is left opening manifests to find out who claimed the name.
+    try std.testing.expect(std.mem.indexOf(u8, said, "ext:mcp.fake/fake_echo_it") != null);
+    try std.testing.expect(std.mem.indexOf(u8, said, "ext:mcp.fake_echo/fake_echo_it") != null);
 }

@@ -3,6 +3,9 @@
  *
  *   nulya-acp [--profile <p>] [--model <id>] [--effort <e>] [--mode ask|unsafe]
  *
+ * The standing approval tables come from `acp.toml` (see `settings.ts`),
+ * user layer then the workspace each session names.
+ *
  * An editor spawns this and drives it with JSON-RPC; every session it opens is
  * a real nulya session in the `cwd` the client names, so the same conversations
  * are on disk for `nulya session list`, for the TUI, and for a resume.
@@ -16,6 +19,7 @@
 import { ndJsonStream } from "@agentclientprotocol/sdk"
 import { normalizeMode, type PermissionMode } from "../approvals.ts"
 import { createAcpAgent } from "./agent.ts"
+import { acpRules } from "./settings.ts"
 
 interface Args {
   profile?: string
@@ -77,5 +81,7 @@ try {
   process.exit(2)
 }
 
-const connection = createAcpAgent(args).connect(ndJsonStream(stdoutStream(), Bun.stdin.stream()))
+const warn = (line: string) => process.stderr.write(`${line}
+`)
+const connection = createAcpAgent({ ...args, rules: acpRules(process.env, warn) }).connect(ndJsonStream(stdoutStream(), Bun.stdin.stream()))
 await connection.closed

@@ -436,7 +436,7 @@ fn assemble(
         .extensions = try copyFrozenExtensions(a, resolved.extensions, resolved.exec_versions),
         .extension_tool_bindings = bindings,
         .prompts = resolved.prompts,
-        .tools = try snapshotFromBindings(a, dialect, bindings),
+        .tools = try snapshotFromBindings(a, io, dialect, bindings, site.diag),
         .skills = skills,
         .system_prompts = try buildSystemPrompts(a, io, site, resolved.extensions, resolved.prompts, skills),
     };
@@ -452,11 +452,17 @@ fn validateBudget(opts: Options) CompositionError!void {
 /// Freeze the builtin table plus the bindings' tools. The extras array is
 /// transient — `snapshotWith` copies it — but each `Tool.executor.ptr` keeps
 /// pointing at the arena-owned, address-stable `bindings`.
-fn snapshotFromBindings(a: std.mem.Allocator, dialect: environment.Dialect, bindings: []ext_tools.Binding) !registry.ToolSetSnapshot {
+fn snapshotFromBindings(
+    a: std.mem.Allocator,
+    io: std.Io,
+    dialect: environment.Dialect,
+    bindings: []ext_tools.Binding,
+    diag: site_mod.Diag,
+) !registry.ToolSetSnapshot {
     const extras = try a.alloc(tool.Tool, bindings.len);
     defer a.free(extras);
     for (bindings, extras) |*b, *slot| slot.* = b.asTool();
-    return registry.snapshotWith(a, dialect, extras);
+    return registry.snapshotWith(a, io, dialect, extras, diag);
 }
 
 /// The extension-tool bindings for a FRESH session: for each member, its
