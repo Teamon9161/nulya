@@ -331,6 +331,7 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
     //         the live CLI runs v2, and a fresh pinned session's call runs v2.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
+    const host_dialect = try support.hostDialect(alloc, io);
 
     var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
@@ -370,7 +371,7 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
         defer tool_stats.freeEvents(alloc, events);
         try std.testing.expect(events.len != 0);
 
-        var uncomposed = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{});
+        var uncomposed = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, host_dialect, .{});
         defer uncomposed.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), uncomposed.tools.tools.len);
         try std.testing.expect(uncomposed.tools.lookup("web_search") == null);
@@ -378,7 +379,7 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
 
     // --- Session B: the selection puts it on the tool face, and freezes it. ---
     const with_search: []const composition.WithRef = &.{.{ .id = "web.search", .tools = .{ .named = &.{"web_search"} } }};
-    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{ .with = with_search });
+    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, host_dialect, .{ .with = with_search });
     defer comp_b.deinit(alloc);
 
     // The selected tool is native and model-facing, and calling it through the
@@ -416,7 +417,7 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
     }
 
     // 3. A fresh session with the same member freezes on v2.
-    var comp_c = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{ .with = with_search });
+    var comp_c = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, host_dialect, .{ .with = with_search });
     defer comp_c.deinit(alloc);
     const tool_c = comp_c.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     {
@@ -658,6 +659,7 @@ fn buildSkillExtensionIn(
 test "extension store: bytes live in one store, and a workspace pointer decides which version a member means" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
+    const host_dialect = try support.hostDialect(alloc, io);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -686,7 +688,7 @@ test "extension store: bytes live in one store, and a workspace pointer decides 
     // their own): the user-wide extension's skill is in the catalog, and
     // `shared` resolves to the version the WORKSPACE pointer names.
     const named: []const composition.WithRef = &.{ .{ .id = "user-wide" }, .{ .id = "shared" } };
-    var comp = try composition.SessionComposition.init(alloc, io, ws_path, store_rel, .{ .with = named });
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, store_rel, host_dialect, .{ .with = named });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), comp.extensions.len);
     var saw_user_wide = false;
@@ -712,7 +714,7 @@ test "extension store: bytes live in one store, and a workspace pointer decides 
             .{ .id = "shared", .version = user_shared },
         },
     };
-    var resumed = try composition.SessionComposition.initFrozen(alloc, io, ws_path, store_rel, frozen, .{});
+    var resumed = try composition.SessionComposition.initFrozen(alloc, io, ws_path, store_rel, host_dialect, frozen, .{});
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), resumed.extensions.len);
     for (resumed.extensions) |pkg| {
@@ -721,13 +723,13 @@ test "extension store: bytes live in one store, and a workspace pointer decides 
 
     // Dropping the workspace pointer reveals the store's, for the same member.
     try site.deactivate(alloc, .workspace, "shared");
-    var after = try composition.SessionComposition.init(alloc, io, ws_path, store_rel, .{ .with = &.{.{ .id = "shared" }} });
+    var after = try composition.SessionComposition.init(alloc, io, ws_path, store_rel, host_dialect, .{ .with = &.{.{ .id = "shared" }} });
     defer after.deinit(alloc);
     try std.testing.expectEqualStrings(user_shared, after.extensions[0].version);
 
     // A machine with no store holds nothing, and naming a member is a refusal
     // rather than a silent absence.
-    try std.testing.expectError(error.WithVersionNotFound, composition.SessionComposition.init(alloc, io, ws_path, "nowhere", .{ .with = named }));
+    try std.testing.expectError(error.WithVersionNotFound, composition.SessionComposition.init(alloc, io, ws_path, "nowhere", host_dialect, .{ .with = named }));
 }
 
 test "cli: the store is one place and the pointer layer is a column — ext list / skill list / activate / deactivate all read it" {
@@ -903,6 +905,7 @@ test "cli: a system prompt's declared position orders the extension band, and a 
     // rule (member id order): the package that must come FIRST sorts LAST.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
+    const host_dialect = try support.hostDialect(alloc, io);
 
     var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
@@ -976,7 +979,7 @@ test "cli: a system prompt's declared position orders the extension band, and a 
         .{ .id = "z.head" },
         .{ .id = "a.tail" },
     };
-    var fresh = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{ .with = named });
+    var fresh = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, host_dialect, .{ .with = named });
     defer fresh.deinit(alloc);
 
     const expected = [_][]const u8{ "HEAD\n", "BODY\n", "TAIL\n" };
@@ -2321,6 +2324,7 @@ fn scaffoldAndBuildScript(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, 
 test "script extension: init(--script) -> build(seal) -> activate -> run -> pinned native in the next session" {
     const alloc = std.testing.allocator;
     const io = std.testing.io; // runExtension is synchronous; no async shell needed.
+    const host_dialect = try support.hostDialect(alloc, io);
 
     var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
@@ -2364,7 +2368,7 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> pinn
 
     // A session that selects the script tool exposes it natively, and its
     // ToolExecutor runs the frozen script (via its interpreter) end to end.
-    var comp = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, host_dialect, .{
         .with = &.{.{ .id = "greeter", .tools = .{ .named = &.{"greet"} } }},
     });
     defer comp.deinit(alloc);
@@ -2386,6 +2390,7 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> pinn
 test "manifest surface: the frozen version keeps what the draft declared, and an unknown word is refused before anything is built" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
+    const host_dialect = try support.hostDialect(alloc, io);
 
     var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
@@ -2452,7 +2457,7 @@ test "manifest surface: the frozen version keeps what the draft declared, and an
     var ws_real: [std.fs.max_path_bytes]u8 = undefined;
     const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
     try support.activateInStore(alloc, io, ws, "faces", version);
-    var comp = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, host_dialect, .{
         .with = &.{.{ .id = "faces", .tools = .{ .named = &.{"pinny"} } }},
     });
     defer comp.deinit(alloc);
@@ -2460,7 +2465,7 @@ test "manifest surface: the frozen version keeps what the draft declared, and an
     try std.testing.expect(comp.tools.lookup("ask") != null);
     try std.testing.expect(comp.tools.lookup("quiet") != null);
     try std.testing.expect(comp.tools.lookup("drive") == null);
-    try std.testing.expectError(error.WithToolNotDeclared, composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{
+    try std.testing.expectError(error.WithToolNotDeclared, composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, host_dialect, .{
         .with = &.{.{ .id = "faces", .tools = .{ .named = &.{"drive"} } }},
     }));
 

@@ -548,7 +548,7 @@ test "editing a frozen manifest breaks its seal rather than changing what a sess
     const kong_manifest = try frozenManifestPath(alloc, "mode.kong", version);
     defer alloc.free(kong_manifest);
     try ws.writeFile(io, .{ .sub_path = kong_manifest, .data =
-    \\{"schema":"nulya.extension/v2","id":"mode.kong","contributes":{"system_prompts":["prompts/tone.md"],"skills":[]}}
+        \\{"schema":"nulya.extension/v2","id":"mode.kong","contributes":{"system_prompts":["prompts/tone.md"],"skills":[]}}
     });
 
     const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--with", "mode.kong" };
@@ -783,4 +783,201 @@ test "ext sync --seed --dry-run: a seed plan for the bundled drafts, on a root t
     // Neither half of a dry-run may leave a mark: the root directory itself
     // must not exist afterward.
     try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{}));
+}
+
+// ── 6. installer defaults: what activation writes down ────────
+
+/// A data package whose draft lives OUTSIDE `.nulya/extensions`, so activating
+/// it lands on the user pointer layer the way installing somebody else's
+/// package does. `extra` goes into the manifest verbatim (`"apply":"auto",`).
+/// Returns its version id; caller owns it.
+fn installerPackage(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    exe_abs: []const u8,
+    id: []const u8,
+    extra: []const u8,
+) ![]u8 {
+    const draft = try std.fs.path.join(alloc, &.{ "drafts", id });
+    defer alloc.free(draft);
+    const prompts = try std.fs.path.join(alloc, &.{ draft, "prompts" });
+    defer alloc.free(prompts);
+    try ws.createDirPath(io, prompts);
+
+    const manifest = try std.fmt.allocPrint(
+        alloc,
+        \\{{"schema":"nulya.extension/v2","id":"{s}",{s}"contributes":{{"system_prompts":["prompts/tone.md"]}}}}
+    ,
+        .{ id, extra },
+    );
+    defer alloc.free(manifest);
+    const manifest_path = try std.fs.path.join(alloc, &.{ draft, "extension.json" });
+    defer alloc.free(manifest_path);
+    try ws.writeFile(io, .{ .sub_path = manifest_path, .data = manifest });
+    const tone_path = try std.fs.path.join(alloc, &.{ prompts, "tone.md" });
+    defer alloc.free(tone_path);
+    try ws.writeFile(io, .{ .sub_path = tone_path, .data = "TONE\n" });
+
+    const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft });
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    return extractVersion(alloc, built.stdout);
+}
+
+/// The user config file this run reads, or an empty string when there is none.
+/// Caller owns the bytes.
+fn userConfig(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir) ![]u8 {
+    const path = support.home_subdir ++ std.fs.path.sep_str ++ "config.toml";
+    return ws.readFileAlloc(io, path, alloc, .limited(1 << 20)) catch |err| switch (err) {
+        error.FileNotFound => try alloc.dupe(u8, ""),
+        else => err,
+    };
+}
+
+test "a package that declares apply:auto is composed by activating it, and deactivating takes it back" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const version = try installerPackage(alloc, io, ws, exe_abs, "mode.loud", "\"apply\":\"auto\",");
+    defer alloc.free(version);
+
+    // Built, not activated: nothing composes it.
+    {
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.loud") == null);
+    }
+
+    const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", "mode.loud", version });
+    defer alloc.free(activated.stdout);
+    try std.testing.expectEqual(@as(u8, 0), activated.code);
+
+    // The manifest's installer default is what activation WROTE DOWN: a member
+    // line in the person's own config, not a second source the kernel consults.
+    {
+        const config = try userConfig(alloc, io, ws);
+        defer alloc.free(config);
+        try std.testing.expect(std.mem.indexOf(u8, config, "\"mode.loud\"") != null);
+
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.loud") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, version) != null);
+    }
+
+    const off = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "deactivate", "mode.loud" });
+    defer alloc.free(off.stdout);
+    try std.testing.expectEqual(@as(u8, 0), off.code);
+    {
+        const config = try userConfig(alloc, io, ws);
+        defer alloc.free(config);
+        try std.testing.expect(std.mem.indexOf(u8, config, "\"mode.loud\"") == null);
+
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.loud") == null);
+    }
+}
+
+test "activation selects the manual tools a package recommends, and leaves its extras off" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const windows = @import("builtin").os.tag == .windows;
+    const entry = if (windows) "src/run.ps1" else "src/run.sh";
+    const script_name = if (windows) "run.ps1" else "run.sh";
+    const script_body = if (windows) "[Console]::Out.Write('ok')\n" else "#!/bin/sh\nprintf ok\n";
+    const interpreter = if (windows) "powershell" else "sh";
+
+    const draft = "drafts" ++ std.fs.path.sep_str ++ "kit";
+    const src = draft ++ std.fs.path.sep_str ++ "src";
+    try ws.createDirPath(io, src);
+    try ws.writeFile(io, .{ .sub_path = src ++ std.fs.path.sep_str ++ script_name, .data = script_body });
+
+    const manifest = try std.fmt.allocPrint(alloc,
+        \\{{"schema":"nulya.extension/v2","id":"kit","runtime":{{"entry":"{s}","interpreter":"{s}"}},"contributes":{{"tools":[{{"name":"read","surface":"manual","description":"d","input":{{"type":"object"}}}},{{"name":"rewrite","surface":"manual","recommended":false,"description":"d","input":{{"type":"object"}}}}]}}}}
+    , .{ entry, interpreter });
+    defer alloc.free(manifest);
+    try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data = manifest });
+
+    const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft });
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+
+    const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", "kit", version });
+    defer alloc.free(activated.stdout);
+    try std.testing.expectEqual(@as(u8, 0), activated.code);
+
+    // `recommended: false` is the package saying "an extra": the tool exists, a
+    // member may still name it, and installing the package does not.
+    const config = try userConfig(alloc, io, ws);
+    defer alloc.free(config);
+    try std.testing.expect(std.mem.indexOf(u8, config, "\"kit:read\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, config, "rewrite") == null);
+
+    const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
+    defer alloc.free(header);
+    try std.testing.expect(std.mem.indexOf(u8, header, "ext:kit/read") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "ext:kit/rewrite") == null);
+}
+
+test "a bulk sync moves pointers and writes no member line, however loudly a manifest asks" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // A draft in the USER draft root, which is what `ext sync --user` builds:
+    // the store itself, where a draft sits beside its own `versions/`.
+    const draft = support.store_rel ++ std.fs.path.sep_str ++ "mode.loud";
+    try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
+    try ws.writeFile(io, .{
+        .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json",
+        .data =
+        \\{"schema":"nulya.extension/v2","id":"mode.loud","apply":"auto","contributes":{"system_prompts":["prompts/tone.md"]}}
+        ,
+    });
+    try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "TONE\n" });
+
+    const stderr = try runCliStderr(alloc, io, ws, &.{ exe_abs, "ext", "sync", "--user", "--activate" }, &.{});
+    defer alloc.free(stderr);
+
+    // A directory's worth of packages is not the moment to decide which of them
+    // belong in every session: the pointer moved, the config did not.
+    try std.testing.expect(std.mem.indexOf(u8, stderr, "mode.loud") != null);
+    const config = try userConfig(alloc, io, ws);
+    defer alloc.free(config);
+    try std.testing.expect(std.mem.indexOf(u8, config, "mode.loud") == null);
+
+    const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
+    defer alloc.free(header);
+    try std.testing.expect(std.mem.indexOf(u8, header, "mode.loud") == null);
 }

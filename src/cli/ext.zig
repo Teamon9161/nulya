@@ -4,7 +4,10 @@
 //! model-facing tool.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const environment = @import("../environment.zig");
+const composition = @import("../composition.zig");
+const config = @import("../config.zig");
 const build_ext = @import("../extension/build/build_ext.zig");
 const store = @import("../extension/store.zig");
 const site_mod = @import("../extension/site.zig");
@@ -25,6 +28,7 @@ const ZigExe = cli_toolchain.ZigExe;
 const resolveZig = cli_toolchain.resolveZig;
 const noteUnpinnedZig = cli_toolchain.noteUnpinnedZig;
 const common = @import("common.zig");
+const members = @import("members.zig");
 const StoreView = common.StoreView;
 const flagValue = common.flagValue;
 const draftRootSpec = common.draftRootSpec;
@@ -339,6 +343,13 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var produced: usize = 0;
     var already: usize = 0;
     var failed: usize = 0;
+    // What a bulk pass will NOT do: a directory's worth of packages is not the
+    // moment to decide which of them belong in every session.
+    var asks: std.ArrayList([]u8) = .empty;
+    defer {
+        for (asks.items) |spec| alloc.free(spec);
+        asks.deinit(alloc);
+    }
     for (drafts) |draft| {
         var result = (if (dry_run)
             build_ext.planExtension(alloc, io, root_dir, draft, dest_root.root, &zig)
@@ -385,9 +396,23 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         var line: std.Io.Writer.Allocating = .init(alloc);
         defer line.deinit();
         try line.writer.print("{s}: {s} {s}", .{ result.id, result.version, state });
-        try appendActivation(alloc, io, &line.writer, &view.site, result, .{ .activate = activate, .dry_run = dry_run, .user = flags.user });
+        const moved = try appendActivation(alloc, io, &line.writer, &view.site, result, .{ .activate = activate, .dry_run = dry_run, .user = flags.user });
         try line.writer.writeByte('\n');
         try printRaw(io, line.written());
+        if (moved) {
+            if (try declaredSpec(alloc, &view.site, result.id, result.version)) |spec| try asks.append(alloc, spec);
+        }
+    }
+    if (asks.items.len != 0) {
+        var list: std.Io.Writer.Allocating = .init(alloc);
+        defer list.deinit();
+        for (asks.items, 0..) |spec, i| try list.writer.print("{s}\"{s}\"", .{ if (i == 0) "" else ", ", spec });
+        try printErrFmt(
+            alloc,
+            io,
+            "note: {d} package(s) above ask to be in every session, and a whole directory at once is not that decision — nothing was written to config; add {s} to [extensions] with, or run `nulya ext activate <id> <version>` for the ones you want\n",
+            .{ asks.items.len, list.written() },
+        );
     }
 
     try printOut(alloc, io, "{d} {s}, {d} already built, {d} failed\n", .{
@@ -402,9 +427,10 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 
 const SyncMode = struct { activate: bool, dry_run: bool, user: bool };
 
-/// The tail of a sync line. Sync points `current` at a version it just brought
-/// into this root, and at a draft's version for an id with no `current` at all
-/// — never over a `current` naming something else.
+/// The tail of a sync line, and whether this call MOVED the pointer. Sync
+/// points `current` at a version it just brought into this root, and at a
+/// draft's version for an id with no `current` at all — never over a `current`
+/// naming something else.
 fn appendActivation(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -412,7 +438,7 @@ fn appendActivation(
     site: *site_mod.Site,
     result: build_ext.BuildResult,
     mode: SyncMode,
-) !void {
+) !bool {
     const layer = common.activateLayer(site, result.id, mode.user);
     const current = blk: {
         const p = (try site.activePointer(alloc, result.id)) orelse break :blk null;
@@ -421,16 +447,29 @@ fn appendActivation(
     defer if (current) |c| alloc.free(c);
 
     if (current) |c| {
-        if (std.mem.eql(u8, c, result.version)) return out.writeAll(" (active)");
+        if (std.mem.eql(u8, c, result.version)) {
+            try out.writeAll(" (active)");
+            return false;
+        }
     }
-    if (!mode.activate or mode.dry_run) return;
+    if (!mode.activate or mode.dry_run) return false;
     if (result.already_built and current != null) {
-        return out.print(" (current stays {s})", .{current.?});
+        try out.print(" (current stays {s})", .{current.?});
+        return false;
     }
     try warnUserScope(alloc, io, result.id, result.version, mode.user);
     try site.activate(alloc, layer, result.id, result.version);
     depositSessionNote(alloc, io, site.store().?.root, result.id, result.version) catch {};
     try out.print(" -> current ({s})", .{layer.label()});
+    return layer == .user;
+}
+
+/// The member spec this version's manifest asks an installer for, or null. The
+/// bulk paths use it to NAME what they declined to write.
+fn declaredSpec(alloc: std.mem.Allocator, site: *site_mod.Site, id: []const u8, version: []const u8) !?[]u8 {
+    const resolved = site.resolveVersion(alloc, id, version, .structural) catch return null;
+    defer resolved.deinit(alloc);
+    return installerSpec(alloc, id, resolved.manifest);
 }
 
 /// `nulya ext prune [<id>] [--dry-run]` — drop the version directories no
@@ -839,10 +878,12 @@ fn writeTypedValue(jw: *std.json.Stringify, val: []const u8, ty: ?[]const u8) !v
 /// Point `current` at one built version. There is no second verb for going
 /// backwards: a rollback IS this, aimed at an older version.
 fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    const flags = try takeUserFlag(alloc, args);
+    const kept = try takeNoWith(alloc, args);
+    defer alloc.free(kept.rest);
+    const flags = try takeUserFlag(alloc, kept.rest);
     defer alloc.free(flags.rest);
     if (flags.rest.len < 2) {
-        try printErr(io, "usage: nulya ext activate [--user] <id> <version>\n");
+        try printErr(io, "usage: nulya ext activate [--user] [--no-with] <id> <version>\n");
         return 1;
     }
     const id = flags.rest[0];
@@ -877,11 +918,155 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     try printOut(alloc, io, "{s}: current -> {s} ({s})\n", .{ id, version, layer.label() });
     if (covered_by) |c| {
         try printOut(alloc, io, "note: not in effect — the {s} pointer names {s}@{s}\n", .{ c.layer.label(), id, c.version });
-    } else {
+    } else if (!try recordInstallerDefault(alloc, io, &view, id, version, layer, kept.no_with)) {
         try noteMembership(alloc, io, &view.site, id, version);
     }
     return 0;
 }
+
+/// `--no-with`: move the pointer and write nothing. The escape hatch for a
+/// script, and for anyone who keeps their member list by hand.
+fn takeNoWith(alloc: std.mem.Allocator, args: []const []const u8) !struct { no_with: bool, rest: [][]const u8 } {
+    var rest: std.ArrayList([]const u8) = .empty;
+    errdefer rest.deinit(alloc);
+    var no_with = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--no-with")) no_with = true else try rest.append(alloc, a);
+    }
+    return .{ .no_with = no_with, .rest = try rest.toOwnedSlice(alloc) };
+}
+
+/// What this package's manifest says installing it means, as ONE member spec:
+/// `apply: "auto"` asks for the bare member, and every `manual` tool that did
+/// not opt out of `recommended` rides on the same entry. Null when the package
+/// declared neither, which is most of them.
+fn installerSpec(alloc: std.mem.Allocator, id: []const u8, m: manifest.Manifest) !?[]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try out.writer.writeAll(id);
+    var selected: usize = 0;
+    for (m.tools) |t| {
+        if (t.surfaceOf() != .manual or !t.recommendedOf()) continue;
+        try out.writer.print("{s}{s}", .{ if (selected == 0) ":" else ",", t.name });
+        selected += 1;
+    }
+    if (m.applyOf() != .auto and selected == 0) return null;
+    return try alloc.dupe(u8, out.written());
+}
+
+/// Write the installer default into the user's member list, and say what was
+/// written. False when nothing was — the package declared no default, this is
+/// not the user layer (a project config can only narrow, so a member written
+/// there would compose nothing), or `--no-with` — and the caller then prints
+/// the line that spells the member out for a person to write themselves.
+fn recordInstallerDefault(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    view: *StoreView,
+    id: []const u8,
+    version: []const u8,
+    layer: site_mod.Layer,
+    no_with: bool,
+) !bool {
+    if (no_with) return false;
+    // `.structural`: the activation just above verified this version's seal, so
+    // these are the bytes the pointer now names.
+    const resolved = view.site.resolveVersion(alloc, id, version, .structural) catch return false;
+    defer resolved.deinit(alloc);
+    const spec = (try installerSpec(alloc, id, resolved.manifest)) orelse return false;
+    defer alloc.free(spec);
+
+    // A member written in a project config REPLACES the user's list for this
+    // workspace, so a workspace pointer records nothing and says so.
+    if (layer != .user) {
+        try printErrFmt(
+            alloc,
+            io,
+            "note: {s} declares an installer default, and the pointer here is this workspace's own, so nothing was written — add \"{s}\" to [extensions] with, or pass `nulya session new --with {s}`\n",
+            .{ id, spec, spec },
+        );
+        return true;
+    }
+
+    var host = try environment.hostEnvironMap(alloc);
+    defer host.deinit();
+    const paths = try config.ConfigPaths.init(alloc, &host);
+    defer paths.deinit(alloc);
+    if (paths.user.len == 0) return false;
+
+    var cfg = try config.load(alloc, io, &host, common.stderr_diag);
+    defer cfg.deinit();
+    const ext_store = try launch.storePath(alloc, &host);
+    defer alloc.free(ext_store);
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var gate: BudgetGate = .{
+        .alloc = alloc,
+        .io = io,
+        .cwd = try cwdRealPath(io, &cwd_buf),
+        .ext_store = ext_store,
+        .max_tools = cfg.registry.max_tools,
+    };
+
+    switch (try members.add(alloc, io, paths.user, spec, gate.handle())) {
+        .added => |path| {
+            try printOut(alloc, io, "{s}: in every session here — \"{s}\" written to [extensions] with in {s}\n", .{ id, spec, path });
+        },
+        .already => {
+            try printErrFmt(alloc, io, "note: [extensions] with already has an entry for {s}; activation left it as written\n", .{id});
+        },
+        .refused => |why| {
+            try printErrFmt(
+                alloc,
+                io,
+                "note: {s} asks to be in every session, but its entry {s} ({s}); add \"{s}\" to [extensions] with by hand\n",
+                .{ id, why, paths.user, spec },
+            );
+        },
+    }
+    return true;
+}
+
+/// The `max_tools` veto, answered by composing the prospective member list with
+/// the kernel's own resolver — which tools a member puts on the face is a rule
+/// with one home, and this is not a second copy of it. Any OTHER failure is not
+/// this write's business: a member that was already broken stays the next
+/// `session new`'s news.
+const BudgetGate = struct {
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    cwd: []const u8,
+    ext_store: []const u8,
+    max_tools: u32,
+
+    fn handle(self: *BudgetGate) members.Fits {
+        return .{ .ptr = self, .askFn = ask };
+    }
+
+    fn ask(ptr: *anyopaque, specs: []const []const u8) bool {
+        const self: *BudgetGate = @ptrCast(@alignCast(ptr));
+        var refs: std.ArrayList(composition.WithRef) = .empty;
+        defer {
+            for (refs.items) |ref| switch (ref.tools) {
+                .named => |names| self.alloc.free(names),
+                else => {},
+            };
+            refs.deinit(self.alloc);
+        }
+        for (specs) |spec| {
+            const ref = common.memberRef(self.alloc, spec) catch return true;
+            refs.append(self.alloc, ref) catch return true;
+        }
+        // The dialect only shapes the builtin's description text; the tool
+        // COUNT this asks about does not depend on it.
+        const dialect: environment.Dialect = if (builtin.os.tag == .windows) .powershell else .bash;
+        var comp = composition.SessionComposition.init(self.alloc, self.io, self.cwd, self.ext_store, dialect, .{
+            .max_tools = self.max_tools,
+            .with = refs.items,
+        }) catch |err| return err != error.ToolBudgetExceeded and err != error.ToolBudgetTooSmall;
+        comp.deinit(self.alloc);
+        return true;
+    }
+};
 
 /// One stderr line saying what activation did NOT do: a package reaches a
 /// session only as a member, so the way in is `[extensions] with` or `session
@@ -968,6 +1153,7 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     };
     try view.site.deactivate(alloc, layer, id);
     try printOut(alloc, io, "{s}: deactivated ({s})\n", .{ id, layer.label() });
+    try forgetMembership(alloc, io, id);
 
     // Dropping the workspace pointer can reveal the store's — say so.
     if (try view.site.activePointer(alloc, id)) |still| {
@@ -975,6 +1161,29 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         try printOut(alloc, io, "note: the {s} pointer names {s}@{s}, which is now in effect\n", .{ still.layer.label(), id, still.version });
     }
     return 0;
+}
+
+/// Take this id off the user's member list, so `deactivate` undoes what
+/// `activate` wrote. An entry a person put there themselves goes the same way:
+/// deactivating an id whose version is gone would otherwise leave a member no
+/// session can resolve.
+fn forgetMembership(alloc: std.mem.Allocator, io: std.Io, id: []const u8) !void {
+    var host = try environment.hostEnvironMap(alloc);
+    defer host.deinit();
+    const paths = try config.ConfigPaths.init(alloc, &host);
+    defer paths.deinit(alloc);
+    if (paths.user.len == 0) return;
+
+    switch (try members.remove(alloc, io, paths.user, id)) {
+        .added => |path| try printOut(alloc, io, "{s}: taken off [extensions] with in {s}\n", .{ id, path }),
+        .already => {},
+        .refused => |why| try printErrFmt(
+            alloc,
+            io,
+            "note: [extensions] with in {s} {s}; {s} is still on it and the next session will still compose it\n",
+            .{ paths.user, why, id },
+        ),
+    }
 }
 
 /// Every extension this machine holds, sorted by id. Column two is what
@@ -1331,7 +1540,7 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  as that call's result — the call never ran, nothing changed — and the rest
             \\  of the batch is decided one call at a time.
             \\
-            \\  A manifest speaks to three different readers, and each one keeps its own
+            \\  A manifest speaks to four different readers, and each one keeps its own
             \\  discipline for every field it owns rather than restating it field by field.
             \\
             \\  KERNEL-ENFORCED, checked at build time and acted on at run time: `id`;
@@ -1363,10 +1572,22 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  names the tools this session puts on the model's face beyond the
             \\  package's `surface: auto` default, `:none` puts nothing there at all, and
             \\  a tool the manifest does not declare (or declares `internal`) is refused.
-            \\  Reach is never something a package takes: `nulya ext activate` only says
-            \\  "which version `<id>` means". `nulya config show` prints the standing
-            \\  list; `nulya ext list` marks an id that is on it `[with]`; `session new
-            \\  --bare` reads none of it and composes from its own flags alone.
+            \\  Reach is never something a package takes: `nulya ext activate` says which
+            \\  version `<id>` means, and — when the manifest declares an installer
+            \\  default — WRITES that member line into the user's own config, where it can
+            \\  be read, edited and deleted (`ext deactivate` takes it back, `--no-with`
+            \\  declines it, and a bulk `ext seed` / `ext sync --activate` never writes
+            \\  one). `nulya config show` prints the standing list; `nulya ext list` marks
+            \\  an id that is on it `[with]`; `session new --bare` reads none of it and
+            \\  composes from its own flags alone.
+            \\
+            \\  INSTALLER DEFAULTS, read ONCE by whoever installs and never by the kernel:
+            \\  `apply` (top-level, `"auto"` | `"manual"`, default `manual`) — `auto` says
+            \\  whoever activates this package probably wants it in every session;
+            \\  `tools[].recommended` (bool, default true, only on a `manual` tool) — false
+            \\  marks an extra that stays off until a member names it. Together they are
+            \\  the member line `ext activate` writes; nothing composes a session from
+            \\  them.
             \\
             \\  DRIVER DECLARATIONS, parsed, frozen into the version, and never enforced by
             \\  the kernel: a claim for whoever DRIVES a session (a front end, `nulya ext

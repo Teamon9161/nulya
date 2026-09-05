@@ -328,7 +328,9 @@ session 开始时一次选定，整场冻结（`composition.SessionComposition.i
 
 frozen 路（header）**不重推**：resume 只重放冻下来的 `native_tools`。**usage 自己绝不改 `tools[]`**——journal 是证据，晋升是有人往成员表里写一行（§5.5）。
 
-**`ext activate` 只回答"`<id>` 现在指哪个版本"**，它一场都不组合。stderr 上多一行提示，把出路指向 `[extensions] with` / `session new --with`，并在这个版本有 `manual` 工具时把选择拼出来（`--with <id>:a,b`）。
+**`ext activate` 回答"`<id>` 现在指哪个版本"**，它自己一场都不组合；但当这个版本的 manifest 声明了**安装时默认值**（`apply` / `tools[].recommended`，§7.2.1）时，它会把对应的那一行**写进 user 配置的 `[extensions] with`**——写完打一行说写了什么、写进哪个文件。所以"装了就生效"不需要人再配一次，而生效的理由仍然只有成员表这一个来源：那一行是人自己文件里的文本，看得见、改得掉、删得掉。
+
+写与不写的边界（都在 `cli/ext.zig`，内核不参与）：`ext deactivate` 对称地把那一行取走；`--no-with` 只移指针；**workspace 层的指针不写**（project 层的 `with` 是整表替换而不是并集，§9.5，在那里写一行会盖掉用户自己的列表）；`ext seed` / `ext sync --activate` 这类**批量路径一个字都不写**，只在末尾一行点名哪些包提了这个要求；写之前先用**内核自己的 resolver** 把"加上这一行之后的成员表"组合一遍，越过 `max_tools` 就整条不写（哪些工具上模型面这条规则只有一处实现，这里不复制）。没有声明默认值的包照旧只得到那行"activation 组合不了任何东西"的提示（有 `manual` 工具时把选择拼出来：`--with <id>:a,b`）。
 
 **`session new --bare`** 不读 config 的 `with`，composition 只来自 argv。`max_tools` 照读（天花板不是选择）。header 不记这个 flag。用它的是 `extensions/agent` 委派出的子场（§7.8）。
 
@@ -499,13 +501,14 @@ workspace 只放 **draft** 与一个**可选的 `current` 指针**：`.nulya/ext
 
 ### 7.2.1 目录与 manifest（`nulya.extension/v2`）
 
-manifest 讲给三种听众，字段按哪个听众读它分成三层，每层守一种纪律：
+manifest 讲给四种听众，字段按哪个听众读它分层，每层守一种纪律：
 
 | 层 | 纪律 |
 |---|---|
 | **内核强制** | 类型错是 parse 错，值错是 validate 错；语义由 kernel 的代码路径读取并照做 |
 | **driver 声明** | kernel 解析、冻进版本的 manifest、**一个字节都不强制**；封闭词表的值错仍是 validate 错，但"要不要有这个字段"从不是 build 会拒绝的事 |
 | **前端声明** | 形状由 kernel 检查，**值是开放词表**——认不出的词是**读的人**的选择（退回朴素卡、warn-and-skip），永远不是 build 拒绝 |
+| **安装时默认值** | 词表封闭（值错是 validate 错），读者只有一个而且在壳层：`ext activate` 在移指针那一刻读一次，把结果写成成员表里的一行。**内核零读者**，composition 的解析路径里没有它们的名字 |
 
 ```
 <workspace>/.nulya/extensions/<id>/   ← draft（可变；`--user` 的 draft 在 store 里同形）
@@ -551,7 +554,9 @@ manifest 讲给三种听众，字段按哪个听众读它分成三层，每层�
 
 **内核强制的那些**：`runtime.entry` / `.interpreter` 说的是**怎么跑这个 runtime**（§7.1）——怎么跟它说话不在 manifest 里，只有一种（§7.3）。`tools[].input` schema 只在该 tool 进了模型工具面时才喂给模型。`tools[].timeout_ms?` **只在它被放到模型工具面上的那次调用生效**（缺省 30s；`ext run` 不套用它）。`tools[].surface?` 是 §5.1 那张三行表；kernel 读并强制：选择只接受 `auto` / `manual`，任何成员都展开自己的 `auto`，resume 只重放 header `native_tools`。`skills` / `system_prompts` 是这个版本贡献的文件列表，随 build 冻结进快照。
 
-> **manifest 说不出"我进哪一场 session"。** 那一个决定是人的：成员表（`[extensions] with` / `session new --with`），§5.1。**没有任何 manifest 字段能决定 reach。**
+> **manifest 说不出"我进哪一场 session"，但说得出"装我的人多半想要什么"。** reach 那一个决定仍然只由成员表回答（`[extensions] with` / `session new --with`，§5.1）：**没有任何 manifest 字段进得了 composition 的解析路径。** 而 `apply` / `tools[].recommended` 是**安装时默认值**——`ext activate` 在移指针那一刻读一次（seal 校验之后），把结果写成成员表里人看得见的一行；此后再没有人读它们。所以事后篡改一个冻结的 manifest 改不动任何一场 session 的组成。
+
+**安装时默认值**（第四类听众：**装这个包的人**，读者在壳层，内核零读者）：`apply?`（顶层，`"auto"` / `"manual"`，缺省 `manual`，闭合词表否则 `InvalidApply`）= "激活我的人多半想让我进每一场"；`tools[].recommended?`（bool，缺省 true，**只允许写在 `manual` 工具上**，否则 `InvalidRecommended`——`auto` 已经在面上、`internal` 永远不在，那里这个键没有问题可答）= false 是"这是附赠品，等人点名"。两者合起来就是 `ext activate` 写下的那一行（`<id>` 或 `<id>:a,b`）。顶层而不是 `contributes` 下：它不是一项贡献，是作者对"装上我意味着什么"的解释。
 
 **driver 声明**：`tools[].readonly?`（可选 bool）= 这个包对**这个 tool 只读**的声明——§9 那句"没有一个 manifest 字段是安全边界"的第一个例子，消费者是 driver 的审批 policy（§4 的 gate；TUI 的 `[approvals] manifest_readonly`），它有权不信。**缺省是 null 不是 false**：包什么都没说，与包说了"不是只读"是两件事；类型不对是 `WrongType` 而不是被悄悄忽略。`contributes.policy?`（`{readonly: ?bool}`）= 这个包要求审批 policy 在**它是本场成员期间**收窄的东西；同为声明，TUI 把它判在三张审批表**之前**。**一个可选 bool 说不出任何拓宽的话**，所以"只能收窄"由形状自己守。
 
@@ -1480,6 +1485,7 @@ GapDetector · WorkflowMiner · ToolSynthesisManager · AutoRefactor · RewardMo
 | 方案 | 否决理由 | 节 |
 |---|---|---|
 | 动态 promotion / eviction 改 `tools[]` | 每次都是全量 cache miss | §5.4 |
+| 删掉包的安装默认值（`apply` / `recommended`），让人手写 `[extensions] with` | 默认值不是第二根轴，是同一根轴的**安装时**默认；删它不减内核状态（读者本就在壳层），只把这份表达转嫁成每台机器上的一次手工配置 | §5.1 / §7.2.1 |
 | `.so/.dll` 动态链接 extension | ABI / 版本 / crash 带死 host / allocator 所有权 | §7.1 |
 | WASM in-process | 与原生 + 内嵌工具链冲突，削弱语言无关性 | §7.1 |
 | 第二种 wire（信封 / 分帧） | oneshot 一次只有一个请求，多出的 id / error code / retryable 一个读者都没有 | §7.3 |

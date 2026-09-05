@@ -139,7 +139,8 @@ printf 'hello %s\n' "${NULYA_ARG_name:-world}"
   but `--with <id>`); `manual` (membership is not enough, the member must name
   this tool: `--with <id>:<tool>`);
   `internal` (never on the model face; front ends and scripts call it with
-  `nulya ext run`). The word is per tool, so one package may use all three: the
+  `nulya ext run`). A `manual` tool may add `recommended: false` — "an extra,
+  off until a member names it" — which only `ext activate` reads. The word is per tool, so one package may use all three: the
   tools it exists FOR are `auto` and arrive with membership, the extras only
   some sessions want are `manual` and are turned on one at a time by whoever
   wants them, and its plumbing is `internal`. That mix is how a package offers
@@ -162,8 +163,9 @@ model's tool face a call is killed at 30s unless the manifest raises
 `--timeout-ms`.
 
 **One axis: membership, with a standing form and a per-session one.**
-`activate` is on neither: it says which version `<id>` means, and that is all it
-does.
+`activate` composes nothing by itself: it says which version `<id>` means — and,
+when the manifest declares an installer default, writes that member line into
+your own config for you (see *Installer defaults* below).
 
 A member is written `<id>[@<version>][:<tool>,<tool>…]`. Being a member puts the
 package's skills in the catalog, its system prompts in the system blocks, its
@@ -177,6 +179,18 @@ quietly missing it.
 Standing form: `[extensions] with` in config. One session: `nulya session new
 --with <spec>`, repeatable. A `--with` naming an id the standing list already
 brought in wins, version and selection both.
+
+**Installer defaults — what `ext activate` writes down.** A manifest may say
+what installing it is expected to mean: top-level `apply: "auto"` ("whoever
+activates me probably wants me in every session") and, per `manual` tool,
+`recommended: false` ("an extra"). `nulya ext activate` reads them ONCE, as it
+moves the pointer, and writes the resulting member line into the user config's
+`[extensions] with` — a line you can read, edit or delete; `ext deactivate`
+takes it back, and `--no-with` declines it. Nothing else reads these keys: a
+session is still composed from the member list alone, so a mode package is
+installed by activating it and a package that says nothing still needs a member
+line written by hand. Bulk paths (`ext seed`, `ext sync --activate`) move
+pointers and write no line — they name what they declined instead.
 
 It takes effect from the next session onward; `nulya config show` prints the
 standing list, and `nulya ext list` marks an id that is on it `[with]`. `nulya

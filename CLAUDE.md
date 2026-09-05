@@ -37,7 +37,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 **内核**：durable ledger（一文件 = 一 generation；header 冻结 composition + 模型身份 + inline prompts，其后是 `seq` JSONL；单写者由 `<id>.lock` 排他 advisory 锁强制，别的进程经 inbox 投递、写者在 step 边界排干、按 `origin` 去重做到 exactly-once）→ PromptIR 纯投影 → 一次 step（批量 tool call、串行执行、**一条** tool_results 回传、可取消、每个 call 可过 gate）。四种事件：`user_text` / `assistant` / `tool_results` / `note`（从 step 之外到达的机器事实，`source` 开放词表），每一条都是一个 turn。换模型 / 换工具 / 换 system prompt 只有一个原语：`session new --parent <id>:<seq> --carry`，带着历史开一个新文件（父文件一个字节不变）。
 
-**工具面**：唯一 builtin 是 `shell`（前台带超时、`background:true` 起活得过 step 进程的任务）。其余能力都是 extension——内容寻址的不可变版本 + `current` 指针，`activate` 只移指针、一场都不组合。版本字节一台机器只有一处（`<NULYA_HOME | ~/.nulya>/store`），workspace 里只有 draft 与一个可选的 `current`（压过 store 那份）。上模型面只有一条路：成为这一场的成员，并由那一行的工具选择决定带哪些 tool（`auto` 随成员上，`manual` 要点名，`internal` 永不上）。
+**工具面**：唯一 builtin 是 `shell`（前台带超时、`background:true` 起活得过 step 进程的任务）。其余能力都是 extension——内容寻址的不可变版本 + `current` 指针，`activate` 移指针，并在 manifest 声明了安装时默认值（`apply` / `tools[].recommended`，内核零读者）时替人把那一行成员写进 user config，所以"装了就生效"不必再配一次，而生效的理由仍只有成员表一处。版本字节一台机器只有一处（`<NULYA_HOME | ~/.nulya>/store`），workspace 里只有 draft 与一个可选的 `current`（压过 store 那份）。上模型面只有一条路：成为这一场的成员，并由那一行的工具选择决定带哪些 tool（`auto` 随成员上，`manual` 要点名，`internal` 永不上）。
 
 **自带扩展**（顶层 `extensions/`，十个，随二进制分发，`ext seed` 落盘）：`std`（六个文件 tool）· `agent`（委派；五种 runner：nulya / codex / claude / pi / `ext:<id>` 外置；定义里的 `model:` 可以写 `@<档位>`——问的是"这一场所在的 profile 管这一档叫什么"，所以换主模型就换掉整支队伍，没写这一档的 profile 上退化成继承）· `compact`（fork 压缩）· `handoff` · `plan` · `ask` · `ground`（开场把「这一场在哪」写成 per-session prompt）· `coding`（工作纪律）· `evolution` · `guide`（自描述 skill）。
 
@@ -77,7 +77,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `diag.zig` | error 装不下的那句话的唯一出口 + CLI 的 stderr sink | 默认不发一个字：目的地由壳层选，库里的路径拿到一个才开口 |
 | `provider.zig` `providers/` | `Model` vtable + `TurnCollector`；四个 provider（`openai`/`anthropic`/`codex` 共用 wire 底座，`scripted.zig` 是离线替身），`launch.ScriptedProvider` 是它的重导出 | provider 只能优化序列化，不能破坏 turn 前缀不变量；`reasoning` 原样交回同一 provider |
 | `config.zig` + `default.toml` | `default → system → user → project` 合并 | project 层只能收窄；`[extensions] with` 是唯一的 extension 键，project 层也读（只能在 store 已有的包里挑） |
-| `extension/manifest.zig` | `nulya.extension/v2` schema | 三层听众：内核强制 / driver 声明 / 前端声明。manifest 是 schema 唯一真相，不问 binary |
+| `extension/manifest.zig` | `nulya.extension/v2` schema | 四层听众：内核强制 / driver 声明 / 前端声明 / 安装时默认值（`apply`、`tools[].recommended`——只有 `ext activate` 与前端安装路径读，内核一个字节都不据此行动）。manifest 是 schema 唯一真相，不问 binary |
 | `extension/protocol.zig` `invoke.zig` | 唯一那种 wire（stdin 参数 JSON、env、stdout 即结果、退出码即 ok） | stderr 就是失败消息，所以包必须独占它 |
 | `extension/store.zig` `site.zig` `integrity.zig` | 版本目录（一台机器一个 store）+ 两层 `current` 指针 + `Diag`（error 装不下的那句话的唯一出口） | 字节只有一处，指针有两层且 workspace 压 user；`current` 授 reach，`.sealed` 证明资格；内核不选 `Diag` 的目的地，缺省不发一个字（写 stderr 的 sink 是 `cli/common.stderr_diag`） |
 | `extension/build/` | 冻结 snapshot → 编译或直接冻结 → seal | version = hash(snapshot + compiler + target)，后两项只对 compiled 非空 |
@@ -85,6 +85,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `skill.zig` | `SkillSetSnapshot` + 渐进披露文本 | Agent Skills 兼容（`SKILL.md` frontmatter） |
 | `journals/journal.zig` | 两条 journal 共用的文件层与时钟 | append 持锁并修残尾，读端不拿锁且忽略残尾；文件不存在 = 还没有事实 |
 | `journals/{tool_stats,outcome}.zig` | 证据 / 评判 | 都只加可选列、不升 `v`；没有行 = unknown ≠ failure |
+| `cli/members.zig` | user config 的 `[extensions] with`：按行外科手术改一个键 | 写完必须读回来核对，对不上就把原字节放回去；这个文件之外的每个字节都要原样活下来 |
 | `cli/task.zig` | 后台任务的 supervisor 与读者面（全部动词、`Row` 投影、本机读法） | supervisor 顺序承重：拿租约 → status → spawn → **deposit 后**才写 done。`status.json` 是真相，`starting`/`lost`/`unreachable` 只活在投影里 |
 | `cli/task_remote.zig` | 任务在别的机器上时的那一半：`Far` 连接收集器 + 把远端 poll 答案投成 `Row` | `readRow` 只在已经知道任务是远端的（`Far.isRemote`）才落进这个文件；本机路径与全部动词仍在 `cli/task.zig` |
 | `launch.zig` | session 启动共享件：模型解析、credential 顺序、scratch 路径、这台机器的 store 路径 | 壳层算好路径再交下来，内核不读 config |

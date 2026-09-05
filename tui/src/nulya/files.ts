@@ -70,6 +70,14 @@ export interface Contributions {
   tools: string[]
   /** The subset of `tools` whose surface is `manual`: model-facing only when a member selects it. */
   manualTools: string[]
+  /**
+   * The subset of `manualTools` an INSTALL should switch on — the package's own
+   * `recommended` word (absent reads as yes). What a manual tool that opted out
+   * says is "an extra, off until somebody names it", so a pass that writes a
+   * selection reads this list and a pane that offers checkboxes reads
+   * `manualTools`.
+   */
+  recommendedTools: string[]
   /** The subset of `tools` whose surface is `auto`: model-facing as soon as its package is a member. */
   autoTools: string[]
   /** The subset of `tools` whose surface is `internal`: callable with `ext run`, never on the model face. */
@@ -185,6 +193,7 @@ export async function readContributions(
     version,
     tools: [],
     manualTools: [],
+    recommendedTools: [],
     autoTools: [],
     internalTools: [],
     skills: [],
@@ -228,6 +237,7 @@ function contributionsOf(
   Contributions,
   | "tools"
   | "manualTools"
+  | "recommendedTools"
   | "autoTools"
   | "internalTools"
   | "systemPrompts"
@@ -250,9 +260,11 @@ function contributionsOf(
   }
   const tools = named.map((tool) => tool["name"] as string)
   const surfaces = new Map(named.map((tool) => [tool["name"] as string, toolSurfaceOf(tool)]))
+  const recommended = new Map(named.map((tool) => [tool["name"] as string, tool["recommended"] !== false]))
   return {
     tools,
     manualTools: tools.filter((tool) => surfaces.get(tool) === "manual"),
+    recommendedTools: tools.filter((tool) => surfaces.get(tool) === "manual" && recommended.get(tool) === true),
     autoTools: tools.filter((tool) => surfaces.get(tool) === "auto"),
     internalTools: tools.filter((tool) => surfaces.get(tool) === "internal"),
     skills: stringList(contributes["skills"]),

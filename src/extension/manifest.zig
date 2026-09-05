@@ -138,6 +138,31 @@ pub const Surface = enum {
     }
 };
 
+/// What the package's author expects INSTALLING it to mean — an installer
+/// default, not reach:
+///
+///   - `manual` : THE DEFAULT. Activating says which version `<id>` names and
+///                nothing more.
+///   - `auto`   : whoever activates this package probably wants it in every
+///                session, so `nulya ext activate` writes it into the user's
+///                member list (`[extensions] with`) as it moves the pointer.
+///
+/// Read ONCE, at activation time, by the CLI's activate path and a front end's
+/// install path — after the version's seal is verified, never again. The kernel
+/// composes a session from the member list alone and never consults this field:
+/// what activation wrote down is a line of the person's own config, which they
+/// can read, edit and delete.
+pub const Apply = enum {
+    auto,
+    manual,
+
+    pub fn fromString(s: []const u8) ?Apply {
+        if (std.mem.eql(u8, s, "auto")) return .auto;
+        if (std.mem.eql(u8, s, "manual")) return .manual;
+        return null;
+    }
+};
+
 /// Where this package's system prompt sits among the OTHER packages' — the only
 /// thing a manifest may say about prompt order. `early` / `normal` (THE
 /// DEFAULT, member order decides) / `late`, relative to the packages that said
@@ -198,12 +223,25 @@ pub const ToolSpec = struct {
     readonly: ?bool = null,
     /// Kept as WRITTEN; read through `surfaceOf` for the default.
     surface: ?[]const u8 = null,
+    /// Should activating this package switch this `manual` tool on? The
+    /// installer-time companion of `Apply`, read in the same one place and by
+    /// the same readers; `validate` refuses the key on an `auto` tool (already
+    /// on) or an `internal` one (never on the face). Absent reads as true: a
+    /// package that bothered to declare a manual tool means it, and `false`
+    /// marks the extra that should stay off until somebody names it.
+    recommended: ?bool = null,
     ui: ?ToolUi = null,
 
     /// `validate` refuses a word outside the three, so the unwrap is safe.
     pub fn surfaceOf(self: ToolSpec) Surface {
         if (self.surface) |s| return Surface.fromString(s).?;
         return .auto;
+    }
+
+    /// Would activating this package select this tool? Meaningful only for a
+    /// `manual` tool.
+    pub fn recommendedOf(self: ToolSpec) bool {
+        return self.recommended orelse true;
     }
 };
 
@@ -277,6 +315,10 @@ pub const Manifest = struct {
     arena: std.heap.ArenaAllocator,
     schema: []const u8,
     id: []const u8,
+    /// Kept as WRITTEN; read through `applyOf` for the default. Top-level
+    /// rather than under `contributes`: it is not a contribution, it is the
+    /// author's reading of what installing this package means.
+    apply: ?[]const u8 = null,
     runtime: ?Runtime,
     tools: []const ToolSpec,
     skills: []const []const u8,
@@ -292,11 +334,22 @@ pub const Manifest = struct {
         self.* = undefined;
     }
 
+    /// `validate` refuses a word outside the two, so the unwrap is safe.
+    pub fn applyOf(self: Manifest) Apply {
+        if (self.apply) |s| return Apply.fromString(s).?;
+        return .manual;
+    }
+
     /// The deterministic kernel rules. Whether a tool is "good taste" is
     /// policy, checked elsewhere.
     pub fn validate(self: Manifest) ValidateError!void {
         if (!std.mem.eql(u8, self.schema, schema_id)) return error.UnsupportedSchema;
         if (!isValidId(self.id)) return error.InvalidId;
+        // Refused rather than defaulted: a typo meaning `auto` would otherwise
+        // leave the person believing installing was enough.
+        if (self.apply) |s| {
+            if (Apply.fromString(s) == null) return error.InvalidApply;
+        }
         if (self.tools.len == 0 and self.skills.len == 0 and self.system_prompts.len == 0 and
             self.commands.len == 0 and !policyContributes(self.policy) and self.ui.len == 0) return error.NoContributions;
 
@@ -344,6 +397,10 @@ pub const Manifest = struct {
             if (t.surface) |s| {
                 if (Surface.fromString(s) == null) return error.InvalidSurface;
             }
+            // On any other surface the key has no question to answer, and a
+            // package that wrote one there believes something untrue about
+            // where its tool ends up.
+            if (t.recommended != null and t.surfaceOf() != .manual) return error.InvalidRecommended;
             for (self.tools[i + 1 ..]) |other| {
                 if (std.mem.eql(u8, t.name, other.name)) return error.DuplicateToolName;
             }
@@ -419,6 +476,8 @@ pub const ValidateError = error{
     DuplicateToolName,
     InvalidTimeout,
     InvalidSurface,
+    InvalidApply,
+    InvalidRecommended,
     InvalidSkillPath,
     DuplicateSkillPath,
     InvalidSystemPromptPath,
@@ -455,6 +514,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
 
     const schema = try dupString(a, obj, "schema");
     const id = try dupString(a, obj, "id");
+    const apply = try optionalString(a, obj, "apply");
     const runtime = try dupRuntime(a, obj);
     const tools = try dupTools(a, contributes);
     const skills = try dupStringList(a, contributes, "skills");
@@ -470,6 +530,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
         .arena = arena,
         .schema = schema,
         .id = id,
+        .apply = apply,
         .runtime = runtime,
         .tools = tools,
         .skills = skills,
@@ -590,6 +651,7 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
             .timeout_ms = try optionalU32(to, "timeout_ms"),
             .readonly = try optionalBool(to, "readonly"),
             .surface = try optionalString(a, to, "surface"),
+            .recommended = try optionalBool(to, "recommended"),
             .ui = try dupToolUi(a, to),
         };
     }

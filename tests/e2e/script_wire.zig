@@ -272,6 +272,7 @@ test "a non-zero exit is a failed call carrying the code, stderr and stdout" {
 test "per-platform entry: one version, this host's script — and a version with none for this host fails by name" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
+    const host_dialect = try support.hostDialect(alloc, io);
 
     var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
@@ -387,6 +388,7 @@ test "per-platform entry: one version, this host's script — and a version with
             io,
             ws_path,
             support.store_rel,
+            host_dialect,
             .{ .with = &.{.{ .id = "elsewhere", .tools = .{ .named = &.{"t"} } }} },
         );
         defer comp.deinit(alloc);

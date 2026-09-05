@@ -473,6 +473,16 @@ export function selectableToolsOf(what: Pick<Contributions, "id" | "manualTools"
 }
 
 /**
+ * The tool ids INSTALLING this package should switch on: the manual tools it
+ * did not mark `recommended: false`. `selectableToolsOf` answers the wider
+ * question — which ones a person could tick — so a pane full of checkboxes
+ * reads that one and a pass that WRITES a selection reads this one.
+ */
+export function recommendedToolsOf(what: Pick<Contributions, "id" | "recommendedTools">): string[] {
+  return what.recommendedTools.map((tool) => toolId(what.id, tool))
+}
+
+/**
  * The one declared way to wear this package for a session — its first
  * `{with: true}` command — or null when it declares none.
  *
@@ -643,8 +653,9 @@ export async function adoptInstalled(
  * Put the `manual` tools of packages this pass just INSTALLED on this TUI's
  * session member list, and report which packages got any.
  *
- * WHICH tools is the package's own word (`selectableToolsOf` → `surface`), so a
- * package that grew or lost one is followed without editing this file. The
+ * WHICH tools is the package's own word (`recommendedToolsOf` → `surface` plus
+ * `recommended`), so a package that grew, lost or demoted one is followed
+ * without editing this file. The
  * quota is checked against the whole prospective face at once: a `session new`
  * that refuses to start is worse than a tool left off, so if the lot will not
  * fit, none of it is written and `/ext` is where the choosing happens.
@@ -654,7 +665,7 @@ async function selectInstalled(
   installed: readonly Contributions[],
   statePath?: string,
 ): Promise<string[]> {
-  const wanted = installed.flatMap((what) => selectableToolsOf(what))
+  const wanted = installed.flatMap((what) => recommendedToolsOf(what))
   if (wanted.length === 0) return []
   const current = sessionSelection(statePath)
   let merged_config: string[] = []
@@ -670,7 +681,7 @@ async function selectInstalled(
   const face = new Set([...merged_config, ...current, ...wanted])
   if (builtin_tools + face.size > max_tools) return []
   rememberSessionSelection([...new Set([...current, ...wanted])], statePath)
-  return installed.filter((what) => selectableToolsOf(what).length > 0).map((what) => what.id)
+  return installed.filter((what) => recommendedToolsOf(what).length > 0).map((what) => what.id)
 }
 
 /**
@@ -732,7 +743,7 @@ export async function sessionMember(ws: Workspace, spec: string): Promise<Sessio
   // that moves a tool between surfaces is followed without an edit.
   const tools = asked?.tools
     ? asked.tools.map((tool) => toolId(id, tool))
-    : selectableToolsOf(await readContributions(ws, id, version))
+    : recommendedToolsOf(await readContributions(ws, id, version))
   return { id, version, tools }
 }
 

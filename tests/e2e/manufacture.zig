@@ -61,6 +61,7 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    const host_dialect = try support.hostDialect(alloc, io);
 
     var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
@@ -199,7 +200,7 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
         // put its tool on the model's face.
         try std.testing.expect(std.mem.indexOf(u8, plain_header, "\"native_tools\":[]") != null);
 
-        var comp_plain = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, .{});
+        var comp_plain = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, host_dialect, .{});
         defer comp_plain.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), comp_plain.tools.tools.len);
         try std.testing.expect(comp_plain.tools.lookup("greet") == null);

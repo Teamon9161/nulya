@@ -8,6 +8,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test"
 import {
   listExtensions,
   probeWriterLease,
+  readContributions,
   readDelegationRecord,
   readToolUsage,
   sessionExists,
@@ -71,6 +72,28 @@ test("probeWriterLease sees the writer lease while a step runs", async () => {
     expect(seen.every((state) => state === "unknown" || state === "held")).toBe(true)
   }
 }, 60_000)
+
+test("a manual tool that opted out of recommended is selectable but not installed", async () => {
+  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
+  expect(run(["ext", "init", "--script", "kit"]).exitCode).toBe(0)
+  const draft = join(ws.dir, ".nulya", "extensions", "kit")
+  const manifest = JSON.parse(readFileSync(join(draft, "extension.json"), "utf8")) as Record<string, unknown>
+  const tool = (manifest["contributes"] as Record<string, unknown>)["tools"] as Array<Record<string, unknown>>
+  tool[0]!["surface"] = "manual"
+  tool.push({ ...tool[0]!, name: "extra", recommended: false })
+  writeFileSync(join(draft, "extension.json"), JSON.stringify(manifest))
+
+  const built = run(["ext", "build", ".nulya/extensions/kit"])
+  expect(built.exitCode).toBe(0)
+  const version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0]!
+
+  // Two different questions: which tools a person COULD tick, and which ones
+  // installing this package switches on.
+  const kit = await readContributions(ws, "kit", version)
+  expect(kit.manualTools).toContain("extra")
+  expect(kit.recommendedTools).not.toContain("extra")
+  expect(kit.recommendedTools.length).toBe(kit.manualTools.length - 1)
+})
 
 test("listExtensions reads the version line, the current pointer and the manifest", async () => {
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })

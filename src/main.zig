@@ -81,6 +81,7 @@ test {
     _ = @import("cli/remote.zig");
     _ = @import("cli/step_stream.zig");
     _ = @import("cli/ext.zig");
+    _ = @import("cli/members.zig");
     _ = @import("cli/ext_seed.zig");
     _ = @import("cli/config.zig");
     _ = @import("cli/skill.zig");

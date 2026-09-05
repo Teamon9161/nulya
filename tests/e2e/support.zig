@@ -165,6 +165,15 @@ pub fn runCli(
     return runCliEnvs(alloc, io, ws, argv, &.{});
 }
 
+/// The shell dialect a local Environment answers with on THIS machine — what a
+/// session composed here freezes, and what a composition test must hand
+/// `SessionComposition.init` so its answer is the one the CLI would give.
+pub fn hostDialect(alloc: std.mem.Allocator, io: std.Io) !environment.Dialect {
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    return lenv.dialect_val;
+}
+
 /// The `greet` fixture with its greeting text swapped, so two builds differ by
 /// observable output (and therefore by content-addressed version). The source
 /// stays a real, compilable single-file extension. Caller owns the bytes.

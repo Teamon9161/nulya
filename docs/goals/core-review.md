@@ -43,6 +43,16 @@ stdin/stdout/退出码、gate 只答 allow/deny、PromptIR 类型里没有不投
 4. **composition 词汇表巴洛克化。** 两根轴 × 三个来源 + surface 三词 + `recommended` + pin 蕴含成员
    + `apply` + `--bare`。`apply:"auto"` 为了避免读一次未验证 manifest，在 `current` 多写一列、
    `ActiveEntry` 多一字段、composition 多一整条 `resolveApplyAutoExtensions` 路径。
+   - **2026-09-04 修正（[ext-defaults.md](ext-defaults.md)）：这一条里 `apply` / `recommended` 那半是记账错误。**
+     两根轴该砍，砍了也确实干净；但这两个键不是第二根轴，是**同一根轴的安装时默认值**——包对
+     "装我的人多半想要什么"的表态，人两个方向都能推翻。Lane C 把它们一并删掉的后果是：`ext activate`
+     之后什么都没发生，一个纯 prompt 包要人再去 config 手写一行，而这一行与"装它"本就是同一个意图的两半。
+     恢复的形态**不是**把 §1.4 列的成本请回来：`current` 的 `apply=` 列、`ActiveEntry.standing`、
+     `resolveApplyAutoExtensions` 一个都没回来，composition 仍然只读成员表一处。回来的是两个
+     **安装时默认值**——`ext activate`（壳层）在移指针那一刻读一次，把结果写成用户 config 里的一行成员。
+     那份成本当年是自找的：为了省掉"读一次 manifest"才把状态复制进 `current`；读在 activate 里发生之后，
+     被它挡住的那个问题（[ext-syntax.md](ext-syntax.md) §5.2 的"篡改冻结 manifest 能悄悄关掉常驻 prompt"）
+     连同解药一起消失。**下一个读到这一条的人：删之前先看 DESIGN §17 那一行。**
 5. **`wsl` exec target 是半个 remote**，与已退役的 `ssh:` 同一种裂脑；`--env` 一个 flag 两族语义。
 6. **锁的动物园**没有集中声明；`session prune` 的 lifetime 冻结横跨 ledger / cli/task / remote。
 7. **内核往 stderr 打字**（`reportBrokenActive` 等三处 + `if (builtin.is_test) return`）。
