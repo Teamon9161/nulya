@@ -140,6 +140,40 @@ TUI 没在驱动的那些场里，只有 E2 答得出。
 （D1）· `cli/ext.zig` 内嵌的 `ext api manifest` 文本 · `docs/tui.md` §7（`--settings-help` 与
 `extensions/tui`）· `docs/PLAN.md`（若 §3 有对应占位则删）。
 
-## 4. 落地记录
+## 4. 落地记录（2026-09-05，内核那半）
 
-（待填）
+- **A · 不变量** ✅ 进 `CLAUDE.md` 工作约定，紧挨着「substrate 还是 intelligence」那条。
+- **B · `contributes.skills[].surface`** ✅ `manifest.SkillSurface{auto,reference}` + `SkillSpec{path,surface}`
+  + `surfaceOf()` + `InvalidSkillSurface`；条目「字符串或对象」照 `SystemPromptSpec` 的形状写（`dupSkills`
+  是 `dupSystemPrompts` 的同形）。落到模型面的那一步只有一处：`SkillDescriptor.reference` 一个字段，
+  `SkillSetSnapshot.catalogText` 一处过滤；`listActive` 不过滤。全是 `reference` 的一场**没有** catalog 块，
+  而不是一个空标题（`listed` 先数一遍）。`m.skills` 的五个既有消费者（`integrity` 三处、`skills.zig` 三处）
+  改成读 `spec.path`，没有第二处语义。
+- **落地时偏离契约一处**：§1 B 写的是「`composition.zig` 建 catalog 时过滤，`skill.zig` 的 `catalogText`
+  不变」。实际反过来——过滤在 `catalogText` 里，`composition.zig` 一个字未改。理由：`catalogText` 是
+  `<available_skills>` 的**唯一**产地，规则放在那里只有一处；放在 composition 则 snapshot 与它印出来的
+  东西开始不一致（快照里少了那条 skill，而 `skill load` 仍然要拿得到它），并且下一个建 catalog 的调用点
+  会把同一条规则抄第二遍。
+- **C · 解耦** ✅ 只是 B 的推论，没有单独的代码。
+- **D · `skill list` 说清两件事** ✅ `nulya help` 那行从「the skill catalog: one line per skill available
+  here」改成「every skill on this machine, worn this session or not」；输出多一列，值就是 manifest 的那两个词
+  （`cli/skill.zig` 的 `surfaceWord`，词表只有一处）。第四列是**追加**，既有的三列位置不变，所以按 tab 切前三个
+  字段的读者（`tui/src/nulya/cli.ts`）不受影响。
+- **E1 · `agent` 的定义手册** ✅ `extensions/agent/skills/writing-an-agent/`，标 `reference`。内容是
+  `defs.zig` 真正解析的那套方言：`name` / `description` / `permissions` / `runner` / `model` / `runner_model`
+  / `max_steps` / `max_exchanges` / `with` / `agents`，三层查找顺序，隐式档位那条，以及「写坏了会怎样」。
+  在此之前这套方言**只存在于本仓库源码里**——A 那条不变量当场就是破的。
+- **`ext api manifest`** ✅ 多说 `skills` 条目的两种形状（那段文本是 `cli/ext.zig` 内嵌的，与 manifest 同一个 commit 改）。
+
+验收：`zig build test` 623/627（4 skip）· `zig build e2e` 181/188（7 skip），两条都 exit 0。
+新增三处钉子：`manifest.zig` 一条（两种形状 + 错字 + 逃逸 + 重复 + 类型）· `skill.zig` 一条（catalog 过滤
+与「只剩手册就没有块」）· `bundled.zig` 一条（**每一个**自带 manifest 都 parse + validate，且 `agent` 的手册
+是 `reference`——有人把它改回 `auto` 就红）· e2e 两处（`ext_cli` 的封闭词表多一个 `InvalidSkillSurface` 案例；
+`extension.zig` 一条走完 build → 成员 composition 的 catalog → `skill list` → `skill load`）。
+
+### 还没做的（本轮**故意**留下）
+
+- **E2 · `tui.toml` 那条断链**（`nulya-tui --settings-help` + `extensions/tui` 的 thin `reference` skill）。
+  排在 ACP adapter 之后：两者都动 `tui/`，并发改是白痛苦。**A 那条不变量在这一处仍然是破的**，
+  E2 落地之前不要说它成立。
+- **F · ground 报出「谁在驱动」**。它是 E2 的锦上添花（三跳压成一跳），不能替代 E2，所以跟着 E2 一起做。

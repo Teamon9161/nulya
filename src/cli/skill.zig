@@ -4,6 +4,8 @@
 
 const std = @import("std");
 const ext_skills = @import("../extension/skills.zig");
+const skill_mod = @import("../skill.zig");
+const manifest = @import("../extension/manifest.zig");
 const common = @import("common.zig");
 const StoreView = common.StoreView;
 const cwdRealPath = common.cwdRealPath;
@@ -18,6 +20,12 @@ pub fn dispatchSkill(alloc: std.mem.Allocator, io: std.Io, args: []const []const
     return 1;
 }
 
+/// The word `skill list` prints for a skill's surface. The vocabulary is the
+/// manifest's own, so a reader who has seen one has seen the other.
+fn surfaceWord(s: skill_mod.SkillDescriptor) manifest.SkillSurface {
+    return if (s.reference) .reference else .auto;
+}
+
 fn skillList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     var view = try StoreView.open(alloc, io, try cwdRealPath(io, &cwd_buf));
@@ -30,7 +38,7 @@ fn skillList(alloc: std.mem.Allocator, io: std.Io) !u8 {
         return 0;
     }
     for (skills.skills) |s| {
-        try printOut(alloc, io, "{s}\t{s}\t{s}\n", .{ s.ref, s.name, s.description });
+        try printOut(alloc, io, "{s}\t{s}\t{s}\t{s}\n", .{ s.ref, s.name, s.description, @tagName(surfaceWord(s)) });
     }
     return 0;
 }

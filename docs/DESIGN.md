@@ -528,7 +528,7 @@ manifest 讲给四种听众，字段按哪个听众读它分层，每层守一�
   },
   "contributes": {
     "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }, "timeout_ms": 60000, "readonly": true, "surface": "manual", "ui": { "render": "checklist", "panel": true } }],
-    "skills": ["skills/risk-parity"],
+    "skills": ["skills/risk-parity", { "path": "skills/setup", "surface": "reference" }],
     "system_prompts": ["prompts/finance.md", { "path": "prompts/closing.md", "position": "late" }],
     "commands": [{ "name": "search", "description": "…", "action": { "run": "web_search" } }],
     "policy": { "readonly": true },
@@ -545,6 +545,7 @@ manifest 讲给四种听众，字段按哪个听众读它分层，每层守一�
 - `surface` 必须是 `auto` / `manual` / `internal` 之一，否则 `InvalidSurface`——**词表封闭**：一个想写 `internal` 的错字若被读成缺省，那个 driver tool 就上了模型面。
 - `entry` / `interpreter` 按平台声明成对象时只许脚本实现（`InvalidEntry`），且宿主 os 必须能选出一个变体（`EntryUnsupportedOnHost`，§7.1）。
 - `runtime.runs_on` 必须是 `workspace` / `session` 之一，否则 `InvalidRunsOn`——**词表封闭**，同 `surface` 的理由：一个想写 `session` 的错字被读成缺省，那个包就被送去它工作不了的机器上（§8.2）。
+- `contributes.skills` 的条目若写成对象，`surface` 必须是 `auto` / `reference` 之一（`InvalidSkillSurface`）——**词表封闭**，同 `surface` / `runs_on` 的理由：一个想写 `reference` 的错字被读成缺省，那份手册就回到了每一场的 prompt 里。
 - `entry` / skill / system_prompt / 每个 `ui` 条目的 `entry` 路径不能逃出包目录。
 - `system_prompts` 的条目若写成对象，`position` 必须是 `early` / `normal` / `late` 之一（`InvalidPromptPosition`）。
 - 命令 `name` 必须是 `[a-z0-9-]+` 且包内不重复（`InvalidCommandName` / `DuplicateCommandName`），`action` 必须**恰有一个键**（`InvalidCommandAction`），键是 `run` 时值必须是本包声明的 tool（`UnknownCommandTool`）。
@@ -552,7 +553,7 @@ manifest 讲给四种听众，字段按哪个听众读它分层，每层守一�
 
 **manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。**未知键一律忽略**，不留兼容垫片。
 
-**内核强制的那些**：`runtime.entry` / `.interpreter` 说的是**怎么跑这个 runtime**（§7.1）——怎么跟它说话不在 manifest 里，只有一种（§7.3）。`tools[].input` schema 只在该 tool 进了模型工具面时才喂给模型。`tools[].timeout_ms?` **只在它被放到模型工具面上的那次调用生效**（缺省 30s；`ext run` 不套用它）。`tools[].surface?` 是 §5.1 那张三行表；kernel 读并强制：选择只接受 `auto` / `manual`，任何成员都展开自己的 `auto`，resume 只重放 header `native_tools`。`skills` / `system_prompts` 是这个版本贡献的文件列表，随 build 冻结进快照。
+**内核强制的那些**：`runtime.entry` / `.interpreter` 说的是**怎么跑这个 runtime**（§7.1）——怎么跟它说话不在 manifest 里，只有一种（§7.3）。`tools[].input` schema 只在该 tool 进了模型工具面时才喂给模型。`tools[].timeout_ms?` **只在它被放到模型工具面上的那次调用生效**（缺省 30s；`ext run` 不套用它）。`tools[].surface?` 是 §5.1 那张三行表；kernel 读并强制：选择只接受 `auto` / `manual`，任何成员都展开自己的 `auto`，resume 只重放 header `native_tools`。`skills` / `system_prompts` 是这个版本贡献的文件列表，随 build 冻结进快照；`skills[].surface?` 是 §7.7 那根两值轴，kernel 读并强制（`auto` 随成员进 catalog，`reference` 永不进）。
 
 > **manifest 说不出"我进哪一场 session"，但说得出"装我的人多半想要什么"。** reach 那一个决定仍然只由成员表回答（`[extensions] with` / `session new --with`，§5.1）：**没有任何 manifest 字段进得了 composition 的解析路径。** 而 `apply` / `tools[].recommended` 是**安装时默认值**——`ext activate` 在移指针那一刻读一次（seal 校验之后），把结果写成成员表里人看得见的一行；此后再没有人读它们。所以事后篡改一个冻结的 manifest 改不动任何一场 session 的组成。
 
@@ -720,6 +721,8 @@ extension <id>: current points at <version>, which is broken (<err>); run 'nulya
 
 - 直接兼容 Agent Skills：`<name>/{SKILL.md, scripts/, references/, assets/}`，frontmatter 至少 `name` + `description`。
 - 渐进披露：session 开头 system block 里放 `<available_skills>` 摘要（name + description + `load:` 命令）；模型经 shell `nulya skill load <ref>` 拉完整 `SKILL.md`。`ref` 是冻结引用，隐藏物理路径。
+- **两值轴 `contributes.skills[].surface`（`auto` 缺省 / `reference`）**：`auto` 是上面那条渐进披露；`reference` 是**手册**——**永不**进 `<available_skills>`（是不是成员都不进），**永远**在 `nulya skill list` 与 `skill load` 里。落点是 `SkillDescriptor.reference` 一个字段 + `catalogText` 一处过滤（**只此一处**），`listActive` 不过滤——索引就是要看见全部。全是 `reference` 的一场**没有** catalog 块，而不是一个空标题。
+  之所以要这一档：一个包的**工具**必须在模型面上时（`agent` 是现成例子）它就必须是成员，而在此之前，成员资格同时决定了它的 skill 进不进 catalog——于是一份一百场里开一次的手册要花每一场一行注意力。两个问题就此解耦：**是否成员由工具面决定，skill 进不进 catalog 由 `surface` 决定。**
 - 当前 skill 只有 extension 一个来源，`SkillRegistry` 直接吃 `list/get`，**不抽 SkillProvider**。
 
 Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 registry，互不侵占模型工具面。

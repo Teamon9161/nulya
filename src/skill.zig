@@ -7,6 +7,10 @@ pub const SkillDescriptor = struct {
     ref: []const u8,
     name: []const u8,
     description: []const u8,
+    /// A manual rather than a method: it stays out of the session catalogue
+    /// and is reached by asking for it. Declared by the contributing package
+    /// (`contributes.skills[].surface`); every other producer leaves it false.
+    reference: bool = false,
 };
 
 pub const SkillSetSnapshot = struct {
@@ -21,12 +25,21 @@ pub const SkillSetSnapshot = struct {
         alloc.free(self.skills);
     }
 
+    /// The `<available_skills>` block, or null when this session has nothing
+    /// to advertise. `reference` skills are never advertised: they stay in the
+    /// snapshot and stay loadable by ref, and a set holding nothing else
+    /// yields no block at all rather than an empty heading.
     pub fn catalogText(self: SkillSetSnapshot, alloc: std.mem.Allocator) !?[]u8 {
-        if (self.skills.len == 0) return null;
+        var listed: usize = 0;
+        for (self.skills) |s| {
+            if (!s.reference) listed += 1;
+        }
+        if (listed == 0) return null;
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(alloc);
         try out.appendSlice(alloc, "Available skills:\n");
         for (self.skills) |s| {
+            if (s.reference) continue;
             try out.print(alloc, "- {s} — {s}\n  load: nulya skill load {s}\n", .{ s.name, s.description, s.ref });
         }
         return try out.toOwnedSlice(alloc);
@@ -108,6 +121,27 @@ pub fn deinitDescriptorArrayList(alloc: std.mem.Allocator, descriptors: *std.Arr
         alloc.free(s.description);
     }
     descriptors.deinit(alloc);
+}
+
+test "a reference skill is in the snapshot but not in the catalogue, and a set of only those has no catalogue" {
+    const alloc = std.testing.allocator;
+
+    const mixed = SkillSetSnapshot{ .skills = &.{
+        .{ .ref = "ext:a@v/method", .name = "method", .description = "how to work" },
+        .{ .ref = "ext:a@v/manual", .name = "manual", .description = "how to set up", .reference = true },
+    } };
+    const text = (try mixed.catalogText(alloc)).?;
+    defer alloc.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "method") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "manual") == null);
+
+    // Not an empty heading: a package whose only skill is a manual contributes
+    // nothing to advertise, and saying so with a header would spend the very
+    // attention `reference` exists to save.
+    const only = SkillSetSnapshot{ .skills = &.{
+        .{ .ref = "ext:a@v/manual", .name = "manual", .description = "how to set up", .reference = true },
+    } };
+    try std.testing.expect(try only.catalogText(alloc) == null);
 }
 
 test "parses minimal Agent Skill frontmatter" {

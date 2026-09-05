@@ -199,6 +199,46 @@ pub const SystemPromptSpec = struct {
     }
 };
 
+/// Does this skill ride membership onto the model's face, or does it only wait
+/// in the index?
+///
+///   - `auto`      : THE DEFAULT. A member package's skill enters the session's
+///                   `<available_skills>` catalogue, so the model sees its name
+///                   and description in every session that wears the package.
+///   - `reference` : a manual, consulted when somebody asks. NEVER in the
+///                   catalogue — not even when its package is a member — and
+///                   always in `nulya skill list` and `nulya skill load`.
+///
+/// The second word exists because a package whose TOOLS must be on the face
+/// (`agent` is the standing example) had no way to carry its own instructions
+/// without spending a line of every session's attention on a manual that one
+/// session in a hundred opens.
+pub const SkillSurface = enum {
+    auto,
+    reference,
+
+    pub fn fromString(s: []const u8) ?SkillSurface {
+        if (std.mem.eql(u8, s, "auto")) return .auto;
+        if (std.mem.eql(u8, s, "reference")) return .reference;
+        return null;
+    }
+};
+
+/// A bare path, or an object also carrying a `surface`; the bare form means
+/// `auto`:
+///
+///     "skills": ["skills/how-to-work", {"path": "skills/setup", "surface": "reference"}]
+pub const SkillSpec = struct {
+    path: []const u8,
+    /// Kept as WRITTEN; read through `surfaceOf`, which defaults `auto`.
+    surface: ?[]const u8 = null,
+
+    pub fn surfaceOf(self: SkillSpec) SkillSurface {
+        if (self.surface) |s| return SkillSurface.fromString(s).?;
+        return .auto;
+    }
+};
+
 /// Read by nobody but whoever draws a tool's calls on a screen.
 pub const ToolUi = struct {
     /// An OPEN vocabulary (`"checklist"`, `"markdown"`, …), kept as WRITTEN;
@@ -321,7 +361,7 @@ pub const Manifest = struct {
     apply: ?[]const u8 = null,
     runtime: ?Runtime,
     tools: []const ToolSpec,
-    skills: []const []const u8,
+    skills: []const SkillSpec,
     system_prompts: []const SystemPromptSpec,
     commands: []const Command = &.{},
     /// Null when `contributes.policy` was never written, so null and a
@@ -407,9 +447,15 @@ pub const Manifest = struct {
         }
 
         for (self.skills, 0..) |skill, i| {
-            if (!isSafeRelPath(skill)) return error.InvalidSkillPath;
+            if (!isSafeRelPath(skill.path)) return error.InvalidSkillPath;
+            // Refused rather than defaulted: a typo meaning `reference` would
+            // put a manual back on every session's face, and one meaning `auto`
+            // would hide a skill its author meant the model to see.
+            if (skill.surface) |w| {
+                if (SkillSurface.fromString(w) == null) return error.InvalidSkillSurface;
+            }
             for (self.skills[i + 1 ..]) |other| {
-                if (std.mem.eql(u8, skill, other)) return error.DuplicateSkillPath;
+                if (std.mem.eql(u8, skill.path, other.path)) return error.DuplicateSkillPath;
             }
         }
 
@@ -479,6 +525,7 @@ pub const ValidateError = error{
     InvalidApply,
     InvalidRecommended,
     InvalidSkillPath,
+    InvalidSkillSurface,
     DuplicateSkillPath,
     InvalidSystemPromptPath,
     DuplicateSystemPromptPath,
@@ -517,7 +564,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     const apply = try optionalString(a, obj, "apply");
     const runtime = try dupRuntime(a, obj);
     const tools = try dupTools(a, contributes);
-    const skills = try dupStringList(a, contributes, "skills");
+    const skills = try dupSkills(a, contributes);
     const system_prompts = try dupSystemPrompts(a, contributes);
     const commands = try dupCommands(a, contributes);
     const policy = try readPolicy(contributes);
@@ -660,6 +707,25 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
 
 /// A bare path, or an object with `path` plus optional `position`; anything
 /// else is a `WrongType`.
+fn dupSkills(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]const SkillSpec {
+    const list = switch (contributes.get("skills") orelse return a.alloc(SkillSpec, 0)) {
+        .array => |arr| arr,
+        else => return error.WrongType,
+    };
+    const out = try a.alloc(SkillSpec, list.items.len);
+    for (list.items, 0..) |v, i| {
+        out[i] = switch (v) {
+            .string => |str| .{ .path = try a.dupe(u8, str) },
+            .object => |o| .{
+                .path = try dupString(a, o, "path"),
+                .surface = try optionalString(a, o, "surface"),
+            },
+            else => return error.WrongType,
+        };
+    }
+    return out;
+}
+
 fn dupSystemPrompts(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]const SystemPromptSpec {
     const list = switch (contributes.get("system_prompts") orelse return a.alloc(SystemPromptSpec, 0)) {
         .array => |arr| arr,
@@ -862,7 +928,7 @@ test "parses and validates a well-formed manifest" {
     try std.testing.expectEqualStrings("web_search", m.tools[0].name);
     try std.testing.expect(std.mem.indexOf(u8, m.tools[0].input_schema, "query") != null);
     try std.testing.expectEqual(@as(usize, 1), m.skills.len);
-    try std.testing.expectEqualStrings("skills/search-review", m.skills[0]);
+    try std.testing.expectEqualStrings("skills/search-review", m.skills[0].path);
 }
 
 test "parses and validates a script runtime with an interpreter" {
@@ -1047,7 +1113,7 @@ test "validates a pure skill package without runtime" {
     try m.validate();
     try std.testing.expect(m.runtime == null);
     try std.testing.expectEqual(@as(usize, 0), m.tools.len);
-    try std.testing.expectEqualStrings("skills/risk-parity", m.skills[0]);
+    try std.testing.expectEqualStrings("skills/risk-parity", m.skills[0].path);
 }
 
 test "rejects wrong schema" {
@@ -1296,6 +1362,50 @@ test "a system prompt entry is a bare path or an object with a position; silence
 
     const wrong =
         \\{"schema":"nulya.extension/v2","id":"p","contributes":{"system_prompts":[42]}}
+    ;
+    try std.testing.expectError(error.WrongType, parse(alloc, wrong));
+}
+
+test "a skill entry is a bare path or an object with a surface; silence means auto and an unknown word is refused" {
+    const alloc = std.testing.allocator;
+
+    const mixed =
+        \\{"schema":"nulya.extension/v2","id":"s","contributes":{"skills":["skills/how",{"path":"skills/setup","surface":"reference"},{"path":"skills/plain"}]}}
+    ;
+    var m = try parse(alloc, mixed);
+    defer m.deinit();
+    try m.validate();
+    try std.testing.expectEqualStrings("skills/how", m.skills[0].path);
+    try std.testing.expectEqual(SkillSurface.auto, m.skills[0].surfaceOf());
+    try std.testing.expectEqual(SkillSurface.reference, m.skills[1].surfaceOf());
+    try std.testing.expect(m.skills[2].surface == null);
+    try std.testing.expectEqual(SkillSurface.auto, m.skills[2].surfaceOf());
+
+    // Refused, not defaulted: read as `auto` this manual would be back on every
+    // session's face, which is the whole cost the word exists to remove.
+    const typo =
+        \\{"schema":"nulya.extension/v2","id":"s","contributes":{"skills":[{"path":"skills/a","surface":"referrence"}]}}
+    ;
+    var t = try parse(alloc, typo);
+    defer t.deinit();
+    try std.testing.expectError(error.InvalidSkillSurface, t.validate());
+
+    const escape =
+        \\{"schema":"nulya.extension/v2","id":"s","contributes":{"skills":[{"path":"../evil","surface":"reference"}]}}
+    ;
+    var e = try parse(alloc, escape);
+    defer e.deinit();
+    try std.testing.expectError(error.InvalidSkillPath, e.validate());
+
+    const dup =
+        \\{"schema":"nulya.extension/v2","id":"s","contributes":{"skills":["skills/a",{"path":"skills/a","surface":"reference"}]}}
+    ;
+    var d = try parse(alloc, dup);
+    defer d.deinit();
+    try std.testing.expectError(error.DuplicateSkillPath, d.validate());
+
+    const wrong =
+        \\{"schema":"nulya.extension/v2","id":"s","contributes":{"skills":[42]}}
     ;
     try std.testing.expectError(error.WrongType, parse(alloc, wrong));
 }

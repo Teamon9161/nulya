@@ -133,7 +133,8 @@ pub fn collectPackageSnapshot(
         try collectTree(alloc, io, root, src_dir, "src", &files);
     }
 
-    for (m.skills) |skill_path| {
+    for (m.skills) |spec| {
+        const skill_path = spec.path;
         const skill_fs = try std.fs.path.join(alloc, &.{ ext_dir_rel, skill_path });
         defer alloc.free(skill_fs);
         const skill_rel = try canonicalRel(alloc, skill_path);
@@ -179,7 +180,8 @@ pub fn collectFrozenSnapshot(
         try collectTree(alloc, io, root, src_dir, "src", &files);
     }
 
-    for (m.skills) |skill_path| {
+    for (m.skills) |spec| {
+        const skill_path = spec.path;
         const skill_fs = try std.fs.path.join(alloc, &.{ version_rel, package_dir, skill_path });
         defer alloc.free(skill_fs);
         const skill_rel = try canonicalRel(alloc, skill_path);
@@ -417,7 +419,7 @@ fn requireDeclaredPaths(
     m: manifest.Manifest,
 ) !void {
     if (m.runtime != null) try requirePackagePath(alloc, io, root, version_rel, "src");
-    for (m.skills) |skill_path| try requirePackagePath(alloc, io, root, version_rel, skill_path);
+    for (m.skills) |spec| try requirePackagePath(alloc, io, root, version_rel, spec.path);
     for (m.system_prompts) |p| try requirePackagePath(alloc, io, root, version_rel, p.path);
     for (m.ui) |u| try requirePackagePath(alloc, io, root, version_rel, u.entry);
 }

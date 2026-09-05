@@ -369,6 +369,11 @@ test "a word outside a closed manifest vocabulary is refused before anything is 
         .{ .id = "old.driver", .body =
         \\{"schema":"nulya.extension/v2","id":"old.driver","runtime":{"entry":"src/run.sh","interpreter":"sh"},"contributes":{"tools":[{"name":"t","surface":"driver","input":{}}]}}
         , .err = "InvalidSurface" },
+        // A skill's surface is closed for the same reason from the other
+        // side: read as the default, a manual is back on every session's face.
+        .{ .id = "bad.manual", .body =
+        \\{"schema":"nulya.extension/v2","id":"bad.manual","contributes":{"skills":[{"path":"skills/manual","surface":"referrence"}]}}
+        , .err = "InvalidSkillSurface" },
     }) |bad| {
         const draft = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", bad.id });
         defer alloc.free(draft);
@@ -387,6 +392,12 @@ test "a word outside a closed manifest vocabulary is refused before anything is 
         const tone_path = try std.fs.path.join(alloc, &.{ prompts, "tone.md" });
         defer alloc.free(tone_path);
         try ws.writeFile(io, .{ .sub_path = tone_path, .data = "TONE\n" });
+        const skill_dir = try std.fs.path.join(alloc, &.{ draft, "skills", "manual" });
+        defer alloc.free(skill_dir);
+        try ws.createDirPath(io, skill_dir);
+        const skill_md = try std.fs.path.join(alloc, &.{ skill_dir, "SKILL.md" });
+        defer alloc.free(skill_md);
+        try ws.writeFile(io, .{ .sub_path = skill_md, .data = "---\nname: manual\ndescription: a manual\n---\nbody\n" });
 
         const argv = [_][]const u8{ exe_abs, "ext", "build", draft };
         const refused = try runCli(alloc, io, ws, &argv);

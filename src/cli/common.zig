@@ -344,7 +344,7 @@ pub const config_usage =
 ;
 
 pub const skill_usage =
-    \\  nulya skill list                                  the skill catalog: one line per skill available here
+    \\  nulya skill list                                  every skill on this machine, worn this session or not
     \\  nulya skill load <skill-ref>                      print one frozen SKILL.md in full
     \\
 ;

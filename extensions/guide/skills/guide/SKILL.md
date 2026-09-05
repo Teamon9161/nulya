@@ -44,8 +44,13 @@ help` in PowerShell. Below, `nulya` means whichever of the two applies.
   and `max_tools`, and the config paths in use. Never a secret.
 - `nulya session list` (add `--json`) — every session here: composition, event
   count, cost, fork root, latest verdict.
-- `nulya skill list` — the catalog; `nulya skill load <ref>` prints one frozen
-  `SKILL.md` in full.
+- `nulya skill list` — **every skill on this machine**: one line per skill of
+  every package a `current` here points at, whether or not this session wears
+  it. The last column is `auto` (it is in the session catalogue of any member
+  that carries it) or `reference` (a manual — never in the catalogue, always
+  here). `nulya skill load <ref>` prints one frozen `SKILL.md` in full. So to
+  configure a package this session is NOT wearing: list, load, and follow what
+  that package says about itself.
 
 ## Configuring
 
@@ -252,6 +257,15 @@ Store and scope:
   `---`, then the body. Only name and description enter a session, one catalog
   line each; the body is read on demand with `nulya skill load <ref>`. Put the
   recipes in the body — that is what makes a skill cheap to carry.
+- A `contributes.skills` entry is a bare path or `{"path": "<p>", "surface":
+  "auto"|"reference"}`. `auto` is the default and costs that one catalog line in
+  every session wearing the package. `reference` costs nothing there: it is a
+  manual, out of the catalogue entirely, found through `nulya skill list` and
+  read with `skill load`. Write `reference` for the page nobody needs until they
+  ask — how to configure this package, what its file format is — especially when
+  the package's TOOLS must be on the face anyway, which is the case where not
+  being a member is not an option. `extensions/agent` carries its definition
+  format that way.
 - A `system_prompt` is the opposite: every byte joins the system blocks of
   every session that package is a member of, and is paid for on every step.
 - A mode is a data extension contributing a system prompt. Out of `[extensions]

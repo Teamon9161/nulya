@@ -1555,7 +1555,11 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  <id>:<tool>`; `internal` = never on the model face, called
             \\  through `nulya ext run`) / `.timeout_ms` (this tool's own cap on a
             \\  MODEL-FACE call, default 30s, ceiling 600s);
-            \\  `skills`; `system_prompts`, whose entries are a bare path or
+            \\  `skills`, whose entries are a bare path or `{"path": "<p>", "surface":
+            \\  "auto"|"reference"}` — `auto` is the default and puts a member package's
+            \\  skill in the session catalogue, `reference` is a manual that stays out of
+            \\  it and is reached through `nulya skill list` / `skill load`;
+            \\  `system_prompts`, whose entries are a bare path or
             \\  `{"path": "<p>", "position": "early"|"normal"|"late"}` — `normal` is the
             \\  default, and the three words order this package's blocks against the
             \\  OTHER packages' only: the kernel's own block stays first, `session new

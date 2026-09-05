@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const embed = @import("ext_embed");
+const manifest = @import("extension/manifest.zig");
 
 /// Every embedded draft file, sorted by path. Paths are relative to the repo's
 /// `extensions/` directory and slash-normalized, so the first component is the
@@ -37,6 +38,38 @@ pub fn has(id: []const u8) bool {
         if (std.mem.eql(u8, idOf(f.path), id)) return true;
     }
     return false;
+}
+
+test "every bundled manifest validates, and agent ships its authoring manual as a reference skill" {
+    const alloc = std.testing.allocator;
+    var checked: usize = 0;
+    for (files) |f| {
+        if (!std.mem.endsWith(u8, f.path, "/extension.json")) continue;
+        checked += 1;
+        var m = manifest.parse(alloc, f.bytes) catch |err| {
+            std.debug.print("bundled {s} does not parse: {t}\n", .{ f.path, err });
+            return err;
+        };
+        defer m.deinit();
+        m.validate() catch |err| {
+            std.debug.print("bundled {s} does not validate: {t}\n", .{ f.path, err });
+            return err;
+        };
+
+        // `agent`'s tool must be on the model's face, so the package is a
+        // member of every session that delegates. Its authoring manual rides
+        // that membership and must NOT ride it onto the catalogue: one line of
+        // every session's attention for a page opened once in a hundred.
+        if (!std.mem.eql(u8, m.id, "agent")) continue;
+        var manual = false;
+        for (m.skills) |spec| {
+            if (!std.mem.endsWith(u8, spec.path, "writing-an-agent")) continue;
+            manual = true;
+            try std.testing.expectEqual(manifest.SkillSurface.reference, spec.surfaceOf());
+        }
+        try std.testing.expect(manual);
+    }
+    try std.testing.expect(checked >= 8);
 }
 
 test "bundled drafts include every one the repo ships, each with a manifest at its root" {

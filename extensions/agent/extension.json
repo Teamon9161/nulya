@@ -6,6 +6,7 @@
     "runs_on": "session"
   },
   "contributes": {
+    "skills": [{ "path": "skills/writing-an-agent", "surface": "reference" }],
     "tools": [
       {
         "name": "agent",

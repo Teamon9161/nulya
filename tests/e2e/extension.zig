@@ -732,6 +732,84 @@ test "extension store: bytes live in one store, and a workspace pointer decides 
     try std.testing.expectError(error.WithVersionNotFound, composition.SessionComposition.init(alloc, io, ws_path, "nowhere", host_dialect, .{ .with = named }));
 }
 
+test "a reference skill is a manual: never in a session catalogue, always in `skill list`, always loadable" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+
+    // One package, two skills: a method that rides membership onto the model's
+    // face and a manual that must not.
+    const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "manuals";
+    for ([_][]const u8{ "method", "setup" }) |name| {
+        const dir = try std.fs.path.join(alloc, &.{ draft, "skills", name });
+        defer alloc.free(dir);
+        try ws.createDirPath(io, dir);
+        const md = try std.fs.path.join(alloc, &.{ dir, "SKILL.md" });
+        defer alloc.free(md);
+        const body = try std.fmt.allocPrint(alloc, "---\nname: {s}\ndescription: the {s} page\n---\nbody of {s}\n", .{ name, name, name });
+        defer alloc.free(body);
+        try ws.writeFile(io, .{ .sub_path = md, .data = body });
+    }
+    const manifest_rel = try std.fs.path.join(alloc, &.{ draft, "extension.json" });
+    defer alloc.free(manifest_rel);
+    try ws.writeFile(io, .{ .sub_path = manifest_rel, .data =
+        \\{"schema":"nulya.extension/v2","id":"manuals","contributes":{"skills":["skills/method",{"path":"skills/setup","surface":"reference"}]}}
+    });
+
+    const draft_abs = try support.absIn(alloc, io, ws, draft);
+    defer alloc.free(draft_abs);
+    const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft_abs });
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+    try support.activateInStore(alloc, io, ws, "manuals", version);
+
+    // Wearing the package: BOTH descriptors are in the frozen snapshot, and
+    // only the method reaches the catalogue the model reads.
+    {
+        const host_dialect = try support.hostDialect(alloc, io);
+        const named: []const composition.WithRef = &.{.{ .id = "manuals" }};
+        var comp = try composition.SessionComposition.init(alloc, io, ws_path, support.store_rel, host_dialect, .{ .with = named });
+        defer comp.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 2), comp.skills.skills.len);
+
+        const catalog = (try comp.skills.catalogText(alloc)).?;
+        defer alloc.free(catalog);
+        try std.testing.expect(std.mem.indexOf(u8, catalog, "method") != null);
+        try std.testing.expect(std.mem.indexOf(u8, catalog, "setup") == null);
+    }
+
+    // The index answers for both, and says which is which — no session is in
+    // sight here, so membership never entered into it.
+    {
+        const listed = try runCli(alloc, io, ws, &.{ exe_abs, "skill", "list" });
+        defer alloc.free(listed.stdout);
+        try std.testing.expectEqual(@as(u8, 0), listed.code);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "method") != null);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "setup") != null);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "reference") != null);
+
+        const ref = try std.fmt.allocPrint(alloc, "ext:manuals@{s}/setup", .{version});
+        defer alloc.free(ref);
+        const load = try runCli(alloc, io, ws, &.{ exe_abs, "skill", "load", ref });
+        defer alloc.free(load.stdout);
+        try std.testing.expectEqual(@as(u8, 0), load.code);
+        try std.testing.expect(std.mem.indexOf(u8, load.stdout, "body of setup") != null);
+    }
+}
+
 test "cli: the store is one place and the pointer layer is a column — ext list / skill list / activate / deactivate all read it" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

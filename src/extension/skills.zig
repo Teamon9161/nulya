@@ -49,7 +49,8 @@ pub fn appendFromManifest(
     version: []const u8,
     m: manifest.Manifest,
 ) !void {
-    for (m.skills) |skill_path| {
+    for (m.skills) |spec| {
+        const skill_path = spec.path;
         const expected_name = basename(skill_path) orelse return error.InvalidSkillDirectoryName;
         if (!skill.isValidName(expected_name)) return error.InvalidSkillDirectoryName;
 
@@ -73,6 +74,7 @@ pub fn appendFromManifest(
             .ref = ref,
             .name = name,
             .description = description,
+            .reference = spec.surfaceOf() == .reference,
         });
     }
 }
@@ -81,7 +83,8 @@ pub fn validateSnapshot(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot
     var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(alloc);
 
-    for (m.skills) |skill_path| {
+    for (m.skills) |spec| {
+        const skill_path = spec.path;
         const expected_name = basename(skill_path) orelse return error.InvalidSkillDirectoryName;
         if (!skill.isValidName(expected_name)) return error.InvalidSkillDirectoryName;
 
@@ -164,7 +167,8 @@ fn readSkillBody(
     parsed: ParsedRef,
     m: manifest.Manifest,
 ) ![]u8 {
-    for (m.skills) |skill_path| {
+    for (m.skills) |spec| {
+        const skill_path = spec.path;
         const expected_name = basename(skill_path) orelse return error.InvalidSkillDirectoryName;
         if (!std.mem.eql(u8, expected_name, parsed.name)) continue;
 

@@ -82,7 +82,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `extension/store.zig` `site.zig` `integrity.zig` | 版本目录（一台机器一个 store）+ 两层 `current` 指针 + `Diag`（error 装不下的那句话的唯一出口） | 字节只有一处，指针有两层且 workspace 压 user；`current` 授 reach，`.sealed` 证明资格；内核不选 `Diag` 的目的地，缺省不发一个字（写 stderr 的 sink 是 `cli/common.stderr_diag`） |
 | `extension/build/` | 冻结 snapshot → 编译或直接冻结 → seal | version = hash(snapshot + compiler + target)，后两项只对 compiled 非空 |
 | `extension/exec.zig` `tools.zig` `skills.zig` `notes.zig` | 执行身份解析 / tool binding / skill catalog / 能力宣告 note | 哪个文件、哪个 entry、seal 对不对，由**持有字节的那台机器**答 |
-| `skill.zig` | `SkillSetSnapshot` + 渐进披露文本 | Agent Skills 兼容（`SKILL.md` frontmatter） |
+| `skill.zig` | `SkillSetSnapshot` + 渐进披露文本 | Agent Skills 兼容（`SKILL.md` frontmatter）；`reference` 的 skill 不进 `<available_skills>` 而永远在 `skill list` 里，过滤**只在 `catalogText` 一处**（`listActive` 不过滤） |
 | `journals/journal.zig` | 两条 journal 共用的文件层与时钟 | append 持锁并修残尾，读端不拿锁且忽略残尾；文件不存在 = 还没有事实 |
 | `journals/{tool_stats,outcome}.zig` | 证据 / 评判 | 都只加可选列、不升 `v`；没有行 = unknown ≠ failure |
 | `cli/members.zig` | user config 的 `[extensions] with`：按行外科手术改一个键 | 写完必须读回来核对，对不上就把原字节放回去；这个文件之外的每个字节都要原样活下来 |
@@ -119,6 +119,7 @@ Zig 0.16（新 `std.Io` API）。发布版加 `-Dembed-toolchain -Dzig-archive=<
 
 - **注释只写代码说不出来的东西**（契约：`docs/goals/comments.md`）。写：不变量与顺序、非显然的取舍、外部约束、格式契约。不写：复述代码、为什么没写成另一种样子、某段代码曾经是什么样、以及**任何文档指针**。**代码不引用文档，文档引用代码**——`nulya src` 的读者打不开 docs，`DESIGN §8.1` 对他是悬空指针；一条注释若离开那个 §x 就不成立，说明事实还没写出来，把事实写进去、指针删掉。模块头 **≤ 15 行**；例外是**契约模块**——一个模块的头如果就是被打印出去、由读它的人照着实现的规格，它可以更长，但只写规格、不写规格的辩护（今天有四个：`extension/protocol.zig`、`environment/remote/protocol.zig`、`extensions/agent/src/external.zig`、`lease.zig` 那张锁顺序表）。一条规则只说一次，在它定义的地方；重复三遍说明该抽出一个有名字的东西。设计论证归 commit message 与 `docs/goals/`，不进源文件。代码注释英文，docs 中文；测试与模块同文件（`test "..."`）。
 - **不加第二个 builtin tool**（`shell` 是唯一那个；`edit` 已搬进 `extensions/std`）；**不在 session 中途改 `tools[]`**；**不给 tool ledger**（需要对话的东西是 subagent，不是 tool）。
+- **每一个用户可见的可配置面，都必须能从 `nulya help` 出发、在有限跳内、不读本仓库源码地到达一份与代码同源的说明。** 两个限定词都承重：**有限跳**（不是「理论上可达」）· **与代码同源**（不是抄本——抄本会腐，而腐掉的说明比没有说明更贵）。新增一个可配置面时同时说出它那条链，说不出就是没做完。每个包自己的配置由**那个包自己的 skill** 讲（一百场里用一次的那种标 `surface: "reference"`，不占 catalog 一行），`guide` 只讲机制、不复制任何一个包的格式——一份罗列每个包配置格式的 guide 会在那个包的下一个版本发布时过期。
 - 新增 kernel 概念前先问一句：**这是 substrate 还是 intelligence？** 是 intelligence 就放 kernel 之上。
 - **内核只长 substrate，不长便利。** 往 `src/` 加东西前问：把它删掉，八条 physics 哪一条会失效？一条都不会 → 它不是内核。落点优先级：extension / skill（agent 自己造）> `cli.zig` / `launch.zig` 这类外壳 > kernel 模块。std 能做的不手写（`std.json` 类型化编解码、`union(enum)`）；一个字段只写不读、一个动词没有语义、一个决定在多层各做一遍、一个读者拿着写句柄——都是该删或该收的信号。
 - **欠答案的机制长成 inbox 事件**（任务报告 `note{source:"task"}` 是先例），不长成 driver 要认的新盘面文件：靠某个目录里的文件形态传递"结果稍后到"，每个 driver（TUI / `drivers/goal.sh` / `goal.ps1` / 下一个）都要重学一遍同一份 folklore，跨平台就是两份实现。今天仓库里一个这种形状都没有，别造第一个——"模型提议、driver 决定"的回路，提议的落点是 ledger（args）或 inbox 事件。
