@@ -377,7 +377,8 @@ pub fn usage(io: std.Io) !u8 {
         \\  nulya help                                        this text, which a bare `nulya` prints too
         \\  nulya demo                                        one fixed-prompt session, end to end, to see it work
         \\
-        \\a fuller reference ships with the nulya repo, as an extension you install once:
+        \\a fuller reference is the `guide` skill — `nulya skill list` says whether it is already
+        \\here, `nulya skill load <its ref>` prints it. If it is not, it ships with this repo:
         \\  nulya ext build extensions/guide     then     nulya ext activate --user guide <version>
         \\
     );
