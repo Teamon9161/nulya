@@ -105,14 +105,19 @@ fn render(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Rendered, failed
     }
     const entry = (try defs.find(alloc, ctx.io, ctx.env, name)) orelse {
         const known = try availableAgentsSummary(alloc, ctx.io, ctx.env);
+        // Name the directories that were read. A definition written moments ago
+        // and still not found is nearly always sitting in a `.nulya/agents`
+        // under some OTHER directory — the shell that wrote it chose its own
+        // cwd, and this delegation's workspace is the one below.
+        const where = try defs.searchedDirs(alloc, ctx.io, ctx.env);
         return .{ .failed = if (known.len == 0)
             try std.fmt.allocPrint(
                 alloc,
-                "no agent '{s}': this workspace defines no agents at all. Definitions are markdown files in {s}/ or in this machine's agents directory; without one there is nobody to delegate to, so do the work yourself.",
-                .{ name, defs.project_dir },
+                "no agent '{s}': no definitions in {s}. Definitions are markdown files there; without one there is nobody to delegate to, so do the work yourself.",
+                .{ name, where },
             )
         else
-            try std.fmt.allocPrint(alloc, "no agent '{s}'. Available: {s}. For the full catalogue, run `nulya ext run agent list` with shell.", .{ name, known }) };
+            try std.fmt.allocPrint(alloc, "no agent '{s}'. Available: {s}. Looked in {s}. For the full catalogue, run `nulya ext run agent list` with shell — from that same workspace, or it reads a different directory.", .{ name, known, where }) };
     };
 
     const def = entry.def;

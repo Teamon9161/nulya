@@ -21,6 +21,14 @@ Flat, `.md` only, one definition per file. The loser of a name collision is
 never dropped, only marked `shadowed`; `nulya ext run agent list` shows every
 definition, its layer and what it resolved to.
 
+`.nulya/agents/` is relative to **the workspace this session was opened in**,
+which is not necessarily the cwd your shell calls are running in. Write the file
+with an absolute path, or with the same cwd the session reports as its working
+directory; a definition under any other directory is invisible to `agent{name}`
+even though a `list` run from that directory will happily show it. Definitions
+are read fresh every delegation, so there is nothing to reload once it is in the
+right place.
+
 ## Front matter
 
 The dialect is deliberately small: `key: value`, `key: [a, b]`, and the `- item`

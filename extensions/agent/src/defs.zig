@@ -425,6 +425,22 @@ pub fn userDir(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) !?
     return try std.fs.path.join(alloc, &.{ home, ".nulya", "agents" });
 }
 
+/// The directories `discover` reads, spelled absolutely, for the message a
+/// caller gets when its name was not in any of them. The workspace one is
+/// relative to THIS process's cwd — the delegation's workspace, which is not
+/// necessarily the cwd of the shell the caller has been running commands in, so
+/// a relative spelling here would name a different directory for every reader.
+pub fn searchedDirs(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    if (std.Io.Dir.cwd().realPathFileAlloc(io, ".", alloc)) |cwd| {
+        try out.writer.writeAll(try std.fs.path.join(alloc, &.{ cwd, project_dir }));
+    } else |_| {
+        try out.writer.writeAll(project_dir);
+    }
+    if (try userDir(alloc, env)) |dir| try out.writer.print(" and {s}", .{dir});
+    return try out.toOwnedSlice();
+}
+
 /// One definition, as discovery found it.
 pub const Entry = struct {
     def: Def,
