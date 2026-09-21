@@ -338,7 +338,7 @@ pub const journal_usage =
 ;
 
 pub const config_usage =
-    \\  nulya config show [--json]                        effective profiles, model catalog and members; never a secret
+    \\  nulya config show [--json]                        effective profiles, new-session defaults, catalog and members; never a secret
     \\  nulya config refresh [--json]                     ask a subscription endpoint for today's models, then show
     \\
 ;

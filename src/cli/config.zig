@@ -241,7 +241,7 @@ fn refreshCodexCatalogs(
 
 fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
     try w.print("config files (later layers override; only the project one is untrusted):\n  system   {s}\n  user     {s}\n  project  {s}\n\n", .{ view.paths.system, view.paths.user, view.paths.project });
-    try w.print("active profile: {s}\n\nprofiles:\n", .{view.active_profile});
+    try w.print("default profile: {s}\n\nprofiles:\n", .{view.active_profile});
     for (view.profiles) |p| {
         try w.print("  {s: <20} {s: <10} {s}", .{ p.name, p.kind, if (p.credential) "ready  " else "no key " });
         if (std.mem.eql(u8, p.credential_source, "config")) {
@@ -252,7 +252,7 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
             try w.writeAll(" ~/.codex/auth.json");
         }
         if (p.effort) |e| try w.print(" effort={s}", .{e});
-        try w.print("\n      model: {s}", .{p.model});
+        try w.print("\n      default model: {s}", .{p.model});
         // A profile with its own catalogue prints it in full below; those ids
         // are NOT described by the shared catalog at the bottom.
         if (p.catalog == null and p.models.len > 1) {

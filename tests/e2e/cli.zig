@@ -349,7 +349,14 @@ test "cli config show: both forms project the effective composition, so today's 
     const text = try runCli(alloc, io, ws, &.{ exe_abs, "config", "show" });
     defer alloc.free(text.stdout);
     try std.testing.expectEqual(@as(u8, 0), text.code);
-    for ([_][]const u8{ "registry:", "max_tools", "extensions:", "date.now:print_date" }) |needle| {
+    for ([_][]const u8{
+        "default profile:",
+        "default model:",
+        "registry:",
+        "max_tools",
+        "extensions:",
+        "date.now:print_date",
+    }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, text.stdout, needle) != null) catch |err| {
             std.debug.print("`config show` never mentions '{s}'\n", .{needle});
             return err;
