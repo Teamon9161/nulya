@@ -67,14 +67,19 @@ pub fn ensureExtracted(alloc: std.mem.Allocator, io: std.Io, data_dir: std.Io.Di
     if (archive_is_zip) {
         try extractZip(alloc, io, data_dir, rel, dest);
     } else {
-        try extractTarXz(alloc, io, dest);
+        try extractTarXz(alloc, io, data_dir, rel, dest);
     }
 
     try data_dir.writeFile(io, .{ .sub_path = ok_marker, .data = "" });
     return try zigExeAbsPath(alloc, io, data_dir, rel);
 }
 
-fn extractTarXz(alloc: std.mem.Allocator, io: std.Io, dest: std.Io.Dir) !void {
+fn extractTarXz(alloc: std.mem.Allocator, io: std.Io, data_dir: std.Io.Dir, rel: []const u8, dest: std.Io.Dir) !void {
+    // macOS's Zig 0.16.0 release build aborts inside the std tar/xz extractor
+    // on the official Zig archive. The system tar also preserves executable
+    // permissions and symlinks from that archive.
+    if (builtin.os.tag == .macos) return extractTarXzWithSystemTar(alloc, io, data_dir, rel);
+
     var input = std.Io.Reader.fixed(embedded_archive);
     const window = try alloc.alloc(u8, 1 << 20);
     defer alloc.free(window);
@@ -82,6 +87,25 @@ fn extractTarXz(alloc: std.mem.Allocator, io: std.Io, dest: std.Io.Dir) !void {
     // `strip_components = 1` drops the leading `zig-<target>-<ver>/` so the
     // executable lands directly at `<dest>/zig`.
     try std.tar.extract(io, dest, &xz.reader, .{ .strip_components = 1 });
+}
+
+fn extractTarXzWithSystemTar(alloc: std.mem.Allocator, io: std.Io, data_dir: std.Io.Dir, rel: []const u8) !void {
+    const tmp_rel = try std.fs.path.join(alloc, &.{ rel, ".archive.tar.xz" });
+    defer alloc.free(tmp_rel);
+    try data_dir.writeFile(io, .{ .sub_path = tmp_rel, .data = embedded_archive });
+    defer data_dir.deleteFile(io, tmp_rel) catch {};
+
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_len = try data_dir.realPath(io, &real_buf);
+    const base = real_buf[0..base_len];
+    const archive_path = try std.fs.path.join(alloc, &.{ base, tmp_rel });
+    defer alloc.free(archive_path);
+    const dest_path = try std.fs.path.join(alloc, &.{ base, rel });
+    defer alloc.free(dest_path);
+
+    var child = try std.process.spawn(io, .{ .argv = &.{ "tar", "-xJf", archive_path, "-C", dest_path, "--strip-components=1" } });
+    const term = try child.wait(io);
+    if (term != .exited or term.exited != 0) return error.TarExtractionFailed;
 }
 
 fn extractZip(alloc: std.mem.Allocator, io: std.Io, data_dir: std.Io.Dir, rel: []const u8, dest: std.Io.Dir) !void {
