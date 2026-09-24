@@ -46,14 +46,14 @@ jobs:
             asset: nulya-x86_64-linux
             tui_asset: nulya-tui-x86_64-linux
             binary: nulya
-            bun_target: bun-linux-x64-musl
+            bun_target: bun-linux-x64
           - runner: ubuntu-latest
             target: aarch64-linux-musl
             archive: aarch64-linux
             asset: nulya-aarch64-linux
             tui_asset: nulya-tui-aarch64-linux
             binary: nulya
-            bun_target: bun-linux-arm64-musl
+            bun_target: bun-linux-arm64
           - runner: macos-14
             target: x86_64-macos
             archive: x86_64-macos

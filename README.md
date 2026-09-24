@@ -66,7 +66,8 @@ Release builds embed the pinned Zig toolchain:
 Release assets contain two executables for Linux, macOS, and Windows on x86_64
 and aarch64: `nulya` (the kernel, carrying Zig 0.16.0) and `nulya-tui` (the
 compiled frontend, carrying Bun). The installers place both in the same
-directory. No separate Zig or Bun installation is needed.
+directory. No separate Zig or Bun installation is needed. The Linux TUI targets
+glibc; the kernel itself remains statically linked.
 
 On Linux or macOS:
 
