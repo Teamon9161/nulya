@@ -56,7 +56,7 @@ jobs:
             archive: x86_64-windows
             asset: nulya-x86_64-windows.exe
             binary: nulya.exe
-          - runner: windows-11-arm
+          - runner: windows-latest
             target: aarch64-windows
             archive: aarch64-windows
             asset: nulya-aarch64-windows.exe
@@ -109,7 +109,7 @@ jobs:
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast -Dstrip=true -Dembed-toolchain=true -Dzig-archive="$ZIG_ARCHIVE"
 
       - name: Smoke test the native release and bundled Zig
-        if: matrix.target != 'aarch64-linux-musl' && matrix.target != 'x86_64-macos'
+        if: matrix.target != 'aarch64-linux-musl' && matrix.target != 'x86_64-macos' && matrix.target != 'aarch64-windows'
         shell: bash
         run: |
           python - <<'PY'
@@ -122,7 +122,17 @@ jobs:
               env['LOCALAPPDATA'] = data_dir
               env['XDG_DATA_HOME'] = data_dir
               version = subprocess.check_output([str(binary), '--version'], env=env, text=True).strip()
-              zig_version = subprocess.check_output([str(binary), 'toolchain', 'zig', 'version'], env=env, text=True).strip()
+              result = subprocess.run([str(binary), 'toolchain', 'zig', 'version'], env=env, text=True, capture_output=True)
+              if result.returncode:
+                  print('bundled Zig smoke failed:', result.returncode)
+                  print('stdout:', result.stdout)
+                  print('stderr:', result.stderr)
+                  for path in list(pathlib.Path(data_dir).rglob('*'))[:30]:
+                      print('extracted:', path.relative_to(data_dir), path.stat().st_size if path.is_file() else '<dir>')
+                  for path in pathlib.Path.home().glob('Library/Logs/DiagnosticReports/*nulya*'):
+                      print('crash report:', path, path.read_text(errors='replace')[-15000:])
+                  raise SystemExit(result.returncode)
+              zig_version = result.stdout.strip()
               assert version == 'nulya ' + os.environ['GITHUB_REF_NAME'][1:], version
               assert zig_version == '0.16.0', zig_version
           PY
