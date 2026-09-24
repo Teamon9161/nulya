@@ -28,7 +28,7 @@ function findBuiltBinary(start: string): string | null {
 }
 
 /**
- * NULYA_BIN wins; then a `zig-out/bin/` build at or above the workspace; then
+ * NULYA_BIN wins; then a colocated release binary; then a `zig-out/bin/` build at or above the workspace; then
  * one at or above this package (running the TUI from `tui/` inside the repo);
  * then PATH. Throws with all three candidates named when nothing resolves —
  * "binary not found" is the first thing a new user hits.
@@ -40,6 +40,8 @@ export function resolveBin(workspaceDir: string, env: Record<string, string | un
     if (!existsSync(path)) throw new Error(`NULYA_BIN points at '${path}', which does not exist`)
     return path
   }
+  const adjacent = join(dirname(process.execPath), exe)
+  if (existsSync(adjacent)) return adjacent
   const built = findBuiltBinary(workspaceDir) ?? findBuiltBinary(import.meta.dir)
   if (built) return built
   const onPath = Bun.which(exe) ?? Bun.which("nulya")

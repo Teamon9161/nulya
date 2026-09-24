@@ -16,6 +16,7 @@
  * actually run here, the picker is the first thing on screen.
  */
 import { render } from "@opentui/solid"
+import packageJson from "../package.json"
 import { openWorkspace, type Workspace } from "./nulya/bin.ts"
 import { configShow } from "./nulya/cli.ts"
 import { sessionExists } from "./nulya/files.ts"
@@ -93,6 +94,7 @@ function parseArgs(argv: string[]): Args {
  * here rather than restating what `tui.toml` takes.
  */
 function answeredOnStdout(argv: readonly string[], cwd: string): string | null {
+  if (argv.includes("--version")) return `nulya-tui ${packageJson.version}\n`
   if (argv.includes("--settings-help")) return tuiSettingsHelp(cwd)
   if (argv.includes("--help") || argv.includes("-h")) {
     return [

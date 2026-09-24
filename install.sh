@@ -17,6 +17,7 @@ case "$(uname -m)" in
 esac
 
 asset="nulya-$arch-$os"
+tui_asset="nulya-tui-$arch-$os"
 if [ "$version" = latest ]; then
     base="https://github.com/$repo/releases/latest/download"
 else
@@ -38,15 +39,39 @@ download() {
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 download "$base/$asset" "$tmp/$asset"
+download "$base/$tui_asset" "$tmp/$tui_asset"
 download "$base/checksums.txt" "$tmp/checksums.txt"
-expected="$(awk -v name="$asset" '$2 == name { print $1; exit }' "$tmp/checksums.txt")"
-[ -n "$expected" ] || { echo "checksum missing for $asset" >&2; exit 1; }
-if command -v sha256sum >/dev/null 2>&1; then
-    actual="$(sha256sum "$tmp/$asset" | awk '{ print $1 }')"
-else
-    actual="$(shasum -a 256 "$tmp/$asset" | awk '{ print $1 }')"
-fi
-[ "$expected" = "$actual" ] || { echo "checksum mismatch for $asset" >&2; exit 1; }
+for file in "$asset" "$tui_asset"; do
+    expected="$(awk -v name="$file" '$2 == name { print $1; exit }' "$tmp/checksums.txt")"
+    [ -n "$expected" ] || { echo "checksum missing for $file" >&2; exit 1; }
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual="$(sha256sum "$tmp/$file" | awk '{ print $1 }')"
+    else
+        actual="$(shasum -a 256 "$tmp/$file" | awk '{ print $1 }')"
+    fi
+    [ "$expected" = "$actual" ] || { echo "checksum mismatch for $file" >&2; exit 1; }
+done
 mkdir -p "$install_dir"
+install -m 755 "$tmp/$tui_asset" "$install_dir/nulya-tui"
 install -m 755 "$tmp/$asset" "$install_dir/nulya"
-echo "Installed nulya to $install_dir/nulya"
+echo "Installed nulya and its TUI to $install_dir"
+case ":$PATH:" in
+    *":$install_dir:"*) ;;
+    *)
+        if [ "$install_dir" = "$HOME/.local/bin" ]; then
+            case "${SHELL##*/}" in
+                zsh) profile="${ZDOTDIR:-$HOME}/.zshrc" ;;
+                bash) profile="$HOME/.bashrc" ;;
+                *) profile="$HOME/.profile" ;;
+            esac
+            line='export PATH="$HOME/.local/bin:$PATH"'
+            if ! grep -Fqx "$line" "$profile" 2>/dev/null; then
+                printf '\n%s\n' "$line" >> "$profile"
+            fi
+            echo "Added ~/.local/bin to PATH in $profile; open a new terminal."
+        else
+            echo "Add $install_dir to PATH before running nulya."
+        fi
+        ;;
+esac
+echo "Run: nulya"

@@ -1,5 +1,5 @@
-//! Replace a release-installed nulya with the newest GitHub Release binary.
-//! The staged executable is verified before the installed file is touched.
+//! Replace the release-installed kernel and TUI together. Both staged files
+//! are verified before either installed file is touched.
 const std = @import("std");
 const builtin = @import("builtin");
 const common = @import("common.zig");
@@ -22,6 +22,19 @@ pub fn dispatchUpdate(alloc: std.mem.Allocator, io: std.Io, args: []const []cons
 
 fn update(alloc: std.mem.Allocator, io: std.Io) !void {
     const asset = releaseAsset() orelse return error.UnsupportedPlatform;
+    const tui_asset = try std.fmt.allocPrint(alloc, "nulya-tui-{s}", .{asset["nulya-".len..]});
+    defer alloc.free(tui_asset);
+    const executable = try std.process.executablePathAlloc(io, alloc);
+    defer alloc.free(executable);
+    const tui_path = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(executable) orelse ".", if (builtin.os.tag == .windows) "nulya-tui.exe" else "nulya-tui" });
+    defer alloc.free(tui_path);
+    const tui_missing = if (std.Io.Dir.openFileAbsolute(io, tui_path, .{})) |file| blk: {
+        file.close(io);
+        break :blk false;
+    } else |err| switch (err) {
+        error.FileNotFound => true,
+        else => return err,
+    };
     var client: std.http.Client = .{ .allocator = alloc, .io = io };
     defer client.deinit();
 
@@ -33,10 +46,13 @@ fn update(alloc: std.mem.Allocator, io: std.Io) !void {
     const tag = parsed.value.tag_name;
     if (tag.len < 2 or tag[0] != 'v') return error.InvalidReleaseTag;
     const latest = tag[1..];
-    switch (try compareVersions(latest, version)) {
+    const order = try compareVersions(latest, version);
+    switch (order) {
         .eq => {
-            try common.printOut(alloc, io, "nulya {s} is already up to date\n", .{version});
-            return;
+            if (!tui_missing) {
+                try common.printOut(alloc, io, "nulya {s} is already up to date\n", .{version});
+                return;
+            }
         },
         .lt => {
             try common.printOut(alloc, io, "nulya {s} is newer than the latest release ({s})\n", .{ version, latest });
@@ -47,36 +63,50 @@ fn update(alloc: std.mem.Allocator, io: std.Io) !void {
 
     const base = try std.fmt.allocPrint(alloc, "https://github.com/{s}/releases/download/{s}", .{ repository, tag });
     defer alloc.free(base);
-    const executable = try std.process.executablePathAlloc(io, alloc);
-    defer alloc.free(executable);
     var nonce: [8]u8 = undefined;
     try io.randomSecure(&nonce);
     const staged = try std.fmt.allocPrint(alloc, "{s}.{x}.new", .{ executable, nonce });
     defer alloc.free(staged);
     errdefer std.Io.Dir.deleteFileAbsolute(io, staged) catch {};
+    const tui_staged = try std.fmt.allocPrint(alloc, "{s}.{x}.new", .{ tui_path, nonce });
+    defer alloc.free(tui_staged);
+    errdefer std.Io.Dir.deleteFileAbsolute(io, tui_staged) catch {};
     const checksum_url = try std.fmt.allocPrint(alloc, "{s}/checksums.txt", .{base});
     defer alloc.free(checksum_url);
     const checksums = try downloadText(alloc, &client, checksum_url);
     defer alloc.free(checksums);
-    const expected = checksumFor(checksums, asset) orelse return error.ChecksumMissing;
-    const asset_url = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ base, asset });
-    defer alloc.free(asset_url);
-
-    try common.printOut(alloc, io, "Downloading nulya {s} ({s})...\n", .{ latest, asset });
-    try downloadFile(&client, io, asset_url, staged);
-    const actual = try sha256File(io, staged);
-    if (!std.ascii.eqlIgnoreCase(actual[0..], expected)) return error.ChecksumMismatch;
+    const all_files = [_]ReleaseFile{
+        .{ .asset = asset, .staged = staged },
+        .{ .asset = tui_asset, .staged = tui_staged },
+    };
+    const files: []const ReleaseFile = if (order == .eq) all_files[1..] else all_files[0..];
+    for (files) |file| {
+        const expected = checksumFor(checksums, file.asset) orelse return error.ChecksumMissing;
+        const url = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ base, file.asset });
+        defer alloc.free(url);
+        try common.printOut(alloc, io, "Downloading {s} {s}...\n", .{ file.asset, latest });
+        try downloadFile(&client, io, url, file.staged);
+        const actual = try sha256File(io, file.staged);
+        if (!std.ascii.eqlIgnoreCase(actual[0..], expected)) return error.ChecksumMismatch;
+    }
 
     if (builtin.os.tag == .windows) {
-        try scheduleWindowsReplacement(alloc, io, staged, executable);
-        try common.printOut(alloc, io, "Verified nulya {s}; it will replace this executable after nulya exits.\n", .{latest});
+        try scheduleWindowsReplacement(alloc, io, if (order == .eq) null else staged, executable, tui_staged, tui_path);
+        try common.printOut(alloc, io, "Verified nulya {s}; close any running TUI so the update can finish.\n", .{latest});
     } else {
-        var file = try std.Io.Dir.openFileAbsolute(io, staged, .{});
-        defer file.close(io);
-        try file.setPermissions(io, @enumFromInt(0o755));
-        try std.Io.Dir.renameAbsolute(staged, executable, io);
+        try installStaged(io, tui_staged, tui_path);
+        if (order != .eq) try installStaged(io, staged, executable);
         try common.printOut(alloc, io, "Updated nulya to {s}. Restart it to use the new version.\n", .{latest});
     }
+}
+
+const ReleaseFile = struct { asset: []const u8, staged: []const u8 };
+
+fn installStaged(io: std.Io, staged: []const u8, destination: []const u8) !void {
+    var file = try std.Io.Dir.openFileAbsolute(io, staged, .{});
+    defer file.close(io);
+    try file.setPermissions(io, @enumFromInt(0o755));
+    try std.Io.Dir.renameAbsolute(staged, destination, io);
 }
 
 fn releaseAsset() ?[]const u8 {
@@ -182,27 +212,31 @@ fn sha256File(io: std.Io, path: []const u8) ![64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-fn scheduleWindowsReplacement(alloc: std.mem.Allocator, io: std.Io, staged: []const u8, executable: []const u8) !void {
+fn scheduleWindowsReplacement(alloc: std.mem.Allocator, io: std.Io, staged: ?[]const u8, executable: []const u8, tui_staged: []const u8, tui_path: []const u8) !void {
     if (builtin.os.tag != .windows) unreachable;
-    const script_path = try std.fmt.allocPrint(alloc, "{s}.update.ps1", .{staged});
+    const script_path = try std.fmt.allocPrint(alloc, "{s}.update.ps1", .{tui_staged});
     defer alloc.free(script_path);
     const script =
-        \\param([string]$Staged, [string]$Destination, [int]$ParentPid)
+        \\param([string]$Staged, [string]$Destination, [string]$TuiStaged, [string]$TuiDestination, [int]$ParentPid)
         \\$ErrorActionPreference = 'Stop'
         \\try { Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue } catch {}
-        \\$done = $false
-        \\for ($i = 0; $i -lt 120; $i++) {
-        \\  try { Move-Item -LiteralPath $Staged -Destination $Destination -Force -ErrorAction Stop; $done = $true; break }
-        \\  catch { Start-Sleep -Milliseconds 500 }
+        \\foreach ($pair in @(@($TuiStaged, $TuiDestination), @($Staged, $Destination))) {
+        \\  if (-not $pair[0]) { continue }
+        \\  $done = $false
+        \\  for ($i = 0; $i -lt 1200; $i++) {
+        \\    try { Move-Item -LiteralPath $pair[0] -Destination $pair[1] -Force -ErrorAction Stop; $done = $true; break }
+        \\    catch { Start-Sleep -Milliseconds 500 }
+        \\  }
+        \\  if (-not $done) { exit 1 }
         \\}
-        \\if ($done) { Remove-Item -LiteralPath $PSCommandPath -Force }
+        \\Remove-Item -LiteralPath $PSCommandPath -Force
     ;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = script_path, .data = script });
     errdefer std.Io.Dir.deleteFileAbsolute(io, script_path) catch {};
     const pid = try std.fmt.allocPrint(alloc, "{d}", .{std.os.windows.GetCurrentProcessId()});
     defer alloc.free(pid);
     _ = try std.process.spawn(io, .{
-        .argv = &.{ "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", script_path, "-Staged", staged, "-Destination", executable, "-ParentPid", pid },
+        .argv = &.{ "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", script_path, "-Staged", staged orelse "", "-Destination", executable, "-TuiStaged", tui_staged, "-TuiDestination", tui_path, "-ParentPid", pid },
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,

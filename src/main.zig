@@ -30,6 +30,27 @@ pub fn main(init: std.process.Init) !u8 {
     if (argv.len == 1) if (host.get(ssh_askpass.marker_env)) |marker|
         return ssh_askpass.runHelper(io, marker);
 
+    // The installed product opens its screen by default. Source builds without
+    // a colocated TUI keep the CLI's usual help output.
+    if (argv.len == 0) {
+        const self_path = try std.process.executablePathAlloc(io, alloc);
+        defer alloc.free(self_path);
+        const tui_path = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(self_path) orelse ".", if (@import("builtin").os.tag == .windows) "nulya-tui.exe" else "nulya-tui" });
+        defer alloc.free(tui_path);
+        var child = std.process.spawn(io, .{ .argv = &.{tui_path} }) catch |err| switch (err) {
+            error.FileNotFound => {
+                std.debug.print("nulya-tui is missing; run `nulya update` to install it, or build it from tui/.\n", .{});
+                return cli.usage(io);
+            },
+            else => return err,
+        };
+        const term = try child.wait(io);
+        return switch (term) {
+            .exited => |code| code,
+            else => 1,
+        };
+    }
+
     return cli.dispatch(alloc, io, argv);
 }
 

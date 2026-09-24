@@ -21,7 +21,20 @@ follows the ledger with `session events --follow`, can still `append` (the turn
 waits in the inbox for the other writer's next step boundary), and offers
 `press ↵ to take over` once the lease is free again.
 
-## Install (Windows 11 + Windows Terminal)
+## Install
+
+The public installer downloads both the compiled TUI and the kernel. After
+installation, `nulya` opens this interface, and `nulya update` upgrades both.
+No Bun or Zig installation is required:
+
+```powershell
+irm https://raw.githubusercontent.com/Teamon9161/nulya/main/install.ps1 | iex
+nulya
+```
+
+On Linux or macOS, use `curl -fsSL https://raw.githubusercontent.com/Teamon9161/nulya/main/install.sh | sh`.
+
+## Build from source (Windows 11 + Windows Terminal)
 
 Everything below is a normal PowerShell prompt inside Windows Terminal. Git Bash
 works the same way with the obvious path changes.
@@ -73,9 +86,9 @@ bun run compile                 # writes dist\nulya-tui.exe (~120 MB, Bun runtim
 dist\nulya-tui.exe --session s-…
 ```
 
-The compiled binary bundles only `src/`; it still needs `nulya.exe` at run time
-and finds it by the same three rules (there is no `tui/` directory next to it,
-so in practice: set `NULYA_BIN`, or run it from inside a repo checkout).
+The compiled binary bundles the Bun runtime and TUI code. It still needs
+`nulya.exe` at run time: it first looks beside itself, then in a source
+checkout or on PATH. Release installers put the two programs side by side.
 
 One trap: run it from your workspace, **not** from `tui\` itself. Bun reads
 `bunfig.toml` from the current directory, and this package's is a development

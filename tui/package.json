@@ -1,6 +1,6 @@
 {
   "name": "nulya-tui",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "module": "src/main.tsx",
   "type": "module",
   "private": true,

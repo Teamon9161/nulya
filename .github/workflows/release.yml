@@ -22,6 +22,15 @@ jobs:
         with:
           version: 0.16.0
       - run: zig build test
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Check TUI
+        shell: bash
+        run: |
+          cd tui
+          bun install --frozen-lockfile
+          bun run typecheck
 
   build:
     name: Build ${{ matrix.asset }}
@@ -35,32 +44,44 @@ jobs:
             target: x86_64-linux-musl
             archive: x86_64-linux
             asset: nulya-x86_64-linux
+            tui_asset: nulya-tui-x86_64-linux
             binary: nulya
+            bun_target: bun-linux-x64-musl
           - runner: ubuntu-latest
             target: aarch64-linux-musl
             archive: aarch64-linux
             asset: nulya-aarch64-linux
+            tui_asset: nulya-tui-aarch64-linux
             binary: nulya
+            bun_target: bun-linux-arm64-musl
           - runner: macos-14
             target: x86_64-macos
             archive: x86_64-macos
             asset: nulya-x86_64-macos
+            tui_asset: nulya-tui-x86_64-macos
             binary: nulya
+            bun_target: bun-darwin-x64
           - runner: macos-14
             target: aarch64-macos
             archive: aarch64-macos
             asset: nulya-aarch64-macos
+            tui_asset: nulya-tui-aarch64-macos
             binary: nulya
+            bun_target: bun-darwin-arm64
           - runner: windows-latest
             target: x86_64-windows
             archive: x86_64-windows
             asset: nulya-x86_64-windows.exe
+            tui_asset: nulya-tui-x86_64-windows.exe
             binary: nulya.exe
+            bun_target: bun-windows-x64
           - runner: windows-latest
             target: aarch64-windows
             archive: aarch64-windows
             asset: nulya-aarch64-windows.exe
+            tui_asset: nulya-tui-aarch64-windows.exe
             binary: nulya.exe
+            bun_target: bun-windows-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +94,14 @@ jobs:
         uses: mlugg/setup-zig@v2.2.1
         with:
           version: 0.16.0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install TUI build dependencies
+        shell: bash
+        run: cd tui && bun install --frozen-lockfile --os '*' --cpu '*'
 
       - name: Verify tag and download the target's Zig archive
         shell: bash
@@ -108,6 +137,25 @@ jobs:
         shell: bash
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast -Dstrip=true -Dembed-toolchain=true -Dzig-archive="$ZIG_ARCHIVE"
 
+      - name: Compile the matching TUI
+        shell: bash
+        env:
+          NULYA_BUILD_TARGET: ${{ matrix.bun_target }}
+          NULYA_BUILD_TUI_ONLY: '1'
+        run: cd tui && bun run compile
+
+      - name: Smoke test the native TUI executable
+        if: matrix.target != 'aarch64-linux-musl' && matrix.target != 'x86_64-macos' && matrix.target != 'aarch64-windows'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess
+          suffix = '.exe' if os.name == 'nt' else ''
+          tui = pathlib.Path(f'tui/dist/nulya-tui{suffix}').resolve()
+          version = subprocess.check_output([str(tui), '--version'], text=True).strip()
+          assert version == 'nulya-tui ' + os.environ['GITHUB_REF_NAME'][1:], version
+          PY
+
       - name: Smoke test the native release and bundled Zig
         if: matrix.target != 'aarch64-linux-musl' && matrix.target != 'x86_64-macos' && matrix.target != 'aarch64-windows'
         shell: bash
@@ -142,12 +190,13 @@ jobs:
         run: |
           mkdir -p dist
           cp "zig-out/bin/${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+          cp "tui/dist/nulya-tui${{ matrix.binary == 'nulya.exe' && '.exe' || '' }}" "dist/${{ matrix.tui_asset }}"
 
       - name: Upload release asset
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
+          path: dist/
           if-no-files-found: error
 
   publish:

@@ -18,6 +18,7 @@ switch -Regex ($processor) {
     default { throw "unsupported architecture: $processor" }
 }
 $asset = "nulya-$arch-windows.exe"
+$tuiAsset = "nulya-tui-$arch-windows.exe"
 if ($Version -eq 'latest') {
     $base = "https://github.com/$Repo/releases/latest/download"
 } else {
@@ -29,23 +30,33 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ("nulya-install-" + [guid]::NewGuid(
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
     $binary = Join-Path $tmp $asset
+    $tuiBinary = Join-Path $tmp $tuiAsset
     $checksums = Join-Path $tmp 'checksums.txt'
     Invoke-WebRequest -Uri "$base/$asset" -OutFile $binary
+    Invoke-WebRequest -Uri "$base/$tuiAsset" -OutFile $tuiBinary
     Invoke-WebRequest -Uri "$base/checksums.txt" -OutFile $checksums
-    $line = Get-Content $checksums | Where-Object { ($_ -split '\s+')[-1] -eq $asset } | Select-Object -First 1
-    if (-not $line) { throw "checksum missing for $asset" }
-    $expected = ($line -split '\s+')[0].ToLowerInvariant()
-    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash.ToLowerInvariant()
-    if ($expected -ne $actual) { throw "checksum mismatch for $asset" }
+    foreach ($entry in @(@($asset, $binary), @($tuiAsset, $tuiBinary))) {
+        $line = Get-Content $checksums | Where-Object { ($_ -split '\s+')[-1] -eq $entry[0] } | Select-Object -First 1
+        if (-not $line) { throw "checksum missing for $($entry[0])" }
+        $expected = ($line -split '\s+')[0].ToLowerInvariant()
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry[1]).Hash.ToLowerInvariant()
+        if ($expected -ne $actual) { throw "checksum mismatch for $($entry[0])" }
+    }
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     $target = Join-Path $InstallDir 'nulya.exe'
+    $tuiTarget = Join-Path $InstallDir 'nulya-tui.exe'
+    Copy-Item -LiteralPath $tuiBinary -Destination $tuiTarget -Force
     Copy-Item -LiteralPath $binary -Destination $target -Force
 
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (($userPath -split ';') -notcontains $InstallDir) {
         [Environment]::SetEnvironmentVariable('Path', "$userPath;$InstallDir".TrimStart(';'), 'User')
     }
-    Write-Host "Installed nulya to $target"
+    if (($env:Path -split ';') -notcontains $InstallDir) {
+        $env:Path = "$env:Path;$InstallDir"
+    }
+    Write-Host "Installed nulya and its TUI to $InstallDir"
+    Write-Host 'Run: nulya'
     Write-Host 'Restart your terminal if nulya is not found on PATH.'
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force
