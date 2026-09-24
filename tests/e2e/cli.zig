@@ -55,7 +55,7 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
         "demo",           "task run",   "task list",    "wait",       "retarget",
         "--running",      "journal append", "journal read", "remote check",
         "remote ls",      "remote serve",   "--workspace",  "remote:ssh:<dest>",
-        "session note",   "--source",
+        "session note",   "--source",  "update",       "--version",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, help.stdout, needle) != null) catch |err| {
             std.debug.print("`nulya help` never mentions '{s}'\n", .{needle});
@@ -76,6 +76,12 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
         try std.testing.expectEqual(@as(u8, 0), alt.code);
         try std.testing.expectEqualStrings(help.stdout, alt.stdout);
     }
+
+    const version = try runCli(alloc, io, ws, &.{ exe_abs, "--version" });
+    defer alloc.free(version.stdout);
+    try std.testing.expectEqual(@as(u8, 0), version.code);
+    try std.testing.expect(std.mem.startsWith(u8, version.stdout, "nulya "));
+    try std.testing.expect(std.mem.endsWith(u8, version.stdout, "\n"));
 
     // A bare verb family prints its own block and nothing else — a subset of the
     // full screen, so the two can never describe the same verb differently.

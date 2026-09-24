@@ -88,6 +88,7 @@ test {
     _ = @import("cli/src.zig");
     _ = @import("cli/remote_agent.zig");
     _ = @import("cli/toolchain.zig");
+    _ = @import("cli/update.zig");
     _ = @import("selfbuild.zig");
     _ = @import("source.zig");
     _ = @import("bundled.zig");

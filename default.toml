@@ -79,22 +79,25 @@ model = "gpt-5.5"
 # DeepSeek serves the same models behind both wire formats, which makes it the
 # cheapest way to exercise either provider end to end. Its Chat Completions
 # endpoint is the primary one (prefix cache, `thinking` switch, `reasoning_effort`).
+# `deepseek-flash` is the current Flash name (V4.1, 2026-09-10); the retired
+# `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` still route to it, so an
+# old session header keeps working while a new one gets the current id.
 [[provider.profiles]]
 name = "deepseek"
 kind = "openai"
-model = "deepseek-v4-flash"
-models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+model = "deepseek-flash"
+models = ["deepseek-flash", "deepseek-v4-pro"]
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 [provider.profiles.roles]
-explore = "deepseek-v4-flash"
+explore = "deepseek-flash"
 review = { model = "deepseek-v4-pro", effort = "max" }
 
 [[provider.profiles]]
 name = "deepseek-anthropic"
 kind = "anthropic"
-model = "deepseek-v4-flash"
-models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+model = "deepseek-flash"
+models = ["deepseek-flash", "deepseek-v4-pro"]
 base_url = "https://api.deepseek.com/anthropic"
 api_key_env = "DEEPSEEK_API_KEY"
 
@@ -120,7 +123,7 @@ model = "scripted-demo"
 # `efforts` lists the dial positions the model accepts, lowest → highest; a
 # picker always offers "auto" (send nothing) besides these. Empty = no dial.
 # `default_effort` is what a session sends when nobody names one; unset means
-# auto. Ids and dials verified 2026-08 against each vendor's docs.
+# auto. Ids and dials verified 2026-09 against each vendor's docs.
 #
 # `vision = true` is what lets `session append --image` through (DESIGN §14).
 # The gate reads this catalog and nothing else: an id with no entry, or an entry
@@ -187,14 +190,18 @@ label = "GPT-5.5 (Codex)"
 efforts = ["off", "low", "medium", "high"]
 vision = true
 
-# DeepSeek V4: thinking is ON by default server-side (effort `high`); `off`
-# disables it. Its `reasoning_effort` accepts low | high | max (`medium` is
-# treated as `high`), so the dial lists what the endpoint distinguishes.
+# DeepSeek: thinking is ON by default server-side (effort `high`); `off` disables
+# it. `reasoning_effort` accepts low | high | max (`medium` maps to `high`),
+# so the dial lists what the endpoint distinguishes.
+# Flash (V4.1) is natively multimodal on both endpoints — Chat Completions and
+# `/anthropic` alike. V4 Pro is text-only: its pricing row says vision is not
+# supported, so it stays silent here and `session append --image` refuses it.
 [[models]]
-id = "deepseek-v4-flash"
-label = "DeepSeek V4 Flash"
+id = "deepseek-flash"
+label = "DeepSeek V4.1 Flash"
 context_window = 1000000
 efforts = ["off", "low", "high", "max"]
+vision = true
 
 [[models]]
 id = "deepseek-v4-pro"

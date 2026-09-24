@@ -374,7 +374,7 @@ pub fn usage(io: std.Io) !u8 {
         \\reading this harness
         \\
     ++ config_usage ++ skill_usage ++ src_usage ++ toolchain_usage ++
-        \\  nulya help                                        this text, which a bare `nulya` prints too
+        \\  nulya help | --version | update                   help, release version, or verified self-update
         \\  nulya demo                                        one fixed-prompt session, end to end, to see it work
         \\
         \\a fuller reference is the `guide` skill — `nulya skill list` says whether it is already

@@ -60,3 +60,32 @@ zig build run     # fixed-prompt demo (scripted provider without an API key)
 
 Release builds embed the pinned Zig toolchain:
 `zig build -Dembed-toolchain -Dzig-archive=<path-to-zig-0.16-archive>`.
+
+## Install and update
+
+Release assets are single executables for Linux, macOS, and Windows on x86_64
+and aarch64. Each one carries the Zig 0.16.0 archive for its own platform;
+`nulya toolchain zig version` extracts it on first use.
+
+On Linux or macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Teamon9161/nulya/main/install.sh | sh
+```
+
+On Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Teamon9161/nulya/main/install.ps1 | iex
+```
+
+The installers verify the release's SHA-256 checksum. After installation, run
+`nulya --version` to see the installed version, then `nulya update` to check
+the latest GitHub Release and replace the executable after verifying its
+checksum. On Windows, replacement finishes after the
+current `nulya` process exits. The update command does not modify sessions,
+extensions, or configuration.
+
+Releases are published by pushing a `v<version>` tag matching `build.zig.zon`.
+The release workflow builds all six assets, verifies the downloaded Zig archives
+against Zig's published SHA-256 values, and publishes `checksums.txt`.

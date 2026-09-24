@@ -14,6 +14,7 @@ const cli_remote = @import("cli/remote.zig");
 const cli_journal = @import("cli/journal.zig");
 const cli_src = @import("cli/src.zig");
 const cli_config = @import("cli/config.zig");
+const cli_update = @import("cli/update.zig");
 
 /// `nulya demo` composes a session through the same code path `session new`
 /// does, so the two cannot drift.
@@ -29,6 +30,10 @@ pub const usage = common.usage;
 pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len == 0) return usage(io);
     if (std.mem.eql(u8, args[0], "help") or std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h")) return usage(io);
+    if ((std.mem.eql(u8, args[0], "--version") or std.mem.eql(u8, args[0], "-V")) and args.len == 1) {
+        try common.printOut(alloc, io, "nulya {s}\n", .{@import("config_options").version});
+        return 0;
+    }
     if (std.mem.eql(u8, args[0], "ext")) return ext.dispatchExt(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "skill")) return skill.dispatchSkill(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "toolchain")) return cli_toolchain.dispatchToolchain(alloc, io, args[1..]);
@@ -38,6 +43,7 @@ pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     if (std.mem.eql(u8, args[0], "journal")) return cli_journal.dispatchJournal(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "src")) return cli_src.dispatchSrc(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "config")) return cli_config.dispatchConfig(alloc, io, args[1..]);
+    if (std.mem.eql(u8, args[0], "update")) return cli_update.dispatchUpdate(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "demo")) return runDemo(alloc, io);
     try common.printErrFmt(alloc, io, "unknown command '{s}'; run `nulya help`\n", .{args[0]});
     return 1;

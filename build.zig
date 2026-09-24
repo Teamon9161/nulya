@@ -567,13 +567,12 @@ fn hashField(h: *std.crypto.hash.Blake3, field: []const u8) void {
     h.update(field);
 }
 
-/// The file `@embedFile("zig_archive")` resolves to. When embedding is off (or no
-/// path was given) this is an empty stub, and `toolchain.ensureExtracted`
-/// reports `error.ToolchainNotEmbedded`.
+/// The file `@embedFile("zig_archive")` resolves to. Development builds use an
+/// empty stub; a release build must name a real archive.
 fn zigArchiveLazyPath(b: *std.Build, embed: bool, path: ?[]const u8) std.Build.LazyPath {
     if (embed) {
         if (path) |p| return .{ .cwd_relative = p };
-        std.debug.print("warning: -Dembed-toolchain set without -Dzig-archive; embedding empty stub\n", .{});
+        std.debug.panic("-Dembed-toolchain requires -Dzig-archive=<path>", .{});
     }
     const wf = b.addWriteFiles();
     return wf.add("zig_archive_stub", "");

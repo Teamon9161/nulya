@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Test ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+      - run: zig build test
+
+  build:
+    name: Build ${{ matrix.asset }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-linux-musl
+            archive: x86_64-linux
+            asset: nulya-x86_64-linux
+            binary: nulya
+          - runner: ubuntu-latest
+            target: aarch64-linux-musl
+            archive: aarch64-linux
+            asset: nulya-aarch64-linux
+            binary: nulya
+          - runner: macos-14
+            target: x86_64-macos
+            archive: x86_64-macos
+            asset: nulya-x86_64-macos
+            binary: nulya
+          - runner: macos-14
+            target: aarch64-macos
+            archive: aarch64-macos
+            asset: nulya-aarch64-macos
+            binary: nulya
+          - runner: windows-latest
+            target: x86_64-windows
+            archive: x86_64-windows
+            asset: nulya-x86_64-windows.exe
+            binary: nulya.exe
+          - runner: windows-11-arm
+            target: aarch64-windows
+            archive: aarch64-windows
+            asset: nulya-aarch64-windows.exe
+            binary: nulya.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+
+      - name: Verify tag and download the target's Zig archive
+        shell: bash
+        env:
+          ZIG_ARCHIVE_TARGET: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os, pathlib, urllib.request
+
+          import re
+          manifest = pathlib.Path('build.zig.zon').read_text()
+          version = re.search(r'\.version\s*=\s*"([^"]+)"', manifest).group(1)
+          tag = os.environ['GITHUB_REF_NAME']
+          if tag != f'v{version}':
+              raise SystemExit(f'tag {tag} does not match build.zig.zon version {version}')
+          with urllib.request.urlopen('https://ziglang.org/download/index.json') as response:
+              release = json.load(response)['0.16.0'][os.environ['ZIG_ARCHIVE_TARGET']]
+          archive = pathlib.Path('zig-toolchain' + ('.zip' if os.name == 'nt' else '.tar.xz'))
+          digest = hashlib.sha256()
+          with urllib.request.urlopen(release['tarball']) as response, archive.open('wb') as output:
+              while chunk := response.read(1024 * 1024):
+                  output.write(chunk)
+                  digest.update(chunk)
+          if digest.hexdigest() != release['shasum']:
+              archive.unlink()
+              raise SystemExit('Zig archive SHA-256 mismatch')
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              print(f'ZIG_ARCHIVE={archive.resolve()}', file=output)
+          PY
+
+      - name: Build release binary with the target Zig bundled
+        shell: bash
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast -Dstrip=true -Dembed-toolchain=true -Dzig-archive="$ZIG_ARCHIVE"
+
+      - name: Smoke test the native release and bundled Zig
+        if: matrix.target != 'aarch64-linux-musl' && matrix.target != 'x86_64-macos'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess, tempfile
+
+          binary = pathlib.Path('zig-out/bin/${{ matrix.binary }}').resolve()
+          with tempfile.TemporaryDirectory() as data_dir:
+              env = os.environ.copy()
+              env.pop('NULYA_ZIG', None)
+              env['LOCALAPPDATA'] = data_dir
+              env['XDG_DATA_HOME'] = data_dir
+              version = subprocess.check_output([str(binary), '--version'], env=env, text=True).strip()
+              zig_version = subprocess.check_output([str(binary), 'toolchain', 'zig', 'version'], env=env, text=True).strip()
+              assert version == 'nulya ' + os.environ['GITHUB_REF_NAME'][1:], version
+              assert zig_version == '0.16.0', zig_version
+          PY
+
+      - name: Package release asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "zig-out/bin/${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        run: cd dist && sha256sum nulya-* > checksums.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/nulya-*
+            dist/checksums.txt
+          generate_release_notes: true

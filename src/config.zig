@@ -630,10 +630,13 @@ test "default catalog: every model a built-in profile lists is described, and ef
         try std.testing.expect(default_listed);
     }
 
-    const flash = cfg.findModel("deepseek-v4-flash").?;
+    const flash = cfg.findModel("deepseek-flash").?;
     try std.testing.expect(flash.efforts.len != 0);
     try std.testing.expectEqualStrings("off", flash.efforts[0]);
-    try std.testing.expect(cfg.defaultEffort("deepseek", "deepseek-v4-flash") == null);
+    try std.testing.expect(cfg.defaultEffort("deepseek", "deepseek-flash") == null);
+    // The multimodal claim is what `session append --image` reads; V4 Pro stays silent.
+    try std.testing.expect(flash.vision);
+    try std.testing.expect(!cfg.findModel("deepseek-v4-pro").?.vision);
 }
 
 test "[[models]] merge by id and a profile effort overrides the catalog default" {
@@ -641,7 +644,7 @@ test "[[models]] merge by id and a profile effort overrides the catalog default"
         .{ .source = default_toml },
         .{ .source =
         \\[[models]]
-        \\id = "deepseek-v4-flash"
+        \\id = "deepseek-flash"
         \\default_effort = "high"
         \\
         \\[[models]]
@@ -663,11 +666,11 @@ test "[[models]] merge by id and a profile effort overrides the catalog default"
     });
     defer cfg.deinit();
 
-    const flash = cfg.findModel("deepseek-v4-flash").?;
+    const flash = cfg.findModel("deepseek-flash").?;
     try std.testing.expect(flash.label.len != 0);
     try std.testing.expectEqualStrings("high", flash.default_effort.?);
-    try std.testing.expectEqualStrings("high", cfg.defaultEffort("deepseek", "deepseek-v4-flash").?);
-    try std.testing.expectEqualStrings("low", cfg.defaultEffort("deepseek-anthropic", "deepseek-v4-flash").?);
+    try std.testing.expectEqualStrings("high", cfg.defaultEffort("deepseek", "deepseek-flash").?);
+    try std.testing.expectEqualStrings("low", cfg.defaultEffort("deepseek-anthropic", "deepseek-flash").?);
 
     const local = cfg.provider.findProfile("local").?;
     try std.testing.expectEqualStrings("my-local-model", local.defaultModel());
@@ -701,7 +704,7 @@ test "project layer cannot touch the model catalog" {
         .{ .source = default_toml },
         .{ .project = true, .source =
         \\[[models]]
-        \\id = "deepseek-v4-flash"
+        \\id = "deepseek-flash"
         \\default_effort = "max"
         \\
         \\[[models]]
@@ -709,7 +712,7 @@ test "project layer cannot touch the model catalog" {
         },
     });
     defer cfg.deinit();
-    try std.testing.expect(cfg.findModel("deepseek-v4-flash").?.default_effort == null);
+    try std.testing.expect(cfg.findModel("deepseek-flash").?.default_effort == null);
     try std.testing.expect(cfg.findModel("injected") == null);
 }
 

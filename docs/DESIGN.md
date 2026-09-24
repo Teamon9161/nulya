@@ -1049,7 +1049,7 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Site.resolv
 | `environment` | `{backend, shell}` |
 | `extensions` | 只有 `with`（§5.1 的常驻成员名单，每项 `<id>[@<version>][:<tool>,…]`），**project 层也读**。**没有第二个键**：store 只有一个 |
 
-`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目；其中收图片的那些写了 `vision = true`——**这一列是主张不是猜测**，自带目录只替它查得准的模型说话。
+`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目；其中收图片的那些写了 `vision = true`——**这一列是主张不是猜测**，自带目录只替它查得准的模型说话。**同一个 id 在两家 vendor 上可能不是同一个东西**，而目录按 id 合并一次，所以只有"两个端点上都收图"的 id 才写 `vision = true`（DeepSeek 侧：`deepseek-flash` 是原生多模态，`deepseek-v4-pro` 只收文本，故不写）。
 
 **两张表描述模型。** profile 说**怎么连**和**它服务哪些 model id**（`ProviderProfile.defaultModel()`：`model` 非空取它，否则 `models[0]`，否则 provider 内置默认）；`[[models]]` 目录说一个 id **是什么**（label、effort 档位、context window、`vision`），一个 id 不管经几个端点都只写一次。目录是纯描述：kernel 不读它；`launch` / `cli` 用它给 session 默认 effort（`Config.defaultEffort(profile, model_id)` = `profile.effort ?? catalog.default_effort ?? 无`）。
 
@@ -1082,10 +1082,11 @@ resume 时按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDe
 ## 10. 内嵌 Zig 工具链（`extension/build/toolchain.zig`）
 
 - 宿主平台那一份 Zig（pinned 0.16.0）`@embedFile` 进二进制，首次需要时解压到 `~/.local/share/nulya/toolchains/zig/<ver>/`（`XDG_DATA_HOME` 优先；Windows: `%LOCALAPPDATA%\nulya\`）。一份宿主 Zig 可交叉编译所有 target。代价 +50–90MB；换来零网络、零 hash 校验、零版本漂移。
-- 内嵌由 `-Dembed-toolchain -Dzig-archive=<path>` 门控；日常 `zig build test` 不嵌，e2e 用 `NULYA_TEST_ZIG` 指向宿主 zig。
+- 内嵌由 `-Dembed-toolchain -Dzig-archive=<path>` 门控；打开门却未指定归档会在 build 配置阶段失败。日常 `zig build test` 不嵌，e2e 用 `NULYA_TEST_ZIG` 指向宿主 zig。
 - **`cli.resolveZig` 按三档找编译器**：① `NULYA_ZIG`（显式覆盖，**原样取用、不做存在性检查**）；② **managed 目录** `<data>/toolchains/zig/0.16.0/`（内嵌了就往里解压，**没内嵌也认里面已有的**；扁平 `zig[.exe]` 与 `zig-<target>-<ver>/zig[.exe]` 两种布局都收）；③ **PATH 上的 `zig`**——走到这一档时往 stderr 说一句 `note: using zig from PATH (<path>); set NULYA_ZIG or use an embedded build for a pinned toolchain`：**不拦，但不悄悄**（换一个 zig 得到的是**另一个 version**，§7.4）。
 - 三档都没有才报 "no zig toolchain" + 出路（`cli_toolchain.noZigHint`：`set NULYA_ZIG to a zig 0.16.0 executable, or unpack zig 0.16.0 into <managed 目录绝对路径>`；"根本没有 zig"的场合前面再加一句 `put zig on PATH`）。`ext build` / `ext sync` 撞墙时打的是**同一句**。`ext sync` 另外区分"有 zig 但它在那个目录里答不出 `zig version`"，点名那个 zig 的路径、不再建议 PATH，并原样引一句探测自己的说法。
 - AI 不直接 `zig build`，走 `nulya ext build`（统一 optimize=ReleaseSafe / target / cache）→ 可复现构建。`nulya toolchain zig <args>` 供 scratch。
+- `v<version>` tag 触发 `.github/workflows/release.yml`，版本必须与 `build.zig.zon` 一致。六个 target（Linux/macOS/Windows × x86_64/aarch64）分别内嵌**目标平台**的官方 Zig 0.16.0 归档；归档下载后按 ziglang.org 的 `index.json` SHA-256 核对。发布单文件二进制和 `checksums.txt`。`install.sh` / `install.ps1` 按平台取文件并校验；`nulya update` 查询 GitHub latest release，只在版本更高时下载对应文件，校验 release 的 SHA-256 后才替换正在运行的可执行文件。Unix 同目录原子 rename；Windows 用隐藏的 PowerShell helper 等当前进程退出再替换。
 
 ---
 
