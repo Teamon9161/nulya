@@ -243,6 +243,13 @@ bun run tui\src\main.tsx --profile codex
 | `Ctrl+W` | close the current tab (with one tab it is the composer's delete-word, as in a shell) |
 | click the model under the composer | `/model` |
 
+At startup the TUI queries support for Win32 input mode (`9001`) and enables it
+when the terminal reports it is supported but disabled. This preserves Enter's
+Shift/Ctrl modifiers in Windows Terminal without editing terminal settings. On
+exit, the TUI restores a mode it enabled itself. Terminals without this support
+keep their existing Kitty or legacy input path; `Ctrl+J` remains the newline
+fallback when modifiers cannot be reported.
+
 Each row is the first thing that was said to the session — which is what you
 actually recognise one by — and how long ago that was; a session nobody has
 spoken to yet says `nothing said yet`. The id is the one thing here nobody can

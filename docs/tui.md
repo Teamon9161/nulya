@@ -227,7 +227,8 @@ tui/
 
 ### 4.4 Composer / 按键 / slash
 
-- `Enter` 发送；`Shift+Enter` / `Ctrl+Enter`（包括同时按 Ctrl+Shift）换行，终端需要能报告修饰键（Kitty 或 modifyOtherKeys）；终端不能区分带修饰键的 Enter 时用 `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
+- `Enter` 发送；`Shift+Enter` / `Ctrl+Enter`（包括同时按 Ctrl+Shift）换行，终端需要能报告修饰键（Win32 输入模式、Kitty 或 modifyOtherKeys）；终端不能区分带修饰键的 Enter 时用 `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
+- **Win32 输入模式自动协商**（`tui/src/terminalkeys.ts`）：启动时经 DECRQM 查询私有模式 `9001`，终端报告支持且关闭时才启用，不按平台或环境变量猜能力，也不写个人终端设置。解析 `CSI Vk;Sc;Uc;Kd;Cs;Rc _`，恢复 Shift/Ctrl/Alt、功能键和方向键，抬起与纯修饰键事件不触发编辑；重复记录按次数交付，UTF-16 代理对合成 emoji，AltGr 的可打印结果按普通文本处理。事件仍经 OpenTUI 的全局优先分发，屏幕消费的键不再编辑输入框；鼠标和括号粘贴继续走原有解析器。退出时只关闭由本 TUI 开启的模式，原本开启或终端不支持时不改状态。
 - 发送时若 `stepping`：只 append（queued）；不打断。**正文只在 transcript 那张用户卡上出现一次**，输入框上面的 queue lane 只画一行计数 `⏸ N queued · ctrl+g interrupts & delivers`（静息时不画）；要提前结束当前 step 并投递就是 `Ctrl+G`（append → kill 这一步 → 等它真的退出 → 立即再 step；idle 且输入框是空的时走 `wake()`，**inbox 为空绝不裸 step**）。`Ctrl+J` 始终留给非 Kitty 终端的换行——裸 `ctrl+j` 与换行在那些终端上字节相同，抢它会毁掉 `Shift+Enter` 的退路。同一 TUI 的 append 子进程串行启动，保证快速连发取得 inbox 名时仍是 FIFO。
 - `/` 开头弹一个小补全，三档依次：**内建命令**（表在 `commands.ts`，也是 `/help` 与补全读的同一张表：`/model` `/mode [ask|unsafe]` `/provider` `/effort <level|auto>` `/env [<target>]` `/new` `/clear` `/sessions [<id>]` `/cwd [<path>]` `/sidebar [<percent>]` `/ext` `/tasks` `/usage` `/context` `/settings` `/outcome <verdict> [note]` `/with [<id>[@<v>]]` `/agent [<name> <task…>]` `/step` `/cancel` `/fold` `/help` `/quit`）· **activate 了的包自己声明的命令**（`contributes.commands`；`/plan` `/ask` `/evolve` `/compact` 都是这一档，包不在就连这个词都不存在）· **activate 了的 skill**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → 包命令 → skill → 原样发给模型。
   - 一个概念一个词：`/with` 就是内核的 `session new --with`；`/new` 另开一个 tab、`/clear` 把**当前** tab 原地换成一张新草稿（同一个数组下标），两者都不删任何东西（ledger 只能 append，旧 session 的文件照样在盘上、`/sessions` 照样找得到），区别只在"新的那一场落在哪个 tab"。

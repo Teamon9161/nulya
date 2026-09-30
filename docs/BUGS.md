@@ -10,5 +10,5 @@
 - Windows Terminal 若截获 `Ctrl+V` 且截图不产生文本事件，应用收不到这个手势，需要 `Alt+V` 直接读桌面剪贴板；已在 `/help` 写明。未发送真实联网图片请求，未在真实终端手工验证系统截图粘贴。内核需重新构建并重启 TUI，正在运行的旧二进制不会获得这些改动。
 - 验证：相关 TUI 回归测试 46 项通过，视图测试 12 项通过，类型检查通过；Codex 能力单测和 append/carry/config 投影的离线 CLI 回归通过。完整 TUI 首轮为 815 通过、1 跳过、1 个帮助页快照失败；该快照已更新并定向复测通过，之后未重跑完整套件。图片集成测试已可编译运行，但未配置联网 profile，实际请求跳过。
 - 第 3 项：委派工具描述与新建、排队和重启 runner 的成功回执不再强制立即结束本轮。主线程可以继续独立任务；不得重复子任务或轮询催结果，没有独立工作时再结束本轮等待报告。委派启动与 wake 不变量的两项离线端到端测试通过。
-- Composer 新增 `Ctrl+Enter` / `Ctrl+Shift+Enter` 换行绑定，`Shift+Enter` 原有绑定保留。Kitty 与 modifyOtherKeys 的修饰 Enter 回归通过；真实 Windows Terminal 的 Shift+Enter 仍可能退化成普通回车，当前依赖未接入 Win32 增强键盘协议，因此不标记这个实际终端问题已修复。
+- Composer 新增 `Ctrl+Enter` / `Ctrl+Shift+Enter` 换行绑定，`Shift+Enter` 原有绑定保留。另在 TUI 启动路径接入 Win32 增强输入模式：查询终端能力后自动启用，退出恢复，无需用户修改 Windows Terminal 设置。Win32 字节记录经真实解析器到 Composer 的回归、协议协商与恢复、抬起/重复、中文/emoji 和 AltGr 测试共 8 项通过；Kitty 与 modifyOtherKeys 回归也通过。未在重启后的真实 Windows Terminal 中手工按键验证，当前运行的旧 TUI 不会热更新。
 - 提交前重新启动的完整 TUI 套件及 Zig 验证被中断，没有可确认的完整结束汇总，不计为通过；不重复启动长验证。已完成的本轮定向验证为 Composer 28 项、帮助页 3 项、委派端到端 2 项及 TypeScript 类型检查。

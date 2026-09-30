@@ -16,6 +16,8 @@
  * actually run here, the picker is the first thing on screen.
  */
 import { render } from "@opentui/solid"
+import { createCliRenderer } from "@opentui/core"
+import { installWin32Keyboard } from "./terminalkeys.ts"
 import packageJson from "../package.json"
 import { openWorkspace, type Workspace } from "./nulya/bin.ts"
 import { configShow } from "./nulya/cli.ts"
@@ -181,6 +183,16 @@ async function main() {
   const live = liveStyle(settings)
   const state = id === undefined ? undefined : createSessionState(id)
 
+  // Keep a direct terminal writer before OpenTUI captures application stdout.
+  const write = process.stdout.write.bind(process.stdout)
+  const renderer = await createCliRenderer({
+    exitOnCtrlC: false,
+    targetFps: 30,
+    // The debug console steals focus; failures already appear in the transcript.
+    openConsoleOnError: false,
+  })
+  installWin32Keyboard(renderer, (sequence) => { write(sequence) })
+
   await render(
     () => (
       <App
@@ -210,15 +222,7 @@ async function main() {
         agentsTrusted={agentsTrusted}
       />
     ),
-    {
-      exitOnCtrlC: false,
-      targetFps: 30,
-      // OpenTUI's debug console is useful for library development, but in this
-      // app it is a trap: it steals focus, Esc only blurs it, and the user loses
-      // the TUI controls that would let them recover. Driver failures already
-      // have a first-class surface in the transcript (`ErrorNotice`).
-      openConsoleOnError: false,
-    },
+    renderer,
   )
 }
 
