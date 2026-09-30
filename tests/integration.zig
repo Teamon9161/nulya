@@ -46,7 +46,7 @@ const Live = struct {
         const profile = env.get("NULYA_INTEGRATION_PROFILE") orelse return null;
         if (profile.len == 0) return null;
 
-        var cfg = try config.load(alloc, io, &env);
+        var cfg = try config.load(alloc, io, &env, .{});
         defer if (!opened) cfg.deinit();
         if (cfg.provider.findProfile(profile) == null) {
             std.debug.print("integration: no provider profile named '{s}'\n", .{profile});
@@ -115,14 +115,11 @@ const Live = struct {
         });
     }
 
-    /// Does this machine's catalog say the live model accepts images? The claim
-    /// is the user's to make, so an unmarked model means "not
-    /// asked to be tested with images", not "broken".
-    fn claimsVision(self: *const Live) bool {
-        for (self.cfg.models) |m| {
-            if (std.mem.eql(u8, m.id, self.model_id)) return m.vision;
-        }
-        return false;
+    fn claimsVision(self: *const Live) !bool {
+        return launch.visionAccepted(std.testing.allocator, std.testing.io, &self.cfg, &self.env, .{
+            .provider = @tagName(self.holder),
+            .model = self.model_id,
+        });
     }
 };
 
@@ -318,14 +315,10 @@ test "live provider: an image in a user turn reaches the model and it describes 
     var live = (try Live.open(alloc, io)) orelse return error.SkipZigTest;
     defer live.deinit();
 
-    // Only a model the catalog claims can see images. Today
-    // that is the codex profile's `gpt-5.5` and Anthropic's own models — but the
-    // claim is written in the user's config, never guessed here, exactly as
-    // `session append --image` reads it. DeepSeek's endpoints do not take
-    // images, so the two cheap profiles skip.
-    if (!live.claimsVision()) {
+    // Exercise images only when the append/carry capability gate would permit them.
+    if (!try live.claimsVision()) {
         std.debug.print(
-            "integration: '{s}' is not marked `vision = true` in [[models]]; skipping the image turn\n",
+            "integration: '{s}' has no image capability claim; skipping the image turn\n",
             .{live.model_id},
         );
         return error.SkipZigTest;

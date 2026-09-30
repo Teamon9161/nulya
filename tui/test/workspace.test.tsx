@@ -39,7 +39,7 @@ import { agentStart, createAskQueue, createEntryOnce, trustAfter } from "../src/
 import { SessionsView } from "../src/ui/overlays/SessionsView.tsx"
 import { StyleContext } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
-import { displayWidth } from "../src/ui/columns.ts"
+import { displayWidth, fit } from "../src/ui/columns.ts"
 import { sessionNew } from "../src/nulya/cli.ts"
 import {
   frameLines,
@@ -97,6 +97,13 @@ test("a typed path expands ~, drive letters and relatives", () => {
   // otherwise: this browser gets pasted paths from the other platform all day.
   expect(expandPath("D:", base, env)).toBe(`D:${sep}`)
   expect(expandPath("D:\\src", base, env)).toBe("D:\\src")
+  // A drive's ROOT keeps its trailing separator whatever way it was typed.
+  // `D:` alone is drive-relative in the Win32 API (`D:Users` means "Users
+  // under this drive's CURRENT directory on that drive"), so handing it back
+  // un-separated made every path built from it point somewhere else and a
+  // drive list come back empty.
+  expect(expandPath("D:\\", base, env)).toBe(`D:${sep}`)
+  expect(expandPath("D:/", base, env)).toBe(`D:${sep}`)
   expect(expandPath("sub", base, env)).toBe(join(base, "sub"))
   // Nothing typed is where you already are, never the filesystem root.
   expect(expandPath("   ", base, env)).toBe(base)
@@ -359,9 +366,14 @@ test("a start-up that threw reached no answer, so the next tab into that directo
 /** Replace a run-specific path (and its basename) with a fixed-width stand-in. */
 function mask(frame: string, real: string, token: string): string {
   const name = basename(real)
-  return frame
+  let masked = frame
     .replaceAll(real, token.padEnd(real.length))
     .replaceAll(name, `${token}-name`.padEnd(name.length))
+  // A recent's path column can show only a prefix of the temporary path.
+  for (let width = displayWidth(real) - 1; width > displayWidth(token); width--) {
+    masked = masked.replaceAll(fit(real, width), `${token.padEnd(width - 1)}…`)
+  }
+  return masked
 }
 
 async function overlayFrame(node: () => JSX.Element, width = 120, height = 24) {
@@ -402,7 +414,7 @@ test("the directory browser draws its sections at 80 and at 120", async () => {
         // columns, because a snapshot is here to pin the layout and a mask
         // that shortened a line would pin a layout nobody ever saw.
         const frame = mask(mask(raw, box, "<dir>"), elsewhere, "<elsewhere>")
-        expect(frame).toMatchSnapshot(`browser-${width}`)
+        expect(frame.split("\n").map((line) => line.trimEnd()).join("\n")).toMatchSnapshot(`browser-${width}`)
       } finally {
         setup.renderer.destroy()
       }
@@ -525,6 +537,37 @@ afterAll(() => {
   here.cleanup()
   there.cleanup()
 })
+
+test("the directory browser replaces the composer input and restores it on close", async () => {
+  const setup = await testRender(
+    () => (
+      <App
+        ws={here}
+        pick={{ profile: "scripted", model: "scripted-demo" }}
+        style={style}
+        statePath={join(here.dir, "cwd-layout-state.json")}
+        driver={{ env: scripted_env }}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  try {
+    await settle(setup, 4)
+    await setup.mockInput.typeText("/cwd")
+    setup.mockInput.pressEnter()
+    let frame = await settle(setup, 5)
+    expect(frame).toContain("choose a workspace")
+    expect(frame.split("╭")).toHaveLength(2)
+    setup.mockInput.pressEscape()
+    frame = await settle(setup, 4)
+    expect(frame).not.toContain("choose a workspace")
+    expect(frame.split("╭")).toHaveLength(2)
+    await setup.mockInput.typeText("back in the composer")
+    expect(await settle(setup, 3)).toContain("back in the composer")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
 
 test("`/cwd` re-points the draft, and the session lands in THAT directory", async () => {
   const state = join(mkdtempSync(join(tmpdir(), "nulya-state-")), "tui-state.json")

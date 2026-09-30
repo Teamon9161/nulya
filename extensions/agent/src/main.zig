@@ -625,7 +625,7 @@ fn newDelegation(
     return .{ .text = try std.fmt.allocPrint(
         alloc,
         "delegated to '{s}' — delegation {s}, {s}, running as background task {s}{s}.\n" ++
-            "Do not call any more tools about this; end your turn. Its report will arrive here as a message when it finishes, and only its final answer comes back — nothing else from that conversation enters this one.\n" ++
+            "Continue independent work while it runs; do not duplicate its task or poll for completion. When nothing independent remains, end your turn and wait for its report. Its report will arrive here as a message when it finishes, and only its final answer comes back — nothing else from that conversation enters this one.\n" ++
             "To press it for specifics, send a correction, or change its direction mid-run, call agent again with session={s} instead of starting a new one — it keeps everything it already found. {s}",
         .{
             m.def.name,
@@ -764,7 +764,7 @@ fn sendTurn(
         .busy => return .{ .text = try std.fmt.allocPrint(
             alloc,
             "{s} for delegation {s} ('{s}') — it is working right now and will take this at its next turn.\n" ++
-                "Do not call any more tools about this; end your turn. Its next report will arrive here as a message.",
+                "Continue independent work while it runs; do not duplicate its task or poll for completion. When nothing independent remains, end your turn and wait for its next report to arrive here as a message.",
             .{ if (interrupt) "interrupt queued" else "queued", target, worn },
         ) },
         .task => |t| t,
@@ -773,7 +773,7 @@ fn sendTurn(
     return .{ .text = try std.fmt.allocPrint(
         alloc,
         "sent to delegation {s} ('{s}'), running as background task {s}.\n" ++
-            "Do not call any more tools about this; end your turn. Its next report will arrive here as a message.",
+            "Continue independent work while it runs; do not duplicate its task or poll for completion. When nothing independent remains, end your turn and wait for its next report to arrive here as a message.",
         .{ target, worn, started },
     ) };
 }

@@ -86,7 +86,7 @@ const nulya_light: Theme = {
   lift: "#0b0e14",
 }
 
-/** NO_COLOR: every token collapses to the terminal's own foreground. */
+/** NO_COLOR: foreground tokens collapse; backgrounds stay transparent. */
 function monochrome(): Theme {
   const fg = "#ffffff"
   return {
@@ -100,7 +100,7 @@ function monochrome(): Theme {
     warn: fg,
     diff: { add: fg, del: fg, addBg: "transparent", delBg: "transparent" },
     hairline: fg,
-    selection: fg,
+    selection: "transparent",
     lift: fg,
   }
 }

@@ -137,11 +137,9 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
     });
     defer alloc.free(delegated.stdout);
     try std.testing.expectEqual(@as(u8, 0), delegated.code);
-    // The receipt names the child — that is what lets a transcript link to it —
-    // and tells the model to stop, because the work has not happened yet.
+    // The receipt names the child so a transcript can link to it.
     try std.testing.expect(std.mem.indexOf(u8, delegated.stdout, "background task") != null);
     try std.testing.expect(std.mem.indexOf(u8, delegated.stdout, "read-only") != null);
-    try std.testing.expect(std.mem.indexOf(u8, delegated.stdout, "end your turn") != null);
     const child = blk: {
         const at = std.mem.indexOf(u8, delegated.stdout, "session s-").? + "session ".len;
         var end = at;

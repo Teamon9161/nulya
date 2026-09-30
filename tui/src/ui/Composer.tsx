@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, onMount } from "solid-js"
 import type { KeyEvent, MouseEvent, PasteEvent, TextareaRenderable } from "@opentui/core"
 import { MouseButton, SyntaxStyle } from "@opentui/core"
+import { DraftHistory, type DraftSnapshot } from "../draft.ts"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { columnWidth, displayWidth, fit, squeeze, toHighlightRanges, wrapWords } from "./columns.ts"
 import { pointer } from "./pointer.ts"
@@ -24,7 +25,6 @@ import {
   placeholderFor,
   placeholderRanges,
   referenced,
-  tokenAt,
   type PasteAttachment,
 } from "../paste.ts"
 import { skillCompletions, type SkillTable } from "../skills.ts"
@@ -81,8 +81,9 @@ export function wrappedRows(text: string, width: number): number {
 }
 
 /**
- * The composer. Enter sends, Shift+Enter (or Ctrl+J, for terminals without the
- * Kitty protocol) makes a newline, Up on an empty buffer walks the history.
+ * The composer. Enter sends; Shift+Enter and Ctrl+Enter make a newline, with
+ * Ctrl+J as a fallback when the terminal cannot report Enter's modifiers.
+ * Up on an empty buffer walks the history.
  * Sending while a step runs is allowed and does not interrupt it — the turn is
  * queued and the kernel drains it at its next step boundary.
  *
@@ -254,8 +255,8 @@ export function Composer(props: {
    *
    * Kept for the life of the composer rather than drained on submit, for the
    * same reason the message history is: a recalled draft has to still mean what
-   * it said. An attachment leaves only when its token does — one Backspace on
-   * the token drops both.
+   * it said. Deleting a token hides its attachment, but keeps the payload for
+   * undo and redo until the draft is discarded.
    */
   const [attachments, setAttachments] = createSignal<PasteAttachment[]>([])
   const [images, setImages] = createSignal<ImageAttachment[]>([])
@@ -385,11 +386,41 @@ export function Composer(props: {
    */
   const rows = () => Math.min(8, Math.max(1, wrappedRows(line(), Math.max(8, screen().width - 6))))
 
+  const edits = new DraftHistory()
+  const snapshot = (): DraftSnapshot => ({
+    text: area?.plainText ?? "",
+    cursor: area?.getTextRange(0, area.cursorOffset).length ?? 0,
+  })
   const sync = () => {
-    setLine(area?.plainText ?? "")
-    setAt(area?.cursorOffset ?? 0)
+    const state = snapshot()
+    edits.record(state)
+    area?.editBuffer.clearHistory()
+    setLine(state.text)
+    setAt([...state.text.slice(0, state.cursor)].length)
     setPick(0)
     paintTokens()
+  }
+  const showSnapshot = (state: DraftSnapshot) => {
+    if (!area || area.isDestroyed) return
+    area.setText(state.text)
+    const lines = state.text.slice(0, state.cursor).split("\n")
+    const last = lines[lines.length - 1]!.replace(/\t/g, " ".repeat(area.editBuffer.getTabWidth()))
+    area.setCursor(lines.length - 1, displayWidth(last))
+    sync()
+  }
+  const replaceRange = (start: number, end: number, text: string) => {
+    if (!area) return
+    const before = area.plainText
+    showSnapshot({ text: before.slice(0, start) + text + before.slice(end), cursor: start + text.length })
+  }
+  const insertText = (text: string) => {
+    if (!area) return
+    sync()
+    const selection = area.getSelection()
+    const state = snapshot()
+    const start = selection ? area.getTextRange(0, selection.start).length : state.cursor
+    const end = selection ? area.getTextRange(0, selection.end).length : state.cursor
+    replaceRange(start, end, text)
   }
 
   /**
@@ -416,6 +447,11 @@ export function Composer(props: {
       return
     }
     const text = new TextDecoder().decode(event.bytes)
+    if (text.length === 0 || /^https?:\/\/\S+$/i.test(text.trim())) {
+      event.preventDefault()
+      void pasteTerminalImage(text, plantPending())
+      return
+    }
     const path = imagePathIn(text)
     if (path) {
       // Claimed before we know: whether this paste is a picture or only its
@@ -449,8 +485,7 @@ export function Composer(props: {
   let nextPending = 1
   const plantPending = (): string => {
     const token = pendingPlaceholder(nextPending++)
-    area?.insertText(token)
-    sync()
+    insertText(token)
     return token
   }
 
@@ -461,16 +496,14 @@ export function Composer(props: {
    * answer arrived; the content is not put back, the same rule
    * `backspaceAttachment` already lives by for a settled attachment's own
    * placeholder — putting it back would silently undo an edit made on
-   * purpose. An empty `replacement` just removes the marker.
+   * purpose. Undo history is settled too, so redo can restore the real content
+   * without resurrecting a marker whose read has already finished.
    */
   const settleToken = (token: string, replacement: string) => {
-    if (!area) return
-    const at = tokenAt(area.plainText, token)
-    if (at < 0) return
-    area.setSelection(at, at + [...token].length)
-    area.deleteSelection()
-    if (replacement.length > 0) area.insertText(replacement)
+    if (!area || area.isDestroyed) return
     sync()
+    const settled = edits.settle(token, replacement)
+    if (settled.text !== area.plainText) showSnapshot(settled)
   }
 
   /**
@@ -484,16 +517,14 @@ export function Composer(props: {
     if (!pasteShouldFold(size.chars, size.lines)) return false
     const attachment: PasteAttachment = { id: nextId(), text, ...size }
     setAttachments([...attachments(), attachment])
-    area?.insertText(placeholderFor(attachment.id))
-    sync()
+    insertText(placeholderFor(attachment.id))
     return true
   }
 
   /** Pasted text, put in the box by us. The fold applies wherever it came from. */
   const insertPaste = (text: string) => {
     if (foldPaste(text)) return
-    area?.insertText(text)
-    sync()
+    insertText(text)
   }
 
   /**
@@ -552,6 +583,7 @@ export function Composer(props: {
    */
   const pastePath = async (path: string, text: string, token: string) => {
     const found = await (props.readImage ?? readImageFile)(path)
+    if (!area || area.isDestroyed || !edits.hasToken(token)) return
     if (found.kind === "image") {
       const attachment = registerImage(found.image)
       if (attachment) {
@@ -567,23 +599,26 @@ export function Composer(props: {
     settleText(token, text)
   }
 
-  /**
-   * `Ctrl+V`, when the terminal hands the key over instead of pasting itself.
-   *
-   * Both representations, one gesture (`clipboard.ts`): an image becomes an
-   * attachment, and text is inserted here — including the fold a long one gets
-   * through the bracketed path, because which key delivered a paste is not a
-   * reason for it to behave differently. Taking the key and then only looking
-   * for an image is what made this half a gesture: on a terminal that does
-   * hand it over, a plain text paste did nothing at all.
-   *
-   * `readClipboard` is a real read too (spawns a host clipboard reader) and
-   * gets the same pending-marker treatment `pastePath` does, for the same
-   * reason: the answer can arrive after the cursor has moved.
-   */
+  // Browsers can put both a picture and its URL on the clipboard. Ask for the
+  // picture only; a failed read must fall back to the terminal's original text.
+  const pasteTerminalImage = async (text: string, token: string) => {
+    const found = await readClipboard(props.readClipboard, true)
+    if (!area || area.isDestroyed || !edits.hasToken(token)) return
+    if (found.kind === "image") {
+      const attachment = registerImage(found.image)
+      settleToken(token, attachment ? imagePlaceholder(attachment.id) : text)
+    } else {
+      settleText(token, text)
+      if (text.length === 0) props.onNotice?.("no image on the clipboard · Alt+V reads the desktop clipboard directly")
+    }
+  }
+
+  // A terminal may pass the paste key through without inserting any text.
+  // Read both clipboard representations so plain text still works on that path.
   const pasteFromClipboard = async () => {
     const token = plantPending()
     const found = await readClipboard(props.readClipboard)
+    if (!area || area.isDestroyed || !edits.hasToken(token)) return
     switch (found.kind) {
       case "image": {
         const attachment = registerImage(found.image)
@@ -621,15 +656,12 @@ export function Composer(props: {
    */
   const backspaceAttachment = (): boolean => {
     if (!area) return false
-    const found = placeholderBefore(area.plainText, area.cursorOffset, attachments())
-    const image = images().find((entry) => area!.plainText.slice(0, area!.cursorOffset).endsWith(imagePlaceholder(entry.id)))
+    const state = snapshot()
+    const found = placeholderBefore(state.text, [...state.text.slice(0, state.cursor)].length, attachments())
+    const image = images().find((entry) => state.text.slice(0, state.cursor).endsWith(imagePlaceholder(entry.id)))
     if (!found && !image) return false
     const token = found ? placeholderFor(found.id) : imagePlaceholder(image!.id)
-    area.setSelection(area.cursorOffset - [...token].length, area.cursorOffset)
-    area.deleteSelection()
-    if (found) setAttachments(attachments().filter((entry) => entry.id !== found.id))
-    if (image) setImages(images().filter((entry) => entry.id !== image.id))
-    sync()
+    replaceRange(state.cursor - token.length, state.cursor, "")
     return true
   }
 
@@ -681,8 +713,8 @@ export function Composer(props: {
 
   const clear = () => {
     if (!area) return
-    area.selectAll()
-    area.deleteSelection()
+    area.setText("")
+    edits.reset()
     sync()
   }
 
@@ -727,10 +759,10 @@ export function Composer(props: {
    */
   const acceptReference = (match: ReferenceMatch, start: number, end: number): void => {
     if (!area) return
-    area.setSelection(start, end)
-    area.deleteSelection()
-    area.insertText(match.kind === "directory" ? match.replacement : `${match.replacement} `)
     sync()
+    const chars = [...area.plainText]
+    replaceRange(chars.slice(0, start).join("").length, chars.slice(0, end).join("").length,
+      match.kind === "directory" ? match.replacement : `${match.replacement} `)
   }
 
   /** Tab on a half-typed command finishes it, with a space ready for arguments. */
@@ -744,9 +776,8 @@ export function Composer(props: {
     }
     const best = matches()[0]
     if (!best || best.name === line()) return false
-    clear()
-    area?.insertText(best.args ? `${best.name} ` : best.name)
     sync()
+    replaceRange(0, area?.plainText.length ?? 0, best.args ? `${best.name} ` : best.name)
     return true
   }
 
@@ -771,6 +802,12 @@ export function Composer(props: {
     if (event.name === "v" && (event.ctrl || event.meta)) {
       event.preventDefault()
       void pasteFromClipboard()
+      return
+    }
+    if (event.ctrl && (event.name === "z" || event.name === "y")) {
+      event.preventDefault()
+      sync()
+      showSnapshot(event.name === "y" || event.shift ? edits.redo() : edits.undo())
       return
     }
     if (event.name === "tab") {
@@ -948,6 +985,8 @@ export function Composer(props: {
           keyBindings={[
             { name: "return", action: "submit" },
             { name: "return", shift: true, action: "newline" },
+            { name: "return", ctrl: true, action: "newline" },
+            { name: "return", ctrl: true, shift: true, action: "newline" },
             { name: "j", ctrl: true, action: "newline" },
           ]}
         />

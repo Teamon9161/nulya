@@ -366,7 +366,7 @@ export interface ModelView {
   default_effort: string | null
   context_window: number | null
   /** Whether the catalog explicitly permits `session append --image`. */
-  vision: boolean
+  vision: boolean | null
 }
 
 /** The merged `[registry]`: the ceiling on this workspace's tool face. */
@@ -385,11 +385,18 @@ export interface ExtensionsView {
   with: string[]
 }
 
+export interface ImageModel {
+  provider: string
+  model: string
+}
+
 export interface ConfigView {
   paths: ConfigPaths
   active_profile: string
   profiles: ProfileView[]
   models: ModelView[]
+  /** Effective claims from the append/carry resolver; absent on older binaries. */
+  image_models?: ImageModel[]
   registry: RegistryView
   extensions: ExtensionsView
 }
@@ -437,6 +444,7 @@ export async function configShow(ws: Workspace, env?: Record<string, string>): P
       roles: roles(p.roles),
     })),
     models: models.map(model),
+    image_models: Array.isArray(record["image_models"]) ? record["image_models"] as ImageModel[] : undefined,
   }
 }
 
@@ -461,7 +469,7 @@ function model(m: ModelView): ModelView {
     efforts: Array.isArray(m.efforts) ? m.efforts : [],
     default_effort: m.default_effort ?? null,
     context_window: m.context_window ?? null,
-    vision: m.vision ?? false,
+    vision: m.vision ?? null,
   }
 }
 

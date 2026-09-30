@@ -58,7 +58,7 @@ test("/help lists the bindings that are actually in force", async () => {
   // Tall enough for the whole page: this test's point is that EVERY command is
   // on it, and the page is a scrollbox, so a viewport that cuts the last two
   // rows would turn "not discoverable" into "not scrolled to".
-  const setup = await overlay(() => <HelpView keys={createKeymap(default_settings)} onClose={() => {}} />, style, 100, 98)
+  const setup = await overlay(() => <HelpView keys={createKeymap(default_settings)} onClose={() => {}} />, style, 100, 110)
   try {
     // Eight passes, not four: a busy machine can capture a half-painted frame,
     // and a snapshot that flaky is worse than none.

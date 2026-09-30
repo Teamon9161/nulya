@@ -94,9 +94,9 @@ pub const ModelParams = struct {
     /// "send nothing" (provider default).
     default_effort: ?[]const u8 = null,
     context_window: ?u64 = null,
-    /// Whether this model accepts images in a user turn. Explicit opt-in: an id
-    /// that does not say so makes `--image` refuse, rather than a provider 400.
-    vision: bool = false,
+    /// Explicit image capability override. Null defers to endpoint evidence;
+    /// without either source the shell refuses images.
+    vision: ?bool = null,
 };
 
 pub const Provider = struct {
@@ -635,8 +635,8 @@ test "default catalog: every model a built-in profile lists is described, and ef
     try std.testing.expectEqualStrings("off", flash.efforts[0]);
     try std.testing.expect(cfg.defaultEffort("deepseek", "deepseek-flash") == null);
     // The multimodal claim is what `session append --image` reads; V4 Pro stays silent.
-    try std.testing.expect(flash.vision);
-    try std.testing.expect(!cfg.findModel("deepseek-v4-pro").?.vision);
+    try std.testing.expect(flash.vision.?);
+    try std.testing.expect(!(cfg.findModel("deepseek-v4-pro").?.vision orelse false));
 }
 
 test "[[models]] merge by id and a profile effort overrides the catalog default" {

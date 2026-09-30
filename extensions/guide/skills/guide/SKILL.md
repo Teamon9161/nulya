@@ -338,8 +338,11 @@ Store and scope:
   and belongs to the model that produced it) — so expect the child's first step
   to pay for the whole prefix again on a cold prompt cache. It refuses, and
   creates nothing, if `seq` is past the parent's last event, or if the copied
-  turns hold images and the child's model has no `[[models]]` entry saying
-  `vision = true`. Which models are worth switching between is your call, not
+  turns hold images and the child's provider/model has no image capability claim.
+  An explicit trusted `[[models]] vision = true/false` wins; otherwise only a
+  matching Codex subscription cache entry whose `input_modalities` includes
+  `image` permits images (refresh it with `nulya config refresh`). A label-only
+  entry or an explicit selectable `models` list does not suppress that evidence. Which models are worth switching between is your call, not
   the kernel's: it holds no compatibility table.
 - `nulya session new --env <spec>` chooses WHERE this session's `shell` commands
   run: `local` (the default) or a `remote:…` spec that moves the whole

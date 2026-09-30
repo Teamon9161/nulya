@@ -567,10 +567,13 @@ test("a key pasted in /provider makes the kernel see the profile as ready (real 
     // The key itself is not in the projection.
     expect(JSON.stringify(after)).not.toContain("sk-test-not-real")
     // And a session on it freezes the real provider, not scripted.
+    // The id is read from the config rather than spelled: DeepSeek renamed
+    // Flash once already, and this test is about the KEY making the profile
+    // runnable — the id is whatever the config says this profile defaults to.
     const id = await sessionNew(ws, { profile: "deepseek" }, env)
     const header = JSON.parse(require("node:fs").readFileSync(join(ws.dir, ".nulya", "sessions", `${id}.jsonl`), "utf8").split("\n")[0])
     expect(header.model_identity.provider).toBe("openai")
-    expect(header.model_identity.model).toBe("deepseek-v4-flash")
+    expect(header.model_identity.model).toBe(ready.model)
     expect(JSON.stringify(header)).not.toContain("sk-test-not-real")
   } finally {
     rmSync(home, { recursive: true, force: true })

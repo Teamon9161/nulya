@@ -69,10 +69,10 @@ export type ClipboardReader = (types: readonly [string, ...string[]]) => Promise
 
 const fromHost: ClipboardReader = (types) => host().read({ preferredTypes: types })
 
-export async function readClipboard(read: ClipboardReader = fromHost): Promise<ClipboardPaste> {
+export async function readClipboard(read: ClipboardReader = fromHost, imagesOnly = false): Promise<ClipboardPaste> {
   let result: ClipboardReadResult
   try {
-    result = await read(wanted)
+    result = await read(imagesOnly ? ["image/png", "image/jpeg"] : wanted)
   } catch (error) {
     // A clipboard that throws is a clipboard we do not have. It is never worth
     // an error screen: the terminal's own paste is right there.

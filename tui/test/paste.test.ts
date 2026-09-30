@@ -166,8 +166,7 @@ test("hasPendingPaste sees an unresolved marker wherever it sits, and nothing el
 test("placeholders are accented by their shape, wherever they sit in the line", () => {
   const text = "before [Pasted text #1] middle [Pasted text #22] after [Pasted text #] [Image #3]"
   const lit = placeholderRanges(text).map((range) => text.slice(range.start, range.end))
-  // A numberless bracket is not a placeholder, and images are not this
-  // contract's business (D7) — neither lights up.
-  expect(lit).toEqual(["[Pasted text #1]", "[Pasted text #22]"])
+  // Both attachment shapes light up, but a numberless bracket does not.
+  expect(lit).toEqual(["[Pasted text #1]", "[Pasted text #22]", "[Image #3]"])
   expect(placeholderRanges("nothing here")).toEqual([])
 })

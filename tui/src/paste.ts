@@ -8,10 +8,8 @@
  * `PASTE_FOLD_LINES` / `PASTE_FOLD_CHARS`, `input.rs` `[Pasted text #N]`) —
  * goals/tui-panel.md D6.
  *
- * Text only. Images are the vision track's business and are deliberately not
- * approximated here: the ledger has no image content block today, and building
- * a "cannot see images yet" placeholder now would be building something to
- * throw away (D7).
+ * Image payloads live beside the composer; token scanning and numbering are
+ * shared with text attachments.
  */
 
 /** tcode `PASTE_FOLD_LINES` / `PASTE_FOLD_CHARS`. */
@@ -72,16 +70,17 @@ export function referenced(text: string, attachments: readonly PasteAttachment[]
 }
 
 /**
- * The character ranges of `[Pasted text #N]` tokens, for the accent in the
+ * The character ranges of text and image attachment tokens, for the accent in the
  * input box (tcode `input_token_ranges`). Shape-matched rather than
  * attachment-matched, exactly as there: the token is what the eye reads.
  */
 export function placeholderRanges(text: string): { start: number; end: number }[] {
   const chars = [...text]
-  const prefix = [..."[Pasted text #"]
+  const prefixes = ["[Pasted text #", "[Image #"].map((prefix) => [...prefix])
   const ranges: { start: number; end: number }[] = []
   for (let at = 0; at < chars.length; at++) {
-    if (!prefix.every((c, i) => chars[at + i] === c)) continue
+    const prefix = prefixes.find((prefix) => prefix.every((c, i) => chars[at + i] === c))
+    if (!prefix) continue
     let end = at + prefix.length
     while (end < chars.length && chars[end]! >= "0" && chars[end]! <= "9") end += 1
     if (end === at + prefix.length || chars[end] !== "]") continue
@@ -108,8 +107,7 @@ export function placeholderBefore(
 /**
  * Every shape a paste in this composer can become, as the word between `#`
  * and the number: `[Pasted text #N]` here, `[Image #N]` in `Composer.tsx`.
- * Images are otherwise none of this file's business (D7 above), but the
- * counter that numbers both shapes has to recognise both, or a fresh image
+ * The counter has to recognise both shapes, or a fresh image
  * could be handed the same number a still-recalled text placeholder means.
  */
 const numbered_placeholder = /\[(?:Pasted text|Image) #(\d+)\]/g

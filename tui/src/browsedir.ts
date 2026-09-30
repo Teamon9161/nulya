@@ -72,7 +72,14 @@ export function expandPath(
   if ((raw.startsWith("~/") || raw.startsWith("~\\")) && home.length > 0) {
     return join(home, raw.slice(2))
   }
+  // A bare drive letter names the drive's ROOT, and the root is `X:\` —
+  // `node:path` on a win32 host is the one thing that agrees (`join("C:",
+  // "Users")` is `C:\Users`, and `statSync("C:")` follows the DRIVE-RELATIVE
+  // meaning from the process's own cwd instead). Returning the letter alone
+  // is what used to make listing a drive show nothing: every path built from
+  // it came back drive-relative and missed.
   if (/^[a-zA-Z]:$/.test(raw)) return `${raw}${sep}`
+  if (/^[a-zA-Z]:[\\/]$/.test(raw)) return `${raw.slice(0, 2)}${sep}`
   if (/^[a-zA-Z]:[\\/]/.test(raw)) return raw.replace(/[\\/]+$/, "") || raw
   if (isAbsolute(raw)) return resolve(raw)
   return resolve(base, raw)

@@ -1,35 +1,16 @@
 /**
- * `/cwd`: which directory this tab works in (goals/tui-shell.md §5.3b point 2).
- *
- * A minimal directory browser and nothing more. No file preview, no multiple
- * selection, no "new folder" — the question is "which of the directories you
- * already have", and every one of those would be a second question.
- *
- * AN OVERLAY, NOT A COMPOSER DIALOG. §6.5 draws that line at one place: a
- * dialog above the composer may never outgrow its rows, and a listing of a
- * directory obviously can. So it takes the overlay skeleton — title, a blank
- * line, the body, one dim line of keys last — and its list is a scrollbox. Its
- * title carries no glyph, because a browser is a PLACE and only a screen where
- * an identity or a level is chosen wears `◈` (§6.5, §6.3).
- *
- * ONE VERB, and it is worth writing down because two obvious ones would fight:
- * `Enter` always takes the row under the cursor — a directory row is entered,
- * a `no project` / recent / `use this directory` row is chosen. Typing does not
- * need a second confirm gesture, because typing puts the cursor ON `use this
- * directory` for whatever the typed path resolves to: "Enter in the path field"
- * and "Enter on a row" are then the same keystroke doing the same thing, rather
- * than two rules a person has to hold apart.
- *
- * The path field keeps the keyboard the whole time — it is the only control
- * here that takes text, and a browser you cannot paste a path into is a browser
- * that fails at the one thing a terminal user reaches for. The cursor moves on
- * `↑`/`↓` alone for the same reason: `j` and `k` are letters in a path.
+ * A workspace browser shared by local and remote directory selection.
+ * Enter takes the cursor's row: folders are entered, workspaces are chosen.
+ * Typing moves the cursor to `use this directory` after the listing resolves.
+ * The path field keeps focus throughout; only arrow keys move the row cursor,
+ * since j/k must remain ordinary path characters.
  */
 import { Index, Show, createEffect, createMemo, createSignal, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import type { InputRenderable, ScrollBoxRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../../render/theme.ts"
-import { displayWidth, fit } from "../columns.ts"
+import { columnWidth, displayWidth, fit } from "../columns.ts"
+import { ascii_border } from "../Composer.tsx"
 import { createHover, onClick, rowBackground, rowGutter, rowText } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { browseAt, browserRows, type DirChild, type DirRow, type DirSection, type DirSource } from "../../browsedir.ts"
@@ -41,9 +22,9 @@ export { holdsWorkspace } from "../../dirsource.ts"
 /** The heading a run of rows sits under, or nothing for the standing first row. */
 const section_title: Record<DirSection, string> = {
   places: "",
-  recent: "recent",
-  current: "",
-  subdirs: "",
+  recent: "recent workspaces",
+  current: "current directory",
+  subdirs: "folders",
 }
 
 export function DirBrowser(props: {
@@ -84,8 +65,9 @@ export function DirBrowser(props: {
   let field: InputRenderable | undefined
   let list: ScrollBoxRenderable | null = null
 
-  const inner = () => Math.max(24, screen().width - 2)
-  /** What the title line carries AFTER the path, so the path is cut for exactly that much and not for a guess. */
+  const inner = () => Math.max(1, screen().width - 2)
+  const ascii = () => style.settings.transcript.ascii
+  /** Reserve the machine and loading state before fitting the title. */
   const titleSuffix = () => `${props.on ? ` · on ${props.on}` : ""}${listing() ? " · listing…" : ""}`
   const source = () => props.source ?? localDirSource()
   const home = props.homeDir ?? homeWorkspaceDir()
@@ -162,6 +144,12 @@ export function DirBrowser(props: {
     if (at) list?.scrollChildIntoView(rowId(cursor()))
   })
   const rowId = (index: number) => `dir-row:${index}`
+  const selected = () => rows()[cursor()]
+  const actionLabel = (row: DirRow) => row.kind === "parent" ? "up" : row.action === "enter" ? "open" : "choose"
+  const actionWidth = () => columnWidth(rows().map(actionLabel), 0)
+  const nameWidth = () => columnWidth(rows().filter((row) => row.kind === "recent").map((row) => row.label))
+  const folderCount = () => rows().filter((row) => row.kind === "child").length
+  const foldersHeading = () => listing() ? "folders" : `folders · ${folderCount()}${where().filter ? ` · starts with ${where().filter}` : ""}`
 
   onMount(() => field?.focus())
 
@@ -202,14 +190,9 @@ export function DirBrowser(props: {
 
   return (
     <box flexDirection="column" width="100%" flexGrow={1} paddingLeft={1} paddingRight={1}>
-      {/* A place, so no glyph (§6.5).
-          The path here is NOT the path in the field below it, and that is the
-          point: the field is what has been typed and the title is what is
-          being listed. They agree until somebody types half a name, and then
-          the title is the answer to "what am I looking at". */}
       <box flexDirection="row" width="100%" height={1} flexShrink={0}>
         <text fg={style.theme.accent.evolve} flexShrink={1}>
-          {fit(`directory · ${where().dir}`, Math.max(8, inner() - displayWidth(titleSuffix())))}
+          {fit("  directory · choose a workspace", Math.max(1, inner() - displayWidth(titleSuffix())))}
         </text>
         {/* The machine, in the warn colour every other surface uses for
             "not here" — a path on somebody else's disk reads identically to
@@ -222,8 +205,20 @@ export function DirBrowser(props: {
         </Show>
       </box>
       <box height={1} flexShrink={0} />
-      <box flexDirection="row" width="100%" height={1} flexShrink={0}>
-        <text fg={style.theme.accent.evolve} flexShrink={0}>
+      <box
+        flexDirection="row"
+        width="100%"
+        height={3}
+        flexShrink={0}
+        border
+        borderStyle={ascii() ? "single" : "rounded"}
+        customBorderChars={ascii() ? ascii_border : undefined}
+        borderColor={style.theme.accent.user}
+        paddingLeft={1}
+        paddingRight={1}
+        onMouseDown={() => field?.focus()}
+      >
+        <text fg={style.theme.accent.user} flexShrink={0}>
           {`${style.glyphs.user} `}
         </text>
         <input
@@ -259,19 +254,24 @@ export function DirBrowser(props: {
             const tone = () => ({ selected: index === cursor(), hovered: hover.at() === index })
             const gutter = () => rowGutter(style, tone())
             const click = onClick(() => clickRow(index))
-            /** A heading only where a run of rows begins, never on every row. */
             const heading = () => {
-              const title = section_title[row().section]
-              if (title.length === 0) return ""
-              return rows()[index - 1]?.section === row().section ? "" : title
+              if (rows()[index - 1]?.section === row().section) return ""
+              return row().section === "subdirs" ? foldersHeading() : section_title[row().section]
             }
-            /** A directory that has been worked in before (§6.3 `workspaceMark`). */
             const mark = () => (row().workspace ? ` ${style.glyphs.workspaceMark}` : "")
+            const available = () => Math.max(1, inner() - 2 - displayWidth(mark()) - actionWidth() - 2)
+            // Recent names can collide; show their paths only when there is
+            // room for a useful column. The selected path stays in the footer.
+            const pathWidth = () => row().kind === "recent" && available() - nameWidth() - 2 >= 24
+              ? available() - nameWidth() - 2 : 0
+            const labelWidth = () => pathWidth() > 0 ? nameWidth() : available()
+            const label = () => row().kind === "child" || row().kind === "parent" ? `${row().label}/` : row().label
             return (
               <>
                 <Show when={heading().length > 0}>
+                  <box height={1} flexShrink={0} />
                   <text fg={style.theme.dim} height={1} flexShrink={0}>
-                    {`  ${heading()}`}
+                    {fit(`  ${heading()}`, inner())}
                   </text>
                 </Show>
                 <box
@@ -298,32 +298,53 @@ export function DirBrowser(props: {
                         ? style.theme.faint
                         : style.theme.fg,
                     )}
-                    flexGrow={1}
-                    flexShrink={1}
+                    width={labelWidth()}
+                    flexShrink={0}
                   >
-                    {fit(row().label, Math.max(4, inner() - 4 - displayWidth(mark())))}
+                    {fit(label(), labelWidth())}
                   </text>
+                  <Show when={pathWidth() > 0}>
+                    <text fg={rowText(style, tone(), style.theme.dim)} width={pathWidth() + 2} flexShrink={0}>
+                      {`  ${fit(row().path, pathWidth())}`}
+                    </text>
+                  </Show>
                   <Show when={mark().length > 0}>
                     <text fg={rowText(style, tone(), style.theme.accent.evolve)} flexShrink={0}>
                       {mark()}
                     </text>
                   </Show>
+                  <text
+                    fg={rowText(style, tone(), tone().selected ? style.theme.fg : style.theme.dim)}
+                    width={actionWidth() + 2}
+                    flexShrink={0}
+                  >
+                    {`  ${actionLabel(row()).padStart(actionWidth())}`}
+                  </text>
                 </box>
               </>
             )
           }}
         </Index>
+        <Show when={listing() || folderCount() === 0}>
+          <text fg={style.theme.dim} height={1} flexShrink={0}>
+            {fit(`  ${listing() ? "listing folders…" : where().filter ? "no matching folders" : "no visible subdirectories"}`, inner())}
+          </text>
+        </Show>
       </scrollbox>
-      <OverlayFooter
-        width={inner()}
-        help={help}
-        brief={"↑↓ move · Enter take the row · Esc close"}
-        more={[
-          "type or paste a path · ~ expands · the list follows what you type",
-          "a directory row is entered; no project, a recent and use this directory are chosen",
-          `${style.glyphs.workspaceMark} marks a directory that already has a .nulya/ in it`,
-        ]}
-      />
+      <box height={1} flexShrink={0} />
+      <box width="100%" paddingLeft={2} flexShrink={0}>
+        <OverlayFooter
+          width={Math.max(1, inner() - 2)}
+          help={help}
+          notice={selected() ? fit(selected()!.path, inner() - 2) : null}
+          brief={`↑↓ move · Enter ${selected() ? actionLabel(selected()!) : "choose"} · Esc close`}
+          more={[
+            "type or paste a path · ~ expands · the list follows what you type",
+            "a directory row is entered; no project, a recent and use this directory are chosen",
+            `${style.glyphs.workspaceMark} marks a directory that already has a .nulya/ in it`,
+          ]}
+        />
+      </box>
     </box>
   )
 }

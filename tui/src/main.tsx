@@ -195,6 +195,7 @@ async function main() {
         guide={guide}
         guideOn={guideOn}
         models={config.models}
+        imageModels={config.image_models}
         profiles={config.profiles}
         configTools={selectedToolIds(config.extensions.with)}
         sync={{

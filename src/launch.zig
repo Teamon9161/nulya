@@ -654,3 +654,58 @@ test "a session's tasks live beside its spills, under one removable subtree" {
     try std.testing.expectEqualStrings(".nulya/scratch/s-1", scratch);
     try std.testing.expectEqualStrings(".nulya/scratch/s-1/tasks", tasks);
 }
+
+/// An effective image capability, scoped to the actual provider identity.
+pub const ImageModel = struct { provider: []const u8, model: []const u8 };
+
+fn acceptsImages(cfg: *const config.Config, kind: []const u8, id: []const u8, endpoint: []const config.ModelParams) bool {
+    if (cfg.findModel(id)) |m| {
+        if (m.vision) |claim| return claim;
+    }
+    if (!std.mem.eql(u8, kind, "codex")) return false;
+    for (endpoint) |m| {
+        if (std.mem.eql(u8, m.id, id)) return m.vision orelse false;
+    }
+    return false;
+}
+
+pub fn imageModels(alloc: std.mem.Allocator, cfg: *const config.Config, endpoint: []const config.ModelParams) ![]const ImageModel {
+    var out: std.ArrayList(ImageModel) = .empty;
+    errdefer out.deinit(alloc);
+    for ([_][]const u8{ "openai", "anthropic", "codex", "scripted" }) |kind| {
+        for (cfg.models) |m| {
+            if (acceptsImages(cfg, kind, m.id, endpoint)) try out.append(alloc, .{ .provider = kind, .model = m.id });
+        }
+    }
+    for (endpoint) |m| {
+        if (cfg.findModel(m.id) != null) continue;
+        if (acceptsImages(cfg, "codex", m.id, endpoint)) try out.append(alloc, .{ .provider = "codex", .model = m.id });
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+pub fn visionAccepted(alloc: std.mem.Allocator, io: std.Io, cfg: *const config.Config, env: *const std.process.Environ.Map, identity: ledger.ModelDescriptor) !bool {
+    if (cfg.findModel(identity.model)) |m| {
+        if (m.vision) |claim| return claim;
+    }
+    if (!std.mem.eql(u8, identity.provider, "codex")) return false;
+    var catalog = (try codex.Catalog.load(alloc, io, env)) orelse return false;
+    defer catalog.deinit();
+    return acceptsImages(cfg, identity.provider, identity.model, catalog.models);
+}
+
+test "image capabilities: explicit claims override provider-scoped endpoint evidence" {
+    var cfg = config.Config.init(std.testing.allocator);
+    defer cfg.deinit();
+    const endpoint: []const config.ModelParams = &.{ .{ .id = "sol", .vision = true }, .{ .id = "text", .vision = false } };
+    try std.testing.expect(acceptsImages(&cfg, "codex", "sol", endpoint));
+    try std.testing.expect(!acceptsImages(&cfg, "openai", "sol", endpoint));
+    try std.testing.expect(!acceptsImages(&cfg, "codex", "unknown", endpoint));
+    try std.testing.expect(!acceptsImages(&cfg, "codex", "text", endpoint));
+    cfg.models = try cfg.arena.allocator().dupe(config.ModelParams, &.{ .{ .id = "sol", .vision = false }, .{ .id = "custom", .vision = true }, .{ .id = "text", .label = "Label only" } });
+    try std.testing.expect(!acceptsImages(&cfg, "codex", "sol", endpoint));
+    try std.testing.expect(acceptsImages(&cfg, "openai", "custom", endpoint));
+    const projected = try imageModels(std.testing.allocator, &cfg, endpoint);
+    defer std.testing.allocator.free(projected);
+    for (projected) |m| try std.testing.expect(acceptsImages(&cfg, m.provider, m.model, endpoint));
+}

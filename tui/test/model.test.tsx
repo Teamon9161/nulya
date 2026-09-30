@@ -655,8 +655,13 @@ test("configShow reads the real binary: scripted is always runnable, the catalog
   expect(scripted?.credential).toBe(true)
   const deepseek = config.profiles.find((p) => p.name === "deepseek")
   expect(deepseek?.api_key_env).toBe("DEEPSEEK_API_KEY")
-  expect(deepseek?.models).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"])
-  const flash = config.models.find((m) => m.id === "deepseek-v4-flash")
+  // Named by the config, never by this file: DeepSeek renamed its Flash model
+  // once already (`deepseek-v4-flash` → `deepseek-flash`), and a test that
+  // spelled the id would fail on the rename rather than on what it is here to
+  // prove — that the projection describes every id the profile lists.
+  const flashId = deepseek!.models.find((id) => id.includes("flash"))!
+  expect(deepseek?.models).toEqual([flashId, "deepseek-v4-pro"])
+  const flash = config.models.find((m) => m.id === flashId)
   expect(flash?.efforts).toEqual(["off", "low", "high", "max"])
   // A profile that does not describe its own endpoint says so with null — and
   // a binary that has never heard of the field reads back the same way.

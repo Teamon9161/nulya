@@ -227,14 +227,15 @@ tui/
 
 ### 4.4 Composer / 按键 / slash
 
-- `Enter` 发送；`Shift+Enter` / `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
+- `Enter` 发送；`Shift+Enter` / `Ctrl+Enter`（包括同时按 Ctrl+Shift）换行，终端需要能报告修饰键（Kitty 或 modifyOtherKeys）；终端不能区分带修饰键的 Enter 时用 `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
 - 发送时若 `stepping`：只 append（queued）；不打断。**正文只在 transcript 那张用户卡上出现一次**，输入框上面的 queue lane 只画一行计数 `⏸ N queued · ctrl+g interrupts & delivers`（静息时不画）；要提前结束当前 step 并投递就是 `Ctrl+G`（append → kill 这一步 → 等它真的退出 → 立即再 step；idle 且输入框是空的时走 `wake()`，**inbox 为空绝不裸 step**）。`Ctrl+J` 始终留给非 Kitty 终端的换行——裸 `ctrl+j` 与换行在那些终端上字节相同，抢它会毁掉 `Shift+Enter` 的退路。同一 TUI 的 append 子进程串行启动，保证快速连发取得 inbox 名时仍是 FIFO。
 - `/` 开头弹一个小补全，三档依次：**内建命令**（表在 `commands.ts`，也是 `/help` 与补全读的同一张表：`/model` `/mode [ask|unsafe]` `/provider` `/effort <level|auto>` `/env [<target>]` `/new` `/clear` `/sessions [<id>]` `/cwd [<path>]` `/sidebar [<percent>]` `/ext` `/tasks` `/usage` `/context` `/settings` `/outcome <verdict> [note]` `/with [<id>[@<v>]]` `/agent [<name> <task…>]` `/step` `/cancel` `/fold` `/help` `/quit`）· **activate 了的包自己声明的命令**（`contributes.commands`；`/plan` `/ask` `/evolve` `/compact` 都是这一档，包不在就连这个词都不存在）· **activate 了的 skill**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → 包命令 → skill → 原样发给模型。
   - 一个概念一个词：`/with` 就是内核的 `session new --with`；`/new` 另开一个 tab、`/clear` 把**当前** tab 原地换成一张新草稿（同一个数组下标），两者都不删任何东西（ledger 只能 append，旧 session 的文件照样在盘上、`/sessions` 照样找得到），区别只在"新的那一场落在哪个 tab"。
   - **`/as`（`/with` 的旧名）· `/resume`（`/sessions`）· `/exit`（`/quit`）不上表但补全**：不列出是这个前端只为一个概念主张一个词，补全是回答一个已经打了四个字母的人；别名与本名走**同一段代码**，且都在 `builtin_names` 里，所以包夺不走。
   - `/<skill> [args]` = `nulya skill load <ref>` 拿到 body、包一层 sentinel 后作为**普通 user turn** append（谁触发不等于谁判断，goals/tui-panel.md D8）；与包命令重名的 skill 不在菜单里出现第二次。
 - `@` 开头（前一字符非字母数字下划线）弹文件补全：`↑↓` 选、`Tab` 上屏成 `@path`；已知引用在输入框里 accent。**上屏的是路径，不是文件内容**（T13）。
-- 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；`Backspace` 落在占位尾部整条删掉（T14）。
+- 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；图片显示 accent 色的 `[Image #N]`，`Backspace` 落在占位尾部整条删掉。`Ctrl+V` / `Alt+V` / 输入框右键直接读桌面剪贴板；Windows Terminal 截获 `Ctrl+V` 且图片不产生文本事件时用 `Alt+V`。终端送来的单独图片路径读文件；单独 URL 或空粘贴先只问剪贴板有没有图片，有则只附图片、不重复插入 URL，没有则保留原文本，不下载链接。
+- 编辑与撤销：`Ctrl+Z` 撤销，`Ctrl+Shift+Z` / `Ctrl+Y` 重做。补全和粘贴各算一次编辑；异步粘贴解析会同时更新撤销历史，重做不会复活已完成读取的 `[Pasting… #N]`。历史保留最近 100 个草稿状态，发送或丢弃草稿时清空；附件内容保留以支持撤销删除。所有替换先转成字符串坐标，写回时再转回编辑器的显示列坐标，中文、emoji 和换行不会把 `@` 补全或占位符替换落到别处；异步解析保留当前光标。
 - 有 tool call 在等批准时（§5.7），**审批对话框拿着键盘**：`↑↓` / 数字键选答案、`Enter` 作答、`Tab` 在答案列表与 note 之间切、直接打字即写 note、`Esc` 在列表上 = deny（在 note 里先清空）。带 modifier 的键（`Ctrl+C`）照旧穿过去。
 - 全局：`Esc` cancel（stepping 时）/ browse 模式；**`Ctrl+C` 由近及远，永远不在第一下退出**（T27）：输入框里有字 → 先清空（`ComposerApi.clear`）· 正在 stepping → 先 kill 这一步 · 都没有 → 先说一句 `Ctrl+C again to quit`，**再按一下才退**（提示 3 秒后失效，所以几分钟后的一下永远不是意外退出）。半条写了一半的消息、和整个屏幕，都不是第二次按键能撤销的东西；`main.tsx` 的 `exitOnCtrlC: false` 是这条链成立的前提。`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`；`F4` 下一个 tab；`F5` `/model`；`F6` `/provider`；`F7` `/tasks`；`F8` `/sidebar`；`Ctrl+W` 关掉当前 tab（最后一个不关）；`Ctrl+←/→/↑/↓` 在 pane 之间移动键盘（**只在不止一个 pane 时才认领这四个键**，平时它们仍是 textarea 的 word-motion）。
 - 鼠标（T18）：列表行点一下落光标、点已选中的行执行它的 Enter；`/ext` 的 pane 条、`[x]` 与 id 行的开关记号、TabBar、状态栏的 `↓ N more below`、输入框都可点（点输入框也会退出 browse 模式）；拖过文本是选取，松手复制（OSC 52）。**模型这一行处处可点**（T20 → T22）：**输入框下面那一行开头的 `<model-id> [(effort)]`**、CompositionCard 的 `model` 值都开 `/model`；Welcome 的那几条 `/` 命令行、那一行末尾的 `/help` 也是按钮。所有可点的东西悬停都是同一种反馈：**把这一行自己的颜色朝 `lift` 抬起来**（T95，`ui/rows.ts`），背后不刷底色——底色只留给光标（`selection`），两个事实两种手法。
@@ -432,6 +433,7 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 
 - **tab = (workspace, session)**：`TabCommon.ws`。session tab 的目录永不改变（它的文件在那儿）；draft 可以被重新指向，`TabStore.retarget` 就是浏览器按的那个动词——它换掉整个 tab 对象而不是改一个字段，因为 `ws` 是通过 `tabs.active()` 到处被读的。
 - **`/cwd`**：裸的开目录浏览器（整屏 overlay `host:cwd`，§6.5 的第一类骨架 —— 它是个**地方**所以标题不带 glyph，列表可能超屏所以是 scrollbox）；带参数直接选定，是「拿一行」的点名形态（与 `/resume <id>` 之于 `Enter` 同一条先例）。三个入口：`/cwd` · 空状态那一行 `cwd`（可点）· 状态行上的 workspace chip（只在它说得出新东西时存在）。
+  - **浏览器的视觉层级**：路径输入沿用 composer 的圆角框与 ASCII 降级，浏览器打开时暂时隐藏聊天输入框，关闭后恢复，屏幕上仍只有一个输入框；列表以留白和 dim 标题分为 recent workspaces / current directory / folders，文件夹带 `/` 后缀。右侧动作列对齐写 `choose` / `open` / `up`，底部 Enter 提示跟随光标行；workspace 标记仍只说「已有 `.nulya/`」。最近目录在有足够列宽时附 dim 路径，窄屏隐藏这一列，底部始终显示光标行的目标路径（过长截断）。folders 标题给出可见目录数与前缀过滤条件；加载中、没有匹配和没有可见子目录分开说，不把尚未返回的远端列表画成空目录。
 - **浏览器只有一个动词**：`Enter` 永远拿光标那一行——目录行是**进去**，`no project` / recent / `use this directory` 是**选定**。打字不需要第二个确认手势，因为**打字把光标放到 `use this directory` 上**：「在输入框按 Enter」和「在一行上按 Enter」于是是同一次击键做同一件事。路径框全程持有键盘（能粘贴路径是终端用户第一个要的东西），所以光标只认 `↑↓`——`j`/`k` 是路径里的字母。列表：`no project` 恒第一行 · recents 段 · `use this directory` · `..` 段首 + 子目录（只列目录、隐藏点目录、按名排序、含 `.nulya/` 的带 `▪`）。**不做**文件预览、多选、新建目录。
 - **无项目 session**：家 workspace = `<NULYA_HOME | ~/.nulya>/home/`。**不是 `~` 本身**——`~/.nulya` 是 user 层，塌在一起会让 store 与工作区搅在一处。这一场跳过 `[extensions] session_prompts`：那些 renderer 画的是**项目**（布局、instruction 文件、这个分支、这棵工作树），而 `no project` 的答案正是「没有项目」，每一段都会是空话，而且它进的是缓存前缀、每一步都在付。侧边栏与 chip 上它叫 `no project`。
 - **列表按 workspace 分组**：打开的 tab 的 workspace 全列，每组各跑一次 `session list --json`，当前 front tab 的组在前，组头 = 目录名 + 宽度够时的 dim 全路径（`min_path`，rail 上放不下就整个不画）。**只有第二个 workspace 出现时才有组头**（`groupedRows`）——单 workspace 的屏幕逐位等于 T70 结束时那一帧，快照钉住了这一点。光标只停在 session 行上（`nextSelectable`）：组头按 `Enter` 没有事可做。T70 的 persona 过滤每组照用。
@@ -517,10 +519,10 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 | `accent.evolve` | 演化与去处：`⚙ ⚡ ↺ ⌕ ☰ ⤷` 的 glyph、面的标题、`↗` 可点行、状态栏 `◈`、`↓ N more below` |
 | `ok` / `warn` / `err` | 判决：`✓ current` / `unsafe`·等你回答·漂移 / `exit 1`·`✗`·deny |
 | `diff.add` / `diff.del` | **只有前景色**，无背景块；上下文行 dim |
-| `hairline` `selection` `lift` | 框线 · **光标行的底色**（唯一的行底色）· 抬色的方向：指针经过的行与扫光都朝它抬（主题自报，`NO_COLOR` 即 `fg`，两者都变成 no-op；T95 把 `hover` 那格底色删了） |
+| `hairline` `selection` `lift` | 框线 · **光标行的底色**（唯一的行底色）· 抬色的方向：指针经过的行与扫光都朝它抬（主题自报；`NO_COLOR` 的 `selection` 透明、`lift` = `fg`，所以指针抬色与扫光都是 no-op；T95 把 `hover` 那格底色删了） |
 
 **代码有自己的配色**（T91，`render/syntax.ts`）：`markup.*`（正文的标题 / 列表 / 链接）与 `default` 仍来自上面这套 tokens——那是本前端自己的文档；而 fenced code 里的 14 个角色（comment / string / number / boolean / constant / keyword / function / type / variable / property / operator / punctuation / tag / attribute）来自一张**独立的调色板**，`[ui] code_theme` 选：`auto`（缺省，按界面主题的明暗给出 one-dark / github-light）· `theme`（旧行为：代码也用界面 tokens）· `one-dark` · `github-dark` · `github-light`。scoped capture 名（`keyword.control` 之类）不列——OpenTUI 的 `getStyleId` 会回落到第一个点之前的基名。`NO_COLOR` 压过一切调色板。
-主题：`nulya-dark`（默认）/ `nulya-light` / `NO_COLOR` 全塌成终端自己的前景色。
+主题：`nulya-dark`（默认）/ `nulya-light` / `NO_COLOR` 的前景 tokens 全塌成同一色，背景（包括 `selection`）透明；无彩色模式靠光标、指针和当前 tab 的字形标记区分状态，不把前景色同时涂成背景而遮住文字。
 
 ### 6.3 glyph 词表（封闭）
 

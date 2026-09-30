@@ -392,30 +392,36 @@ test("picking a directory keeps the `@` menu open, so a nested path can be reach
   }
 }, 60_000)
 
-test("Shift+Enter inserts a newline instead of submitting", async () => {
-  const sent: string[] = []
-  const setup = await testRender(
-    () => (
-      <StyleContext.Provider value={style}>
-        <Composer onSubmit={(text) => sent.push(text)} />
-      </StyleContext.Provider>
-    ),
-    { width: 60, height: 8, kittyKeyboard: true },
-  )
-  try {
-    await settle(setup, 3)
-    await setup.mockInput.typeText("first")
-    setup.mockInput.pressEnter({ shift: true })
-    await setup.mockInput.typeText("second")
-    await settle(setup, 2)
-    expect(sent).toEqual([])
-    setup.mockInput.pressEnter()
-    await settle(setup, 2)
-    expect(sent).toEqual(["first\nsecond"])
-  } finally {
-    setup.renderer.destroy()
-  }
-}, 60_000)
+for (const protocol of ["kitty", "modifyOtherKeys"] as const) {
+  test(`${protocol}: modified Enter inserts a newline and only plain Enter submits`, async () => {
+    const sent: string[] = []
+    const setup = await testRender(
+      () => (
+        <StyleContext.Provider value={style}>
+          <Composer onSubmit={(text) => sent.push(text)} />
+        </StyleContext.Provider>
+      ),
+      { width: 60, height: 8, kittyKeyboard: protocol === "kitty", otherModifiersMode: protocol === "modifyOtherKeys" },
+    )
+    try {
+      await settle(setup, 3)
+      await setup.mockInput.typeText("first")
+      setup.mockInput.pressEnter({ shift: true })
+      await setup.mockInput.typeText("second")
+      setup.mockInput.pressEnter({ ctrl: true })
+      await setup.mockInput.typeText("third")
+      setup.mockInput.pressEnter({ ctrl: true, shift: true })
+      await setup.mockInput.typeText("fourth")
+      await settle(setup, 2)
+      expect(sent).toEqual([])
+      setup.mockInput.pressEnter()
+      await settle(setup, 2)
+      expect(sent).toEqual(["first\nsecond\nthird\nfourth"])
+    } finally {
+      setup.renderer.destroy()
+    }
+  }, 60_000)
+}
 
 test("a long paste folds into a placeholder and comes back whole on submit", async () => {
   const sent: string[] = []
@@ -933,3 +939,148 @@ function accented(frame: { lines: { spans: { text: string; fg: { r: number; g: n
   }
   return out.replace(furniture, " ").replace(/\s+/g, " ").trim()
 }
+
+
+test("image paste after Chinese prose replaces only its marker and preserves the live cursor", async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const sent: { text: string; count: number }[] = []
+  const setup = await testRender(() => (
+    <StyleContext.Provider value={style}>
+      <Composer readClipboard={async () => {
+        await gate
+        return { status: "read", representation: { mimeType: "image/png", bytes: png } }
+      }} onSubmit={(text, _, images) => sent.push({ text, count: images?.length ?? 0 })} />
+    </StyleContext.Provider>
+  ), { width: 80, height: 12 })
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.pasteBracketedText("请看🙂这张图：")
+    setup.mockInput.pressKey("v", { meta: true })
+    await settle(setup, 1)
+    setup.mockInput.pressKey("HOME")
+    await setup.mockInput.typeText("开头 ")
+    release()
+    const frame = await settle(setup, 4)
+    expect(frame).toContain("开头 请看🙂这张图：[Image #1]")
+    expect(frame).not.toContain("Pasting")
+    expect(accented(setup.captureSpans(), style.theme.accent.user)).toContain("[Image #1]")
+    await setup.mockInput.typeText("继续 ")
+    setup.mockInput.pressEnter()
+    await settle(setup, 2)
+    expect(sent).toEqual([{ text: "开头 继续 请看🙂这张图：", count: 1 }])
+  } finally { setup.renderer.destroy() }
+}, 60_000)
+
+test("Tab completes a reference after Chinese prose without corrupting surrounding text", async () => {
+  const sent: string[] = []
+  const index: ProjectIndex = {
+    candidates: () => [{ path: "README.md", kind: "file" }], touch: () => {}, size: () => 12,
+  }
+  const setup = await testRender(() => (
+    <StyleContext.Provider value={style}>
+      <Composer references={index} onSubmit={(text) => sent.push(text)} />
+    </StyleContext.Provider>
+  ), { width: 80, height: 12 })
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.pasteBracketedText("请看🙂这里 @READ")
+    setup.mockInput.pressTab()
+    await settle(setup, 2)
+    setup.mockInput.pressEnter()
+    await settle(setup, 2)
+    expect(sent).toEqual(["请看🙂这里 @README.md "])
+  } finally { setup.renderer.destroy() }
+}, 60_000)
+
+test("one Ctrl+Z undoes a settled image paste and redo restores its image", async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const sent: { text: string; count: number }[] = []
+  const setup = await testRender(() => (
+    <StyleContext.Provider value={style}>
+      <Composer readClipboard={async () => ({ status: "read", representation: { mimeType: "image/png", bytes: png } })}
+        onSubmit={(text, _, images) => sent.push({ text, count: images?.length ?? 0 })} />
+    </StyleContext.Provider>
+  ), { width: 80, height: 12 })
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.typeText("说明：")
+    setup.mockInput.pressKey("v", { ctrl: true })
+    await settle(setup, 4)
+    setup.mockInput.pressKey("z", { ctrl: true })
+    const undone = await settle(setup, 2)
+    expect(undone).toContain("说明：")
+    expect(undone).not.toContain("[Image #")
+    expect(undone).not.toContain("Pasting")
+    setup.mockInput.pressKey("y", { ctrl: true })
+    expect(await settle(setup, 2)).toContain("[Image #1]")
+    setup.mockInput.pressEnter()
+    await settle(setup, 2)
+    expect(sent).toEqual([{ text: "说明：", count: 1 }])
+  } finally { setup.renderer.destroy() }
+}, 60_000)
+
+
+test("a terminal paste of a copied image URL attaches only the picture, with a text fallback", async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  let available = true
+  const sent: { text: string; count: number }[] = []
+  const setup = await testRender(() => (
+    <StyleContext.Provider value={style}>
+      <Composer readClipboard={async (types) => {
+        expect(types).not.toContain("text/plain")
+        return available ? { status: "read", representation: { mimeType: "image/png", bytes: png } } : { status: "unsupported" }
+      }} onSubmit={(text, _, images) => sent.push({ text, count: images?.length ?? 0 })} />
+    </StyleContext.Provider>
+  ), { width: 80, height: 12 })
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.typeText("图片：")
+    await setup.mockInput.pasteBracketedText("https://example.test/shot.png")
+    const frame = await settle(setup, 4)
+    expect(frame).toContain("图片：[Image #1]")
+    expect(frame).not.toContain("https://")
+    setup.mockInput.pressBackspace()
+    expect(await settle(setup, 2)).not.toContain("[Image #1]")
+    setup.mockInput.pressKey("z", { ctrl: true })
+    expect(await settle(setup, 2)).toContain("[Image #1]")
+    setup.mockInput.pressEnter()
+    await settle(setup, 2)
+    expect(sent).toEqual([{ text: "图片：", count: 1 }])
+    available = false
+    await setup.mockInput.pasteBracketedText("https://example.test/plain")
+    await settle(setup, 4)
+    setup.mockInput.pressEnter()
+    await settle(setup, 2)
+    expect(sent[1]).toEqual({ text: "https://example.test/plain", count: 0 })
+  } finally { setup.renderer.destroy() }
+}, 60_000)
+
+
+test("multiline paste and reference completion use logical text positions and each undo atomically", async () => {
+  const sent: string[] = []
+  const index: ProjectIndex = {
+    candidates: () => [{ path: "README.md", kind: "file" }], touch: () => {}, size: () => 12,
+  }
+  const setup = await testRender(() => (
+    <StyleContext.Provider value={style}>
+      <Composer references={index} onSubmit={(text) => sent.push(text)} />
+    </StyleContext.Provider>
+  ), { width: 80, height: 12 })
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.pasteBracketedText("第一行🙂\n第二行 @READ")
+    setup.mockInput.pressTab()
+    await settle(setup, 2)
+    expect(await settle(setup, 1)).toContain("第二行 @README.md ")
+    setup.mockInput.pressKey("z", { ctrl: true })
+    expect(await settle(setup, 2)).toContain("第二行 @READ")
+    setup.mockInput.pressKey("y", { ctrl: true })
+    await settle(setup, 2)
+    await setup.mockInput.typeText("继续")
+    setup.mockInput.pressEnter()
+    await settle(setup, 2)
+    expect(sent).toEqual(["第一行🙂\n第二行 @README.md 继续"])
+  } finally { setup.renderer.destroy() }
+}, 60_000)

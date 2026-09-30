@@ -296,7 +296,7 @@ pub const session_usage =
     \\                                                    --bare reads no standing layer: the config `with` list is left out
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
     \\                                                    queue a user turn for the next step boundary, print the delivery name;
-    \\                                                    --image inlines a png/jpeg ≤5 MB, if the model's catalog entry says vision = true
+    \\                                                    --image inlines a png/jpeg ≤5 MB, if explicit vision = true or the Codex endpoint claims image input
     \\  nulya session note <id> --source <label> [--meta <json>] (<text> | --file <p>)
     \\                                                    queue a machine fact instead of a user turn: --source names who saw it
     \\  nulya session step <id> [--max-steps N] [--effort E] [--gate] [--stream] [--ssh-password-stdin]

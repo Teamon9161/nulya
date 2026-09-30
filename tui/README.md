@@ -222,7 +222,7 @@ bun run tui\src\main.tsx --profile codex
 | Key | Action |
 |---|---|
 | `Enter` | send |
-| `Shift+Enter` / `Ctrl+J` | newline |
+| `Shift+Enter` / `Ctrl+Enter` / `Ctrl+J` | newline (`Ctrl+J` works even when the terminal cannot report Enter's modifiers) |
 | `Ctrl+G` | interrupt the running step and deliver the queued draft immediately |
 | `↑` / `↓` (empty composer) | walk the message history; keeps walking while the buffer is still the recalled entry |
 | `Esc` (stepping) | `session cancel` — the kernel stops at its next step boundary |

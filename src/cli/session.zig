@@ -438,7 +438,7 @@ pub fn createSession(
             },
         };
         // The pictures come along, so the taking-over model must claim it sees them.
-        if (carried.?.has_images and !try visionClaimed(alloc, io, &cfg, identity.model, "--carry")) return null;
+        if (carried.?.has_images and !try visionClaimed(alloc, io, &cfg, identity, "--carry")) return null;
     }
 
     // Read before anything exists on disk: no session left behind.
@@ -985,27 +985,22 @@ fn imageSize(io: std.Io, path: []const u8) ?u64 {
     return (file.stat(io) catch return null).size;
 }
 
-/// Does anything claim this model accepts images? The `[[models]]` catalog is
-/// descriptive and trusted-layer only, and no entry is a NO. `what` names the
-/// refusing command; a false answer prints its own refusal on stderr.
+/// Both image entry points ask the frozen identity, not today's active profile.
+/// A false answer prints its own refusal on stderr.
 fn visionClaimed(
     alloc: std.mem.Allocator,
     io: std.Io,
     cfg: *const config.Config,
-    model_id: []const u8,
+    identity: ledger.ModelDescriptor,
     what: []const u8,
 ) !bool {
+    const model_id = identity.model;
     const named = if (model_id.len != 0) model_id else "(unnamed model)";
-    for (cfg.models) |m| {
-        if (!std.mem.eql(u8, m.id, model_id)) continue;
-        if (m.vision) return true;
-        try printErrFmt(alloc, io, "{s} refused: model '{s}' is not marked as accepting images\n", .{ what, named });
-        break;
-    } else {
-        try printErrFmt(alloc, io, "{s} refused: no [[models]] entry for '{s}', so nothing claims it accepts images\n", .{ what, named });
-    }
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
+    if (try launch.visionAccepted(alloc, io, cfg, &host, identity)) return true;
+    try printErrFmt(alloc, io, "{s} refused: model '{s}' is not marked as accepting images (no explicit [[models]] vision or matching endpoint evidence)\n", .{ what, named });
+    if (std.mem.eql(u8, identity.provider, "codex")) try printErr(io, "  check the subscription catalog with `nulya config refresh`\n");
     var paths = try config.ConfigPaths.init(alloc, &host);
     defer paths.deinit(alloc);
     try printVisionHint(alloc, io, model_id, paths.user);
@@ -1026,7 +1021,7 @@ fn visionAccepted(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !bool
     var cfg = try config.load(alloc, io, &host, common.stderr_diag);
     defer cfg.deinit();
 
-    return visionClaimed(alloc, io, &cfg, header.value.model_identity.model, "session append");
+    return visionClaimed(alloc, io, &cfg, header.value.model_identity, "session append");
 }
 
 fn printVisionHint(alloc: std.mem.Allocator, io: std.Io, model_id: []const u8, user_config: []const u8) !void {

@@ -120,6 +120,7 @@ import { wrapApprovalNote } from "../approvalnote.ts"
 import { createProjectIndex } from "../references.ts"
 import { createSkillTable, skillTurn, splitSlash } from "../skills.ts"
 import { describeTool } from "../render/registry.ts"
+import { imageAccepted } from "../state/vision.ts"
 import { no_snapshot, runningModel, smoothUsageTotals, usageLabel, type UsageTotals } from "../state/session.ts"
 import type { NextSession } from "./Welcome.tsx"
 import {
@@ -134,6 +135,7 @@ import {
   type ProfileView,
   type TaskEntry,
   type ImageInput,
+  type ImageModel,
 } from "../nulya/cli.ts"
 import {
   activateUnattended,
@@ -242,13 +244,15 @@ export interface AppProps {
   /** Where the TUI remembers its last pick; tests point it elsewhere. */
   statePath?: string
   /**
-   * The global `[[models]]` catalog, read once at launch. Only `context_window`
+   * The global `[[models]]` catalog, read once at launch. `context_window`
    * is used, for the status bar's fullness gauge (via `modelParamsFor`, which
    * prefers a profile's own catalog over this list) — without either, the
    * gauge simply does not appear, which is why this is optional rather than
    * loaded here.
    */
   models?: ModelParams[]
+  /** Effective provider/model image claims projected at launch. */
+  imageModels?: ImageModel[]
   /**
    * The profiles, as `config show --json` projects them. Two fields are read:
    * a profile's default model id (so a draft that names a profile and no model
@@ -2011,20 +2015,15 @@ export function App(props: AppProps) {
     return summary.length > 0 ? ` · ${summary}` : ""
   }
 
-  /**
-   * Whether that model is catalogued as accepting images (`[[models]]` with
-   * `vision = true`) — the same question, against the same table, that the
-   * kernel's gate asks when the turn is appended. An id the
-   * catalog does not mention is a refusal there, so it is one here too.
-   *
-   * Null only when this launch has no catalog at all: the front end may repeat
-   * the kernel's answer, never invent one it would not have given.
-   */
+  /** Ask the projected claims using the draft choice or the frozen identity. */
   const visionHere = (): { model: string; accepted: boolean } | null => {
-    const catalog = props.models
     const model = modelName()
-    if (!catalog || model.length === 0) return null
-    return { model, accepted: catalog.find((entry) => entry.id === model)?.vision ?? false }
+    if (model.length === 0) return null
+    const here = tab()
+    const provider = here.kind === "draft"
+      ? props.profiles?.find((p) => p.name === here.pick()?.profile)?.kind ?? ""
+      : snapshot().header?.model_identity.provider ?? ""
+    return { model, accepted: imageAccepted(props.imageModels, provider, model, props.models ?? []) }
   }
 
   /**
@@ -4921,7 +4920,7 @@ export function App(props: AppProps) {
                   <SshPasswordPrompt spec={passwordRequest()!.spec} bytes={passwordRequest()!.bytes.length} />
                 </Show>
                 <Composer
-                  hidden={passwordRequest() !== null}
+                  hidden={passwordRequest() !== null || overlay.kind() === "cwd" || overlay.kind() === "envdir"}
                   onSubmit={submit}
                   onNotice={setNotice}
                   onEmptySubmit={() => takeOverIfOffered()}

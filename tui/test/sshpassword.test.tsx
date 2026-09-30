@@ -85,20 +85,43 @@ test("the composer is off the layout while the password field stands in its plac
   }
 })
 
+/**
+ * A nulya stand-in this host can actually EXECUTE.
+ *
+ * Windows has no shebang: a file starting `#!/bin/sh` is not an executable
+ * there and `Bun.spawn` fails with ENOENT before the script runs a line. So
+ * this writes a `.cmd` on Windows and a shebang script elsewhere, and takes
+ * the SCRIPT as two lists — `say` the lines it prints on stderr, `answer` the
+ * JSON it prints on stdout — because the two shells spell even `echo` a
+ * different way (a `.cmd` has no `printf`, and quotes the whole line instead
+ * of the argument). What the test is about is those lines, not the shell.
+ */
+function fakeNulya(dir: string, say: string[], answer: string): string {
+  const win = process.platform === "win32"
+  const bin = join(dir, win ? "fake-nulya.cmd" : "fake-nulya")
+  const script = win
+    ? ["@echo off", ...say.map((line) => `echo ${line} 1>&2`), `echo ${answer}`, ""].join("\r\n")
+    : ["#!/bin/sh", ...say.map((line) => `echo '${line}' >&2`), `printf '%s\\n' '${answer}'`, ""].join("\n")
+  writeFileSync(bin, script)
+  chmodSync(bin, 0o700)
+  return bin
+}
+
+/**
+ * Here, not in `nonWindows`: a slow install narrating itself line by line is a
+ * promise this front end makes on EVERY host, so it is proven on every host —
+ * the `#!/bin/sh` in the stand-in was the only reason it could not be.
+ */
 test("a slow remote command narrates itself line by line while it runs", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nulya-remote-progress-"))
   try {
-    const bin = join(dir, "fake-nulya")
     // Two narration lines on stderr before the answer on stdout: what an
     // install over a slow link looks like from here.
-    writeFileSync(
-      bin,
-      `#!/bin/sh\n` +
-        `echo 'no nulya on that machine; installing one' >&2\n` +
-        `echo 'sending this nulya (5 MB) to x86_64-linux' >&2\n` +
-        `printf '%s\\n' '{"nulya":"test","os":"linux","arch":"x86_64","home":"/home/test","cwd":"/work","dialect":"bash"}'\n`,
+    const bin = fakeNulya(
+      dir,
+      ["no nulya on that machine; installing one", "sending this nulya (5 MB) to x86_64-linux"],
+      '{"nulya":"test","os":"linux","arch":"x86_64","home":"/home/test","cwd":"/work","dialect":"bash"}',
     )
-    chmodSync(bin, 0o700)
     const seen: string[] = []
     const hello = await remoteCheck({ dir, bin }, "remote:ssh:box", undefined, undefined, (line) => seen.push(line))
     expect(hello.os).toBe("linux")

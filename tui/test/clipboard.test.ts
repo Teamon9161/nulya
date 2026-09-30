@@ -37,3 +37,11 @@ test("no clipboard here is an answer, not a crash", async () => {
   })
   expect(thrown).toEqual({ kind: "unavailable", why: "no display" })
 })
+
+test("image-only reads never request a text representation", async () => {
+  const result = await readClipboard(async (types) => {
+    expect(types).toEqual(["image/png", "image/jpeg"])
+    return { status: "empty" }
+  }, true)
+  expect(result).toEqual({ kind: "empty" })
+})

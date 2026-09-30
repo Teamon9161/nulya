@@ -291,3 +291,85 @@ test "session append --image: the file's magic decides the type, and 5 MB is the
 fn sessionRel(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "{s}.jsonl", .{id});
 }
+
+test "Codex vision: endpoint evidence agrees across append, carry and the UI projection" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var host = try std.testing.environ.createMap(alloc);
+    defer host.deinit();
+    const exe = try std.fs.path.resolve(alloc, &.{host.get("NULYA_EXE") orelse return error.SkipZigTest});
+    defer alloc.free(exe);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    try ws.createDirPath(io, "codex-home");
+    try ws.createDirPath(io, ".nulya/sessions");
+    try ws.writeFile(io, .{ .sub_path = "shot.png", .data = png_bytes });
+    try ws.writeFile(io, .{ .sub_path = "codex-home/auth.json", .data = "{\"tokens\":{\"access_token\":\"offline-test\"}}" });
+    try ws.writeFile(io, .{ .sub_path = "codex-home/models_cache.json", .data =
+        \\{"models":[{"slug":"gpt-6.1-sol","visibility":"list","input_modalities":["text","image"]}]}
+    });
+    const user_config =
+        \\[[provider.profiles]]
+        \\name = "subscription"
+        \\kind = "codex"
+        \\models = ["gpt-6.1-sol"]
+        \\[[provider.profiles]]
+        \\name = "text-only"
+        \\kind = "scripted"
+        \\models = ["gpt-6.1-sol"]
+        \\[[models]]
+        \\id = "gpt-6.1-sol"
+        \\label = "Label without capability override"
+        \\
+    ;
+    try writeUserConfig(io, ws, user_config);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try std.fs.path.join(alloc, &.{ buf[0..try ws.realPath(io, &buf)], "codex-home" });
+    defer alloc.free(home);
+    const env: []const support.EnvPair = &.{.{ .key = "CODEX_HOME", .value = home }};
+    {
+        var parent = try ledger.createDurable(alloc, io, ws, ".nulya/sessions/vision-parent.jsonl", .{
+            .session = "vision-parent",
+            .model = "subscription",
+            .model_identity = .{ .provider = "codex", .model = "gpt-6.1-sol" },
+        });
+        defer parent.deinit();
+        try parent.append(.{ .user_text = .{ .text = "look", .images = &.{.{ .media_type = "image/png", .data = "aW1hZ2U=" }} } });
+    }
+    const append_args = &.{ exe, "session", "append", "vision-parent", "look", "--image", "shot.png" };
+    const carry_args = &.{ exe, "session", "new", "--parent", "vision-parent:1", "--carry", "--profile", "subscription" };
+    const appended = try support.runCliEnvs(alloc, io, ws, append_args, env);
+    defer alloc.free(appended.stdout);
+    try std.testing.expectEqual(@as(u8, 0), appended.code);
+    const carried = try support.runCliEnvs(alloc, io, ws, carry_args, env);
+    defer alloc.free(carried.stdout);
+    try std.testing.expectEqual(@as(u8, 0), carried.code);
+    const other = try support.runCliEnvs(alloc, io, ws, &.{ exe, "session", "new", "--parent", "vision-parent:1", "--carry", "--profile", "text-only" }, env);
+    defer alloc.free(other.stdout);
+    try std.testing.expectEqual(@as(u8, 1), other.code);
+    try std.testing.expectEqualStrings("", other.stdout);
+    const shown = try support.runCliEnvs(alloc, io, ws, &.{ exe, "config", "show", "--json" }, env);
+    defer alloc.free(shown.stdout);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, shown.stdout, .{});
+    defer parsed.deinit();
+    var found = false;
+    for (parsed.value.object.get("image_models").?.array.items) |claim| {
+        if (std.mem.eql(u8, claim.object.get("model").?.string, "gpt-6.1-sol")) {
+            try std.testing.expectEqualStrings("codex", claim.object.get("provider").?.string);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+    const denied_config = try std.fmt.allocPrint(alloc, "{s}vision = false\n", .{user_config});
+    defer alloc.free(denied_config);
+    try writeUserConfig(io, ws, denied_config);
+    const denied_append = try support.runCliEnvs(alloc, io, ws, append_args, env);
+    defer alloc.free(denied_append.stdout);
+    try std.testing.expectEqual(@as(u8, 1), denied_append.code);
+    try std.testing.expectEqual(@as(usize, 1), try inboxCount(io, ws, alloc, "vision-parent"));
+    const denied_carry = try support.runCliEnvs(alloc, io, ws, carry_args, env);
+    defer alloc.free(denied_carry.stdout);
+    try std.testing.expectEqual(@as(u8, 1), denied_carry.code);
+    try std.testing.expectEqualStrings("", denied_carry.stdout);
+}

@@ -327,13 +327,20 @@ fn parse(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}!?[]const
             .efforts = try efforts.toOwnedSlice(arena),
             .default_effort = nonEmptyString(wire.string(m, "default_reasoning_level")),
             .context_window = effectiveWindow(m),
-            // Not claimed here: the `--image` gate reads the id-keyed
-            // `[[models]]` catalog, so a claim here is one nothing honours.
-            .vision = false,
+            .vision = acceptsImageInput(m),
         });
     }
     if (out.items.len == 0) return null;
     return try out.toOwnedSlice(arena);
+}
+
+fn acceptsImageInput(m: std.json.Value) bool {
+    const modalities = wire.field(m, "input_modalities") orelse return false;
+    if (modalities != .array) return false;
+    for (modalities.array.items) |modality| {
+        if (modality == .string and std.mem.eql(u8, modality.string, "image")) return true;
+    }
+    return false;
 }
 
 /// The window the subscription actually gives: the raw one, times the percentage
@@ -791,7 +798,7 @@ test "the subscription's catalogue is read, not configured: listable models only
     try std.testing.expectEqual(@as(usize, 0), models[1].efforts.len);
     try std.testing.expect(models[1].default_effort == null);
     try std.testing.expect(models[1].context_window == null);
-    try std.testing.expect(!models[0].vision);
+    try std.testing.expect(!(models[0].vision orelse false));
 
     const bare = (try parse(a,
         \\[{"slug":"gpt-5.5","visibility":"list","context_window":272000}]
@@ -1011,4 +1018,20 @@ test "an image rides as an input_image part; a turn without one keeps its pre-im
     defer alloc.free(shot_body);
     try std.testing.expect(std.mem.indexOf(u8, shot_body, "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"what is this\"}," ++
         "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0=\"}]}") != null);
+}
+
+test "subscription image capabilities require input_modalities evidence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const models = (try parse(arena.allocator(),
+        \\{"models":[
+        \\ {"slug":"gpt-6.1-sol","visibility":"list","input_modalities":["text","image"]},
+        \\ {"slug":"text","visibility":"list","input_modalities":["text"]},
+        \\ {"slug":"missing","visibility":"list"},
+        \\ {"slug":"malformed","visibility":"list","input_modalities":"image"},
+        \\ {"slug":"wrong-type","visibility":"list","input_modalities":[null,17,"Image"]}
+        \\]}
+    )).?;
+    try std.testing.expect(models[0].vision.?);
+    for (models[1..]) |m| try std.testing.expect(!m.vision.?);
 }

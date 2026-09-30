@@ -43,6 +43,7 @@ const ConfigView = struct {
     active_profile: []const u8,
     profiles: []const ProfileView,
     models: []const config.ModelParams,
+    image_models: []const launch.ImageModel = &.{},
     /// The merged `[registry]`. Effective values only; typed as
     /// `config.Registry`, so the names printed are the keys to write back.
     registry: config.Registry,
@@ -111,6 +112,10 @@ fn configShow(alloc: std.mem.Allocator, io: std.Io, opts: ShowOptions) !u8 {
         catalogs.deinit(alloc);
     }
 
+    var image_catalog = try codex.Catalog.load(alloc, io, &host);
+    defer if (image_catalog) |*c| c.deinit();
+    const image_models = try launch.imageModels(a, &cfg, if (image_catalog) |c| c.models else &.{});
+
     const views = try a.alloc(ConfigView.ProfileView, cfg.provider.profiles.len);
     for (cfg.provider.profiles, 0..) |p, i| {
         const default_model = p.defaultModel();
@@ -147,6 +152,7 @@ fn configShow(alloc: std.mem.Allocator, io: std.Io, opts: ShowOptions) !u8 {
         .active_profile = cfg.provider.active_profile,
         .profiles = views,
         .models = cfg.models,
+        .image_models = image_models,
         .registry = cfg.registry,
         .extensions = .{ .with = cfg.extensions.with },
     };
@@ -300,7 +306,7 @@ fn writeModelLine(w: *std.Io.Writer, m: config.ModelParams) !void {
     try w.print("  {s: <22} {s: <18}", .{ m.id, m.label });
     if (m.context_window) |c| try w.print("  ctx {d: >7}", .{c});
     // Only when true: absence of the word is absence of the claim.
-    if (m.vision) try w.writeAll("  vision");
+    if (m.vision orelse false) try w.writeAll("  vision");
     if (m.efforts.len != 0) {
         try w.writeAll("  effort ");
         for (m.efforts, 0..) |e, i| {

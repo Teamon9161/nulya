@@ -195,7 +195,7 @@ header 冻的东西：
 
 **它没有第二个冻结点。** 没有任何事件、任何 flag 能在一场 session 中途换掉模型身份；要换就是**换文件**——带历史的 fork（`session new --carry`，§11）。于是"这一场跑在什么模型上"永远只有一处答案：`header.model_identity`（effort 缺省、`session list` 的投影、`--image` 的 vision 门读的都是它）。
 
-**vision 门守在两个入口**，同一份 `[[models]]` 目录、同一条"没有条目 = 不主张 = 拒绝"：`session append --image`、`session new --carry`（拒绝时什么都不建）。两条都在壳层。
+**vision 门守在两个入口**：`session append --image`、`session new --carry`（拒绝时什么都不建）。两条都在壳层，用实际冻结的 `(provider, model)` 问 `launch.visionAccepted`：trusted `[[models]]` 的显式 `vision = true/false` 优先；该字段未声明时，仅 `codex` 可从本机订阅目录的匹配模型 `input_modalities` 含 `"image"` 得到肯定证据。未知模型、缺失/不可读 cache 或缺失/错误形状的 modalities 都不放行，其他 provider 不借用 Codex 的证据。描述性配置（如只写 label）不抹掉端点证据；显式 false 可关掉它。
 
 **resume**：`openDurable` 重放 header + 每个完整事件行；截断的**最后一行**修掉；**中间**行坏了或 `seq` 不连是 `CorruptLedger`。**`model_rebind` 行是单独一档 `LegacyModelRebind`**（文件是好的）：`session step` 把它翻成一句指路 `session new --parent <id>:<seq> --carry --profile …`；`session list` 读原始行，所以这样一场仍然列得出来。停在 assistant-with-calls 之后由 `completeInterruptedToolBatch` 补一条（§4）。
 
@@ -1051,7 +1051,7 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Site.resolv
 
 `default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目；其中收图片的那些写了 `vision = true`——**这一列是主张不是猜测**，自带目录只替它查得准的模型说话。**同一个 id 在两家 vendor 上可能不是同一个东西**，而目录按 id 合并一次，所以只有"两个端点上都收图"的 id 才写 `vision = true`（DeepSeek 侧：`deepseek-flash` 是原生多模态，`deepseek-v4-pro` 只收文本，故不写）。
 
-**两张表描述模型。** profile 说**怎么连**和**它服务哪些 model id**（`ProviderProfile.defaultModel()`：`model` 非空取它，否则 `models[0]`，否则 provider 内置默认）；`[[models]]` 目录说一个 id **是什么**（label、effort 档位、context window、`vision`），一个 id 不管经几个端点都只写一次。目录是纯描述：kernel 不读它；`launch` / `cli` 用它给 session 默认 effort（`Config.defaultEffort(profile, model_id)` = `profile.effort ?? catalog.default_effort ?? 无`）。
+**两张表描述模型。** profile 说**怎么连**和**它服务哪些 model id**（`ProviderProfile.defaultModel()`：`model` 非空取它，否则 `models[0]`，否则 provider 内置默认）；`[[models]]` 目录说一个 id **是什么**（label、effort 档位、context window、`vision`），一个 id 不管经几个端点都只写一次；`vision` 未声明读为 null，显式布尔值则优先于端点证据。目录是纯描述：kernel 不读它；`launch` / `cli` 用它给 session 默认 effort（`Config.defaultEffort(profile, model_id)` = `profile.effort ?? catalog.default_effort ?? 无`）。
 
 **第三张（挂在 profile 上）：`roles` 档位表。** 一个档位是一个**有名字的模型选择**：`explore = "gpt-5.6-luna"`，或带上只属于这一档的 effort：`review = { model = "gpt-5.6-terra", effort = "high" }`。裸词是**这个 profile 自己的**一个 model id；带 `/` 的读作 `<profile>/<model-id>`，跨到另一个 profile 去（`extensions/agent` 的 `model:` 里裸词是 profile 名——两处的裸词含义相反，各自在自己的位置上无歧义：一个档位值写在某个 profile 的**里面**）。
 
@@ -1059,7 +1059,9 @@ host 从**自己的 store** 按 `(package_digest, target)` 反查（`Site.resolv
 
 按**档位名**逐条合并（重述一个档位只替换那一条），**只认 trusted 层**（project 层连 profile 都改不了，档位自动落在同一条边界内：一个 checkout 不能把某一档改指向另一个 endpoint）。表形缺 `model`、或 `model` / `effort` 不是字符串，都是**硬失败**——悄悄编一个 id 出来，最后会进到某个子场的 header 里，那是事后谁也看不见的错。失败经 `Diag` 点名是哪个 profile 的哪个档位；`config.load` 的 sink 由**壳层**交下来（`cli/` 的每个动词都给 stderr，`.{}` 是给没有地方放这句话的调用方的）。
 
-**第三种来源：端点自己报的目录（今天只有 codex）。** 一个订阅服务哪些模型、每个什么窗口什么档位，是订阅自己的事实——写进 config 当天就会过期，所以它**不配置、去读**：`kind = "codex"` 且**没有 `models` 列表**的 profile，它的可选列表与参数来自 Codex CLI 的 `models_cache.json`（`$CODEX_HOME` 否则 `~/.codex/`，`providers/codex.zig` 的 `Catalog`）。映射：只取 `visibility == "list"`；窗口 = `context_window × effective_context_window_percent / 100`（缺 `context_window` 就不主张窗口而不是丢掉这个模型）；efforts = `supported_reasoning_levels[].effort`，默认 = `default_reasoning_level`，label = `display_name`；`vision` 恒为 false。**任何一层写了 `models` 就以它为准**；**读不出 = 这台机器说不出，绝不等于"订阅没有模型"**。
+`config show --json` 另投影 `image_models: [{provider, model}]`，枚举同一能力判据放行的身份。TUI 的图片 UI 用实际冻结 provider/model 查这张有效表，不拿当前 profile 或公共 API 的同名模型代替；旧二进制没有这列时仅沿用全局显式主张。可选模型列表与能力证据是两回事，显式 `models` 列表不阻断后一条路径。
+
+**第三种来源：端点自己报的目录（今天只有 codex）。** 一个订阅服务哪些模型、每个什么窗口什么档位，是订阅自己的事实——写进 config 当天就会过期，所以它**不配置、去读**：`kind = "codex"` 且**没有 `models` 列表**的 profile，它的可选列表与参数来自 Codex CLI 的 `models_cache.json`（`$CODEX_HOME` 否则 `~/.codex/`，`providers/codex.zig` 的 `Catalog`）。映射：只取 `visibility == "list"`；窗口 = `context_window × effective_context_window_percent / 100`（缺 `context_window` 就不主张窗口而不是丢掉这个模型）；efforts = `supported_reasoning_levels[].effort`，默认 = `default_reasoning_level`，label = `display_name`；`vision` 来自 `input_modalities` 数组是否含字符串 `"image"`（缺失/错误形状 = false）。**任何一层写了 `models` 就以它为准选择可选列表**，但不屏蔽独立的图片能力证据；**读不出 = 这台机器说不出，绝不等于"订阅没有模型"**。
 
 投影里这份参数是 **per-profile 的 `catalog`**（§14）而不是并进 `[[models]]`：同一个 id 经订阅与经公开 API 是**两套数字**，id-keyed 的表按定义说不了它。同理 **`Config.defaultEffort` 在 codex profile 上到 `p.effort` 为止**。刷新只有一个触发器：`nulya config refresh`。
 
@@ -1224,7 +1226,7 @@ NULYA_INTEGRATION_PROFILE=deepseek-anthropic zig build integration
 1. 连续步骤的 `cache_read` 单调不减，且从第二步起 ≥ 上一步 input 的 90%。
 2. 开场 turn 特意做到几千 token——provider 对**低于最小长度的前缀根本不缓存**（OpenAI 系是 1024 token），拿玩具 transcript 去测只会得到恒为 0 的假阴性。
 3. 只在 `thinking_replay` 的 provider 上跑：把 effort 强制打开、跑一个多步 tool 循环，必须走到 end-turn 且至少一轮 assistant 带 `reasoning`。
-4. **图片**：往 user turn 里放一张真的 64×64 纯红 PNG（base64 常量——ledger 存的就是这个形状），问它是什么颜色，回答里必须出现 `red`。它只在**本机 catalog 给这个 model id 标了 `vision = true`** 时跑。
+4. **图片**：往 user turn 里放一张真的 64×64 纯红 PNG（base64 常量——ledger 存的就是这个形状），问它是什么颜色，回答里必须出现 `red`。它只在**本机能力判据（§3.4）确认这个 provider/model 接受图片**时跑。
 
 ## 14. CLI 表面（`cli.zig` 只是 dispatcher，每个动词族一个 `cli/<verb>.zig`；都不是 LLM tool，经 shell 调用）
 
@@ -1350,7 +1352,7 @@ nulya                                            ← 无参数：同 `nulya help
 
 **正文必须是合法 UTF-8**（`--file` 与 argv 同一道门，在投递之前）：不是就点名拒绝、一字不写。与 `--prompt` 同一条理由，只是一条 user turn 是人自己的话，只能拒绝、不能像工具输出那样修复。
 
-**`--image <path>`（可重复）把 png / jpeg 内联进这条 user turn**。三道门全在壳层（`cli/session.zig`），**任何一道拒绝都在投递之前**：① **vision**——读 header 冻结的 `model_identity.model`，去 `[[models]]` 找那个 id，`vision = true` 才放行，**没有条目 = 不主张 = 拒绝**（同一个判据的另一个入口是 `session new --carry`，两处一处实现）；② **类型**——按**魔数**认 png（`\x89PNG`）/ jpeg（`\xFF\xD8\xFF`），扩展名不作数；③ **大小**——单张原始字节 ≤ 5 MB（三个 wire 里最紧的那条），**绝不替用户缩图**。纯文本 append 一个字节都没变。
+**`--image <path>`（可重复）把 png / jpeg 内联进这条 user turn**。三道门全在壳层（`cli/session.zig`），**任何一道拒绝都在投递之前**：① **vision**——读 header 冻结的 `model_identity`，按 §3.4 的显式配置优先、Codex 端点证据兜底判据放行（同一个判据的另一个入口是 `session new --carry`，两处一处实现）；② **类型**——按**魔数**认 png（`\x89PNG`）/ jpeg（`\xFF\xD8\xFF`），扩展名不作数；③ **大小**——单张原始字节 ≤ 5 MB（三个 wire 里最紧的那条），**绝不替用户缩图**。纯文本 append 一个字节都没变。
 
 `session append` 全程持 `<id>.inbox/.deposit.lock`（§3.4）：投递名是从"inbox 里已经等着什么"铸出来的，两条并发的 append 不串起来会取到同一个队列位置；而 `session prune` 不能在这条命令的检查与投递之间把这一场拿走。**成功时 stdout 印这个投递名一行，作为回执**（例如 `msg-0003.json`）：这正是排干时落进 `origin`（或 `origins` 里的一项）的那个名字，所以 driver 能拿它去认下一次 `step` / `events` 里的哪条 `user_text` 是它刚发的那条。`session note` 同一条投递机制，不印回执。
 
