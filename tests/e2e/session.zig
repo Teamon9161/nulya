@@ -444,15 +444,15 @@ test "session cli: note deposits a machine fact rather than a user turn, and ref
     // Not one JSON value: refused, and nothing is deposited — a reader of that
     // column must never be handed whatever the caller typed.
     const bad = try runCliStderr(alloc, io, ws, &.{
-        exe_abs,          "session", "note", id, "--source", "watcher",
-        "--meta",         "{oops",   "the tests went red",
+        exe_abs,  "session", "note",               id, "--source", "watcher",
+        "--meta", "{oops",   "the tests went red",
     }, &.{});
     defer alloc.free(bad);
     try std.testing.expect(std.mem.indexOf(u8, bad, "one JSON value") != null);
     try std.testing.expect((try inboxCount(io, ws, alloc, id)) == 0);
 
     const posted = try runCli(alloc, io, ws, &.{
-        exe_abs,  "session",                    "note", id, "--source", "watcher",
+        exe_abs,  "session",                  "note",               id, "--source", "watcher",
         "--meta", "{\"file\":\"build.zig\"}", "the tests went red",
     });
     defer alloc.free(posted.stdout);

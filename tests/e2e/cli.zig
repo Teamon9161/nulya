@@ -45,17 +45,17 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // omits them sends the model guessing at exactly the two decisions it has to
     // make (compose a version in, put a tool on the tool face).
     for ([_][]const u8{
-        "ext init",       "--zig",      "ext build",    "ext run",    "--arg",
-        "ext activate",   "--user",     "ext migrate",  "ext api",    "ext sync",
-        "ext seed",       "ext prune",  "--dry-run",    "--activate", "session new",
-        "--with",         "--parent",   "--carry",      "--prompt",   "session step",
-        "--max-steps",    "--effort",   "--stream",     "--gate",     "session events",
-        "session cancel", "outcome",    "session list", "--image",    "config show",
-        "config refresh", "skill load", "src",          "toolchain",  "help",
-        "demo",           "task run",   "task list",    "wait",       "retarget",
-        "--running",      "journal append", "journal read", "remote check",
-        "remote ls",      "remote serve",   "--workspace",  "remote:ssh:<dest>",
-        "session note",   "--source",  "update",       "--version",
+        "ext init",       "--zig",          "ext build",         "ext run",      "--arg",
+        "ext activate",   "--user",         "ext migrate",       "ext api",      "ext sync",
+        "ext seed",       "ext prune",      "--dry-run",         "--activate",   "session new",
+        "--with",         "--parent",       "--carry",           "--prompt",     "session step",
+        "--max-steps",    "--effort",       "--stream",          "--gate",       "session events",
+        "session cancel", "outcome",        "session list",      "--image",      "config show",
+        "config refresh", "skill load",     "src",               "toolchain",    "help",
+        "demo",           "task run",       "task list",         "wait",         "retarget",
+        "--running",      "journal append", "journal read",      "remote check", "remote ls",
+        "remote serve",   "--workspace",    "remote:ssh:<dest>", "session note", "--source",
+        "update",         "--version",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, help.stdout, needle) != null) catch |err| {
             std.debug.print("`nulya help` never mentions '{s}'\n", .{needle});
@@ -125,12 +125,13 @@ test "cli ext api: manifest and examples carry no document citations and walk sc
     // variables that ARE passed, one field from each declaration tier, the
     // enforced clock, where the bytes live.
     for ([_][]const u8{
-        "shell",     "NULYA_EXE", "NULYA_SESSION", "readonly",
-        "commands",  "ui",        "timeout_ms",    "600",
+        "shell",    "NULYA_EXE",         "NULYA_SESSION", "readonly",
+        "commands", "ui",                "timeout_ms",    "600",
         "/store/",
         // The one axis and the placement vocabulary in full — the screen has to
         // be readable without the docs.
-        "[extensions] with", "auto", "manual", "internal",
+         "[extensions] with", "auto",          "manual",
+        "internal",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, perms.stdout, needle) != null) catch |err| {
             std.debug.print("`ext api manifest` never mentions '{s}'\n", .{needle});
@@ -149,12 +150,12 @@ test "cli ext api: manifest and examples carry no document citations and walk sc
     defer alloc.free(examples.stdout);
     try std.testing.expectEqual(@as(u8, 0), examples.code);
     for ([_][]const u8{
-        "ext init my.helper", "ext build",       "ext run",  "--arg",
-        "ext activate",       "--with",          "--user",
-        "session outcome",    "ext sync",        "ext prune",
+        "ext init my.helper", "ext build", "ext run",    "--arg",
+        "ext activate",       "--with",    "--user",     "session outcome",
+        "ext sync",           "ext prune",
         // The default scaffold is a script, so the worked
         // path has to show what a script actually reads.
-        "NULYA_ARG_",         "--zig",
+        "NULYA_ARG_", "--zig",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, examples.stdout, needle) != null) catch |err| {
             std.debug.print("`ext api examples` never shows '{s}'\n", .{needle});
