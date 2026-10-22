@@ -19,7 +19,7 @@ const wire = @import("wire.zig");
 
 const API_VERSION = "2023-06-01";
 pub const default_base_url = "https://api.anthropic.com";
-pub const default_model = "claude-sonnet-5";
+pub const default_model = "claude-sonnet-5-5";
 
 /// The Messages API rejects a request without `max_tokens`, so "uncapped" has to
 /// become a number somewhere. High enough that no honest answer reaches it, with
