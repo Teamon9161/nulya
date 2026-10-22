@@ -203,7 +203,8 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     //     is the same conversation in a new file, and a result delivered into a
     //     session nobody is reading any more is a result lost. Failing to hand
     //     one over never fails the fork; the result simply stays with the parent.
-    const tasks_footer = try handOverTasks(alloc, io, exe, args.session, new_id);
+    var stderr_w = std.Io.File.stderr().writerStreaming(io, &.{});
+    const tasks_footer = try handOverTasks(alloc, io, exe, args.session, new_id, &stderr_w.interface);
 
     // 6. Carry the brief over. It is deposited, not stepped: it waits in the new
     //    session's inbox exactly like a turn typed before a step runs.
@@ -271,17 +272,17 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
 /// that promise. `state` is the kernel's own projection, so what counts as live
 /// is not re-derived here.
 ///
-/// Every failure is a warning on stderr and nothing more: the fork has already
-/// happened, and a task whose delivery could not be moved still reports into the
-/// parent's inbox, where it is findable — losing the whole compaction over it
-/// would be the worse trade.
-fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: []const u8, child: []const u8) ![]const u8 {
+/// Every failure is a line on `warnings` (stderr, outside tests) and nothing
+/// more: the fork has already happened, and a task whose delivery could not be
+/// moved still reports into the parent's inbox, where it is findable — losing
+/// the whole compaction over it would be the worse trade.
+fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: []const u8, child: []const u8, warnings: *std.Io.Writer) ![]const u8 {
     const listed = runNulya(alloc, io, exe, &.{ "task", "list", "--session", parent, "--json" }) catch |err| {
-        warn(alloc, io, "compact: could not list {s}'s background tasks: {s}\n", .{ parent, @errorName(err) }) catch {};
+        warnings.print("compact: could not list {s}'s background tasks: {s}\n", .{ parent, @errorName(err) }) catch {};
         return "";
     };
     if (listed.code != 0) {
-        warn(alloc, io, "compact: could not list {s}'s background tasks: {s}\n", .{ parent, detail(listed) }) catch {};
+        warnings.print("compact: could not list {s}'s background tasks: {s}\n", .{ parent, detail(listed) }) catch {};
         return "";
     }
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, listed.stdout, .{}) catch return "";
@@ -299,11 +300,11 @@ fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: 
         if (entry != .object) continue;
         const name = stringField(entry.object, "task") orelse continue;
         const done = runNulya(alloc, io, exe, &.{ "task", "retarget", name, "--to", child }) catch |err| {
-            warn(alloc, io, "compact: {s} keeps reporting into {s}: {s}\n", .{ name, parent, @errorName(err) }) catch {};
+            warnings.print("compact: {s} keeps reporting into {s}: {s}\n", .{ name, parent, @errorName(err) }) catch {};
             continue;
         };
         if (done.code != 0) {
-            warn(alloc, io, "compact: {s} keeps reporting into {s}: {s}\n", .{ name, parent, detail(done) }) catch {};
+            warnings.print("compact: {s} keeps reporting into {s}: {s}\n", .{ name, parent, detail(done) }) catch {};
             continue;
         }
         const command = stringField(entry.object, "command") orelse "";
@@ -924,12 +925,16 @@ test "the footer describes the live tasks, and only those" {
 }
 
 test "task handoff treats a subprocess launch failure as best-effort" {
+    var warnings: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer warnings.deinit();
     const footer = try handOverTasks(
         std.testing.allocator,
         std.testing.io,
         "nulya-compact-test-executable-that-does-not-exist",
         "s-parent",
         "s-child",
+        &warnings.writer,
     );
     try std.testing.expectEqualStrings("", footer);
+    try std.testing.expect(warnings.written().len != 0);
 }
