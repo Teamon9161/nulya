@@ -1,0 +1,3 @@
+# LF everywhere, on every platform: build.zig hashes the working-tree bytes into
+# `build_id` and embeds the sources, so a CRLF checkout builds a different binary.
+* text=auto eol=lf
